@@ -859,7 +859,25 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
         &["route", "resolve", "--route", "utility", "--confidential"],
         0,
     )?;
-    assert_eq!(pool["data"]["model"], "claude-haiku-5-5");
+    // The catalogue's utility pool is headed by cursor/composer-2.5, which only
+    // confidentiality excludes; under it the designated utility model is the
+    // first eligible candidate, and the receipt names exactly that pick.
+    let utility_model = "claude-haiku-5-5";
+    assert_eq!(pool["data"]["adapter"], "claude");
+    assert_eq!(pool["data"]["model"], utility_model);
+    let selection = &pool["data"]["pool_selection"];
+    assert_eq!(selection["pick"], "claude/claude-haiku-5-5");
+    let candidates = selection["candidates"]
+        .as_array()
+        .ok_or("utility candidates")?;
+    let first_eligible = candidates
+        .iter()
+        .find(|candidate| candidate["exclusion"].is_null())
+        .ok_or("no eligible utility candidate")?;
+    assert_eq!(
+        first_eligible["model"], selection["pick"],
+        "the pick is the top-ranked eligible candidate: {candidates:?}"
+    );
     let resolved = call(
         &rig,
         &[
@@ -891,12 +909,16 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     );
     // A positional name is a route, an exact model, or a unique model by its ID (#1838).
     for (name, model) in [
-        ("utility", "claude-haiku-5-5"),
+        ("utility", utility_model),
         ("codex/gpt-6.1-terra", "gpt-6.1-terra"),
         ("gpt-6.1-terra", "gpt-6.1-terra"),
         ("terra", "gpt-6.1-terra"),
     ] {
-        let named = call(&rig, &["route", "resolve", name], 0)?;
+        let named = if name == "utility" {
+            call(&rig, &["route", "resolve", name, "--confidential"], 0)?
+        } else {
+            call(&rig, &["route", "resolve", name], 0)?
+        };
         assert_eq!(named["data"]["model"], model, "{name}");
     }
     let selected = rig.root.join("selected-project");

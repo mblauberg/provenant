@@ -315,7 +315,7 @@ pub(super) fn apply_attempt_observation(
                     result_warning,
                     result_path,
                     branch,
-                    commit,
+                    commit.clone(),
                     &upstream_findings,
                 );
                 if !repair::may_report_items(node, plan) {
@@ -526,10 +526,28 @@ pub(super) fn apply_attempt_observation(
                         AttemptOutcome::StoppedNoWork | AttemptOutcome::DeclaredStop
                     )
                 {
+                    let committed = outcome == AttemptOutcome::DeclaredStop
+                        && commit
+                            .as_deref()
+                            .and_then(|head| GitOid::parse(head).ok())
+                            .zip(
+                                progress
+                                    .source_commit
+                                    .as_deref()
+                                    .and_then(|base| GitOid::parse(base).ok()),
+                            )
+                            .is_some_and(|(head, base)| head != base);
                     // One rule for every writer stop, committed, clean or with
                     // uncommitted edits: restart in place on the retained
                     // worktree, or return to the chair (see `next_step`).
-                    progress.advance_error_code = Some("stopped_no_work".into());
+                    progress.advance_error_code = Some(
+                        if committed {
+                            "writer_declared_stop"
+                        } else {
+                            "stopped_no_work"
+                        }
+                        .into(),
+                    );
                     progress.advance_error = Some(
                         if let Some(handoff) = handoff.filter(|handoff| {
                             handoff.status == provenant_records::handoff::HandoffStatus::Blocked
@@ -537,6 +555,8 @@ pub(super) fn apply_attempt_observation(
                             bounded(&handoff.note, MAX_ADVANCE_ERROR_BYTES)
                         } else if outcome == AttemptOutcome::StoppedNoWork {
                             "writer stopped with no work: no new commit".into()
+                        } else if committed {
+                            "writer declared stop after committing work".into()
                         } else {
                             "writer stopped before finishing".into()
                         },
@@ -1982,6 +2002,77 @@ mod tests {
                     Some("deadline_exceeded")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn writer_declared_stop_cause_uses_commit_evidence() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "writer-stop-cause",
+            "nodes": [{"id":"one", "access":"worktree_write", "worktree":"/fixture/writer", "write_scope":["src"], "prompt":"do the work",
+                "routes":[{"adapter":"first", "model":"first/model"}]}]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+        let base = "1111111111111111111111111111111111111111";
+        let head = "2222222222222222222222222222222222222222";
+        for (outcome, commit, expected) in [
+            (
+                AttemptOutcome::DeclaredStop,
+                Some(head),
+                Some("writer_declared_stop"),
+            ),
+            (
+                AttemptOutcome::DeclaredStop,
+                Some(base),
+                Some("stopped_no_work"),
+            ),
+            (AttemptOutcome::DeclaredStop, None, Some("stopped_no_work")),
+            (
+                AttemptOutcome::StoppedNoWork,
+                Some(head),
+                Some("stopped_no_work"),
+            ),
+        ] {
+            let mut checkpoint =
+                initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+            let _ = start(&plan, &positions, &mut checkpoint, &limits);
+            checkpoint.nodes[0].source_commit = Some(base.into());
+            apply_attempt_observation(
+                &plan,
+                &mut checkpoint,
+                &positions,
+                0,
+                &limits,
+                AttemptObservation::Terminal {
+                    attempt_ref: Some("host/attempt".into()),
+                    outcome,
+                    launched: true,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: commit.map(str::to_owned),
+                    stop: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                },
+                ObservationFacts {
+                    route_index: 0,
+                    usage: None,
+                    fallback_evidence: None,
+                    evidence_unreadable: false,
+                    fallback_cause: None,
+                    skipped_accounts: Vec::new(),
+                    review_range: ReviewRange::Unknown,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                checkpoint.nodes[0].advance_error_code.as_deref(),
+                expected,
+                "outcome={outcome:?} commit={commit:?}"
+            );
         }
     }
 

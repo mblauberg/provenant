@@ -1,5 +1,68 @@
 use super::*;
 
+fn mark_created_lane_as_managed(
+    rig: &TestRig,
+    roots: &provenant_core::Roots,
+    path: &Path,
+    branch: &str,
+    base: provenant_core::GitOid,
+    head: provenant_core::GitOid,
+) -> Result {
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let created_at = clock.wall_now()?;
+    let operation_id = format!("gc-fixture-{}", branch.replace('/', "-"))
+        .parse::<provenant_core::OperationId>()?;
+    provenant_confinement::worktrees::with_context(
+        roots,
+        &rig.home,
+        &rig.project,
+        &clock,
+        &cancel,
+        |context| {
+            let tree = provenant_confinement::verify_worktree(context.repo, path)?;
+            let reference = provenant_confinement::repo::GitRefName::branch(branch)
+                .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidRequest)?;
+            let ledger = provenant_confinement::worktrees::RefLedger::for_context(context)?;
+            let lineage = ledger.observe_local_branch(&reference, head, &clock, &cancel)?;
+            if lineage.origin != provenant_records::custody::RefOrigin::Created {
+                return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
+            }
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                attempt_id: None,
+                operation_id: Some(operation_id),
+                branch: branch.to_owned(),
+                base: base.to_string(),
+                host: provenant_core::HostId::from_bytes([1; 16]),
+                created_at,
+                origin: provenant_confinement::worktrees::WorktreeOrigin::Lane,
+                label: None,
+                reference: Some(lineage.ownership()),
+            };
+            provenant_confinement::worktrees::save_lane_owner_when_free(
+                context, &tree, &owner, head, None, false, &cancel,
+            )?;
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+fn commit_unlanded_lane(rig: &TestRig, path: &Path) -> Result<provenant_core::GitOid> {
+    let file = path.join("gc-fixture-unlanded.txt");
+    fs::write(&file, "unique unlanded lane work\n")?;
+    let worktree = path.to_str().ok_or("worktree path")?;
+    git(
+        rig,
+        &["-C", worktree, "add", "--", "gc-fixture-unlanded.txt"],
+    )?;
+    git(
+        rig,
+        &["-C", worktree, "commit", "-qm", "unlanded GC fixture"],
+    )?;
+    Ok(git(rig, &["-C", worktree, "rev-parse", "HEAD"])?.parse()?)
+}
+
 pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
     for name in ["bare.git", ".git"] {
         let mut rig = repository()?;
@@ -145,9 +208,18 @@ pub(super) fn gc_pressure_collects_only_the_selected_primary_project() -> Result
     fs::write(other_tree.join("target/artifact"), "other output")?;
     age_gc_output(&other_tree.join("target"))?;
     rig.project = primary;
-    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let tree = rig.project.join(".worktrees/idle");
-    let (_, context) = writer_context(&rig)?;
+    let head = commit_unlanded_lane(&rig, &tree)?;
+    let (roots, context) = writer_context(&rig)?;
+    mark_created_lane_as_managed(
+        &rig,
+        &roots,
+        &tree,
+        "idle",
+        created["data"]["head"].as_str().ok_or("head")?.parse()?,
+        head,
+    )?;
     fs::create_dir(tree.join("target"))?;
     fs::write(tree.join("target/artifact"), "selected output")?;
     age_gc_output(&tree.join("target"))?;
@@ -339,8 +411,18 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
+    let head = commit_unlanded_lane(&rig, &worktree)?;
+    let (roots, _) = writer_context(&rig)?;
+    mark_created_lane_as_managed(
+        &rig,
+        &roots,
+        &worktree,
+        "idle",
+        created["data"]["head"].as_str().ok_or("head")?.parse()?,
+        head,
+    )?;
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
     fn age(path: &Path) -> Result {
         if path.is_dir() {
@@ -611,6 +693,7 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
 }
 
 pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     use provenant_os::fs::Directory;
     use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
@@ -765,12 +848,9 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(cache.is_dir());
     assert!(dry["data"]["worktree_cleanup"][0]["dry_run"] == true);
     assert!(merged.join("target/artifact").is_file());
-    // Preview does not fetch the upstream proof needed to remove a tree.
     assert!(
-        dry["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
-            .as_array()
-            .ok_or("refs")?
-            .is_empty()
+        has_branch(&rig, "merged")?,
+        "preview deleted the source ref"
     );
     // Alert failure must not block reclamation, including on a full disk.
     fs::write(
@@ -785,6 +865,15 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )?;
     fs::create_dir(rig.state.join("gc/alert.lock"))?;
+    let first_foreign_pass = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert!(
+        first_foreign_pass["data"]["worktree_cleanup"][0]["first_foreign_preview"]
+            .as_bool()
+            .ok_or("first foreign pass")?
+    );
+    assert!(merged.is_dir());
+    assert!(merged.join("target/artifact").is_file());
+    assert!(has_branch(&rig, "merged")?);
     let collected = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
     assert!(
         collected["data"]["alerts"][0]
@@ -792,11 +881,14 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
             .ok_or("alert failure")?
             .contains("disk alert failed")
     );
+    let gc_report = &collected["data"]["worktree_cleanup"][0];
     assert!(
-        collected["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
+        gc_report["refs"]
             .as_array()
             .ok_or("refs")?
-            .contains(&serde_json::json!("merged"))
+            .iter()
+            .any(|entry| entry["name"] == "refs/heads/merged" && entry["outcome"] == "removed"),
+        "GC did not prune merged lane; report: {gc_report}"
     );
     assert!(!merged.exists());
     assert!(!cache.exists());
@@ -805,17 +897,22 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(live.is_dir());
     assert!(unmerged.is_dir());
     assert!(queued_path.is_dir());
+    assert!(rig.project.join(".worktrees/locked").is_dir());
+    assert!(has_branch(&rig, "locked")?);
     for name in ["fresh-old", "fresh-tip", "unrecorded"] {
+        // Scheduled GC follows the retention class: clean subsumed tips are
+        // eligible even without unique work or a run registration.
         assert!(
-            rig.project.join(".worktrees").join(name).is_dir(),
-            "{name} was swept"
+            !rig.project.join(".worktrees").join(name).exists(),
+            "subsumed {name} was retained"
         );
-        assert!(has_branch(&rig, name)?);
+        assert!(!has_branch(&rig, name)?);
     }
     for (branch, reason) in [
-        ("fresh-old", "no_unique_commit"),
-        ("fresh-tip", "at_integration_tip"),
-        ("locked", "locked_or_prunable"),
+        ("dirty", "dirty"),
+        ("live", "lock_busy"),
+        ("locked", "unknown_writer"),
+        ("queued", "unknown_writer"),
     ] {
         let retained = collected["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
             .as_array()
@@ -1154,7 +1251,7 @@ fn merged_upstream(rig: &TestRig, lane: &Path) -> Result<String> {
     let lane = lane.to_str().ok_or("lane path")?;
     let base = git(rig, &["rev-parse", "HEAD"])?;
     let tip = git(rig, &["-C", lane, "rev-parse", "HEAD"])?;
-    let tree = git(rig, &["rev-parse", "HEAD^{tree}"])?;
+    let tree = git(rig, &["-C", lane, "rev-parse", "HEAD^{tree}"])?;
     git(
         rig,
         &[

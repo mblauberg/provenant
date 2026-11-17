@@ -76,6 +76,7 @@ pub(super) fn fixture_input<'a>(
         images: &[],
         command: None,
         route,
+        provider_model: None,
         confined,
         prompt,
         continuation: None,
@@ -483,7 +484,7 @@ fn read_only_launch_requires_cwd_inside_a_declared_read_root() -> Result<(), Pro
 #[test]
 fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(), ProviderError> {
     let prompt = Prompt::new("--literal prompt".into());
-    let route = route("cursor", "fixture-model");
+    let route = route("cursor", "grok-4.7-high");
     let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         for resume in [false, true] {
@@ -508,7 +509,7 @@ fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(
             } else {
                 assert!(!has_flag("--resume"));
             }
-            assert!(has_pair("--model", "fixture-model"));
+            assert!(has_pair("--model", "grok-4.7-high"));
             assert!(spec.argv.iter().any(|arg| arg == prompt.text()));
             assert_eq!(spec.stdin, Stdin::Null);
             assert_eq!(spec.cwd, Path::new("/fixture/repo"));
@@ -530,6 +531,31 @@ fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(
         cursor::Cursor.prepare(input),
         Err(ProviderError::PromptTooLarge { .. })
     ));
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn cursor_effort_launch_spelling_keeps_canonical_continuation_identity()
+-> Result<(), ProviderError> {
+    let prompt = Prompt::new("resume this session".into());
+    let mut route = route("cursor", "grok-4.7");
+    route.effort = Some("high".into());
+    let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), true);
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.provider_model = Some("grok-4.7-high");
+    input.continuation = Some(&continuation);
+
+    let spec = cursor::Cursor.prepare(input)?;
+    assert_eq!(route.model, "grok-4.7");
+    assert_eq!(route.effort.as_deref(), Some("high"));
+    assert!(spec.argv.windows(2).any(|pair| {
+        pair[0] == "--model" && pair[1] == "grok-4.7-high"
+    }));
+    assert!(spec.argv.windows(2).any(|pair| {
+        pair[0] == "--resume" && pair[1] == "fixture-session"
+    }));
     Ok(())
 }
 
@@ -721,6 +747,11 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                 git_context,
                 ..input
             })?;
+            assert_eq!(
+                spec.session_state,
+                crate::SessionStateLocation::AttemptPrivate,
+                "OpenCode keeps its session database in attempt state even on native launches"
+            );
             let env = |key: &str| {
                 spec.env
                     .iter()
@@ -872,6 +903,11 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
                     .unwrap()
                     .adapter;
                 let spec = adapter.prepare(input)?;
+                assert_eq!(
+                    spec.session_state,
+                    crate::SessionStateLocation::AttemptPrivate,
+                    "sandboxed {id} state stays in the attempt"
+                );
                 let key = if id == "claude" {
                     "CLAUDE_CONFIG_DIR"
                 } else {
@@ -936,6 +972,17 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
         input.host_var =
             &|name| (name == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
         let native = adapter.prepare(input)?;
+        let crate::SessionStateLocation::Native { root: session_root } = &native.session_state
+        else {
+            return Err(ProviderError::UnknownIdentity);
+        };
+        assert!(session_root.is_absolute());
+        match id {
+            "agy" | "cursor" => assert_eq!(session_root, Path::new("/fixture/home")),
+            "claude" => assert_eq!(session_root, Path::new("/fixture/home/.claude")),
+            "codex" => {}
+            _ => unreachable!("only native session-state adapters are listed"),
+        }
         for (key, value) in &host {
             // These selectors bind the child to its provider, Fabric context
             // and private Cargo configuration/target with shared downloads.
@@ -994,9 +1041,166 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 Path::new("/fixture/repo"),
                 Some(&token),
             ))?;
+            assert_eq!(
+                confined.session_state,
+                crate::SessionStateLocation::AttemptPrivate,
+                "sandboxed {id} state stays in the attempt"
+            );
             assert!(!confined.tool_requirements.exec.is_empty());
         }
     }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+#[test]
+fn sandbox_path_keeps_requester_env_interpreter_ahead_of_fallbacks()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let requester_bin = temp.path().join("requester-bin");
+    std::fs::create_dir(&requester_bin)?;
+    let preferred_shell = requester_bin.join("sh");
+    std::fs::write(&preferred_shell, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&preferred_shell, std::fs::Permissions::from_mode(0o700))?;
+    let requester_path = std::env::join_paths([requester_bin.as_path()])?;
+    let host_var = |name: &str| match name {
+        "PATH" => Some(requester_path.clone()),
+        name if name == provenant_core::consumer_env::SANDBOX => Some("on".into()),
+        _ => None,
+    };
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    // This fixture uses local login; it has no registered Codex identity.
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let private_wrapper = plan.permissions().scratch.path.join("bin");
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.host_var = &host_var;
+    let spec = codex::Codex.prepare(input)?;
+    let path = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, path)| path)
+        .expect("sandbox PATH");
+    let entries = std::env::split_paths(path).collect::<Vec<_>>();
+    assert!(entries.contains(&std::path::PathBuf::from("/fixture/home/.cargo/bin")));
+    assert!(entries.contains(&std::path::PathBuf::from("/usr/bin")));
+    assert!(entries.contains(&std::path::PathBuf::from("/bin")));
+    assert!(entries.contains(&requester_bin));
+    let requester_index = entries.iter().position(|entry| entry == &requester_bin).unwrap();
+    let cargo_index = entries
+        .iter()
+        .position(|entry| entry == Path::new("/fixture/home/.cargo/bin"))
+        .unwrap();
+    let system_index = entries
+        .iter()
+        .position(|entry| entry == Path::new("/usr/bin"))
+        .unwrap();
+    let bin_index = entries
+        .iter()
+        .position(|entry| entry == Path::new("/bin"))
+        .unwrap();
+    assert_eq!(entries.first(), Some(&private_wrapper));
+    assert!(requester_index < cargo_index && cargo_index < system_index && system_index < bin_index);
+    let env_shell = entries
+        .iter()
+        .map(|directory| directory.join("sh"))
+        .find(|candidate| candidate.is_file());
+    assert_eq!(env_shell.as_deref(), Some(preferred_shell.as_path()));
+    assert!(spec.profile.spec.tool_exec_roots.iter().all(|grant| {
+        !grant.path.starts_with(&requester_bin)
+    }));
+    Ok(())
+}
+
+#[test]
+fn native_provider_preparation_uses_requester_path_without_supervisor_rustup()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    const CHILD: &str = "PROVENANT_TEST_REQUESTER_PATH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let argv = [
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            "tests::native_provider_preparation_uses_requester_path_without_supervisor_rustup"
+                .into(),
+            "--nocapture".into(),
+        ];
+        let env = [
+            (CHILD.into(), "1".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ];
+        let cwd = std::env::current_dir()?;
+        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Capture { limit: 65536 };
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        assert!(!output.timed_out, "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"), "{output:?}");
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let requester_bin = temp.path().join("requester/.cargo/bin");
+    std::fs::create_dir_all(&requester_bin)?;
+    std::fs::write(requester_bin.join("rustup"), b"requester rustup shim")?;
+    std::fs::set_permissions(
+        requester_bin.join("rustup"),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    std::os::unix::fs::symlink("rustup", requester_bin.join("rustc"))?;
+    let requester_path = std::env::join_paths([
+        requester_bin.as_os_str(),
+        std::ffi::OsStr::new("/usr/bin"),
+        std::ffi::OsStr::new("/bin"),
+    ])?;
+    let supervisor_path = std::env::var_os("PATH").unwrap_or_default();
+    assert!(
+        !std::env::split_paths(&supervisor_path).any(|entry| entry == requester_bin),
+        "fixture rustup shim unexpectedly appears on the supervisor PATH"
+    );
+    let host_var = |name: &str| match name {
+        "PATH" => Some(requester_path.clone()),
+        name if name == provenant_core::consumer_env::SANDBOX => Some("off".into()),
+        _ => None,
+    };
+
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    );
+    input.host_var = &host_var;
+
+    let prepared = codex::Codex.prepare(input)?;
+    assert!(prepared.env.iter().any(|(key, value)| {
+        key == provenant_core::consumer_env::SANDBOX && value == "off"
+    }));
+    let paths = prepared
+        .env
+        .iter()
+        .filter(|(key, _)| key == "PATH")
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 1);
+    let lane_path = std::env::split_paths(paths[0]).collect::<Vec<_>>();
+    assert!(
+        lane_path.contains(&requester_bin),
+        "prepared native lane PATH omitted the requester's rustup directory: {lane_path:?}"
+    );
     Ok(())
 }
 

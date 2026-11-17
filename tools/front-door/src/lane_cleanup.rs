@@ -1638,10 +1638,9 @@ mod tests {
             };
             let base = head()?;
             run_git(&project, &["checkout", "-qb", "lane/old"])?;
-            run_git(
-                &project,
-                &["commit", "--allow-empty", "-qm", "unlanded work"],
-            )?;
+            std::fs::write(project.join("unlanded-work.txt"), "unique unlanded work\n")?;
+            run_git(&project, &["add", "unlanded-work.txt"])?;
+            run_git(&project, &["commit", "-qm", "unlanded work"])?;
             let unlanded = head()?;
             run_git(&project, &["checkout", "-q", "main"])?;
             run_git(
@@ -1859,22 +1858,57 @@ mod tests {
     #[test]
     fn ancient_unlanded_local_and_remote_refs_survive_automatic_cleanup()
     -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
         let fixture = CleanupFixture::new()?;
+        // Keep the endpoint candidates distinct so one cannot serve as
+        // subsumption evidence for the other.
+        run_git(
+            &fixture.project,
+            &[
+                "checkout",
+                "-qb",
+                "lane/remote-old",
+                &fixture.base.to_string(),
+            ],
+        )?;
+        std::fs::write(
+            fixture.project.join("remote-unlanded-work.txt"),
+            "distinct remote-only unlanded work\n",
+        )?;
+        run_git(&fixture.project, &["add", "remote-unlanded-work.txt"])?;
+        run_git(
+            &fixture.project,
+            &["commit", "-qm", "distinct remote unlanded work"],
+        )?;
+        let remote_unlanded = GitOid::parse(
+            String::from_utf8(run_git(&fixture.project, &["rev-parse", "HEAD"])?)?.trim(),
+        )?;
+        run_git(&fixture.project, &["checkout", "-q", "main"])?;
+        run_git(&fixture.project, &["push", "bound", "lane/remote-old"])?;
+        run_git(&fixture.project, &["branch", "-D", "lane/remote-old"])?;
+        run_git(&fixture.project, &["push", "bound", ":refs/heads/lane/old"])?;
         fixture.with_context(|context, cancel| {
             let ledger = RefLedger::for_context(context)?;
+            assert_eq!(
+                worktrees::ref_tip(
+                    context,
+                    &GitRefName::branch("lane/remote-old").unwrap(),
+                    cancel,
+                )?,
+                None,
+                "remote-only branch must not have a local counterpart"
+            );
             let target = LandingTarget {
                 reference: Some(GitRefName::branch("main").unwrap()),
                 tip: fixture.landed,
             };
-            for endpoint in [RefEndpoint::Local, fixture.endpoint()] {
-                let record = record_old_ref(
-                    context,
-                    &ledger,
-                    endpoint.clone(),
-                    "lane/old",
-                    fixture.unlanded,
-                    cancel,
-                )?;
+            for (endpoint, branch, tip) in [
+                (RefEndpoint::Local, "lane/old", fixture.unlanded),
+                (fixture.endpoint(), "lane/remote-old", remote_unlanded),
+            ] {
+                let record =
+                    record_old_ref(context, &ledger, endpoint.clone(), branch, tip, cancel)?;
                 let outcomes = if endpoint == RefEndpoint::Local {
                     vec![
                         fixture.with_retirement(context, cancel, &record, |retirement| {
@@ -1915,15 +1949,9 @@ mod tests {
                     })
                     .unwrap();
                 assert_eq!(primary.outcome, ArtefactState::Retained);
-                assert_eq!(primary.head, Some(fixture.unlanded));
+                assert_eq!(primary.head, Some(tip));
                 assert_eq!(
-                    primary.removal.as_ref().map(|record| &record.outcome),
-                    Some(&RemovalOutcome::Kept {
-                        cause: RemovalUncertainty::UnprovenLanding,
-                    })
-                );
-                assert_eq!(
-                    ledger.load(&endpoint, &GitRefName::branch("lane/old").unwrap())?,
+                    ledger.load(&endpoint, &GitRefName::branch(branch).unwrap())?,
                     Some(record)
                 );
             }
@@ -1935,10 +1963,10 @@ mod tests {
                 remote_tip(
                     context,
                     fixture.remote.to_str().unwrap(),
-                    &GitRefName::branch("lane/old").unwrap()
+                    &GitRefName::branch("lane/remote-old").unwrap()
                 )
                 .unwrap(),
-                Some(fixture.unlanded)
+                Some(remote_unlanded)
             );
             Ok(())
         })?;

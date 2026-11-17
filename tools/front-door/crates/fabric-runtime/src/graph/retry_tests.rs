@@ -218,7 +218,7 @@ fn redo_container_after_checkpoint_crash(
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -1429,7 +1429,7 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -2054,7 +2054,7 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -2153,7 +2153,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -2555,7 +2555,8 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
     let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
         .checkpoint;
-    // A container built from a template that declares no `brief` parameter.
+    // `review-panel` now accepts `brief`; use a bundled composite that still
+    // does not so this exercises the unsupported container-edit diagnostic.
     checkpoint.expansions.push(plans::Expansion {
         extra: Default::default(),
         retired: None,
@@ -2568,7 +2569,7 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
         uses: vec![patch::TemplateUse {
             extra: Default::default(),
             id: "work".into(),
-            name: "review-panel".into(),
+            name: "findings-panel".into(),
             parameters: serde_json::Value::Null,
             nodes: vec!["work".into()],
         }],
@@ -2590,7 +2591,7 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
         .parameter
         .clone()
         .unwrap_or_else(|| panic!("{}", error.message));
-    assert_eq!(refusal.template, "review-panel");
+    assert_eq!(refusal.template, "findings-panel");
     assert_eq!(refusal.node.as_deref(), Some("work"));
     assert!(matches!(
         refusal.fault,

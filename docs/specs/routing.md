@@ -51,6 +51,61 @@ preference always expires.
 - Why: changing operating policy should not need a Rust change, and a typo must
   not widen access.
 
+## Provider model scope
+
+Compiled provider model patterns constrain automatic choices from shipped
+pools. Owner-configured pools, routes and model preferences may select other
+catalogued models. When the owner explicitly sets
+`providers.<adapter>.models`, that restriction applies to automatic choices
+from both shipped and owner-configured pools, routes, preferences, fallbacks and
+depletion hand-offs. A fallback model is an automatic alternative, even when
+attached to an explicit model pin. `out_of_scope_pin` applies to an explicit
+primary model choice; it does not filter fallback alternatives. An explicit
+primary pin outside the effective scope follows the provider's policy: warn
+once and launch, refuse, or allow silently. Provider model names are matched
+against literal patterns with `*` as a wildcard. Scope describes the requested
+model ID, not an underlying model selected by a provider's automatic mode.
+`Catalogue::launch_model` applies a recorded effort suffix only to a catalogued
+model with that supported effort; Cursor receives that spelling at its argv
+boundary while route and continuation identity retain the canonical model and
+effort.
+
+## Pinned review selection
+
+When `provenant run review-panel` or a review leaf supplies both `subject` and
+`review_base`, the host resolves them to immutable commits once. Before
+expanding the full panel, it
+derives changed paths and measured size from the merge-base-to-subject diff and
+passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
+the selected shape and add their lenses; explicit request fields and layered
+review configuration keep their existing precedence. If size metadata is
+unavailable because the diff is empty, selection proceeds with size unknown. If
+path or size metadata is incomplete, the resolver applies the configured
+unreadable-path floors and adds a warning to reviewer guidance.
+
+When a lane later adds or edits a nested review panel, the relay uses the
+graph's admitted review base and the source declared by that child or patch.
+Explicit commit sources can differ from the calling node's source. Settled
+node outputs can supply their recorded commit. An integration source is known
+only after its immutable integration pin is recorded; its admission-time branch
+base alone may be stale. A missing or still-moving head is incomplete context
+and applies the configured unreadable-path floors, alongside paths captured
+from any resolved subjects. The relay does not resolve refs again or substitute
+the current checkout head.
+
+Use this command for the complete policy-selected panel:
+
+```sh
+provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+```
+
+The host passes the brief to framing, every selected lens, verification and
+synthesis. A command such as `provenant run review.security` invokes only that
+lens.
+
+- Why: panel coverage must follow the change that reviewers will actually see,
+  not the submitter's current checkout.
+
 ## Capability and selection preferences
 
 Capability never excludes a listed pool member. Capability preferences rank
@@ -115,8 +170,25 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. A pin does not switch accounts. Credential custody is owned by
-[supervision](supervisor.md#native-environment-and-sandbox-tool-stores). A registered long-lived lane token is not rotated by the host.
+refused. A continuation retains the applied provider and optional account key
+as a pair. A missing provider, or a retained key without an account for that
+provider, is refused; a same-key account from another provider is never
+substituted. An absent applied account key remains absent. Credential roots
+must not be HOME or an ancestor of HOME.
+Additional directories within one account entry are aliases and may overlap.
+Distinct isolated registered-account directories must not overlap;
+`accounts register` refuses these and `check config` reports them. An adapter
+that declares no registered accounts but uses a local login can have multiple
+quota/menu entries whose directory paths overlap; those entries all describe
+the same local login, not separate credential trees. This allowance is limited
+to that adapter and does not include isolated registered accounts. A login at
+HOME is the adapter's local account and needs no registration. Agy's local
+login remains selectable as `account=local` beside isolated registered accounts,
+but is an in-memory identity
+rather than a registered credential root; automatic routing continues to choose
+among registered accounts. A pin does not switch accounts. Credential custody
+is owned by [supervision](supervisor.md#native-environment-and-sandbox-tool-stores).
+A registered long-lived lane token is not rotated by the host.
 
 OpenCode models are partitioned by the registered plan, independently of account
 keys and labels. Enumeration keeps one row per registered identity and never

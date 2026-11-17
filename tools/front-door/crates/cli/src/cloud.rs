@@ -250,20 +250,20 @@ pub fn parse_session(output: &str) -> Option<(String, Option<String>)> {
     Some((id, url))
 }
 
-/// The absolute worktree `collect` adds. An explicit path resolves against
-/// the project root, not the process directory, so every Git call agrees.
-/// The default follows the project's sourced worktree layout.
+/// The absolute worktree `collect` adds. Paths use the verified layout root;
+/// provider-private project configuration is read only from its verified
+/// primary checkout, with host settings used when no primary is known.
 pub fn collect_path(
-    project: &Path,
+    project: Option<&Path>,
     host_state: &Path,
     main: &Path,
     path: Option<&Path>,
     branch: &str,
 ) -> std::io::Result<PathBuf> {
     match path {
-        Some(path) => Ok(project.join(path)),
+        Some(path) => Ok(main.join(path)),
         None => {
-            let ports = provenant_config::PortTable::read_for(Some(project), host_state)?;
+            let ports = provenant_config::PortTable::read_for(project, host_state)?;
             Ok(main.join(ports.managed_writer_path(branch)?))
         }
     }
@@ -301,7 +301,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             collect_path(
-                temp.path(),
+                Some(temp.path()),
                 temp.path(),
                 Path::new("/repo"),
                 None,
@@ -309,6 +309,40 @@ mod tests {
             )
             .unwrap(),
             Path::new("/repo/.claude/worktrees/cloud-abc")
+        );
+    }
+
+    #[test]
+    fn collect_default_uses_host_layout_when_primary_is_unresolved() {
+        let temp = tempfile::tempdir().unwrap();
+        let ports = provenant_config::PortTable::builtin();
+        let expected =
+            Path::new("/verified/common").join(ports.managed_writer_path("cloud/abc").unwrap());
+        assert_eq!(
+            collect_path(
+                None,
+                temp.path(),
+                Path::new("/verified/common"),
+                None,
+                "cloud/abc"
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn collect_explicit_path_uses_the_verified_layout_root() {
+        assert_eq!(
+            collect_path(
+                None,
+                Path::new("/unused/state"),
+                Path::new("/verified/common"),
+                Some(Path::new("out/worktree")),
+                "cloud/abc"
+            )
+            .unwrap(),
+            Path::new("/verified/common/out/worktree")
         );
     }
 
@@ -376,15 +410,22 @@ mod tests {
             record_key("https://chatgpt.com/codex/tasks/task_e_1?x=1"),
             "task_e_1"
         );
-        let (project, main) = (Path::new("/repo/sub"), Path::new("/repo"));
+        let (project, main) = (Some(Path::new("/repo")), Path::new("/repo"));
         assert_eq!(
-            collect_path(project, project, main, Some(Path::new("wt")), "cloud/abc").unwrap(),
-            Path::new("/repo/sub/wt")
+            collect_path(
+                project,
+                Path::new("/state"),
+                main,
+                Some(Path::new("wt")),
+                "cloud/abc"
+            )
+            .unwrap(),
+            Path::new("/repo/wt")
         );
         assert_eq!(
             collect_path(
                 project,
-                project,
+                Path::new("/state"),
                 main,
                 Some(Path::new("/elsewhere/wt")),
                 "x"
@@ -393,7 +434,7 @@ mod tests {
             Path::new("/elsewhere/wt")
         );
         assert_eq!(
-            collect_path(project, project, main, None, "cloud/abc").unwrap(),
+            collect_path(project, Path::new("/state"), main, None, "cloud/abc").unwrap(),
             Path::new("/repo/.worktrees/cloud-abc")
         );
     }

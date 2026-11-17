@@ -758,21 +758,26 @@ fn applied_access_matches_compiled_profile() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
 #[test]
-fn lane_path_is_independent_of_host_dependency_path() -> Result<(), Box<dyn std::error::Error>> {
+fn lane_path_uses_captured_requester_path_only() -> Result<(), Box<dyn std::error::Error>> {
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
-    let login = |key: &str| (key == "PATH").then(|| "/host/login/bin:/usr/bin".into());
-    let daemon = |key: &str| (key == "PATH").then(|| "/host/daemon/bin:/bin".into());
-    let build = |host_var: &dyn Fn(&str) -> Option<std::ffi::OsString>| {
+    let build = |requester_path: &str| {
+        let host_var = |key: &str| match key {
+            "PATH" => Some(requester_path.into()),
+            key if key == provenant_core::consumer_env::SANDBOX => Some("on".into()),
+            _ => None,
+        };
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
-        input.host_var = host_var;
+        input.host_var = &host_var;
         crate::codex::Codex.prepare(input)
     };
-    let login = build(&login)?;
-    let daemon = build(&daemon)?;
+    let requester_path = "/host/requester/bin:/usr/bin";
+    let login = build(requester_path)?;
+    let daemon = build(requester_path)?;
     let path = |spec: &crate::LaunchSpec| {
         spec.env
             .iter()
@@ -781,6 +786,18 @@ fn lane_path_is_independent_of_host_dependency_path() -> Result<(), Box<dyn std:
     };
     assert_eq!(path(&login), path(&daemon));
     assert_eq!(login.profile.spec, daemon.profile.spec);
+
+    let alternate_path = build("/host/alternate-requester/bin:/bin")?;
+    assert_ne!(path(&login), path(&alternate_path));
+    let non_path_env = |spec: &crate::LaunchSpec| {
+        spec.env
+            .iter()
+            .filter(|(key, _)| key != "PATH")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(non_path_env(&login), non_path_env(&alternate_path));
+    assert_eq!(login.profile.spec, alternate_path.profile.spec);
     Ok(())
 }
 

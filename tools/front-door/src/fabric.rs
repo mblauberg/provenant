@@ -400,7 +400,26 @@ impl F3Facade for BoundFacade<'_> {
         provenant_fabric_runtime::inbox::InboxError,
     > {
         let ctx = &self.factory.context;
-        provenant_fabric_runtime::inbox::execute(
+        let edge = provenant_cli::run::Edge {
+            roots: &ctx.roots,
+            home: &self.factory.home,
+            assets: &self.factory.assets,
+            cwd: &self.factory.cwd,
+        };
+        let steer = |attempt: provenant_core::AttemptId,
+                     operation: &provenant_core::OperationId,
+                     text: &str,
+                     call: &provenant_fabric_store::Request<'_>| {
+            provenant_cli::inbox::deliver_steer(
+                &edge,
+                &ctx.identity,
+                attempt,
+                operation,
+                text,
+                call,
+            )
+        };
+        provenant_fabric_runtime::inbox::execute_with_steer(
             &ctx.roots.state,
             &ctx.identity,
             &ctx.config,
@@ -417,18 +436,8 @@ impl F3Facade for BoundFacade<'_> {
                     call.cancel,
                 )
             },
-            &|input, _| {
-                provenant_cli::inbox::resolve_control(
-                    &provenant_cli::run::Edge {
-                        roots: &ctx.roots,
-                        home: &self.factory.home,
-                        assets: &self.factory.assets,
-                        cwd: &self.factory.cwd,
-                    },
-                    &ctx.identity,
-                    input,
-                )
-            },
+            &|input, _| provenant_cli::inbox::resolve_control(&edge, &ctx.identity, input),
+            Some(&steer),
         )
     }
     fn refresh_events(

@@ -17,6 +17,7 @@ pub mod host;
 pub mod identity;
 mod lane;
 mod launch;
+mod package_cache;
 mod skill_stage;
 pub use lane::{BuildSlotGate, BuildSlotSetupOutcome, GhShim, LaneRuntime};
 pub use skill_stage::{SkillWarning, StagedUserSkills};
@@ -32,7 +33,7 @@ pub mod update;
 pub use contract::*;
 pub use launch::{
     Access, AppliedAccess, LaunchSpec, OmissionSource, OmittedGrant, PrepareInput,
-    PreparedToolRequirement, Session, SetupStep, Stdin,
+    PreparedToolRequirement, Session, SessionStateLocation, SetupStep, Stdin,
 };
 pub use stream::*;
 

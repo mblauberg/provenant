@@ -353,13 +353,20 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
     }))
     .unwrap();
     let checked = peer::checked_output_origin(output, &origin).unwrap();
-    let OutputResult::Chunk { extra, peer, .. } = checked else {
+    let OutputResult::Chunk {
+        extra,
+        peer,
+        length,
+        planner_fallback,
+        ..
+    } = checked
+    else {
         panic!("chunk expected")
     };
     assert!(extra.is_empty());
-    assert_eq!(peer.length, Some(2));
-    assert_eq!(peer.planner_fallback.as_deref(), Some("bounded planner failure"));
-    assert_eq!(peer.graph, Default::default());
+    assert_eq!(length, Some(2));
+    assert_eq!(planner_fallback.as_deref(), Some("bounded planner failure"));
+    assert_eq!(peer, Default::default());
     assert!(
         extra
             .keys()
@@ -369,18 +376,25 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
 
 #[test]
 fn peer_output_length_round_trips_and_rejects_malformed_values() {
-    for length in [0_u64, 17_u64] {
-        let fields: provenant_records::run::PeerOutputFields =
-            serde_json::from_value(serde_json::json!({"length":length})).unwrap();
-        assert_eq!(fields.length, Some(length));
-        assert_eq!(serde_json::to_value(fields).unwrap()["length"], length);
-    }
-    assert!(
-        serde_json::from_value::<provenant_records::run::PeerOutputFields>(
-            serde_json::json!({"length":"unknown"})
-        )
-        .is_err()
+    let mut value = serde_json::json!({
+        "kind":"chunk", "target":{"attempt":"11111111111111111111111111111111"},
+        "part":"result", "state":"succeeded", "reason":null, "offset":0,
+        "next_offset":0, "eof":true,
+        "digest":provenant_core::Digest::from_bytes([2; 32]),
+        "bytes":{"encoding":"utf8","data":""}, "length":17,
+        "planner_fallback":"planner failed", "future_output_field":{"kept":true}
+    });
+    let chunk: OutputResult = serde_json::from_value(value.clone()).unwrap();
+    let encoded = serde_json::to_value(chunk).unwrap();
+    assert_eq!(encoded["length"], 17);
+    assert_eq!(encoded["planner_fallback"], "planner failed");
+    assert_eq!(
+        encoded["future_output_field"],
+        serde_json::json!({"kept":true})
     );
+
+    value["length"] = serde_json::json!("unknown");
+    assert!(serde_json::from_value::<OutputResult>(value).is_err());
 }
 
 #[test]
@@ -640,7 +654,12 @@ pub(crate) mod peer_tests {
             inbox: &'a provenant_fabric_runtime::inbox::InboxService<'a>,
             cancel: &'a provenant_core::CancelToken,
         ) -> Self {
-            Self { actor, at, inbox, cancel }
+            Self {
+                actor,
+                at,
+                inbox,
+                cancel,
+            }
         }
     }
 
@@ -753,6 +772,9 @@ pub(crate) mod peer_tests {
             omitted_reaped: 0,
             spared: vec![],
             cancel_delivered_before_exit: None,
+            provider_identity_conflict: false,
+            provider_identity_evidence_incomplete: false,
+            provider_identity_eof_fragment: false,
             omitted_spared: 0,
             warnings: vec![],
             omitted_warnings: 0,
@@ -902,7 +924,8 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model { required_family: None,
+                        route: provenant_run::RequestedRoute::Model {
+                            required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1011,7 +1034,8 @@ pub(crate) mod peer_tests {
                         pinned_base: None,
                         head: None,
                         profile: Default::default(),
-                        route: provenant_run::RequestedRoute::Model { required_family: None,
+                        route: provenant_run::RequestedRoute::Model {
+                            required_family: None,
                             extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
@@ -1059,12 +1083,14 @@ pub(crate) mod peer_tests {
             )?;
             let head = if lane_commit {
                 let lane = info.path.to_str().ok_or("lane path")?;
-                let output = rig.execute(
-                    &git,
-                    &["-C", lane, "commit", "--allow-empty", "-qm", "lane work"],
-                    None,
-                )?;
-                assert_eq!(crate::worktree_tests::support::code(&output), 0);
+                std::fs::write(info.path.join("lane-work.txt"), "lane work")?;
+                for args in [
+                    vec!["-C", lane, "add", "lane-work.txt"],
+                    vec!["-C", lane, "commit", "-qm", "lane work"],
+                ] {
+                    let output = rig.execute(&git, &args, None)?;
+                    assert_eq!(crate::worktree_tests::support::code(&output), 0);
+                }
                 let output = rig.execute(&git, &["-C", lane, "rev-parse", "HEAD"], None)?;
                 String::from_utf8(output.stdout.bytes)?
                     .trim()
@@ -1283,7 +1309,8 @@ pub(crate) mod peer_tests {
                     pinned_base: None,
                     head: Some(node_source.to_string()),
                     profile: Default::default(),
-                    route: provenant_run::RequestedRoute::Model { required_family: None,
+                    route: provenant_run::RequestedRoute::Model {
+                        required_family: None,
                         extra: Default::default(),
                         provider: "claude".into(),
                         model: "claude/test-model".into(),
@@ -1396,7 +1423,7 @@ pub(crate) mod peer_tests {
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1596,6 +1623,24 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
             .unwrap()
             .contains("setup anchor changed")
     );
+}
+
+#[test]
+fn managed_writer_path_mismatch_names_the_layout_and_repair() {
+    let error = run_error(provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::ManagedPathMismatch {
+            requested: PathBuf::from("/tmp/project/.worktrees/linked/.worktrees/fix-parser"),
+            expected: PathBuf::from("/tmp/project/.worktrees/fix-parser"),
+        },
+    ));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "dispatch_refused");
+    assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+        detail.contains("does not match") && detail.contains("configured project")
+    }));
+    let detail = diagnostic.detail.as_deref().unwrap();
+    assert!(detail.contains("--branch"));
+    assert!(detail.contains("--worktree"));
 }
 
 #[cfg(test)]

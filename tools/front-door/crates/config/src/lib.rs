@@ -14,12 +14,13 @@ mod history;
 mod install_artifacts;
 mod schema;
 pub use gc::{
-    ByteObservation, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings,
-    LaneBuildSettings, MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings,
-    RETENTION_CLASSES, RemoteBranches, RetentionAdapter, RetentionBytes, RetentionClass,
-    RetentionCollector, RetentionEligibility, RetentionIssue, RetentionKind, RetentionMeasurements,
-    RetentionOwner, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
-    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
+    ByteObservation, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits,
+    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
+    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RemoteBranches,
+    RetentionAdapter, RetentionBytes, RetentionClass, RetentionCollector, RetentionEligibility,
+    RetentionIssue, RetentionKind, RetentionMeasurements, RetentionOwner, RetentionTrigger,
+    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, WRITER_LANES_CEILING, deserialize_auto,
+    parse_cache_size, retention_schedule,
 };
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
@@ -37,7 +38,9 @@ pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod policy;
 mod presets;
 mod providers;
-pub use providers::{ProviderSettings, ProviderUpdate};
+pub use providers::{
+    OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
+};
 pub mod ports;
 mod project_binding;
 pub use ports::{
@@ -168,6 +171,12 @@ pub enum ConfigError {
     InvalidRepositoryPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
+    #[error("project binding directory ownership or permissions are invalid")]
+    ProjectBindingDirectoryUnsafe {
+        path: PathBuf,
+        mode: u32,
+        owner_matches: bool,
+    },
     #[error("project binding lock budget is invalid")]
     ProjectBindingBudget,
     #[error(transparent)]

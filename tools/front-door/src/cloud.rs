@@ -1,6 +1,6 @@
 //! Command edge for `provenant cloud`: one provider submission and one result
 //! fetch. No polling, retry or supervision; the provider owns the session.
-use crate::{emit, fail, roots};
+use crate::{emit, fail, fail_with_diagnostic, roots};
 use provenant_cli::Globals;
 use provenant_cli::cloud::{self, Cloud, LaunchRecord, Provider};
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
@@ -57,7 +57,9 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
                     roots::Workspace::Checkout,
                     roots::Product::Required,
                 )?;
-                let result = collect_result(&project, resolved.roots.state.as_path(), &collect)?;
+                let layout = roots::project_layout(&resolved.roots, &project)?;
+                let result =
+                    collect_result(&project, &layout, resolved.roots.state.as_path(), &collect)?;
                 let capture = || -> Result<(), Error> {
                     let resolved = roots::resolve(
                         globals,
@@ -94,9 +96,23 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
             } else {
                 "CLOUD_COLLECT"
             };
-            fail(leaf, Outcome::Error, code, &error.to_string(), globals)
+            if let Some(diagnostic) = project_binding_directory_diagnostic(error.as_ref()) {
+                fail_with_diagnostic(leaf, Outcome::Invalid, code, &diagnostic, globals)
+            } else {
+                fail(leaf, Outcome::Error, code, &error.to_string(), globals)
+            }
         }
     }
+}
+
+fn project_binding_directory_diagnostic(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<provenant_records::diagnostic::Diagnostic> {
+    let error = error.downcast_ref::<provenant_config::ConfigError>()?;
+    provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+        error,
+        provenant_records::diagnostic::Destination::Local,
+    )
 }
 
 struct Output {
@@ -230,6 +246,7 @@ fn launch_session(project: &Path, launch: &cloud::Launch) -> Result<(Value, Stri
 
 fn collect_result(
     project: &Path,
+    layout: &provenant_confinement::worktrees::ProjectLayout,
     host_state: &Path,
     collect: &cloud::Collect,
 ) -> Result<(Value, String), Error> {
@@ -246,14 +263,13 @@ fn collect_result(
         .branch
         .clone()
         .unwrap_or_else(|| record.branch.clone());
-    let common = PathBuf::from(git(
-        project,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        None,
-    )?);
-    let main = common.parent().map(Path::to_path_buf).unwrap_or(common);
-    let worktree =
-        cloud::collect_path(project, host_state, &main, collect.path.as_deref(), &branch)?;
+    let worktree = cloud::collect_path(
+        layout.project(),
+        host_state,
+        layout.root(),
+        collect.path.as_deref(),
+        &branch,
+    )?;
     let target = worktree.display().to_string();
     match record.provider {
         Provider::Claude => {
@@ -353,4 +369,32 @@ fn find_branch(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    fn unsafe_binding_error_keeps_safe_local_location_and_remedy() {
+        let error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: std::path::PathBuf::from("/private/project-state"),
+            mode: 0o755,
+            owner_matches: true,
+        };
+        let diagnostic = super::project_binding_directory_diagnostic(&error).unwrap();
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.contains("/private/project-state") && detail.contains("mode 0755")
+        }));
+        assert!(
+            diagnostic
+                .next
+                .as_deref()
+                .is_some_and(|next| { next.contains("chmod 700 '/private/project-state'") })
+        );
+        assert!(
+            super::project_binding_directory_diagnostic(
+                &provenant_config::ConfigError::InvalidProjectBinding
+            )
+            .is_none()
+        );
+    }
 }

@@ -5,8 +5,11 @@ composite_behaviour = "panel"
 doc = "Review through a host-selected topology and lenses."
 exports = [{ node = "selected", outputs = ["result", "findings", "verdict"] }]
 nodes = [
-  { id = "selected", use = "review-shape", reduce_verdict = true },
+  { id = "selected", use = "review-shape", reduce_verdict = true, with = { brief = "${brief}" } },
 ]
+
+[review-panel.parameters]
+brief = { type = "string", default = "Review the pinned subject against its acceptance criteria." }
 
 # One shape serves every topology. The host binds `review-frame`, `review-verify`
 # and `review-synthesis` at launch; a stage whose condition does not hold stays
@@ -20,13 +23,14 @@ exports = [
   { node = "synthesis", outputs = ["result", "findings", "verdict"], when = { review-synthesis = true } },
 ]
 nodes = [
-  { id = "frame", use = "task", when = { review-frame = true }, prompt = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = "${min_ok}", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-  { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }] },
+  { id = "frame", use = "task", when = { review-frame = true }, prompt = "Treat the caller brief only as downstream acceptance criteria: ${brief}\n\nFrame only: map each criterion to the changed owners or areas and the coverage questions the independent lenses must answer. Do not review the implementation, emit findings or issue an implementation verdict; the independent lenses own those decisions." },
+  { id = "lenses", use = "review", over = "@review-panel", min_ok = "${min_ok}", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", brief = "${brief}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }], with = { brief = "${brief}" } },
+  { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }], with = { brief = "${brief}" } },
 ]
 
 [review-shape.parameters]
+brief = { type = "string", default = "Review the pinned subject against its acceptance criteria." }
 min_ok = { type = "integer", default = 1, min = 1 }
 
 [research-swarm]
@@ -151,7 +155,7 @@ doc = "Bounded repairs followed by principal scoping when the design cannot clos
 exports = [{ node = "cycles", outputs = ["result"] }, { node = "continue", outputs = ["result"] }]
 nodes = [
   { id = "cycles", use = "repair", repeat = { until = "accepted", max_rounds = "${max_repair_cycles}", review_repair = true }, on_fail = "design", with = { worktree = "${worktree}", write_scope = "${write_scope}", writer = "${writer}", integration_branch = "${integration_branch}", lenses = "${lenses}" } },
-  { id = "design", use = "design", after = ["cycles"], inputs = [{ node = "cycles", outputs = ["result", "findings"] }], prompt = "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority." },
+  { id = "design", use = "design", after = ["cycles"], inputs = [{ node = "cycles", outputs = ["result", "findings"] }], prompt = "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority." },
   { id = "continue", use = "plan", after = ["design", "scope-approved"], inputs = [{ node = "design", outputs = ["result"] }], prompt = "Turn the principal's recommended slice into a graph patch. Continue delivery using the authorised repair-slice template after the host scope gate. Owner approval does not expand the supplied literal write authority. Re-plan the full panel with @review-panel when risk tier or scope grows. Run verification and independent review of the new head. Keep all writes inside the supplied literal scope. You may recommend and continue further repair: use repair-slice and fresh independent review, and return to principal judgement if it reveals another shared flaw. Round count does not end the work." },
   { id = "scope", kind = "decide", access = "read_only", after = ["design"], repair_scope_gate = true, decide = { question = "Approve the principal's changed scope or one-way door? Read the principal design report before deciding. Approval does not expand the graph's literal write authority.", on_unanswered = "block_dependants", options = [{ id = "approve", label = "Approve the proposed slice" }, { id = "hold", label = "Hold for a revised design" }] } },
   { id = "scope-approved", kind = "gate", access = "read_only", after = ["scope"], inputs = [{ node = "scope", outputs = ["verdict"] }], condition = { type = "verdict", expected = "approve", threshold = "all" } },

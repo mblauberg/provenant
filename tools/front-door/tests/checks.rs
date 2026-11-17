@@ -325,12 +325,17 @@ fn release_checks_the_running_binary_as_an_artifact() -> Result {
     let findings = page["data"]["findings"]
         .as_array()
         .ok_or("release findings")?;
+    // The fixture owns the Git evidence: the planted token lives only in tree
+    // and history bytes, and every commit carries the fixture identity. Nothing
+    // may be reported against either. The executable under scan is built
+    // elsewhere, so which byte rules it trips is not the fixture's to pin.
+    let from_fixture: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding["path"]["path"] != "@artifact/provenant")
+        .collect();
     assert!(
-        findings.iter().all(|finding| {
-            finding["path"]["path"] == "@artifact/provenant"
-                && finding["rule"] == "release.home-path"
-        }),
-        "Git source and history bytes are outside the executable scan"
+        from_fixture.is_empty(),
+        "Git source and history bytes are outside the executable scan: {findings:?}"
     );
     assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
     rig.assert_v1_root_untouched()
@@ -502,6 +507,142 @@ fn release_checks_legal_private_symlink_and_bounded_evidence() -> Result {
     );
     fs::write(rig.project.join("LICENSE"), vec![b'a'; 5 * 1024 * 1024 + 1])?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
+    rig.assert_v1_root_untouched()
+}
+
+#[test]
+// Spec: docs/specs/cli.md#release-symlinks
+fn release_gate_allows_only_relative_links_to_tracked_regular_files() -> Result {
+    use std::{fs, os::unix::fs::symlink};
+
+    let rig = check_rig()?;
+    legal(&rig)?;
+    fs::create_dir_all(rig.project.join("config"))?;
+    fs::write(
+        rig.project.join("config/ports.json"),
+        include_str!("../../../config/ports.json"),
+    )?;
+    let base = commit(&rig, "release base")?;
+
+    fs::create_dir_all(rig.project.join("history"))?;
+    symlink("future-target", rig.project.join("history/removed"))?;
+    git(&rig, &["add", "--", "history/removed"])?;
+    git(&rig, &["commit", "-q", "-m", "historical dangling link"])?;
+
+    fs::remove_file(rig.project.join("history/removed"))?;
+    fs::create_dir_all(rig.project.join(".provenant"))?;
+    fs::create_dir_all(rig.project.join("bad"))?;
+    fs::write(rig.project.join("bad/not-directory"), "tracked file\n")?;
+    let links = [
+        (".provenant/ports.json", "../config/ports.json", None),
+        ("bad/absolute", "/outside/release-check", Some("relative")),
+        ("bad/windows-drive", "C:/outside", Some("relative")),
+        (
+            "bad/backslash",
+            r"..\config\ports.json",
+            Some("nonportable"),
+        ),
+        ("bad/escaping", "../../outside", Some("escapes")),
+        ("bad/dangling", "missing", Some("not tracked")),
+        ("bad/chain", "second", Some("another symlink")),
+        ("bad/second", "../config/ports.json", None),
+        ("bad/dir-link", "../config/ports.json", None),
+        (
+            "bad/through-link",
+            "dir-link/../config/ports.json",
+            Some("another symlink"),
+        ),
+        (
+            "bad/through-file",
+            "not-directory/../config/ports.json",
+            Some("non-directory"),
+        ),
+        (
+            "bad/through-missing",
+            "missing/../config/ports.json",
+            Some("untracked directory"),
+        ),
+        ("bad/cycle-a", "cycle-b", Some("chains and cycles")),
+        ("bad/cycle-b", "cycle-a", Some("chains and cycles")),
+        ("bad/untracked", "../untracked-target", Some("not tracked")),
+    ];
+    for (path, target, _) in links {
+        symlink(target, rig.project.join(path))?;
+    }
+    fs::write(rig.project.join("untracked-target"), "not published\n")?;
+    git(
+        &rig,
+        &[
+            "add",
+            "--all",
+            "--",
+            "bad",
+            ".provenant/ports.json",
+            "history/removed",
+        ],
+    )?;
+    git(&rig, &["commit", "-q", "-m", "current link cases"])?;
+
+    fs::write(rig.project.join("history/future-target"), "added later\n")?;
+    git(&rig, &["add", "--", "history/future-target"])?;
+    git(&rig, &["commit", "-q", "-m", "repair historical target"])?;
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+
+    let output = rig.command(&[
+        "check", "release", "--base", &base, "--head", &head, "--json",
+    ])?;
+    let page = json(&output)?;
+    let findings = page["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    let symlink_findings = findings
+        .iter()
+        .filter(|finding| finding["rule"] == "release.symlink")
+        .filter_map(|finding| {
+            Some((
+                finding["path"]["path"].as_str()?,
+                finding["message"].as_str()?,
+            ))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(code(&output), 1);
+    for (path, _, reason) in links {
+        match reason {
+            Some(reason) => assert!(
+                symlink_findings
+                    .get(path)
+                    .is_some_and(|message| message.contains(reason)),
+                "missing actionable finding for {path} ({reason})"
+            ),
+            None => assert!(
+                !symlink_findings.contains_key(path),
+                "unexpected finding for safe link {path}"
+            ),
+        }
+    }
+    assert!(
+        symlink_findings
+            .get("history/removed")
+            .is_some_and(|message| message.contains("not tracked"))
+    );
+
+    fs::rename(rig.project.join("bad"), rig.project.join("bad-directory"))?;
+    fs::write(rig.home.join("release-check-private"), "must never be read")?;
+    symlink(&rig.home, rig.project.join("bad"))?;
+    let parent_link = rig.command(&["check", "release", "--json"])?;
+    assert_eq!(code(&parent_link), 1);
+    let parent_page = json(&parent_link)?;
+    assert!(
+        parent_page["data"]["findings"]
+            .as_array()
+            .ok_or("parent symlink findings")?
+            .iter()
+            .any(|finding| {
+                finding["rule"] == "release.symlink" && finding["path"]["path"] == "bad"
+            })
+    );
+    assert!(!String::from_utf8_lossy(&parent_link.stdout.bytes).contains("must never be read"));
     rig.assert_v1_root_untouched()
 }
 

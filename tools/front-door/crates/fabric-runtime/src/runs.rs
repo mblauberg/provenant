@@ -49,11 +49,67 @@ pub struct AttemptSummary {
     pub queued_at: provenant_core::WallTime,
     pub started_at: Option<provenant_core::WallTime>,
     pub last_output_at: Option<provenant_core::WallTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<provenant_records::run::SteeringStatus>,
+}
+
+const PEER_PROJECT_BINDING_DETAIL: &str = "project binding state directory is unsafe on the host";
+const PEER_PROJECT_BINDING_NEXT: &str = concat!(
+    "ask the host owner to check that the state directory is owned by the current user ",
+    "and private from other users, then retry",
+);
+
+fn is_project_binding_directory_refusal(state: &provenant_records::run::AttemptState) -> bool {
+    matches!(
+        state,
+        provenant_records::run::AttemptState::Terminal {
+            terminal_cause: Some(
+                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+            ),
+            ..
+        }
+    )
+}
+
+fn project_peer_attempt_state_diagnostics(state: &mut provenant_records::run::AttemptState) {
+    if !is_project_binding_directory_refusal(state) {
+        return;
+    }
+    if let provenant_records::run::AttemptState::Terminal {
+        terminal_note,
+        reason,
+        ..
+    } = state
+    {
+        if reason.is_some() {
+            *reason = Some(PEER_PROJECT_BINDING_DETAIL.into());
+        }
+        if terminal_note.is_some() {
+            *terminal_note = Some(PEER_PROJECT_BINDING_NEXT.into());
+        }
+    }
+}
+
+/// Remove host-local project-binding repair details before an attempt crosses
+/// the peer boundary. The stored/local record remains unchanged.
+pub fn project_peer_attempt_diagnostics(record: &mut AttemptRecord) {
+    project_peer_attempt_state_diagnostics(&mut record.state);
+}
+
+/// Project the terminal event's self-contained cause, without consulting the
+/// mutable attempt record that may have changed since the event was written.
+pub fn project_peer_run_event_diagnostics(event: &mut RunEvent) {
+    project_peer_attempt_state_diagnostics(&mut event.change);
 }
 
 impl From<AttemptRecord> for AttemptSummary {
     fn from(record: AttemptRecord) -> Self {
         let projected = provenant_records::wire::LaneRow::project(&record, Default::default());
+        let reason = if is_project_binding_directory_refusal(&record.state) {
+            Some(PEER_PROJECT_BINDING_DETAIL.to_owned())
+        } else {
+            projected.reason
+        };
         let finished_at = match &record.state {
             provenant_records::run::AttemptState::Terminal { finished_at, .. } => {
                 Some(*finished_at)
@@ -66,7 +122,7 @@ impl From<AttemptRecord> for AttemptSummary {
             key: record.key,
             attempt_id: record.attempt_id,
             state: projected.state,
-            reason: projected.reason,
+            reason,
             exit_code: projected.exit_code,
             finished_at,
             retry_of: record.retry_of,
@@ -82,6 +138,7 @@ impl From<AttemptRecord> for AttemptSummary {
             queued_at: record.queued_at,
             started_at: record.started_at,
             last_output_at: record.last_output_at,
+            steering: projected.steering,
         }
     }
 }
@@ -136,6 +193,24 @@ pub enum RunResult {
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
+}
+
+impl RunResult {
+    /// Project full records before peer transport. Stored records retain the
+    /// detailed local repair; compact summaries use a safe reason.
+    pub fn project_peer_diagnostics(&mut self) {
+        match self {
+            Self::List { .. } => {}
+            Self::Status { attempt, .. }
+            | Self::Cancel { attempt, .. }
+            | Self::Resume { attempt, .. } => project_peer_attempt_diagnostics(attempt),
+            Self::Wait { attempts, .. } => {
+                for attempt in attempts {
+                    project_peer_attempt_diagnostics(attempt);
+                }
+            }
+        }
+    }
 }
 
 fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_json::Error> {
@@ -405,6 +480,86 @@ mod tests {
             summary["visible_extension"],
             serde_json::json!({"kept": true})
         );
+    }
+
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    #[test]
+    fn peer_projection_keeps_binding_repair_local_and_projects_a_safe_reason() {
+        let private_path = "/private/host-state/projects/fixture";
+        let private_repair = "run chmod 700 '/private/host-state/projects/fixture' and retry";
+        let mut record = attempt();
+        record
+            .skipped_routes
+            .push(provenant_records::run::SkippedRoute {
+                route: "fixture/model".into(),
+                kind: provenant_records::run::SkipKind::Refused,
+                detail: "project binding state directory is unsafe".into(),
+                confinement_guard: Some(
+                    provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe,
+                ),
+                ..Default::default()
+            });
+        record.state = AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause: Some(
+                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe,
+            ),
+            terminal_note: Some(private_repair.into()),
+            stop: None,
+            outcome: Outcome::PermissionDenied,
+            exit_code: None,
+            finished_at: WallTime::from_micros(2).unwrap(),
+            reason: Some(format!(
+                "{private_path} has unsafe ownership or permissions"
+            )),
+        };
+
+        let local = serde_json::to_string(&record).unwrap();
+        assert!(local.contains(private_path));
+        assert!(local.contains(private_repair));
+
+        let mut peer = RunResult::Status {
+            extra: Default::default(),
+            lane_waits: Vec::new(),
+            attempt: record.clone(),
+        };
+        peer.project_peer_diagnostics();
+        let remote = serde_json::to_string(&peer).unwrap();
+        assert!(!remote.contains(private_path));
+        assert!(!remote.contains(private_repair));
+        assert!(remote.contains(PEER_PROJECT_BINDING_DETAIL));
+        assert!(remote.contains(PEER_PROJECT_BINDING_NEXT));
+
+        let mut unrelated = record.clone();
+        if let AttemptState::Terminal { terminal_cause, .. } = &mut unrelated.state {
+            *terminal_cause = Some(provenant_records::run::TerminalCause::AccessPolicyRefused);
+        }
+        project_peer_attempt_diagnostics(&mut unrelated);
+        let unrelated_remote = serde_json::to_string(&unrelated).unwrap();
+        assert!(unrelated_remote.contains(private_path));
+        assert!(unrelated_remote.contains(private_repair));
+
+        let mut event = RunEvent {
+            extra: Default::default(),
+            schema_version: 1,
+            sequence: 1,
+            project_id: record.project_id,
+            attempt_id: record.attempt_id,
+            revision: record.revision,
+            change: record.state.clone(),
+            trace: Default::default(),
+        };
+        project_peer_run_event_diagnostics(&mut event);
+        let remote_event = serde_json::to_string(&event).unwrap();
+        assert!(!remote_event.contains(private_path));
+        assert!(!remote_event.contains(private_repair));
+        assert!(remote_event.contains(PEER_PROJECT_BINDING_DETAIL));
+        assert!(remote_event.contains(PEER_PROJECT_BINDING_NEXT));
+
+        let summary = serde_json::to_string(&AttemptSummary::from(record)).unwrap();
+        assert!(!summary.contains(private_path));
+        assert!(!summary.contains(private_repair));
+        assert!(summary.contains(PEER_PROJECT_BINDING_DETAIL));
     }
 
     #[test]

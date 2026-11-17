@@ -356,8 +356,8 @@ pub(super) fn confinement_request(
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
                 .chain(
                     writer
-                        .and_then(|writer| writer.worktree.repo().common_git_dir().parent())
                         .into_iter()
+                        .flat_map(|writer| writer.project_root().into_iter())
                         .flat_map(project_scratch_reads),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
@@ -647,6 +647,32 @@ pub(super) fn protected_worktrees(
                 .map_err(|error| error.to_string())?,
         );
     }
+    for binding in provenant_config::registered_projects(roots)
+        .map_err(|error| format!("cannot read registered project inventory: {error}"))?
+    {
+        let common = binding.common_dir();
+        let is_git = common.file_name() == Some(std::ffi::OsStr::new(".git"))
+            || (common.join("HEAD").is_file() && common.join("objects").is_dir());
+        if !is_git {
+            continue;
+        }
+        let layout = utility
+            .project_layout_for_binding(&executor, &binding, budget, &cancel)
+            .map_err(|error| {
+                format!(
+                    "cannot verify registered Git project layout at {}: {error}",
+                    common.display()
+                )
+            })?;
+        let ports = provenant_config::PortTable::read_for(layout.project(), roots.state.as_path())
+            .map_err(|error| {
+                format!(
+                    "cannot read worktree allocation settings for {}: {error}",
+                    common.display()
+                )
+            })?;
+        paths.extend(ports.worktree_roots_under(layout.root()));
+    }
     let mut protected = Vec::new();
     for path in paths {
         let alias = resolve_policy_path(&path).map_err(|error| error.to_string())?;
@@ -691,9 +717,9 @@ pub(super) fn credential_roots(
     let mut roots = CredentialRoots::for_home(home);
     for entry in settings.entries.values() {
         let source = format!("account registry: {}/{}", entry.adapter, entry.label);
-        for path in std::iter::once(&entry.directory).chain(&entry.directories) {
+        for path in crate::accounts::credential_directories(entry) {
             roots.add(
-                path.clone(),
+                path.to_path_buf(),
                 CredentialScope::Subtree,
                 source.clone(),
                 kind(entry.adapter.as_str(), path),
@@ -709,13 +735,7 @@ pub(super) fn credential_roots(
                 "account registry: {}/{} credential file",
                 entry.adapter, entry.label
             );
-            roots.add(
-                entry.directory.with_extension("json"),
-                CredentialScope::Exact,
-                source.clone(),
-                CredentialKind::Store,
-            );
-            for directory in &entry.directories {
+            for directory in crate::accounts::credential_directories(entry) {
                 roots.add(
                     directory.with_extension("json"),
                     CredentialScope::Exact,
@@ -856,6 +876,111 @@ pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String
     })
 }
 
+/// Resolve one PATH policy for the request project and selected worktree.
+/// Git-backed roots come from the shared, verified worktree inventory owner;
+/// a linked checkout contributes both its primary project and selected root.
+pub(in crate::run) fn filtered_requester_lane_path(
+    host: Option<&run::HostLaunchContext>,
+    project_path: &Path,
+    worktree_path: &Path,
+    utility: &provenant_confinement::UtilityRuntime,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &provenant_core::CancelToken,
+    binding: Option<&provenant_config::ProjectBinding>,
+) -> Result<run::FilteredLanePath, String> {
+    let (project, selected) =
+        requester_path_roots(project_path, utility, executor, cancel, binding)?;
+    let selected_worktree = if canonical(project_path)? == canonical(worktree_path)? {
+        selected
+    } else {
+        requester_path_roots(worktree_path, utility, executor, cancel, binding)?.1
+    };
+    run::FilteredLanePath::for_requester(host, &project, &selected_worktree)
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn registered_project_binding(
+    roots: &provenant_core::Roots,
+    project: provenant_core::ProjectId,
+) -> Result<Option<provenant_config::ProjectBinding>, PrepareError> {
+    let bindings = provenant_config::registered_projects(roots)
+        .map_err(PrepareError::registered_project_inventory)?;
+    Ok(bindings
+        .into_iter()
+        .find(|binding| binding.project_id() == project))
+}
+
+/// Return the verified primary project root and selected checkout root. A
+/// non-checkout directory remains its own root; linked checkouts use their
+/// registered binding or the common directory's verified inventory.
+fn requester_path_roots(
+    path: &Path,
+    utility: &provenant_confinement::UtilityRuntime,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &provenant_core::CancelToken,
+    binding: Option<&provenant_config::ProjectBinding>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let git = utility.git_program_path();
+    let path = canonical(path)?;
+    if !path
+        .ancestors()
+        .any(|ancestor| provenant_os::git::repository_marker(ancestor).is_some())
+    {
+        return Ok((path.clone(), path));
+    }
+    let common = provenant_os::git::repository_path_with_cancel(
+        executor,
+        git,
+        &path,
+        provenant_os::git::RepositoryPath::CommonDir,
+        Some(cancel),
+    )
+    .map_err(|error| format!("cannot resolve requester PATH repository: {error}"))?;
+    let selected = provenant_os::git::repository_path_with_cancel(
+        executor,
+        git,
+        &path,
+        provenant_os::git::RepositoryPath::Toplevel,
+        Some(cancel),
+    )
+    .map_err(|error| format!("cannot resolve requester PATH worktree: {error}"))?;
+    let private = provenant_os::git::repository_path_with_cancel(
+        executor,
+        git,
+        &path,
+        provenant_os::git::RepositoryPath::GitDir,
+        Some(cancel),
+    )
+    .map_err(|error| format!("cannot resolve requester PATH private Git directory: {error}"))?;
+    let common = canonical(&common)?;
+    let private = canonical(&private)?;
+    let project = if private == common {
+        // Git proves this selected top-level owns the shared metadata directly.
+        selected.clone()
+    } else if let Some(binding) =
+        binding.filter(|binding| canonical(binding.common_dir()).is_ok_and(|bound| bound == common))
+    {
+        // The utility owns bound layout resolution, including trusted local
+        // bare provenance for a checkout-less common directory.
+        let layout =
+            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
+                .and_then(|budget| {
+                    utility.project_layout_for_binding(executor, binding, budget, cancel)
+                })
+                .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+        layout.project().unwrap_or(layout.root()).to_path_buf()
+    } else {
+        let layout =
+            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
+                .and_then(|budget| {
+                    utility.project_layout_for_common(executor, &common, budget, cancel)
+                })
+                .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+        layout.project().unwrap_or(layout.root()).to_path_buf()
+    };
+    Ok((project, selected))
+}
+
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
 /// worktree rather than falling back to the daemon's checkout.
 #[derive(Debug, thiserror::Error)]
@@ -890,16 +1015,49 @@ fn source_admission_error(error: crate::run::SourceAdmissionError) -> SourceCwdE
     )
 }
 
-fn report_source_warnings(admission: &crate::run::SourceAdmission) {
+fn source_warning_messages(
+    admission: &crate::run::SourceAdmission,
+    policy: &provenant_records::policy::Policy,
+) -> Vec<String> {
+    admission
+        .warnings
+        .iter()
+        .filter_map(|warning| {
+            policy
+                .check(
+                    "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "source overlaps {} (source: {})",
+                        warning.path.display(),
+                        warning.source
+                    )),
+                )
+                .message()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn report_source_warnings(
+    admission: &crate::run::SourceAdmission,
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+) {
     use std::io::Write;
+    let project = task
+        .profile
+        .policy_project
+        .or(registry.project_id)
+        .map(|project| project.to_string())
+        .unwrap_or_default();
+    let policy = registry
+        .roots
+        .map_or_else(provenant_records::policy::Policy::default, |roots| {
+            run::launch_policy(roots.state.as_path(), &project, task)
+        });
     let mut stderr = std::io::stderr().lock();
-    for warning in &admission.warnings {
-        let _ = writeln!(
-            stderr,
-            "warning: source overlaps {} (source: {})",
-            warning.path.display(),
-            warning.source,
-        );
+    for message in source_warning_messages(admission, &policy) {
+        let _ = writeln!(stderr, "warning: {message}");
     }
 }
 
@@ -930,7 +1088,7 @@ pub(super) fn source_cwd(
             crate::run::SourceAdmissionMode::Live,
         )
         .map_err(source_admission_error)?;
-        report_source_warnings(&admission);
+        report_source_warnings(&admission, registry, task);
         return Ok(admission.path);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
@@ -951,7 +1109,7 @@ pub(super) fn source_cwd(
     };
     let admission = crate::run::admit_source_root(cwd, state, source, &credentials, mode)
         .map_err(source_admission_error)?;
-    report_source_warnings(&admission);
+    report_source_warnings(&admission, registry, task);
     if !task.access.source_live && admission.path != *source {
         return Err(source_cwd_authority(
             "graph source checkout changed location".into(),
@@ -1028,8 +1186,22 @@ pub(super) enum ReadOnlyPlanError {
     MissingBinding,
     #[error("pinned source requires a Git repository")]
     PinnedSourceRequiresGit,
+    #[error("{}", read_only_diagnostic_text(.0.as_ref()))]
+    ProjectBindingDirectory(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("{0}")]
     Other(String),
+}
+
+fn read_only_diagnostic_text(diagnostic: &provenant_records::diagnostic::Diagnostic) -> String {
+    let mut message = diagnostic
+        .detail
+        .clone()
+        .unwrap_or_else(|| "project binding state directory is unsafe".into());
+    if let Some(next) = &diagnostic.next {
+        message.push_str("; next: ");
+        message.push_str(next);
+    }
+    message
 }
 
 impl From<String> for ReadOnlyPlanError {
@@ -1042,15 +1214,29 @@ impl From<&str> for ReadOnlyPlanError {
         Self::Other(value.into())
     }
 }
+impl From<provenant_config::ConfigError> for ReadOnlyPlanError {
+    fn from(error: provenant_config::ConfigError) -> Self {
+        let diagnostic =
+            provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+                &error,
+                provenant_records::diagnostic::Destination::Local,
+            );
+        diagnostic.map_or_else(
+            || Self::Other(error.to_string()),
+            |diagnostic| Self::ProjectBindingDirectory(Box::new(diagnostic)),
+        )
+    }
+}
 impl ReadOnlyPlanError {
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
             Self::Run(error) => error.boundary_class(),
             Self::Plan(error) => error.boundary_class(),
-            Self::BindingMismatch | Self::MissingBinding | Self::PinnedSourceRequiresGit => {
-                BoundaryClass::Authority
-            }
+            Self::BindingMismatch
+            | Self::MissingBinding
+            | Self::PinnedSourceRequiresGit
+            | Self::ProjectBindingDirectory(_) => BoundaryClass::Authority,
             Self::Other(_) => BoundaryClass::None,
         }
     }
@@ -1068,6 +1254,7 @@ fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
     }
 }
 
+// Spec: docs/specs/state.md#config-never-widens-authority
 #[test]
 fn read_only_plan_preserves_typed_authority_failures() {
     use provenant_records::diagnostic::BoundaryClass;
@@ -1083,6 +1270,24 @@ fn read_only_plan_preserves_typed_authority_failures() {
         ReadOnlyPlanError::PinnedSourceRequiresGit.boundary_class(),
         BoundaryClass::Authority
     );
+    let unsafe_binding = ReadOnlyPlanError::from(
+        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: PathBuf::from("/private/state"),
+            mode: 0o755,
+            owner_matches: true,
+        },
+    );
+    assert!(matches!(
+        &unsafe_binding,
+        ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)
+            if diagnostic.detail.as_deref().is_some_and(|detail| detail.contains("/private/state"))
+                && diagnostic.next.as_deref().is_some_and(|next| next.contains("chmod 700"))
+    ));
+    assert_eq!(unsafe_binding.boundary_class(), BoundaryClass::Authority);
+    assert!(matches!(
+        ReadOnlyPlanError::from(provenant_config::ConfigError::InvalidProjectBinding),
+        ReadOnlyPlanError::Other(_)
+    ));
     assert_eq!(
         ReadOnlyPlanError::Other("unavailable".into()).boundary_class(),
         BoundaryClass::None
@@ -1135,22 +1340,27 @@ pub(super) fn read_only_plan(
                 Err(error) => return Err(error.to_string().into()),
             }
         }
-        let location = provenant_config::ProjectLocation::new(
-            repository
-                .as_ref()
-                .map_or(cwd, |repo| repo.common_git_dir()),
-        )
+        let location = match repository.as_ref() {
+            Some(repo) if repo.private_git_dir() == repo.common_git_dir() => {
+                provenant_config::ProjectLocation::from_verified_primary_checkout(
+                    repo.common_git_dir(),
+                    repo.root_path(),
+                )
+            }
+            Some(repo) => provenant_config::ProjectLocation::new(repo.common_git_dir()),
+            None => provenant_config::ProjectLocation::new(cwd),
+        }
         .map_err(|error| error.to_string())?;
         let binding = if live {
             // Graph attribution stays with the parent; the read plan belongs to
             // the selected checkout, as it does for an ordinary host launch.
-            let binding = provenant_config::bind_project(roots, location)
-                .map_err(|error| error.to_string())?;
+            let binding =
+                provenant_config::bind_project(roots, location).map_err(ReadOnlyPlanError::from)?;
             request.scope = WorkScope::Project(binding.project_id());
             binding
         } else {
             let binding = provenant_config::lookup_project(roots, &location)
-                .map_err(|error| error.to_string())?
+                .map_err(ReadOnlyPlanError::from)?
                 .ok_or(ReadOnlyPlanError::MissingBinding)?;
             if binding.project_id() != project {
                 return Err(ReadOnlyPlanError::BindingMismatch);
@@ -1358,23 +1568,6 @@ pub(super) fn publishing_executable(
     } else {
         Err("host gh is not an executable file".into())
     }
-}
-
-pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
-    canonical(&find_executable(name)?)
-}
-
-pub(super) fn host_executable(
-    host: &run::HostLaunchContext,
-    name: &str,
-) -> Result<PathBuf, String> {
-    // The caller holds this provider's lease. Retry only an omitted entry,
-    // using host-sealed directories rather than the guardian's environment.
-    let path = match host.executables.get(name) {
-        Some(path) => path.clone(),
-        None => find_executable_on_path(name, &host.executable_search_path)?,
-    };
-    canonical(&path)
 }
 
 pub(crate) fn find_executable(name: &str) -> Result<PathBuf, String> {
@@ -1631,6 +1824,29 @@ pub(super) fn writer_source_context(
 #[cfg(test)]
 mod alias_tests {
     use super::*;
+
+    #[test]
+    // Spec: docs/specs/fabric.md#sources-and-read-roots
+    fn source_configuration_warning_is_opt_in() {
+        use provenant_records::policy::{Policy, Source, Strength};
+        let admission = crate::run::SourceAdmission {
+            path: "/project".into(),
+            warnings: vec![crate::run::SourceWarning {
+                path: "/project/.claude".into(),
+                source: "project-local agent configuration (.claude)".into(),
+            }],
+        };
+        let mut policy = Policy::default();
+        assert!(source_warning_messages(&admission, &policy).is_empty());
+        policy.overlay(
+            &std::collections::BTreeMap::from([(
+                "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE".into(),
+                Strength::Warn,
+            )]),
+            Source::Host,
+        );
+        assert_eq!(source_warning_messages(&admission, &policy).len(), 1);
+    }
 
     #[test]
     fn only_the_temporary_variables_move_to_the_alias() {

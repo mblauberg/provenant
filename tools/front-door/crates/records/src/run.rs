@@ -652,6 +652,9 @@ pub struct RouteRecord {
     pub effort_warning: Option<crate::route_selection::EffortWarning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_warning: Option<String>,
+    /// Human-readable, host-generated warnings retained with the applied route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_warnings: Vec<String>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub provider: Option<String>,
@@ -1011,6 +1014,7 @@ impl RouteRecord {
             host_native: None,
             effort_warning: route.diagnostics.effort_warning.clone(),
             availability_warning: None,
+            launch_warnings: route.diagnostics.launch_warnings.clone(),
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),
@@ -1233,6 +1237,8 @@ impl From<Outcome> for crate::AttemptOutcome {
 pub enum TerminalCause {
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
+    /// A project-binding state directory failed its local owner or mode guard.
+    ProjectBindingDirectoryUnsafe,
     AccountLoginRequired,
     RouteResolutionRefused,
     AccessPolicyRefused,
@@ -1271,6 +1277,8 @@ pub enum TerminalCause {
     /// The lane's launch-time access token was revoked or expired mid-run
     /// while the account login stayed usable.
     LaneTokenLost,
+    /// The host interrupted this attempt to deliver a queued steering turn.
+    Steered,
 }
 
 impl TerminalCause {
@@ -1278,6 +1286,9 @@ impl TerminalCause {
     pub fn reason(self) -> &'static str {
         match self {
             Self::SourceViewRefused => "source view refused; provenant output ID",
+            Self::ProjectBindingDirectoryUnsafe => {
+                "project binding state directory unsafe; provenant output ID"
+            }
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
@@ -1309,6 +1320,7 @@ impl TerminalCause {
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
+            Self::Steered => "steering interruption; provenant output ID",
         }
     }
 
@@ -1320,6 +1332,9 @@ impl TerminalCause {
             }
             Self::SourceViewRefused => {
                 "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
+            }
+            Self::ProjectBindingDirectoryUnsafe => {
+                "the project binding state directory is unsafe; ask the host owner to check its ownership and private permissions before retrying"
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
@@ -1400,6 +1415,9 @@ impl TerminalCause {
             }
             Self::LaneTokenLost => {
                 "the lane's access token was revoked or expired mid-run while the account login stayed usable; a writer continues from its handoff on a new token"
+            }
+            Self::Steered => {
+                "the host interrupted this attempt for a queued steering turn; continuation requires the retained session for this provider, model and account"
             }
         }
     }
@@ -1813,6 +1831,8 @@ settlement_reasons! {
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
     Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    /// The host interrupted a run to deliver its queued continuation turn.
+    Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
     Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
     Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
     /// The provider ran and ended in a non-success outcome.
@@ -1833,6 +1853,9 @@ impl SettlementReason {
             (_, Outcome::Unsettled) => Self::Unsettled,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
+            (_, Outcome::Cancelled) if terminal_cause == Some(TerminalCause::Steered) => {
+                Self::Steered
+            }
             (_, Outcome::Cancelled) => Self::Cancelled,
             (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
             _ if handoff.is_err() => Self::HandoffMalformed,
@@ -2085,34 +2108,6 @@ impl PeerGraphFields {
     }
 }
 
-/// Output-only peer metadata, with the byte length owned by the output boundary.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PeerOutputFields {
-    #[serde(flatten)]
-    pub graph: PeerGraphFields,
-    #[serde(rename = "length", skip_serializing_if = "Option::is_none")]
-    pub length: Option<u64>,
-    #[serde(rename = "planner_fallback", skip_serializing_if = "Option::is_none")]
-    pub planner_fallback: Option<String>,
-}
-
-impl PeerOutputFields {
-    pub fn merge_graph(&mut self, newer: PeerGraphFields) {
-        self.graph.merge(newer);
-    }
-}
-
-impl From<PeerGraphFields> for PeerOutputFields {
-    fn from(graph: PeerGraphFields) -> Self {
-        Self {
-            graph,
-            length: None,
-            planner_fallback: None,
-        }
-    }
-}
-
 fn decode_peer_handoff<'de, D>(
     deserializer: D,
 ) -> Result<Option<crate::handoff::HandoffResult>, D::Error>
@@ -2228,6 +2223,10 @@ pub struct AttemptRecord {
     /// Current policy tail on peer observations; absent in durable receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<AttemptId>,
+    /// Read-only projection of the host's private steering ledger. This is
+    /// populated by RunStore readers and is never persisted in the attempt row.
+    #[serde(skip)]
+    pub steering: Option<SteeringStatus>,
     pub requested_route: RequestedRoute,
     pub resolved_route: Option<RouteRecord>,
     pub applied_route: Option<RouteRecord>,
@@ -2308,6 +2307,71 @@ pub struct AttemptRecord {
     pub skipped_routes: Vec<SkippedRoute>,
     /// Trace context stamped when the attempt is created.
     pub trace: crate::Trace,
+}
+
+/// Outcome visible for an accepted steering turn, without exposing its text.
+/// A live session acknowledgement reports `Resumed` promptly; terminal proof
+/// can still revise that state to `NotContinued`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringState {
+    Queued,
+    Resumed,
+    NotContinued,
+}
+
+/// Safe reason an accepted steering turn could not continue the provider
+/// session. This projection never carries provider text or local paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringCause {
+    SessionUnavailable,
+    SessionMismatch,
+    SessionProofIncomplete,
+    TerminalStop,
+    ContinuationRefused,
+}
+
+impl SteeringCause {
+    /// Stable value persisted in the private RunStore outcome ledger.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionUnavailable => "session_unavailable",
+            Self::SessionMismatch => "session_mismatch",
+            Self::SessionProofIncomplete => "session_proof_incomplete",
+            Self::TerminalStop => "terminal_stop",
+            Self::ContinuationRefused => "continuation_refused",
+        }
+    }
+
+    /// Parse the bounded RunStore outcome value.
+    pub fn from_code(value: &str) -> Option<Self> {
+        match value {
+            "session_unavailable" => Some(Self::SessionUnavailable),
+            "session_mismatch" => Some(Self::SessionMismatch),
+            "session_proof_incomplete" => Some(Self::SessionProofIncomplete),
+            "terminal_stop" => Some(Self::TerminalStop),
+            "continuation_refused" => Some(Self::ContinuationRefused),
+            _ => None,
+        }
+    }
+}
+
+/// Stable identifiers for one accepted steering operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringOperation {
+    pub operation_id: OperationId,
+    pub message_id: provenant_core::MessageId,
+}
+
+/// Safe status projection of the private steering ledger.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringStatus {
+    pub state: SteeringState,
+    pub operations: Vec<SteeringOperation>,
+    pub successor: Option<AttemptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<SteeringCause>,
 }
 
 /// Encode the public form of an attempt, retaining all public extra metadata.
@@ -2824,23 +2888,6 @@ mod tests {
         assert!(
             serde_json::from_value::<PeerGraphRoute>(serde_json::json!({
                 "required_family":7
-            }))
-            .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn peer_output_planner_fallback_round_trips_and_rejects_wrong_type()
-    -> Result<(), Box<dyn std::error::Error>> {
-        // A flattened fragment of its owning record, which keeps the future fields.
-        let value = serde_json::json!({"planner_fallback":"planner failed"});
-        let peer: PeerOutputFields = serde_json::from_value(value.clone())?;
-        assert_eq!(peer.planner_fallback.as_deref(), Some("planner failed"));
-        assert_eq!(serde_json::to_value(&peer)?, value);
-        assert!(
-            serde_json::from_value::<PeerOutputFields>(serde_json::json!({
-                "planner_fallback":{"reason":"wrong shape"}
             }))
             .is_err()
         );

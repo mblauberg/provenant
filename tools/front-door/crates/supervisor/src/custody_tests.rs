@@ -16,6 +16,68 @@ fn admission_clock_error_stays_an_admission_refusal() {
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 
 #[test]
+fn provider_identity_is_read_from_spawned_and_settling_custody() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let lease = crate::fixture::acquire_writer(
+        Directory::open_anchor(root.path())?,
+        scope(),
+        WaitBudget::cli(clock.mono_now(), 1).map_err(|_| CustodyError::InvalidRecord)?,
+        &cancel,
+        &clock,
+    )?;
+    let metadata = lease.directory.metadata()?;
+    let boot = lease.reservation.boot.clone();
+    let guardian = ProcessIdentity {
+        boot: boot.clone(),
+        pid: 10,
+        native_start: 1,
+        group_id: 10,
+        session_id: 10,
+    };
+    let identity = ProcessIdentity {
+        boot,
+        pid: 11,
+        native_start: 2,
+        group_id: 11,
+        session_id: 10,
+    };
+    let mut reservation = lease.reservation.clone();
+    reservation.launch_state = LaunchState::Spawned;
+    reservation.attempt_device = Some(metadata.device);
+    reservation.attempt_inode = Some(metadata.inode);
+    reservation.guardian = Some(guardian);
+    reservation.provider = Some(identity.clone());
+    reservation.unresolved_cleanup = false;
+    reservation.census_incomplete = false;
+    write_record(
+        &lease.directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    assert_eq!(
+        provider_identity(&lease.directory, scope())?,
+        Some(identity.clone())
+    );
+    reservation.launch_state = LaunchState::Settling;
+    write_record(
+        &lease.directory,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    assert_eq!(
+        provider_identity(&lease.directory, scope())?,
+        Some(identity)
+    );
+    Ok(())
+}
+
+#[test]
 fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
@@ -334,6 +396,9 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
     };
     let exit = ProcessExit {
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: true,
+        provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         priority: None,
         schema_version: 1,
         scope: scope(),
@@ -372,6 +437,9 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
     assert!(bytes.len() as u64 <= EXIT_LIMIT);
     assert_eq!(bytes, exit.bounded_bytes()?);
     let stored: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(stored["provider_identity_conflict"], true);
+    assert_eq!(stored["provider_identity_evidence_incomplete"], false);
+    assert_eq!(stored["provider_identity_eof_fragment"], false);
     for (list, omitted, expected) in [
         ("reaped", "omitted_reaped", 18),
         ("spared", "omitted_spared", 19),
@@ -775,6 +843,30 @@ fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
     Ok(())
 }
 
+fn never_executed_command(root: &std::path::Path) -> ProviderCommand {
+    ProviderCommand {
+        policy: Default::default(),
+        profile_file: None,
+        priority: 0,
+        lane_ports: None,
+        resolved_route: "fixture/provider".into(),
+        permission_plan_digest: Digest::from_bytes([0; 32]),
+        key: crate::custody::fixture_key(3),
+        requester: ActorId::from_bytes([4; 16]),
+        protected_commands: vec![],
+        config_environment: vec![],
+        argv: vec!["/nonexistent-never-executed".into()],
+        environment: crate::fixture::environment(root),
+        cwd: root.into(),
+        stdin: vec![],
+        secret_input: None,
+        holder_context: Vec::new(),
+    }
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+// A cancelled launch never spawns, so it settles the same way on every host,
+// including one without provider custody.
 #[test]
 fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -792,24 +884,7 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     token.cancel();
     let failure = launch(
         OwnedLaunch {
-            command: ProviderCommand {
-                policy: Default::default(),
-                profile_file: None,
-                priority: 0,
-                lane_ports: None,
-                resolved_route: "fixture/provider".into(),
-                permission_plan_digest: Digest::from_bytes([0; 32]),
-                key: crate::custody::fixture_key(3),
-                requester: ActorId::from_bytes([4; 16]),
-                protected_commands: vec![],
-                config_environment: vec![],
-                argv: vec!["/nonexistent-never-executed".into()],
-                environment: crate::fixture::environment(root.path()),
-                cwd: root.path().into(),
-                stdin: vec![],
-                secret_input: None,
-                holder_context: Vec::new(),
-            },
+            command: never_executed_command(root.path()),
             lease: &mut writer,
             handshake: WaitBudget::cli(clock.mono_now(), 1)?,
             cancel: &token,
@@ -841,6 +916,43 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
             .join("reservation.json")
             .is_file()
     );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn unsupported_host_refuses_a_launch_before_the_reservation_records_a_handoff() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let attempt = tempfile::tempdir()?;
+    let mut writer = acquire(root.path())?;
+    let clock = SystemClock::new();
+    let token = CancelToken::new();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(attempt.path())?,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &token,
+        &clock,
+    )?;
+    let failure = launch(
+        OwnedLaunch {
+            command: never_executed_command(root.path()),
+            lease: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &token,
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        publication,
+    )
+    .err()
+    .ok_or("launch on a host without provider custody succeeded")?;
+    assert!(matches!(*failure.error, CustodyError::UnsupportedPlatform));
+    assert!(!writer.launched);
+    let evidence = Directory::open_anchor(&root.path().join(scope().attempt.to_string()))?;
+    let recorded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    assert_eq!(recorded.launch_state, LaunchState::Prepared);
+    assert!(!attempt.path().join("process-exit.json").exists());
     Ok(())
 }
 
@@ -897,6 +1009,331 @@ impl ProcessObserver for EmptyNativeWorld {
     ) -> std::result::Result<crate::census::Census, crate::census::CensusError> {
         crate::census::Census::from_observations([], [], [], true, false, 1)
     }
+}
+
+struct HolderWorld {
+    boot: &'static str,
+    observations: std::collections::BTreeMap<i64, ProcessObservation>,
+    census_facts: Vec<crate::census::ProcessFact>,
+    census_complete: bool,
+}
+impl ProcessObserver for HolderWorld {
+    fn boot_identity(&self) -> std::result::Result<String, crate::census::CensusError> {
+        Ok(self.boot.into())
+    }
+    fn observe(&self, pid: i64) -> ProcessObservation {
+        self.observations
+            .get(&pid)
+            .cloned()
+            .unwrap_or(ProcessObservation::Unknown(
+                crate::census::ObservationIssue::Io,
+            ))
+    }
+    fn census(
+        &self,
+        _: usize,
+    ) -> std::result::Result<crate::census::Census, crate::census::CensusError> {
+        let mut facts = self.census_facts.clone();
+        let mut unknown = Vec::new();
+        let mut absent = Vec::new();
+        for (pid, observation) in &self.observations {
+            match observation {
+                ProcessObservation::Present(fact)
+                    if !facts.iter().any(|current| current.identity.pid == *pid) =>
+                {
+                    facts.push(fact.clone());
+                }
+                ProcessObservation::Present(_) => {}
+                ProcessObservation::Absent => absent.push(*pid),
+                ProcessObservation::Unknown(issue) => unknown.push((*pid, *issue)),
+            }
+        }
+        crate::census::Census::from_observations(
+            facts,
+            unknown,
+            absent,
+            self.census_complete,
+            false,
+            crate::census::MAX_CENSUS_ENTRIES,
+        )
+    }
+}
+
+fn process_fact(identity: ProcessIdentity) -> crate::census::ProcessFact {
+    crate::census::ProcessFact {
+        identity,
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    }
+}
+
+#[test]
+fn holder_presence_requires_exact_native_process_evidence() -> TestResult {
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let scope = scope();
+    let guardian = ProcessIdentity {
+        boot: "fixture-recorded-boot-v1".into(),
+        pid: 100,
+        native_start: 7,
+        group_id: 100,
+        session_id: 100,
+    };
+    let provider = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 101,
+        native_start: 8,
+        group_id: 101,
+        session_id: 100,
+    };
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: Vec::new(),
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+
+    let world = |guardian_observation, provider_observation| HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, guardian_observation),
+            (provider.pid, provider_observation),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: Vec::new(),
+        census_complete: true,
+    };
+    let live = world(
+        ProcessObservation::Present(process_fact(guardian.clone())),
+        ProcessObservation::Present(process_fact(provider.clone())),
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &live),
+        HolderPresence::Live
+    );
+    let provider_only = world(
+        ProcessObservation::Absent,
+        ProcessObservation::Present(process_fact(provider.clone())),
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &provider_only),
+        HolderPresence::Live,
+        "an exact live provider remains running even when its guardian is absent"
+    );
+
+    let same_boot_absence = world(ProcessObservation::Absent, ProcessObservation::Absent);
+    assert_eq!(
+        observe_holder(&directory, scope, &same_boot_absence),
+        HolderPresence::Unknown,
+        "same-boot absence from a stale checkpoint does not prove quiescence"
+    );
+    let rebooted = HolderWorld {
+        boot: "fixture-new-boot-v1",
+        ..world(ProcessObservation::Absent, ProcessObservation::Absent)
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &rebooted),
+        HolderPresence::Gone,
+        "a changed boot proves the original process tree cannot still run"
+    );
+
+    let mut reused_provider = provider.clone();
+    reused_provider.native_start += 1;
+    reused_provider.group_id = 200;
+    reused_provider.session_id = 200;
+    let reused = world(
+        ProcessObservation::Absent,
+        ProcessObservation::Present(process_fact(reused_provider)),
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &reused),
+        HolderPresence::Unknown,
+        "a recycled PID does not prove the original writer tree is quiescent"
+    );
+
+    let child = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 102,
+        native_start: 9,
+        group_id: 102,
+        session_id: guardian.session_id,
+    };
+    let child_survives = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, ProcessObservation::Absent),
+            (provider.pid, ProcessObservation::Absent),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: vec![process_fact(child)],
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &child_survives),
+        HolderPresence::Unknown,
+        "a surviving child in the recorded writer session prevents a dead classification"
+    );
+
+    let escaped = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 103,
+        native_start: 10,
+        group_id: 103,
+        session_id: 103,
+    };
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: vec![escaped.clone()],
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let escaped_survives = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, ProcessObservation::Absent),
+            (provider.pid, ProcessObservation::Absent),
+            (
+                escaped.pid,
+                ProcessObservation::Present(process_fact(escaped.clone())),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: vec![process_fact(escaped)],
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &escaped_survives),
+        HolderPresence::Unknown,
+        "a tracked descendant that escaped the provider session prevents a dead classification"
+    );
+
+    // A guardian can crash after a provider forks an escaped child but before
+    // that identity reaches the next checkpoint. The complete flag only
+    // describes the last published snapshot, not all later forks.
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: Vec::new(),
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let unrecorded_escape = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 104,
+        native_start: 11,
+        group_id: 104,
+        session_id: 104,
+    };
+    let stale_complete_checkpoint = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, ProcessObservation::Absent),
+            (provider.pid, ProcessObservation::Absent),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: vec![process_fact(unrecorded_escape)],
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &stale_complete_checkpoint),
+        HolderPresence::Unknown,
+        "a complete current census cannot repair a stale escaped-child checkpoint"
+    );
+
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: Vec::new(),
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let incomplete = HolderWorld {
+        census_complete: false,
+        ..world(ProcessObservation::Absent, ProcessObservation::Absent)
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &incomplete),
+        HolderPresence::Unknown,
+        "an incomplete host census cannot prove the whole owned tree is gone"
+    );
+
+    let unobservable = world(
+        ProcessObservation::Unknown(crate::census::ObservationIssue::PermissionDenied),
+        ProcessObservation::Absent,
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &unobservable),
+        HolderPresence::Unknown
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_writer_process_checkpoint_is_unknown() -> TestResult {
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let world = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: Default::default(),
+        census_facts: Vec::new(),
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope(), &world),
+        HolderPresence::Unknown,
+        "a Running attempt without its process checkpoint needs inspection"
+    );
+    Ok(())
 }
 
 struct RebootWorld {

@@ -16,6 +16,7 @@ pub use evidence::{
 };
 mod inventory;
 mod landed;
+mod layout;
 mod lifecycle;
 mod owner;
 mod refs;
@@ -37,6 +38,15 @@ pub use inventory::*;
 pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
+};
+pub use layout::{ProjectLayout, project_layout_for_checkout, project_layout_git_environment};
+// Strict resolvers without bare provenance are fixture seams; production
+// resolves layouts through `UtilityRuntime`.
+#[cfg(any(test, feature = "fixture"))]
+pub use layout::{project_layout_for_binding, project_layout_for_common};
+pub(crate) use layout::{
+    project_layout_for_binding_primary, project_layout_for_binding_with_bare_setting,
+    project_layout_for_common_with_bare_setting,
 };
 pub use lifecycle::*;
 pub use owner::{
@@ -140,43 +150,17 @@ pub fn managed_writer_branch(
     Ok(ports.managed_writer_branch(relative).map(str::to_owned))
 }
 
-/// Configured allocation roots for a host-registered Git common directory.
-/// Project roots use their sourced layout; bare/common-only repositories still
-/// receive host overrides while retaining the same common-dir anchoring.
+/// Context-free allocation roots for a registered Git common directory.
+/// Without a verified layout owner, only host declarations may be applied and
+/// they remain anchored at the common directory. Git-aware permission callers
+/// add project-owned roots after resolving their actual owner.
 pub(crate) fn allocation_directories(
     common: &Path,
     host_state: &Path,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
-    let parent = common.parent().ok_or(WorktreeError::InvalidRequest)?;
-    let (base, project) = if common.file_name() == Some(OsStr::new(".git")) {
-        (parent, Some(parent))
-    } else {
-        // A primary may have a gitfile that names a separate common directory
-        // inside the checkout. Keep its allocation base and project source.
-        let directory = Directory::open_anchor(parent)?;
-        match directory.metadata_at(OsStr::new(".git"), false) {
-            Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
-                let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
-                let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
-                    .ok_or(WorktreeError::InvalidRequest)?;
-                let target = crate::repo::resolve_git_path(parent, &target)?;
-                if crate::permissions::resolve_boundary_path(&target)
-                    .map_err(|_| WorktreeError::InvalidRequest)?
-                    == common
-                {
-                    (parent, Some(parent))
-                } else {
-                    (common, None)
-                }
-            }
-            Ok(_) => (common, None),
-            Err(error) if error.is_not_found() => (common, None),
-            Err(error) => return Err(error.into()),
-        }
-    };
-    let ports = provenant_config::PortTable::read_for(project, host_state)
+    let ports = provenant_config::PortTable::read_for(None, host_state)
         .map_err(WorktreeError::PortConfiguration)?;
-    Ok(ports.worktree_roots_under(base))
+    Ok(ports.worktree_roots_under(common))
 }
 
 impl From<provenant_config::ConfigError> for WorktreeError {
@@ -224,6 +208,15 @@ pub enum WorktreeError {
     PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error(
+        "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
+    )]
+    ProjectLayoutUnresolved,
+    #[error("requested worktree path does not match the configured managed writer path")]
+    ManagedPathMismatch {
+        requested: PathBuf,
+        expected: PathBuf,
+    },
     #[error("worktree name {name} matches more than one checkout")]
     AmbiguousName { name: String },
     #[error("primary checkout has a detached HEAD; an integration branch is required")]
@@ -571,7 +564,12 @@ impl std::fmt::Display for ObservedProcess {
 /// binding and its `state/worktrees/<ProjectId>` directory.
 pub struct WorktreeContext<'a> {
     pub home: &'a Path,
+    /// The selected verified checkout is the Git execution anchor. It does
+    /// not own project configuration or managed worktree layout.
     pub repo: &'a VerifiedRepo,
+    /// Verified project configuration and allocation roots. Bare repositories
+    /// have a common-directory root and no project checkout.
+    pub layout: &'a ProjectLayout,
     pub binding: &'a ProjectBinding,
     pub project_state: &'a Directory,
     pub executor: &'a dyn Executor,
@@ -800,7 +798,7 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
         if self.is_unowned() {
-            state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
+            state.serialize_field("next", "No Provenant lane currently owns this checkout. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()
     }
@@ -1113,26 +1111,26 @@ mod worktree_layout_tests {
         );
     }
 
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
     #[test]
-    fn allocation_roots_use_every_project_layout_root() {
+    fn context_free_allocation_roots_do_not_guess_a_project_owner() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
-        let ports = provenant_config::PortTable::builtin();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from("project-writers")];
+        ports.worktree_layout.default = PathBuf::from("project-writers/<branch>");
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
         )
         .unwrap();
 
+        let common = project.path().join(".git");
+        let host_ports = provenant_config::PortTable::read_for(None, project.path()).unwrap();
         assert_eq!(
-            allocation_directories(&project.path().join(".git"), project.path()).unwrap(),
-            ports
-                .worktree_layout
-                .roots
-                .iter()
-                .map(|root| project.path().join(root))
-                .collect::<Vec<_>>(),
+            allocation_directories(&common, project.path()).unwrap(),
+            host_ports.worktree_roots_under(&common),
         );
     }
 }

@@ -465,6 +465,62 @@ fn fixture() -> Result {
     // prior launch's evidence.
     let fixture_session = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")?;
     let session = fixture_session.as_str();
+    if prompt.contains("fixture public bounded steer continuation") {
+        const STEER_SESSION: &str = "fixture-steer-session";
+        let resumed = args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == STEER_SESSION);
+        if resumed {
+            assert!(prompt.contains("STEER_NOTE: finish the interrupted task"));
+            assert_eq!(fs::read_to_string("before.txt")?, "before\n");
+            assert_eq!(
+                fs::read("fixture-steer-worktree.txt")?,
+                std::env::current_dir()?.as_os_str().as_encoded_bytes()
+            );
+            fs::write("after.txt", "after\n")?;
+            let committed = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "git add before.txt after.txt fixture-steer-worktree.txt && git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: finish steered work'",
+                ])
+                .output()?;
+            assert!(
+                committed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&committed.stderr)
+            );
+            for frame in [
+                json!({"type":"thread.started","thread_id":STEER_SESSION}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the resumed worktree{DONE_FENCE}")}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
+            ] {
+                writeln!(io::stdout(), "{frame}")?;
+            }
+        } else {
+            assert!(!args.iter().any(|arg| arg == "resume"));
+            fs::write("before.txt", "before\n")?;
+            fs::write(
+                "fixture-steer-worktree.txt",
+                std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+            )?;
+            writeln!(
+                io::stdout(),
+                "{}",
+                json!({"type":"thread.started","thread_id":STEER_SESSION})
+            )?;
+            io::stdout().flush()?;
+            let ready = prompt
+                .lines()
+                .find_map(|line| line.strip_prefix("STEER_READY_FILE: "))
+                .map(PathBuf::from)
+                .ok_or("steer fixture readiness file")?;
+            fs::write(ready, b"ready")?;
+            // The graph steer must stop this fresh Codex process and resume
+            // the same thread after settlement.
+            std::thread::park_timeout(std::time::Duration::from_secs(120));
+        }
+        return Ok(());
+    }
     let sessions = home.join("sessions/2026/10/24");
     fs::create_dir_all(&sessions)?;
     let recorded_session = if prompt.contains("mismatch") {
@@ -743,6 +799,208 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    use provenant_core::{CancelToken, Clock, RootInputs};
+
+    let mut rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let account_key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(
+        &rig,
+        "codex",
+        "fixture",
+        &account_key,
+        &rig.root.join("codex"),
+    )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.graph]\nlaunch_wait_seconds=5\nwriter_provision_seconds=5"
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let committed = rig.execute(
+        &git,
+        &["commit", "--allow-empty", "-qm", "probe base"],
+        None,
+    )?;
+    assert_eq!(code(&committed), 0, "{committed:?}");
+    let base = rig.execute(&git, &["branch", "--show-current"], None)?;
+    assert_eq!(code(&base), 0, "{base:?}");
+    let base = std::str::from_utf8(&base.stdout.bytes)?.trim().to_owned();
+    let ready = rig.root.join("steer-session-ready");
+    let brief = format!(
+        "fixture public bounded steer continuation\nSTEER_READY_FILE: {}\n",
+        ready.display()
+    );
+    let (launch, value) = rig.launch(&[
+        "implement",
+        "--brief",
+        &brief,
+        "--set",
+        "bounded=true",
+        "--name",
+        "public-steer-local",
+        "--model",
+        "codex/gpt-6-luna",
+        "--account",
+        "fixture",
+        "--no-sandbox",
+        "--branch",
+        "smoke/native-steer",
+        "--base",
+        &base,
+    ])?;
+    assert_eq!(code(&launch), 0, "{value}");
+    let graph = value["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("run did not return its graph: {value}"))?
+        .to_owned();
+    let _ = provenant_test_support::wait_for(
+        "Codex session-ready fixture",
+        std::time::Duration::from_secs(10),
+        || ready.exists(),
+        |ready| *ready,
+    )?;
+    let worktree = rig.project.join(".worktrees/smoke-native-steer");
+    assert_eq!(fs::read_to_string(worktree.join("before.txt"))?, "before\n");
+    assert_eq!(
+        std::str::from_utf8(
+            &rig.execute(
+                &git,
+                &[
+                    "-C",
+                    worktree.to_str().ok_or("worktree")?,
+                    "branch",
+                    "--show-current"
+                ],
+                None,
+            )?
+            .stdout
+            .bytes
+        )?,
+        "smoke/native-steer\n"
+    );
+
+    let target = format!("{graph}/task#1");
+    let accepted = rig.command(&[
+        "steer",
+        &target,
+        "--brief",
+        "STEER_NOTE: finish the interrupted task",
+        "--operation-id",
+        "public-steer-local-operation",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&accepted),
+        0,
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout.bytes)
+    );
+    let receipt = support::last_json_record(&accepted.stdout.bytes)?;
+    assert_eq!(receipt["status"], "ok", "{receipt}");
+    assert_eq!(
+        receipt["data"]["receipts"][0]["state"], "queued",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["data"]["receipts"][0]["support"], "continuation_only",
+        "{receipt}"
+    );
+    assert!(!receipt.to_string().contains("STEER_NOTE"), "{receipt}");
+
+    let waited = rig.command(&["wait", &graph, "--timeout", "60s", "--json"])?;
+    let wait_result = support::last_json_record(&waited.stdout.bytes)?;
+    assert_eq!(code(&waited), 0, "{wait_result}");
+    let checkpoint = rig.checkpoint(&graph)?;
+    let node = checkpoint["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .ok_or("graph node")?;
+    let attempts = node["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!(attempts.len(), 2, "{checkpoint}");
+    assert_eq!(fs::read_to_string(worktree.join("before.txt"))?, "before\n");
+    assert_eq!(fs::read_to_string(worktree.join("after.txt"))?, "after\n");
+    let status = rig.execute(
+        &git,
+        &[
+            "-C",
+            worktree.to_str().ok_or("worktree")?,
+            "status",
+            "--porcelain",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    assert!(status.stdout.bytes.is_empty(), "{status:?}");
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let identity =
+        provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: roots.state,
+        project_id: identity.project,
+        actor_id: identity.inbox.actor,
+        read_prompts: true,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?;
+    for (ordinal, attempt) in attempts.iter().enumerate() {
+        let reference = attempt["attempt_ref"].as_str().ok_or("attempt ref")?;
+        let id = reference
+            .rsplit_once('/')
+            .ok_or("host attempt ref")?
+            .1
+            .parse()?;
+        let request = store.request(id, &call)?;
+        let record = store.record(id, &call)?;
+        let context = request.task.context.as_ref().ok_or("graph context")?;
+        assert!(context.graph_template_launch, "{request:?}");
+        assert_eq!(
+            context.graph_id.as_deref(),
+            Some(graph.as_str()),
+            "{request:?}"
+        );
+        assert_eq!(context.node_id.as_deref(), Some("task"), "{request:?}");
+        assert_eq!(
+            context.attempt,
+            Some(u32::try_from(ordinal + 1)?),
+            "{request:?}"
+        );
+        assert_eq!(
+            record.route.provider.as_deref(),
+            Some("codex"),
+            "{record:?}"
+        );
+        assert_eq!(
+            record.route.model.as_deref(),
+            Some("codex/gpt-6-luna"),
+            "{record:?}"
+        );
+        assert_eq!(
+            record.route.account_label.as_deref(),
+            Some("fixture"),
+            "{record:?}"
+        );
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
 /// Exercise the same public writer command with an isolated invocation directory.
 fn writer_cli_launches_from_cwd(location: &str) -> Result {
     let native_available = graph_fixture_available()?;
@@ -753,31 +1011,134 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let branch_mode = location == "branch";
+    let branch_mode = matches!(
+        location,
+        "branch" | "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
+    );
+    let primary_branch_mode = location == "branch";
     for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original instructions\n")?;
     }
-    let mut git_commands = vec![vec!["add", "."], vec!["commit", "-qm", "instructions"]];
-    if !branch_mode {
-        git_commands.push(vec![
-            "worktree",
-            "add",
-            "-qb",
-            "writer-cwd",
-            ".worktrees/writer-cwd",
-        ]);
-    }
+    let git_commands = vec![vec!["add", "."], vec!["commit", "-qm", "instructions"]];
     for args in git_commands {
         let output = rig.execute(&git, &args, None)?;
         assert_eq!(code(&output), 0, "{output:?}");
     }
+    if location == "branch-separate-git-dir" {
+        let metadata = rig.root.join("external-git-metadata");
+        let output = rig.execute(
+            &git,
+            &[
+                "init",
+                "--separate-git-dir",
+                metadata.to_str().ok_or("metadata")?,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        // Git inventory names the external directory, not the checkout, so
+        // the binding carries the primary path captured from that checkout.
+        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                provenant_os::fs::canonicalize(&metadata)?,
+                provenant_os::fs::canonicalize(&rig.project)?,
+            )?,
+        )?;
+    }
+    if location == "branch-bare-linked" {
+        let bare = rig.root.join("bare.git");
+        let selected = rig.root.join("selected");
+        let output = rig.execute(
+            &git,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                rig.project.to_str().ok_or("project")?,
+                bare.to_str().ok_or("bare")?,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        let output = rig.execute(
+            &git,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("bare")?,
+                "worktree",
+                "add",
+                "-b",
+                "writer-cwd",
+                selected.to_str().ok_or("selected")?,
+                "HEAD",
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        rig.project = selected;
+    } else if !primary_branch_mode {
+        let output = rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "writer-cwd",
+                ".worktrees/writer-cwd",
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+    }
+    if location == "branch-worktree" {
+        let ports = rig.project.join(provenant_config::PORTS_CONFIG);
+        fs::create_dir_all(ports.parent().ok_or("ports parent")?)?;
+        fs::write(
+            ports,
+            br#"{"schema_version":2,"worktree_layout":{"backend":{"kind":"builtin"},"roots":["writer-trees"],"default":"writer-trees/<branch>"}}"#,
+        )?;
+        for args in [
+            vec!["add", ".provenant/ports.json"],
+            vec!["commit", "-qm", "configure managed writer layout"],
+        ] {
+            let output = rig.execute(&git, &args, None)?;
+            assert_eq!(code(&output), 0, "{output:?}");
+        }
+    }
     let tree = if branch_mode {
-        rig.project.join(".worktrees/writer-branch")
+        let root = if location == "branch-worktree" {
+            "writer-trees"
+        } else {
+            ".worktrees"
+        };
+        let allocation_root = if location == "branch-bare-linked" {
+            rig.root.join("bare.git")
+        } else {
+            rig.project.clone()
+        };
+        allocation_root.join(root).join("writer-branch")
     } else {
         rig.project.join(".worktrees/writer-cwd")
     };
     if !branch_mode {
         fs::create_dir_all(tree.join("nested/directory"))?;
+    }
+    let linked_invocation = if location == "branch-bare-linked" {
+        rig.project.clone()
+    } else {
+        rig.project.join(".worktrees/writer-cwd")
+    };
+    if location == "branch-worktree" {
+        assert!(
+            !linked_invocation
+                .join(provenant_config::PORTS_CONFIG)
+                .exists(),
+            "fixture must keep the custom layout only in the primary checkout"
+        );
     }
     // TestRig uses project as the child's cwd; PROVENANT_ROOT selects assets.
     rig.project = match location {
@@ -785,6 +1146,9 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             let directory = rig.project.join("launch-subdirectory");
             fs::create_dir_all(&directory)?;
             directory
+        }
+        "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked" => {
+            linked_invocation.clone()
         }
         "worktree" => tree.clone(),
         "subdirectory" => tree.join("nested/directory"),
@@ -828,8 +1192,19 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             tree.is_dir(),
             "branch launch did not keep its new worktree: {response}"
         );
-        assert_eq!(node["worktree"], ".worktrees/writer-branch");
+        if location == "branch" {
+            assert_eq!(node["worktree"].as_str(), tree.to_str());
+        }
         assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
+        if matches!(
+            location,
+            "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
+        ) {
+            assert!(
+                !linked_invocation.join(".worktrees/writer-branch").exists(),
+                "branch path was nested under the invoking linked checkout: {response}"
+            );
+        }
     }
     assert!(
         node["attempts"][0]["attempt_ref"].is_string(),
@@ -868,6 +1243,20 @@ fn writer_cli_launches_from_worktree_root() -> Result {
 
 fn writer_cli_branch_binds_the_new_worktree() -> Result {
     writer_cli_launches_from_cwd("branch")
+}
+
+// Spec: docs/specs/supervisor.md#managed-writer-path-owner
+fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
+    writer_cli_launches_from_cwd("branch-worktree")
+}
+
+// Spec: docs/specs/run-git.md#project-layout-ownership
+fn writer_cli_branch_from_separate_git_directory_uses_saved_primary() -> Result {
+    writer_cli_launches_from_cwd("branch-separate-git-dir")
+}
+
+fn writer_cli_branch_from_bare_linked_checkout_uses_common_layout() -> Result {
+    writer_cli_launches_from_cwd("branch-bare-linked")
 }
 
 fn writer_cli_launches_from_worktree_subdirectory() -> Result {
@@ -916,7 +1305,9 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         .map_err(|e| format!("register account: {e}"))?;
     let args = [
         "task",
-        "remote writer",
+        "fixture uncatalogued refusal",
+        "--model",
+        "codex/uncatalogued-fixture-model",
         "--mode",
         "worktree-write",
         "--branch",
@@ -934,7 +1325,7 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     );
     assert!(
         code(&settled.launch) != 0 || settled.exit() != 0,
-        "the fixture provider should remain unavailable"
+        "the fixture provider should refuse the requested model"
     );
     let head = rig.execute(
         &git,
@@ -1228,11 +1619,10 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
             .ok_or("git")?
             .canonicalize()?,
     );
-    host.executables
-        .insert("claude".into(), std::env::current_exe()?);
-    // Provider resolution must honour the host pin, even when captured PATH
-    // does not contain Claude. Command entries instead retain literal lookup.
-    host.executable_search_path = vec![rig.root.join("missing-bin")];
+    // Provider resolution uses the captured host search path when this
+    // handoff has no retained requester PATH. Command entries keep literal
+    // lookup, while a missing host search path cannot fall through to ambient.
+    host.executable_search_path = vec![rig.root.join("provider/bin")];
     let registry = provenant_cli::run::Registry {
         roots: Some(&roots),
         home: Some(&rig.home),
@@ -2401,7 +2791,7 @@ fn seed_graph_checkpoint(
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: directory.to_owned(),
@@ -2414,6 +2804,208 @@ fn seed_graph_checkpoint(
         &Default::default(),
         &Default::default(),
     )?;
+    Ok(())
+}
+
+/// Persist a settled composite through the graph runtime without launching a
+/// provider. Its parent outputs are the runtime's declared export aggregate.
+fn seed_composite_output_graph(rig: &TestRig, graph_id: &str, root_ids: &[&str]) -> Result {
+    seed_composite_output_graph_with_gate(rig, graph_id, root_ids, false)
+}
+
+fn seed_composite_output_graph_with_gate(
+    rig: &TestRig,
+    graph_id: &str,
+    root_ids: &[&str],
+    include_gate: bool,
+) -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, FileJournal,
+        GraphDocument, GraphExecution, GraphRoute, NodeInput, Replay,
+    };
+    use provenant_os::clock::SystemClock;
+
+    struct TerminalOwner {
+        actor: String,
+        host: String,
+        next: u8,
+        response: String,
+    }
+    impl AttemptOwner for TerminalOwner {
+        type Error = std::io::Error;
+
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
+
+        fn observe_or_start(
+            &mut self,
+            _key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            _access: AccessMode,
+            _worktree: Option<&str>,
+            _replay: Replay<'_>,
+        ) -> std::io::Result<AttemptObservation> {
+            let mut id_bytes = [0; 16];
+            id_bytes[15] = self.next;
+            self.next = self.next.saturating_add(1);
+            let attempt_id = provenant_core::AttemptId::from_bytes(id_bytes);
+            let mut result =
+                provenant_records::result_capture::ResultCapture::new(Some("VERDICT: FAIL"));
+            result.push(self.response.as_bytes());
+            Ok(AttemptObservation::Terminal {
+                attempt_ref: Some(format!("{}/{}", self.host, attempt_id)),
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(result.finish())),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
+            })
+        }
+    }
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let resolved_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &resolved_roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let identity =
+        provenant_cli::fabric::Context::open(resolved_roots.clone(), &rig.home, &rig.project)?
+            .identity;
+    let mut nodes: Vec<Value> = root_ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "kind": "composite",
+                "access": "read_only",
+                "composite": {
+                    "nodes": [{
+                        "id": "review",
+                        "access": "read_only",
+                        "prompt": "review fixture",
+                        "route": {"alias": "senior"}
+                    }],
+                    "exports": [{"node": "review", "outputs": ["result", "verdict", "findings"]}]
+                }
+            })
+        })
+        .collect();
+    if include_gate {
+        nodes.push(json!({
+            "id": "approval",
+            "kind": "gate",
+            "access": "read_only",
+            "depends_on": [root_ids.first().ok_or("gate fixture needs an output root")?],
+            "condition": {"type": "budget"}
+        }));
+    }
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+        "graph_id": graph_id,
+        "nodes": nodes
+    }))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &resolved_roots.state,
+        project,
+        graph_id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: None,
+        directory: rig.project.clone(),
+        document: document.clone(),
+    })?;
+    let response = format!(
+        "```findings\n{}\n```\nVERDICT: FAIL\n",
+        json!({"schema_version": 1, "findings": [{
+            "id": "F1", "severity": "high", "file": "src/lib.rs", "line": 1,
+            "summary": "The failing path is reachable", "status": "open",
+            "evidence": "Input x reaches the failure", "proposed_fix": "Handle x",
+            "trigger": {"sequence": "Invoke the operation with x", "reach": "default_path", "observed": true},
+            "triage": {"decision": "confirmed", "reason": "Input x reproduces the issue",
+                "worth_fixing": true, "root_cause": "unchecked input x",
+                "blocking_class": "default_path_defect", "shared_flaw": false}
+        }]})
+    );
+    provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut TerminalOwner {
+            actor: identity.inbox.actor.to_string(),
+            host: identity.host.to_string(),
+            next: 1,
+            response,
+        },
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    Ok(())
+}
+
+/// Add one planner-owned descendant to the persisted fixture without creating
+/// an attempt. Output selection must keep it under its declared patch owner.
+fn append_owned_expansion_child(rig: &TestRig, graph_id: &str, owner: &str, child: &str) -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+    use provenant_os::clock::SystemClock;
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let resolved_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &resolved_roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &resolved_roots.state,
+        project,
+        graph_id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut checkpoint = journal
+        .load(graph_id)?
+        .ok_or("graph fixture checkpoint is missing")?;
+    checkpoint.nodes.push(serde_json::from_value(json!({
+        "id": child,
+        "state": "running",
+        "worktree": null,
+        "attempts": []
+    }))?);
+    checkpoint.expansions.push(serde_json::from_value(json!({
+        "source": owner,
+        "nodes": [{"id": child, "kind": "task", "access": "read_only", "prompt": "expanded fixture"}],
+        "patch": {"revision": 1, "digest": "sha256:fixture", "parent": owner}
+    }))?);
+    journal.save(&checkpoint)?;
     Ok(())
 }
 
@@ -2651,6 +3243,9 @@ fn persisted_attempt_with(
         omitted_reaped: 0,
         spared: vec![],
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: false,
+        provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
@@ -3021,6 +3616,105 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let data: Value = serde_json::from_slice(&written.stdout.bytes)?;
     assert_eq!(code(&written), 0, "{data}");
     assert_eq!(std::fs::read(&saved)?, b"provider 500: upstream failed\n");
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails pins root selection,
+// explicit composite output, ambiguity choices and the typed result envelope.
+fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
+    let rig = TestRig::new()?;
+    seed_composite_output_graph(&rig, "composite-output", &["panel"])?;
+
+    for target in ["composite-output", "composite-output/panel"] {
+        let output = rig.command(&["output", target, "--json"])?;
+        let data = support::last_json_record(&output.stdout.bytes)?;
+        assert_eq!(code(&output), 0, "{data}");
+        let selected = &data["data"]["selected"];
+        assert_eq!(data["data"]["graph"], "composite-output");
+        assert_eq!(data["data"]["node"], "panel");
+        let excerpt = data["data"]["bytes"]["data"]
+            .as_str()
+            .ok_or("composite result bytes")?;
+        assert!(excerpt.contains("VERDICT: FAIL"), "{excerpt}");
+        assert!(excerpt.contains("```findings"), "{excerpt}");
+        assert_eq!(selected["verdict"], "VERDICT: FAIL");
+        assert_eq!(selected["findings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(selected["findings_available"], true);
+        let schema = provenant_records::wire::data_schema("output").ok_or("output schema")?;
+        provenant_records::wire::schema::validate(&schema, &data["data"])?;
+    }
+    let human_output = rig.command(&["output", "composite-output"])?;
+    let human_output = String::from_utf8_lossy(&human_output.stdout.bytes);
+    assert!(
+        human_output.contains("review verdict: VERDICT: FAIL"),
+        "{human_output}"
+    );
+    assert!(
+        human_output.contains("settlement: succeeded"),
+        "{human_output}"
+    );
+    assert!(
+        human_output.contains("findings: 1 (available)"),
+        "{human_output}"
+    );
+
+    let status_output = rig.command(&["status", "composite-output/panel", "--json"])?;
+    assert_eq!(code(&status_output), 0, "{status_output:?}");
+    let status = support::last_json_record(&status_output.stdout.bytes)?;
+    let digest = status["data"]["digests"]
+        .as_array()
+        .and_then(|digests| {
+            digests
+                .iter()
+                .find(|digest| digest["review_verdict"] == "VERDICT: FAIL")
+        })
+        .ok_or_else(|| format!("status omitted composite verdict: {status}"))?;
+    assert_eq!(digest["state"], "succeeded");
+    assert_eq!(digest["findings_count"], 1);
+    assert_eq!(digest["findings_available"], true);
+    let human_status = rig.command(&["status", "composite-output/panel"])?;
+    let human_status = String::from_utf8_lossy(&human_status.stdout.bytes);
+    assert!(
+        human_status.contains("verdict=VERDICT: FAIL"),
+        "{human_status}"
+    );
+    assert!(
+        human_status.contains("findings=1 (available)"),
+        "{human_status}"
+    );
+
+    seed_composite_output_graph_with_gate(&rig, "composite-gate-output", &["panel"], true)?;
+    let gated_output = rig.command(&["output", "composite-gate-output", "--json"])?;
+    let gated_data = support::last_json_record(&gated_output.stdout.bytes)?;
+    assert_eq!(code(&gated_output), 0, "{gated_data}");
+    assert_eq!(gated_data["data"]["node"], "panel");
+
+    seed_composite_output_graph(&rig, "multi-output", &["alpha", "beta"])?;
+    append_owned_expansion_child(
+        &rig,
+        "multi-output",
+        "alpha--review",
+        "alpha--review--slice",
+    )?;
+    let ambiguous_output = rig.command(&["output", "multi-output", "--json"])?;
+    assert_ne!(code(&ambiguous_output), 0);
+    let ambiguous = support::last_json_record(&ambiguous_output.stdout.bytes)?;
+    assert_eq!(ambiguous["error"]["code"], "AMBIGUOUS_TARGET");
+    let message = ambiguous["error"]["message"]
+        .as_str()
+        .ok_or("ambiguity message")?;
+    assert!(message.contains("multi-output/alpha"), "{message}");
+    assert!(message.contains("multi-output/beta"), "{message}");
+    assert!(!message.contains("alpha--review"), "{message}");
+    assert!(!message.contains("alpha--review--slice"), "{message}");
+    assert!(!message.contains("beta--review"), "{message}");
+    let explicit = rig.command(&["output", "multi-output/alpha", "--json"])?;
+    assert_eq!(
+        code(&explicit),
+        0,
+        "{}",
+        String::from_utf8_lossy(&explicit.stdout.bytes)
+    );
     Ok(())
 }
 
@@ -4679,6 +5373,18 @@ fn main() -> ExitCode {
                 writer_cli_branch_binds_the_new_worktree,
             ),
             (
+                "writer_cli_branch_from_linked_checkout_uses_primary_layout",
+                writer_cli_branch_from_linked_checkout_uses_primary_layout,
+            ),
+            (
+                "writer_cli_branch_from_separate_git_directory_uses_saved_primary",
+                writer_cli_branch_from_separate_git_directory_uses_saved_primary,
+            ),
+            (
+                "writer_cli_branch_from_bare_linked_checkout_uses_common_layout",
+                writer_cli_branch_from_bare_linked_checkout_uses_common_layout,
+            ),
+            (
                 "writer_cli_launches_from_worktree_subdirectory",
                 writer_cli_launches_from_worktree_subdirectory,
             ),
@@ -4723,6 +5429,10 @@ fn main() -> ExitCode {
             (
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
                 output_names_the_attempt_it_reads_and_writes_or_locates_parts,
+            ),
+            (
+                "composite_graph_output_uses_declared_roots_and_exports",
+                composite_graph_output_uses_declared_roots_and_exports,
             ),
             (
                 "receipt_output_resolves_the_work_key",

@@ -626,6 +626,7 @@ fn bind_launch_controls(
     input: &Value,
     node: &mut Value,
     cwd: &Path,
+    project_root: &Path,
     ports: &provenant_config::PortTable,
 ) -> Result<(), FacadeError> {
     let invalid = |field: &str| FacadeError::invalid(InvalidInputDetail::Field(field.into()));
@@ -665,7 +666,7 @@ fn bind_launch_controls(
         let worktree = ports
             .managed_writer_path(branch)
             .map_err(|_| invalid("branch"))?;
-        node["worktree"] = json!(cwd.join(worktree));
+        node["worktree"] = json!(project_root.join(worktree));
         if node.get("attempt").is_none() {
             node["attempt"] = json!({});
         }
@@ -837,13 +838,14 @@ impl Factory {
         &self,
         document: Option<&Value>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
-        self.launch_resolvers_for_tier(document, None)
+        self.launch_resolvers_for_tier(document, None, None)
     }
 
     fn launch_resolvers_for_tier(
         &self,
         document: Option<&Value>,
         route: Option<&RouteChoice>,
+        review_range: Option<(&str, &str)>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
         let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -882,8 +884,10 @@ impl Factory {
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         provenant_cli::fabric::graph_relay::launch_resolvers_at_roots(
             &self.context.roots,
+            &self.cwd,
             &config.domains.routing.review,
             &document,
+            review_range,
         )
         .map_err(|reason| FacadeError::DispatchRefused {
             fact: None,
@@ -1119,9 +1123,15 @@ impl Factory {
             }
             node["with"] = parameters;
         }
-        bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
+        bind_launch_controls(
+            input,
+            &mut node,
+            &self.cwd,
+            &self.context.project_root,
+            &self.context.port_table,
+        )?;
         node["id"] = json!(key);
-        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
+        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), None)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
@@ -1498,15 +1508,6 @@ impl Factory {
         }
         let library = self.template_library(Some(&inline))?;
         let route = route_choice(&input, raw)?;
-        let resolver = self.launch_resolvers_for_tier(raw, route.as_ref())?;
-        let context = PatchContext {
-            library: &library,
-            resolvers: &resolver,
-            scan: &patch::scan_for_secrets,
-            journal: None,
-            limits: &self.context.config.graph.limits,
-            worktree_layout: self.context.port_table.worktree_layout.clone(),
-        };
         let template_name = input["template"]
             .as_str()
             .or_else(|| lane_document.and_then(|document| document["use"].as_str()))
@@ -1533,7 +1534,7 @@ impl Factory {
         let input = &input;
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
-        let review_launch = template_name == "review" || template_name.starts_with("review.");
+        let review_launch = declared.accepts_review_range();
         let setting = |name: &str| -> Result<Option<&str>, FacadeError> {
             match input.get("set").and_then(|set| set.get(name)) {
                 None => Ok(None),
@@ -1575,6 +1576,18 @@ impl Factory {
             resolved_head = Some(head);
             resolved_review_base = Some(base);
         }
+        let review_range = resolved_review_base
+            .as_deref()
+            .zip(resolved_head.as_deref());
+        let resolver = self.launch_resolvers_for_tier(raw, route.as_ref(), review_range)?;
+        let context = PatchContext {
+            library: &library,
+            resolvers: &resolver,
+            scan: &patch::scan_for_secrets,
+            journal: None,
+            limits: &self.context.config.graph.limits,
+            worktree_layout: self.context.port_table.worktree_layout.clone(),
+        };
         // The commit the launch starts from belongs to its identity. A checkout
         // with no commit yet simply has none.
         let source_commit = resolved_head.clone().or_else(|| {
@@ -1711,7 +1724,13 @@ impl Factory {
                     "launch controls require a leaf template".into(),
                 )));
             }
-            bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
+            bind_launch_controls(
+                input,
+                &mut node,
+                &self.cwd,
+                &self.context.project_root,
+                &self.context.port_table,
+            )?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -1880,13 +1899,12 @@ impl Factory {
                 &document,
                 &self.context.config.graph.limits,
             );
-            let config = provenant_config::read(&self.context.roots).map_err(|error| {
-                FacadeError::DispatchRefused {
+            let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
+                .map_err(|error| FacadeError::DispatchRefused {
                     fact: None,
                     disk: None,
                     reason: error.to_string(),
-                }
-            })?;
+                })?;
             let run_config = provenant_confinement::run_config::RunConfig::read(
                 self.context.roots.state.as_path(),
             )
@@ -2277,27 +2295,30 @@ impl Factory {
         }
         let id = target.graph.clone();
         let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
-        if target.node.is_some() || brief_given {
-            let mut journal = FileJournal::open(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-                budget,
-                cancel,
-                &self.clock,
-            )
-            .map_err(graph_journal_error)?;
-            let execution = FileJournal::execution(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-            )
+        // Fail before opening the retry transaction. A capture error leaves
+        // the last valid requester PATH binding untouched.
+        let requester_path = self.requester_lane_path()?;
+        let mut journal = FileJournal::open(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &id,
+            budget,
+            cancel,
+            &self.clock,
+        )
+        .map_err(graph_journal_error)?;
+        let execution = FileJournal::execution(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &id,
+        )
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+        let mut checkpoint = journal
+            .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-            let mut checkpoint = journal
-                .load(&id)
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::NotFound)?;
+        if target.node.is_some() || brief_given {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
             let node = match target.node.clone() {
@@ -2330,9 +2351,16 @@ impl Factory {
                 },
             )
             .map_err(retry_patch_error)?;
-            journal.save(&checkpoint).map_err(graph_journal_error)?;
             target.node = Some(node);
         }
+        // Publish the requester's PATH with any retry patch under the same
+        // journal lock, including graph-wide retries with no node patch. A
+        // concurrent tick cannot launch pending work with stale PATH.
+        journal
+            .set_requester_path(requester_path)
+            .map_err(graph_journal_error)?;
+        journal.save(&checkpoint).map_err(graph_journal_error)?;
+        drop(journal);
         let run = self.graph(
             GraphInput::Resume {
                 extra: Default::default(),
@@ -3273,6 +3301,132 @@ mod tests {
         })
     }
 
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
+    fn graph_advance_uses_requester_path_after_submission_and_retry() -> Result {
+        use std::os::unix::ffi::OsStrExt;
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let mut fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let mut pending = fixture["checkpoint"]["nodes"][0].clone();
+        pending["id"] = json!("review");
+        pending["state"] = json!("pending");
+        pending["attempts"] = json!([]);
+        fixture["checkpoint"]["nodes"]
+            .as_array_mut()
+            .ok_or("checkpoint nodes")?
+            .push(pending);
+        let mut pending = fixture["execution"]["document"]["nodes"][0].clone();
+        pending["id"] = json!("review");
+        pending["prompt"] = json!("work for review");
+        fixture["execution"]["document"]["nodes"]
+            .as_array_mut()
+            .ok_or("document nodes")?
+            .push(pending);
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let document: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let p = rig.home.join("requester-p");
+        let q = rig.home.join("requester-q");
+        std::fs::create_dir_all(&p)?;
+        std::fs::create_dir_all(&q)?;
+        let p = std::fs::canonicalize(p)?.as_os_str().as_bytes().to_vec();
+        let q_directory = std::fs::canonicalize(q)?;
+        let q = q_directory.as_os_str().as_bytes().to_vec();
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: Some(p.clone()),
+            extra: Default::default(),
+            bases: None,
+            directory: factory.cwd.clone(),
+            document: document.clone(),
+        })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        assert!(
+            factory
+                .graph_target(&document.graph_id)?
+                .is_some_and(|target| target.node.is_none())
+        );
+        let mut supervisor = super::super::settlement::recovery_launch(
+            factory.context.roots.state.as_path(),
+            &factory.cwd,
+        )?;
+        supervisor.lane_path = Some(b"/usr/bin".to_vec());
+        super::super::run_owner::restore_graph_lane_path(
+            &factory,
+            &document.graph_id,
+            &mut supervisor,
+        )?;
+        assert_eq!(supervisor.lane_path.as_deref(), Some(p.as_slice()));
+
+        let mut requester = supervisor.clone();
+        requester.lane_path = None;
+        requester.executable_search_path = vec![q_directory];
+        factory.host_launch = Some(requester.clone());
+        // The subsequent resume may refuse for unrelated fixture reasons; the
+        // retry request must have persisted its PATH before that advance.
+        let _ = factory.graph_document(
+            json!({"op":"retry", "id":document.graph_id}),
+            budget,
+            &cancel,
+        );
+        supervisor.lane_path = Some(b"/usr/bin".to_vec());
+        super::super::run_owner::restore_graph_lane_path(
+            &factory,
+            &document.graph_id,
+            &mut supervisor,
+        )?;
+        assert_eq!(supervisor.lane_path.as_deref(), Some(q.as_slice()));
+
+        let before = FileJournal::execution(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+        )?
+        .ok_or("bound graph execution")?;
+        let mut unavailable_git = requester.clone();
+        unavailable_git.git = rig.root.join("missing-git");
+        factory.host_launch = Some(unavailable_git);
+        let error = factory
+            .graph_document(
+                json!({"op":"retry", "id":document.graph_id}),
+                budget,
+                &cancel,
+            )
+            .expect_err("PATH capture failure must refuse retry");
+        assert!(matches!(
+            error,
+            FacadeError::Io { ref operation, .. } if operation == "capture requester PATH"
+        ));
+        let after = FileJournal::execution(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+        )?
+        .ok_or("bound graph execution after refused retry")?;
+        assert_eq!(after, before);
+
+        requester.lane_path = Some(Vec::new());
+        factory.host_launch = Some(requester);
+        assert!(factory.requester_lane_path()?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn refused_retry_leaves_the_persisted_graph_readable_and_unchanged() -> Result {
         let rig = TestRig::new()?;
@@ -3305,6 +3459,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: PathBuf::from("/legacy/project"),
@@ -3365,6 +3520,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: PathBuf::from("/legacy/project"),
@@ -3448,6 +3604,7 @@ mod tests {
             &json!({"branch":"feature/topic"}),
             &mut node,
             project.path(),
+            project.path(),
             &ports,
         )?;
         assert_eq!(
@@ -3468,8 +3625,10 @@ mod tests {
             &json!({"branch":"topic"}),
             &mut node,
             Path::new("/repo/src"),
+            Path::new("/repo"),
             &provenant_config::PortTable::builtin(),
         )?;
+        assert_eq!(node["worktree"], "/repo/.worktrees/topic");
         assert_eq!(
             node["attempt"]["new_worktree"]["base"],
             "refs/remotes/origin/HEAD"
@@ -3479,6 +3638,7 @@ mod tests {
         bind_launch_controls(
             &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
             &mut explicit,
+            Path::new("/repo"),
             Path::new("/repo"),
             &provenant_config::PortTable::builtin(),
         )?;
@@ -3491,6 +3651,7 @@ mod tests {
             bind_launch_controls(
                 &json!({"base":"HEAD"}),
                 &mut node,
+                Path::new("/repo"),
                 Path::new("/repo"),
                 &provenant_config::PortTable::builtin()
             )
@@ -3545,6 +3706,147 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn pinned_review_expansion_applies_path_floors_and_keeps_docs_quick() -> Result {
+        let rig = crate::worktree_tests::repository()?;
+        let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let workflow = rig.project.join(".github/workflows/release.yml");
+        std::fs::create_dir_all(workflow.parent().ok_or("workflow parent")?)?;
+        std::fs::write(&workflow, "name: Release\n")?;
+        let credentials = rig.project.join("credentials/identity.json");
+        std::fs::create_dir_all(credentials.parent().ok_or("credentials parent")?)?;
+        std::fs::write(&credentials, "{}\n")?;
+        crate::worktree_tests::git(
+            &rig,
+            &[
+                "add",
+                ".github/workflows/release.yml",
+                "credentials/identity.json",
+            ],
+        )?;
+        crate::worktree_tests::git(&rig, &["commit", "-qm", "touch protected review paths"])?;
+        let protected_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+
+        crate::worktree_tests::git(&rig, &["checkout", "-q", "-b", "docs-review", &base])?;
+        let documentation = rig.project.join("docs/guide.md");
+        std::fs::create_dir_all(documentation.parent().ok_or("documentation parent")?)?;
+        std::fs::write(&documentation, "Review selection guide\n")?;
+        crate::worktree_tests::git(&rig, &["add", "docs/guide.md"])?;
+        crate::worktree_tests::git(&rig, &["commit", "-qm", "touch docs only"])?;
+        let docs_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let caller_brief = "REVIEW_PANEL_CALLER_BRIEF_SENTINEL";
+        let explain = |subject: &str, review_base: &str| -> Result<GraphDocument> {
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+            let result = factory.graph_document(
+                json!({
+                    "op":"run", "template":"review-panel", "brief":caller_brief,
+                    "explain":true,
+                    "set":{"subject":subject,"review_base":review_base}
+                }),
+                budget,
+                &cancel,
+            )?;
+            Ok(serde_json::from_value(result["document"].clone())?)
+        };
+
+        let protected = explain(&protected_head, &base)?;
+        assert_eq!(protected.review_base.as_deref(), Some(base.as_str()));
+        let protected_lenses = &protected.template_resolvers["review-panel"];
+        assert!(protected_lenses.len() >= 8, "{protected_lenses:?}");
+        for lens in ["correctness-spec", "reliability", "security-privacy"] {
+            assert!(
+                protected_lenses.iter().any(|selected| selected == lens),
+                "{protected_lenses:?}"
+            );
+        }
+        assert_eq!(
+            protected.template_resolvers["review-frame"],
+            vec!["true".to_owned()]
+        );
+        assert_eq!(
+            protected.template_resolvers["review-verify"],
+            vec!["true".to_owned()]
+        );
+        assert_eq!(
+            protected.template_resolvers["review-synthesis"],
+            vec!["true".to_owned()]
+        );
+        let protected_expanded = protected.expanded(&factory.context.config.graph.limits)?;
+        let review_leaves: Vec<_> = protected_expanded
+            .nodes
+            .iter()
+            .filter(|node| node.review_lens.is_some())
+            .collect();
+        assert!(
+            review_leaves.len() >= 8,
+            "{} review leaves",
+            review_leaves.len()
+        );
+        assert!(
+            review_leaves
+                .iter()
+                .all(|node| node.prompt.contains(caller_brief))
+        );
+        for stage in ["frame", "verify", "synthesis"] {
+            let node = protected_expanded
+                .nodes
+                .iter()
+                .find(|node| node.id.contains(&format!("--{stage}")))
+                .ok_or_else(|| format!("full review panel has no {stage} stage"))?;
+            assert!(node.prompt.contains(caller_brief), "{stage} prompt");
+        }
+        assert!(
+            protected_expanded
+                .nodes
+                .iter()
+                .filter(|node| node.review_behaviour.is_some())
+                .all(|node| matches!(
+                    node.source.as_ref(),
+                    Some(provenant_fabric_runtime::graph::SourceBinding::Commit { commit })
+                        if commit == &protected_head
+                ))
+        );
+
+        let docs = explain(&docs_head, &base)?;
+        assert_eq!(docs.template_resolvers["review-panel"].len(), 1);
+        assert_eq!(
+            docs.template_resolvers["review-frame"],
+            vec!["false".to_owned()]
+        );
+        assert_eq!(
+            docs.template_resolvers["review-verify"],
+            vec!["false".to_owned()]
+        );
+        assert_eq!(
+            docs.template_resolvers["review-synthesis"],
+            vec!["false".to_owned()]
+        );
+
+        let tree = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD^{tree}"])?;
+        let disconnected_base =
+            crate::worktree_tests::git(&rig, &["commit-tree", &tree, "-m", "disconnected base"])?;
+        let disconnected_head =
+            crate::worktree_tests::git(&rig, &["commit-tree", &tree, "-m", "disconnected head"])?;
+        let incomplete = explain(&disconnected_head, &disconnected_base)?;
+        let incomplete_lenses = &incomplete.template_resolvers["review-panel"];
+        assert!(incomplete_lenses.len() >= 8, "{incomplete_lenses:?}");
+        for lens in ["correctness-spec", "reliability", "security-privacy"] {
+            assert!(
+                incomplete_lenses.iter().any(|selected| selected == lens),
+                "{incomplete_lenses:?}"
+            );
+        }
+        assert!(
+            incomplete.template_resolvers["review-advice-correctness-spec"][0]
+                .contains("configured unreadable-path floors were applied")
+        );
+        Ok(())
+    }
+
     #[test]
     fn empty_review_range_is_refused_before_launch() -> Result {
         let rig = crate::worktree_tests::repository()?;
@@ -3560,6 +3862,50 @@ mod tests {
 
     #[test]
     fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
+        // `Factory::template_library` honours the caller's XDG directory. Run
+        // this fixture with an empty user template root so unrelated templates
+        // installed on the test host cannot invalidate inline task compilation.
+        const FIXTURE: &str = "PROVENANT_TEST_REPLAY_DIGEST_CONFIG_HOME";
+        if let Some(config_home) = std::env::var_os(FIXTURE) {
+            let config_home = std::path::PathBuf::from(config_home);
+            std::fs::create_dir_all(config_home.join("provenant/templates"))?;
+        } else {
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            use std::time::Duration;
+
+            let temp = tempfile::tempdir()?;
+            let config_home = temp.path().join("config");
+            std::fs::create_dir_all(config_home.join("provenant/templates"))?;
+            let mut environment: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != "XDG_CONFIG_HOME" && key != FIXTURE)
+                .collect();
+            environment.push((FIXTURE.into(), config_home.as_os_str().to_owned()));
+            environment.push(("XDG_CONFIG_HOME".into(), config_home.as_os_str().to_owned()));
+            let argv = [
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit"
+                    .into(),
+                "--nocapture".into(),
+            ];
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+            options.env = Some(&environment);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout.bytes),
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            assert!(!output.timed_out, "{output:?}");
+            return Ok(());
+        }
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
@@ -3584,7 +3930,7 @@ mod tests {
         named["name"] = json!("handle");
         assert_eq!(explain(&factory, task.clone())?, explain(&factory, named)?);
         let inline =
-            json!({"op":"run","document":{"prompt":"inline task","tier":"senior"},"explain":true});
+            json!({"op":"run","document":{"brief":"inline task","tier":"senior"},"explain":true});
         assert_eq!(
             explain(&factory, inline.clone())?,
             explain(&factory, inline)?
@@ -3593,7 +3939,7 @@ mod tests {
         // source commit are unchanged.
         let controlled = json!({
             "op":"run", "explain":true,
-            "document":{"prompt":"Inspect launch policy",
+            "document":{"brief":"Inspect launch policy",
                 "tier":"senior", "access":"read_only"},
             "attempt":{"host":"local", "confidential":true, "provider_timeout":42}
         });
@@ -3733,7 +4079,7 @@ mod tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: factory.cwd.clone(),
@@ -4204,6 +4550,7 @@ mod tests {
             &json!({"branch":"fix/parser","base":"origin/main"}),
             &mut node,
             cwd,
+            cwd,
             &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(node["worktree"], "/fixture/project/.worktrees/fix-parser");
@@ -4211,6 +4558,7 @@ mod tests {
         bind_launch_controls(
             &json!({"worktree":".worktrees/fix-parser"}),
             &mut explicit,
+            Path::new("/fixture/project"),
             Path::new("/fixture/project"),
             &provenant_config::PortTable::builtin(),
         )?;
@@ -4223,6 +4571,7 @@ mod tests {
             &json!({"worktree":"writer"}),
             &mut relative,
             Path::new("/fixture/project/src"),
+            Path::new("/fixture/project"),
             &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(relative["worktree"], "/fixture/project/src/writer");
@@ -4242,6 +4591,7 @@ mod tests {
                 bind_launch_controls(
                     &input,
                     &mut json!({"use":"task"}),
+                    cwd,
                     cwd,
                     &provenant_config::PortTable::builtin()
                 )
@@ -4362,7 +4712,7 @@ mod tests {
         let execution = GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),
@@ -4821,7 +5171,7 @@ mod tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases,
                 directory: rig.project.clone(),
@@ -5555,6 +5905,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),
@@ -5634,6 +5985,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),

@@ -7,5 +7,5 @@ Skip tests that fail on the unmutated baseline and list them as skipped. If
 continue. Report mutant, caught, missed and timed-out counts plus wall time, and
 classify every survivor as a gap or noise. Cap the run (`cargo mutants
 --timeout` per mutant and stop after about 15 minutes); report partial counts as
-timed-out or skipped, and still end with the verdict. This evidence is optional
+timed-out or skipped, and still give the verdict. This evidence is optional
 and never gates delivery.

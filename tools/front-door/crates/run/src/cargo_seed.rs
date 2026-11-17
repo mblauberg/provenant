@@ -48,6 +48,7 @@ detail_codes! {
     CARGO_CONFIG_TOO_LARGE = "cargo_config_too_large",
     CARGO_CONFIG_INVALID = "cargo_config_invalid",
     CARGO_CONFIG_SELECTS_COMPILER = "cargo_config_selects_compiler",
+    CARGO_CONFIG_CHANGES_BUILD_TARGET = "cargo_config_changes_build_target",
     WORKTREE_UNRESOLVABLE = "worktree_unresolvable",
     RUSTUP_HOME_WRITABLE = "rustup_home_writable",
     CARGO_BIN_WRITABLE = "cargo_bin_writable",
@@ -88,6 +89,68 @@ detail_codes! {
     TOOLCHAIN_PIN_CHANNEL_MISSING = "toolchain_pin_channel_missing",
 }
 
+/// Refuse bounded Cargo config input when it can alter the rustc, target, or
+/// build flags represented by a shared target seed. Used by both lane setup
+/// and host seed currentness; values are never returned or logged.
+pub(crate) fn cargo_config_seed_eligibility(bytes: &[u8]) -> Result<(), &'static str> {
+    if bytes.len() > 65536 {
+        return Err(codes::CARGO_CONFIG_TOO_LARGE);
+    }
+    let document: toml_edit::DocumentMut = String::from_utf8(bytes.to_vec())
+        .map_err(|_| codes::CARGO_CONFIG_INVALID)?
+        .parse()
+        .map_err(|_| codes::CARGO_CONFIG_INVALID)?;
+    let compiler_key = |key: &str| {
+        key == "PATH"
+            || key.starts_with("RUSTUP_")
+            || key.starts_with("RUSTC")
+            || key.starts_with("CARGO_BUILD_RUSTC")
+    };
+    let target_key = |key: &str| {
+        matches!(
+            key,
+            "CARGO_BUILD_TARGET"
+                | "RUSTFLAGS"
+                | "CARGO_ENCODED_RUSTFLAGS"
+                | "CARGO_BUILD_RUSTFLAGS"
+        ) || key.starts_with("CARGO_TARGET_")
+            || (key.starts_with("CARGO_PROFILE_") && key != "CARGO_PROFILE_DEV_DEBUG")
+    };
+    let build = document.get("build").and_then(|item| item.as_table_like());
+    let env = document.get("env").and_then(|item| item.as_table_like());
+    if document.contains_key("include")
+        || build.is_some_and(|table| table.iter().any(|(key, _)| key.starts_with("rustc")))
+        || env.is_some_and(|table| table.iter().any(|(key, _)| compiler_key(key)))
+        || (document.contains_key("build") && build.is_none())
+        || (document.contains_key("env") && env.is_none())
+    {
+        return Err(codes::CARGO_CONFIG_SELECTS_COMPILER);
+    }
+
+    let build_changes_target = build.is_some_and(|table| {
+        table
+            .iter()
+            .any(|(key, _)| matches!(key, "target" | "rustflags" | "rustdocflags" | "incremental"))
+    });
+    let env_changes_target = env.is_some_and(|table| table.iter().any(|(key, _)| target_key(key)));
+    let target_changes_build = match document.get("target") {
+        None => false,
+        Some(item) => item.as_table_like().is_none_or(|targets| {
+            targets.iter().any(|(_, settings)| {
+                settings.as_table_like().is_none_or(|settings| {
+                    settings
+                        .iter()
+                        .any(|(key, _)| matches!(key, "linker" | "ar" | "rustflags"))
+                })
+            })
+        }),
+    };
+    if build_changes_target || env_changes_target || target_changes_build {
+        return Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET);
+    }
+    Ok(())
+}
+
 /// Every reason persisted in `cargo-target-setup.json` when target seeding
 /// falls back. Keep call sites and the coverage table on this declaration.
 macro_rules! fallback_reasons {
@@ -111,6 +174,8 @@ fallback_reasons! {
     MANIFEST_INVALID = "manifest_invalid",
     TOOLCHAIN_MISMATCH = "toolchain_mismatch",
     TRIPLE_MISMATCH = "triple_mismatch",
+    CARGO_PROFILE_MISMATCH = "cargo_profile_mismatch",
+    CARGO_PROFILE_UNREPRESENTABLE = "cargo_profile_unrepresentable",
     STAGING_UNAVAILABLE = "staging_unavailable",
     STAGING_SYNC_FAILED = "staging_sync_failed",
     PUBLISH_FAILED = "publish_failed",
@@ -129,15 +194,43 @@ pub(crate) struct Outcome {
     /// an environment value or path.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// Path-free receipt proving which complete generation supplied a seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed_source: Option<SeedSource>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
 }
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SeedSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_id: Option<String>,
+    project_match: bool,
+}
+
+struct SeedCandidate {
+    target: std::path::PathBuf,
+    generation_id: Option<String>,
+    project_match: bool,
+}
+
+fn safe_generation_id(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    (!name.is_empty()
+        && name.len() <= 96
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+    .then(|| name.to_owned())
+}
+
 impl Outcome {
     pub(crate) fn skipped(reason: &'static str) -> Self {
         Self {
             status: "skipped".into(),
             reason: reason.into(),
             detail: None,
+            seed_source: None,
             extra: Default::default(),
         }
     }
@@ -147,6 +240,7 @@ impl Outcome {
             status: "fallback".into(),
             reason: reason.into(),
             detail: None,
+            seed_source: None,
             extra: Default::default(),
         }
     }
@@ -169,25 +263,27 @@ impl Outcome {
             status: "fallback".into(),
             reason: reason.into(),
             detail: Some(detail.into()),
+            seed_source: None,
             extra: Default::default(),
         }
     }
 }
 
 pub(crate) fn seed_target(
-    enabled: bool,
     state: &Path,
     cache: &Path,
     worktree: &Path,
+    project_key: &str,
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
 ) -> Outcome {
-    if !enabled {
-        return Outcome::skipped("disabled");
-    }
     #[cfg(unix)]
     {
+        let settings = provenant_config::LaneBuildSettings::default();
+        let Some(cargo_profile) = settings.cargo_build_profile(environment) else {
+            return Outcome::fallback(fallback_reasons::CARGO_PROFILE_UNREPRESENTABLE);
+        };
         let (version, triple) = match crate::target_seed::lane_rustc_metadata_cancellable(
             worktree,
             home,
@@ -203,15 +299,27 @@ pub(crate) fn seed_target(
         seed_target_cancellable(
             state,
             cache,
-            &version,
-            &triple,
+            SeedCompatibility {
+                version: &version,
+                triple: &triple,
+                cargo_profile: &cargo_profile,
+                project_key,
+            },
             Some(cancel),
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
         )
     }
     #[cfg(not(unix))]
     {
-        let _ = (state, cache, worktree, home, environment, cancel);
+        let _ = (
+            state,
+            cache,
+            worktree,
+            project_key,
+            home,
+            environment,
+            cancel,
+        );
         Outcome::skipped("unsupported_platform")
     }
 }
@@ -224,17 +332,36 @@ fn seed_target_with(
     triple: &str,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
-    seed_target_cancellable(state, cache, version, triple, None, |source, dest, _| {
-        clone(source, dest)
-    })
+    let cargo_profile = provenant_config::LaneBuildSettings::default()
+        .cargo_build_profile(&[])
+        .expect("default Cargo profile is UTF-8");
+    seed_target_cancellable(
+        state,
+        cache,
+        SeedCompatibility {
+            version,
+            triple,
+            cargo_profile: &cargo_profile,
+            project_key: "",
+        },
+        None,
+        |source, dest, _| clone(source, dest),
+    )
+}
+
+#[cfg(any(unix, test))]
+struct SeedCompatibility<'a> {
+    version: &'a str,
+    triple: &'a str,
+    cargo_profile: &'a provenant_config::CargoBuildProfile,
+    project_key: &'a str,
 }
 
 #[cfg(any(unix, test))]
 fn seed_target_cancellable(
     state: &Path,
     cache: &Path,
-    version: &str,
-    triple: &str,
+    compatibility: SeedCompatibility<'_>,
     cancel: Option<&provenant_core::CancelToken>,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
@@ -292,9 +419,12 @@ fn seed_target_cancellable(
     let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
     let mut saw_version = false;
+    let mut saw_triple = false;
+    let mut saw_cargo_profile = false;
     let mut saw_manifest = false;
     let mut saw_entry = false;
-    let mut selected = None;
+    let mut selected_project = None;
+    let mut selected_shared = None;
     for entry in entries {
         if deadline.expired() {
             return Outcome::fallback(fallback_reasons::SEED_BUDGET_EXHAUSTED);
@@ -325,27 +455,49 @@ fn seed_target_cancellable(
             continue;
         };
         saw_manifest = true;
-        if manifest.rustc_vv != version {
+        if manifest.rustc_vv != compatibility.version {
             continue;
         }
         saw_version = true;
-        if manifest.host_triple != triple {
+        if manifest.host_triple != compatibility.triple {
             continue;
         }
-        selected = Some(entry.path().join("target"));
-        break;
+        saw_triple = true;
+        if &manifest.cargo_profile != compatibility.cargo_profile {
+            continue;
+        }
+        saw_cargo_profile = true;
+        let project_match = !compatibility.project_key.is_empty()
+            && manifest.project_key == compatibility.project_key;
+        let candidate = SeedCandidate {
+            target: entry.path().join("target"),
+            generation_id: safe_generation_id(&entry.file_name()),
+            project_match,
+        };
+        if project_match {
+            selected_project = Some(candidate);
+            break;
+        }
+        if selected_shared.is_none() {
+            selected_shared = Some(candidate);
+        }
     }
-    let Some(source) = selected else {
+    let Some(selected) = selected_project.or(selected_shared) else {
         return Outcome::fallback(if !saw_entry {
             fallback_reasons::NO_GENERATIONS
         } else if !saw_manifest {
             fallback_reasons::MANIFEST_INVALID
         } else if !saw_version {
             fallback_reasons::TOOLCHAIN_MISMATCH
-        } else {
+        } else if !saw_triple {
             fallback_reasons::TRIPLE_MISMATCH
+        } else if !saw_cargo_profile {
+            fallback_reasons::CARGO_PROFILE_MISMATCH
+        } else {
+            fallback_reasons::MANIFEST_INVALID
         });
     };
+    let source = selected.target;
     let Ok(random) = temporary_name() else {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     };
@@ -380,6 +532,10 @@ fn seed_target_cancellable(
                 "durability_unconfirmed".into()
             },
             detail: None,
+            seed_source: Some(SeedSource {
+                generation_id: selected.generation_id,
+                project_match: selected.project_match,
+            }),
             extra: Default::default(),
         },
         Err(reason)
@@ -569,16 +725,48 @@ mod tests {
     use super::*;
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
+        generation_for_project(state, name, version, triple, "");
+    }
+
+    fn generation_for_project(
+        state: &Path,
+        name: &str,
+        version: &str,
+        triple: &str,
+        project_key: &str,
+    ) {
+        generation_for_profile(
+            state,
+            name,
+            version,
+            triple,
+            project_key,
+            provenant_config::LaneBuildSettings::default()
+                .cargo_build_profile(&[])
+                .expect("default Cargo profile is UTF-8"),
+        );
+    }
+
+    fn generation_for_profile(
+        state: &Path,
+        name: &str,
+        version: &str,
+        triple: &str,
+        project_key: &str,
+        cargo_profile: provenant_config::CargoBuildProfile,
+    ) {
         let dir = crate::target_seed::store_path(state)
             .join("generations")
             .join(name);
         std::fs::create_dir_all(dir.join("target")).unwrap();
         std::fs::write(dir.join("complete"), b"complete\n").unwrap();
         let manifest = crate::target_seed::Manifest {
+            project_key: project_key.into(),
             rustc_vv: version.into(),
             host_triple: triple.into(),
             commit: "abc".into(),
             profile: "dev".into(),
+            cargo_profile,
             features: vec![],
             flags: vec![],
         };
@@ -725,6 +913,120 @@ mod tests {
         assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn project_generation_beats_newer_foreign_generation_and_receipt_identifies_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation_for_project(&state, "001", "v1", "host", "project-a");
+        generation_for_project(&state, "002", "v1", "host", "project-b");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "project-a",
+            },
+            None,
+            |source, _, _| {
+                assert!(source.ends_with("001/target"));
+                Ok(())
+            },
+        );
+        assert_eq!(
+            (outcome.status.as_str(), outcome.reason.as_str()),
+            ("seeded", "cloned")
+        );
+        assert_eq!(
+            outcome.seed_source,
+            Some(SeedSource {
+                generation_id: Some("001".into()),
+                project_match: true,
+            })
+        );
+        let record = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(
+            record["seed_source"],
+            serde_json::json!({"generation_id":"001", "project_match":true})
+        );
+        assert!(!record.to_string().contains("/target"));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn seed_with_a_different_cargo_profile_is_not_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut different = profile.clone();
+        different.debug = "full".into();
+        generation_for_profile(&state, "001", "v1", "host", "project-a", different);
+
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "project-a",
+            },
+            None,
+            |_, _, _| panic!("profile-incompatible artifacts are never cloned"),
+        );
+        assert_eq!(
+            outcome,
+            Outcome::fallback(fallback_reasons::CARGO_PROFILE_MISMATCH)
+        );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn compatible_foreign_generation_is_used_only_when_project_seed_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation_for_project(&state, "001", "v1", "host", "project-b");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "project-a",
+            },
+            None,
+            |source, _, _| {
+                assert!(source.ends_with("001/target"));
+                Ok(())
+            },
+        );
+        assert_eq!(outcome.status, "seeded");
+        assert_eq!(
+            outcome.seed_source,
+            Some(SeedSource {
+                generation_id: Some("001".into()),
+                project_match: false,
+            })
+        );
+    }
+
     #[test]
     fn target_failed_clone_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -814,6 +1116,8 @@ mod tests {
         )
         .unwrap();
         let report = "rustc 1.99.1\nhost: test-host\nrelease: 1.99.1\n";
+        std::fs::create_dir(worktree.join(".git")).unwrap();
+        let project_key = crate::target_seed::project_key(&worktree.join(".git"));
         let rustc = bin.join("rustc");
         std::fs::write(
             &rustc,
@@ -821,7 +1125,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
-        generation(&state, "001", report, "test-host");
+        generation_for_project(&state, "001", report, "test-host", &project_key);
         // No ambient CARGO_HOME: the same finalisation used by handoff must
         // make a fresh, arbitrarily nested Cargo project seedable.
         let mut env = vec![];
@@ -829,10 +1133,10 @@ mod tests {
             .unwrap()
             .lane_cargo_environment(&home, &cache, &mut env);
         let outcome = seed_target(
-            true,
             &state,
             &cache,
             &worktree,
+            &project_key,
             &home,
             &env,
             &provenant_core::CancelToken::new(),
@@ -845,10 +1149,10 @@ mod tests {
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
         let outcome = seed_target(
-            true,
             &state,
             &cache,
             &worktree,
+            &project_key,
             &home,
             &refused,
             &provenant_core::CancelToken::new(),

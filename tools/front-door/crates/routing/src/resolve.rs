@@ -337,6 +337,30 @@ pub fn list(
     })
 }
 
+fn in_model_scope(model: &ModelId, context: &RoutingContext<'_>) -> bool {
+    context.config.model_in_provider_scope(model)
+}
+
+fn check_pin_scope(model: &ModelId, context: &RoutingContext<'_>) -> Result<(), RoutingError> {
+    if !in_model_scope(model, context)
+        && context
+            .config
+            .provider_scopes
+            .get(model.adapter())
+            .is_some_and(|settings| {
+                settings.out_of_scope_pin == provenant_config::OutOfScopePin::Refuse
+            })
+    {
+        return Err(RoutingError::UnsupportedLaunch(format!(
+            "{} is outside providers.{}.models (providers.{}.out_of_scope_pin = refuse)",
+            model.as_str(),
+            model.adapter(),
+            model.adapter()
+        )));
+    }
+    Ok(())
+}
+
 fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
     context
         .catalogue
@@ -351,9 +375,19 @@ fn raw_pool<'a>(context: &'a RoutingContext<'_>, name: &str) -> Option<&'a Vec<R
 }
 fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
     let members = raw_pool(context, name)?;
+    let source = if context.config.pools.contains_key(name) {
+        AutomaticModelSource::OwnerConfiguration
+    } else {
+        AutomaticModelSource::ShippedPool
+    };
     Some(
         members
             .iter()
+            .filter(|member| {
+                context
+                    .config
+                    .permits_automatic_model(&member.model, source)
+            })
             .map(|member| member.reconciled(context.catalogue.model(&member.model)).0)
             .collect(),
     )
@@ -2207,6 +2241,7 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
+            check_pin_scope(model, context)?;
             if let Some(detail) = excluded_members.family_reason(model) {
                 return Err(RoutingError::NoEligiblePoolMember {
                     exclusions: vec![format!("{}: {detail}", model.as_str())],
@@ -2234,13 +2269,22 @@ fn resolve_inner(
                     .preferred_model(request, risk, kind, context.now)
             });
             let mut pool = effective_pool(context, name);
-            if let Some(model) = preference {
+            if let Some(model) = preference.filter(|model| {
+                context
+                    .config
+                    .permits_automatic_model(model, AutomaticModelSource::OwnerConfiguration)
+            }) {
                 if pool.is_none() {
                     pool = context
                         .config
                         .routes
                         .get(name)
-                        .filter(|route| context.catalogue.model(&route.model).is_some())
+                        .filter(|route| {
+                            context.config.permits_automatic_model(
+                                &route.model,
+                                AutomaticModelSource::OwnerConfiguration,
+                            ) && context.catalogue.model(&route.model).is_some()
+                        })
                         .map(|route| {
                             vec![RoutePoolMember {
                                 model: route.model.clone(),
@@ -2283,6 +2327,17 @@ fn resolve_inner(
                     .routes
                     .get(name)
                     .ok_or(RoutingError::UnknownRoute)?;
+                if !context
+                    .config
+                    .permits_automatic_model(&named.model, AutomaticModelSource::OwnerConfiguration)
+                {
+                    return Err(RoutingError::NoEligiblePoolMember {
+                        exclusions: vec![format!(
+                            "{}: outside provider model scope",
+                            named.model.as_str()
+                        )],
+                    });
+                }
                 if context.catalogue.model(&named.model).is_none() {
                     return Err(RoutingError::Catalogue);
                 }
@@ -2347,14 +2402,23 @@ fn resolve_inner(
     if models.contains(&primary_model) {
         return Err(RoutingError::Alternatives);
     }
-    let named_route = matches!(request.choice, RouteChoice::NamedRoute(_));
     let alternatives = models
         .iter()
         .filter(|model| excluded_members.family_reason(model).is_none())
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
-        // A named route's fallback keeps to the same exclusions as its pool; a
-        // pinned model's own fallback is never filtered.
-        .filter(|model| !named_route || excluded_members.reason(model, context).is_none())
+        // Fallbacks are automatic alternatives even when attached to a model
+        // pin. They use automatic-model scope; pin policy applies only to the
+        // primary `RouteChoice::Model`. Named-route fallbacks keep to the
+        // pool's scheduled exclusions.
+        .filter(|model| {
+            context
+                .config
+                .permits_automatic_model(model, AutomaticModelSource::OwnerConfiguration)
+                && match &request.choice {
+                    RouteChoice::Model(_) => true,
+                    RouteChoice::NamedRoute(_) => excluded_members.reason(model, context).is_none(),
+                }
+        })
         .map(|model| {
             candidate(
                 model,
@@ -3162,13 +3226,35 @@ pub fn depletion_facts(
     also: &[ModelId],
 ) -> Result<Vec<ReadinessFact>, RoutingError> {
     let context = ValidatedContext::new(context)?;
-    let mut models: Vec<ModelId> = effective_pool_names(&context)
-        .iter()
-        .filter_map(|name| raw_pool(&context, name))
-        .flatten()
-        .map(|member| member.model.clone())
-        .chain(also.iter().cloned())
-        .collect();
+    let mut models = Vec::new();
+    for name in effective_pool_names(&context) {
+        let source = if context.config.pools.contains_key(&name) {
+            AutomaticModelSource::OwnerConfiguration
+        } else {
+            AutomaticModelSource::ShippedPool
+        };
+        if let Some(members) = raw_pool(&context, &name) {
+            models.extend(
+                members
+                    .iter()
+                    .filter(|member| {
+                        context
+                            .config
+                            .permits_automatic_model(&member.model, source)
+                    })
+                    .map(|member| member.model.clone()),
+            );
+        }
+    }
+    models.extend(
+        also.iter()
+            .filter(|model| {
+                context
+                    .config
+                    .permits_automatic_model(model, AutomaticModelSource::OwnerConfiguration)
+            })
+            .cloned(),
+    );
     models.sort();
     models.dedup();
     let now = context.now_seconds();

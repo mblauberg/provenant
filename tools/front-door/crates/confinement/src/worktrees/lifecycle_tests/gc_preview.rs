@@ -106,6 +106,7 @@ fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
 /// runs a nested repository's Git filters.
 #[test]
 fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     for state in ["clean", "untracked", "poisoned-gitlink"] {
         let fixture = Fixture::new()?;
         let test = TestContext::new(&fixture)?;
@@ -396,99 +397,6 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<dyn Error>> {
-    struct Shell;
-    impl WorkerObserver for Shell {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            roots
-                .iter()
-                .cloned()
-                .map(|path| (path, Occupancy::Observed { process: None }))
-                .collect()
-        }
-    }
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let mut context = test.context();
-    let path = fixture.root.join(".worktrees/finished-writer");
-    fixture.run(&[
-        "worktree",
-        "add",
-        "-b",
-        "finished-writer",
-        path.to_str().ok_or("path")?,
-    ])?;
-    let slot = writer_directory(context.project_state, &path)?;
-    let previous = provenant_records::custody::Scope {
-        attempt: provenant_core::AttemptId::from_bytes([22; 16]),
-        generation: 1,
-    };
-    let clock = context.clock;
-    let acquire = |scope| {
-        provenant_supervisor::fixture::acquire_writer(
-            slot.try_clone()?,
-            scope,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel(),
-            clock,
-        )
-    };
-    let first = acquire(previous)?;
-    let tree = verify_worktree(&fixture.repo, &path)?;
-    let prior = WorktreeOwner {
-        attempt_id: Some(previous.attempt),
-        operation_id: Some("previous-writer".parse()?),
-        branch: "finished-writer".into(),
-        base: fixture.head()?.to_string(),
-        host: provenant_core::HostId::from_bytes([3; 16]),
-        created_at: context.clock.wall_now()?,
-        origin: WorktreeOrigin::Lane,
-        label: None,
-        reference: None,
-    };
-    save_owner(&tree, &prior)?;
-    let record = slot
-        .current_path()?
-        .join(previous.attempt.to_string())
-        .join("reservation.json");
-    let bytes = fs::read(&record)?;
-    drop(first);
-    context.workers = &Shell;
-    let lane = list(&context, &cancel())?
-        .into_iter()
-        .find(|lane| lane.path == path)
-        .ok_or("lane")?;
-    assert!(matches!(lane.occupancy, Occupancy::Observed { .. }));
-    let owner = WorktreeOwner {
-        attempt_id: None,
-        operation_id: Some("finished-writer-claim".parse()?),
-        branch: "finished-writer".into(),
-        base: lane.head.to_string(),
-        host: provenant_core::HostId::from_bytes([3; 16]),
-        created_at: context.clock.wall_now()?,
-        origin: WorktreeOrigin::Lane,
-        label: None,
-        reference: None,
-    };
-    save_lane_owner_when_free(
-        &context,
-        &tree,
-        &owner,
-        lane.head,
-        Some(&prior),
-        true,
-        &cancel(),
-    )?;
-    let successor = provenant_records::custody::Scope {
-        attempt: provenant_core::AttemptId::from_bytes([24; 16]),
-        generation: 1,
-    };
-    let _second = acquire(successor)?;
-    assert_eq!(fs::read(record)?, bytes);
-    Ok(())
-}
-
-#[test]
 fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
@@ -617,6 +525,59 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
     // Settlement can retain historical evidence after clearing the reservation.
     fs::remove_file(attempt.join("reservation.json"))?;
     assert!(cache_writer_guard(context.project_state, &path).is_ok());
+    Ok(())
+}
+
+#[test]
+fn unsettled_reservation_fences_a_slot_after_its_lock_disappears() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join(".worktrees/unsettled");
+    let slot = writer_directory(context.project_state, &path)?;
+    let scope = provenant_records::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([76; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let reservation = slot
+        .current_path()?
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
+    let evidence = fs::read(&reservation)?;
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Held,
+        "a live kernel lease remains positively busy"
+    );
+    drop(lease);
+    fs::remove_file(slot.current_path()?.join(WRITER_LOCK))?;
+
+    assert!(matches!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Unknown { evidence, .. }
+            if evidence.contains(&scope.attempt.to_string())
+                && evidence.contains("provenant reconcile")
+    ));
+    for result in [
+        cache_writer_probe(context.project_state, &path).map(|_| ()),
+        cache_writer_guard(context.project_state, &path).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Occupancy::Unknown { evidence, .. })
+                if evidence.contains(&scope.attempt.to_string())
+                    && evidence.contains("provenant reconcile")
+        ));
+    }
+    assert_eq!(fs::read(reservation)?, evidence);
     Ok(())
 }
 
@@ -1009,7 +970,8 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
-        .head;
+        .head
+        .ok_or(WorktreeError::InvalidOutput)?;
     assert_ne!(ahead, pin);
     fast_forward(&context, &info.path, pin, &cancel())?;
     let after = context
@@ -1018,7 +980,8 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
-        .head;
+        .head
+        .ok_or(WorktreeError::InvalidOutput)?;
     assert_eq!(after, ahead);
     Ok(())
 }

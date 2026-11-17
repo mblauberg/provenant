@@ -190,7 +190,14 @@ fn collect_resolved(
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = utility.open_repo(&executor, project, budget, &cancel)?;
         let registration = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let location = provenant_config::ProjectLocation::new(repo.common_git_dir())?;
+            let location = if repo.private_git_dir() == repo.common_git_dir() {
+                provenant_config::ProjectLocation::from_verified_primary_checkout(
+                    repo.common_git_dir(),
+                    repo.root_path(),
+                )?
+            } else {
+                provenant_config::ProjectLocation::new(repo.common_git_dir())?
+            };
             let Some(binding) = provenant_config::lookup_project(roots, &location)? else {
                 return Ok(None);
             };

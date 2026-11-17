@@ -43,8 +43,33 @@ seed generations.
 
 ## Cargo target seed
 
-A target seed is cloned only for a matching compiler and target. A published
-generation is immutable, and collection cannot race an active clone.
+A target seed store is shared across registered repositories on the host. Each
+generation records a hash of the verified canonical shared Git directory and
+verify-base commit plus its Rust compiler identity and effective
+`CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` values, so a toolchain or
+profile change rebuilds the seed even when the commit is unchanged. Compiler
+identity uses toolchain pins read from the verify-base tree at the selected
+workspace, not the registered checkout's current toolchain. The same selected
+workspace path is used to validate and build the pinned checkout. Linked
+checkouts share identity and another repository's newer generation does not
+force a rebuild. A writer lane prefers the newest compatible generation for its
+verified project identity, then uses a compatible generation from another
+project if no own generation exists. The seed builder and writer preparation
+use the same lane profile defaults and preserve explicit environment values;
+incompatible profile generations are skipped. Refresh currentness requires the
+recorded verify-base commit to match; writer selection uses compatible
+generations and Cargo's normal per-unit freshness checks before reusing artifacts. Published generations are
+immutable, and collection cannot race an active clone. `max_generations` keeps
+history per project; `max_bytes` remains a host-wide allocated-byte limit and
+can evict a project's only generation under byte pressure. Failed refreshes
+retry at the next scheduled collection, while busy projects retry on the next
+tick without rebuilding other failed projects. Full requests supersede queued
+busy retries and reevaluate prior failures. Detached pending and active scopes
+survive process interruption and are retried after a minute.
+When a scheduled refresh fails, `provenant tick` reports a bounded cause category
+and a next step from the saved result. This note does not expose persisted
+command output, repository paths or environment values, and does not change the
+tick outcome or retry schedule.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order
@@ -100,6 +125,21 @@ A restart preserves the worktree and archives prior attempts. Bounds may turn a
 restart into a chair decision. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
+A writer's declared stop settles as `stopped_early`, or as `blocked` when its
+final handoff is blocked. The node's advance code records whether the stop left
+committed work: `writer_declared_stop` when the writer's head moved past its
+source commit, and `stopped_no_work` otherwise, whether the worktree is clean or
+holds uncommitted edits. Both codes take the `stopped_early` row below unless
+the node overrides it: a new route, which restarts the writer in a fresh session
+on its retained worktree. A junior route escalates to senior; otherwise the
+restart uses a declared route not yet launched, and an alias route may resolve
+again. With no such route, or with the continuation budget spent, the writer
+pauses for the chair. A `blocked` stop always goes to the chair.
+- Why: the chair must see whether a restart resumes committed work, without a
+  second stop rule that could treat the two differently.
+- Owner: `crates/fabric-runtime/src/graph/transitions.rs`,
+  `crates/fabric-runtime/src/graph/next_step.rs`
+
 | Cause | Default | Pinned | Retries |
 | --- | --- | --- | --- |
 | `stopped_early` | `new_route` | no | 0 |
@@ -144,3 +184,4 @@ restart into a chair decision. See [routing](routing.md) for route selection.
 | `lost` | `chair` | no | 0 |
 | `unsettled` | `chair` | no | 0 |
 | `quarantined` | `chair` | no | 0 |
+| `steered` | `chair` | yes | 0 |

@@ -164,7 +164,7 @@ jobs:
       - name: Lint
         if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --features fixture --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
 
       - name: Check harness assets
         run: |
@@ -434,7 +434,7 @@ jobs:
           QUARANTINE_FILTER: ${{ needs.rust-macos-archive.outputs.quarantine_filter }}
         run: |
           if [ -n "$QUARANTINE_FILTER" ]; then
-            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E "$QUARANTINE_FILTER"
           else
             echo 'No quarantined tests to run.'
           fi
@@ -470,6 +470,38 @@ jobs:
         working-directory: tools/front-door
         run: cargo shear
 
+  rust-macos-lint:
+    name: Lint macOS Rust workspace
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: [macos-scope]
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    env:
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-lint-{0}-cold-{1}-{2}', env.RUST_DEVELOPMENT_CACHE, github.run_id, github.run_attempt) || format('front-door-ci-macos-lint-{0}', env.RUST_DEVELOPMENT_CACHE) }}
+          add-job-id-key: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Lint Rust workspace
+        working-directory: tools/front-door
+        run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
+
   rust-macos-archive:
     name: Build macOS test archive
     runs-on: macos-15
@@ -492,7 +524,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -503,9 +535,6 @@ jobs:
       - name: Install nextest
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
-      - name: Lint Rust workspace
-        working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --features fixture --locked -- -D warnings
       - name: Build macOS test archive
         working-directory: tools/front-door
         run: >-
@@ -678,7 +707,7 @@ jobs:
         working-directory: tools/front-door
         run: |
           if [ -n "$QUARANTINE_FILTER" ]; then
-            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E "$QUARANTINE_FILTER"
           else
             echo 'No quarantined tests to run.'
           fi
@@ -726,6 +755,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set Rust temporary directory
         env:
           TMPDIR: ${{ runner.temp }}
@@ -771,6 +801,41 @@ jobs:
             --harness codex --bin-dir "$RUNNER_TEMP/bin"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
+      - name: Check candidate release range
+        run: |
+          release_head="$(git rev-parse --verify --end-of-options "${GITHUB_SHA}^{commit}")"
+          release_base="$(git rev-parse --verify --end-of-options "${release_head}^")"
+          if [ "$release_base" = "$release_head" ] \
+            || ! git merge-base --is-ancestor "$release_base" "$release_head"; then
+            echo "Cannot check candidate release: ${GITHUB_SHA} has no nonempty ancestor range." >&2
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/release-check-home" "$RUNNER_TEMP/release-check-state"
+          HOME="$RUNNER_TEMP/release-check-home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/release-check-state" check release \
+            --base "$release_base" --head "$release_head"
+      - name: Archive checked candidate
+        run: |
+          tar -czf "$RUNNER_TEMP/provenant-candidate.tar.gz" -C "$RUNNER_TEMP/release" .
+          git rev-parse HEAD > "$RUNNER_TEMP/candidate-commit.txt"
+          git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/candidate-tree.txt"
+          uname -m > "$RUNNER_TEMP/candidate-platform.txt"
+          cd "$RUNNER_TEMP"
+          shasum -a 256 provenant-candidate.tar.gz > provenant-candidate.tar.gz.sha256
+      - name: Upload checked candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-release-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/provenant-candidate.tar.gz
+            ${{ runner.temp }}/provenant-candidate.tar.gz.sha256
+            ${{ runner.temp }}/candidate-commit.txt
+            ${{ runner.temp }}/candidate-tree.txt
+            ${{ runner.temp }}/candidate-platform.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       # Clippy lives in the macOS test job, which compiles and caches the
       # workspace; only the Swift package tests (shared client, menu bar and
       # console) stay here, to balance the two jobs.
@@ -789,6 +854,7 @@ jobs:
       - macos-scope
       - generated-reference
       - rust-lint
+      - rust-macos-lint
       - rust-test-archive
       - rust
       - rust-macos-archive

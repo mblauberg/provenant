@@ -84,7 +84,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
-        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+        ..provenant_core::RootInputs::new(home.clone(), assets.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
     let utility = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
@@ -94,6 +94,14 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     let binding = provenant_config::bind_project(
         &roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let layout = worktrees::project_layout_for_binding(
+        &executor,
+        &binding,
+        utility.git_program_path(),
+        &worktrees::project_layout_git_environment(),
+        Duration::from_secs(5),
+        &cancel,
     )?;
     let worktree_state = state
         .join("worktrees")
@@ -108,6 +116,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         &worktrees::WorktreeContext {
             home: &home,
             repo: &repo,
+            layout: &layout,
             binding: &binding,
             project_state: &project_state,
             executor: &executor,
@@ -176,7 +185,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
-            model: "cursor/gpt-5.3-codex-low".into(),
+            model: "cursor/composer-2.5".into(),
             effort: None,
         },
         account: None,
@@ -259,7 +268,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         let saved_config = std::fs::read(state.join("config.toml")).ok();
         std::fs::write(
             state.join("config.toml"),
-            "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.fence-fixture]]\nmodel='codex/gpt-6.1-sol'\nweight=1\nefforts=[]\n[[domains.routing.pools.fence-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
+            "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.fence-fixture]]\nmodel='codex/gpt-6.1-sol'\nweight=1\nefforts=[]\n[[domains.routing.pools.fence-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n",
         )?;
         let mut pool = task.clone();
         pool.route = run::RequestedRoute::Named { required_family: None,
@@ -301,7 +310,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         assert_eq!(prepared.route.provider.as_deref(), Some("cursor"));
         assert_eq!(
             prepared.route.model.as_deref(),
-            Some("cursor/gpt-5.3-codex-low")
+            Some("cursor/composer-2.5")
         );
         let selection = prepared
             .route
@@ -332,6 +341,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             None => std::fs::remove_file(state.join("config.toml"))?,
         }
 
+        // Supply fixture-only privacy evidence; the shipped Composer row is unknown.
+        let _privacy = provenant_routing::fixture_training_override("cursor/composer-2.5", false)?;
         // A protected-paths project: confidential directories denied to every
         // lane, and a confidential task. Excluding a pool's first candidate at
         // preparation, for any cause, tries the next permitted member, even
@@ -347,7 +358,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         std::fs::write(
             state.join("config.toml"),
             format!(
-                "schema_version=1\n[domains.routing]\nsettlement_retries=0\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='codex/gpt-6.1-terra'\nweight=1\nefforts=['low']\n{protected_policy}"
+                "schema_version=1\n[domains.routing]\nsettlement_retries=0\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='codex/gpt-6.1-terra'\nweight=1\nefforts=['low']\n{protected_policy}"
             ),
         )?;
         let mut protected = task.clone();
@@ -464,7 +475,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             routes,
             [
                 "codex/gpt-6.1-terra",
-                "cursor/gpt-5.3-codex-low",
+                "cursor/composer-2.5",
                 "cursor/grok-4.7"
             ],
             "{skipped_routes:?}"
@@ -513,6 +524,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         assert!(resolved.confinement.is_some());
         drop(resolved);
         std::fs::remove_file(state.join("config.toml"))?;
+
+        drop(_privacy);
 
         // A separate access omission retains the confinement guard that
         // refused the plan, rather than being labelled a disclosure denial.
@@ -1129,6 +1142,7 @@ printf 'agy 1.0.0\n'
             policy: &launch_policy,
             command: None,
             route: &codex_route,
+            provider_model: None,
             confined: &confinement.plan,
             prompt: &codex_prompt,
             continuation: None,
@@ -1287,6 +1301,10 @@ printf 'agy 1.0.0\n'
     publishing_task
         .profile
         .knobs
+        .insert("lanes.sandbox".into(), serde_json::json!("on"));
+    publishing_task
+        .profile
+        .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
     let publishing = prepare_with(
         &registry,
@@ -1316,50 +1334,77 @@ printf 'agy 1.0.0\n'
         .github_credential
         .as_ref()
         .ok_or("GitHub credential receipt")?;
+    let sandbox_effective = publishing
+        .confinement
+        .as_ref()
+        .is_some_and(|confinement| confinement.sandbox.effective);
     assert_eq!(credential.identity.as_deref(), Some("user"));
     assert_eq!(credential.source, "default");
-    assert_eq!(credential.delivery, "injected");
+    assert_eq!(
+        credential.delivery,
+        if sandbox_effective {
+            "injected"
+        } else {
+            "ambient"
+        }
+    );
     assert_eq!(credential.mediation, "gh wrapper (advisory)");
     assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
-    assert!(gh_config.is_dir());
-    assert!(
-        publishing
-            .environment
-            .iter()
-            .any(|(key, value)| key == "GH_CONFIG_DIR" && value == gh_config.as_os_str())
-    );
-    assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
     let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
-    assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
     assert!(gh_shim.contains(provenant_config::GH_INVOCATIONS_FILE));
-    assert!(
-        !gh_shim.contains(
-            home.join(".config/gh")
-                .to_str()
-                .ok_or("host gh config path")?
-        )
-    );
-    // If gh is installed, exercise its real configuration parser without a
-    // network request. The private directory gives the ordinary default even
-    // when the host config is linked or absent.
-    if let Ok(real_gh) = find_executable("gh") {
-        let argv = [
-            real_gh.into_os_string(),
-            "config".into(),
-            "get".into(),
-            "git_protocol".into(),
-        ];
-        let environment = [
-            ("HOME".into(), home.as_os_str().to_owned()),
-            ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
-            ("GH_TOKEN".into(), "fixture-host-token".into()),
-        ];
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
-        options.env = Some(&environment);
-        let actual = executor.execute(options)?;
-        assert_eq!(actual.termination, Termination::Exit(0));
-        assert_eq!(actual.stdout.bytes, b"https\n");
+    if sandbox_effective {
+        assert!(gh_config.is_dir());
+        assert!(
+            publishing
+                .environment
+                .iter()
+                .any(|(key, value)| key == "GH_CONFIG_DIR" && value == gh_config.as_os_str())
+        );
+        assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
+        assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
+        assert!(
+            !gh_shim.contains(
+                home.join(".config/gh")
+                    .to_str()
+                    .ok_or("host gh config path")?
+            )
+        );
+        // Exercise gh's real parser only with the attempt-private config. A
+        // native launch deliberately retains the caller's own config.
+        if let Ok(real_gh) = find_executable("gh") {
+            let argv = [
+                real_gh.into_os_string(),
+                "config".into(),
+                "get".into(),
+                "git_protocol".into(),
+            ];
+            let environment = [
+                ("HOME".into(), home.as_os_str().to_owned()),
+                ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
+                ("GH_TOKEN".into(), "fixture-host-token".into()),
+            ];
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+            options.env = Some(&environment);
+            let actual = executor.execute(options)?;
+            assert_eq!(actual.termination, Termination::Exit(0));
+            assert_eq!(actual.stdout.bytes, b"https\n");
+        }
+    } else {
+        assert!(!gh_config.exists());
+        assert!(
+            !publishing
+                .environment
+                .iter()
+                .any(|(key, _)| key == "GH_CONFIG_DIR")
+        );
+        assert!(
+            publishing
+                .environment
+                .iter()
+                .any(|(key, value)| key == "HOME" && value == home.as_os_str())
+        );
+        assert!(!gh_shim.contains("GH_CONFIG_DIR="));
     }
     let profile = &publishing
         .confinement
@@ -1584,11 +1629,13 @@ printf 'agy 1.0.0\n'
             "-l".into(),
             label.into(),
         ];
-        executor.execute(ExecOptions::new(
+        let mut options = ExecOptions::new(
             &argv,
             &attempt,
             std::time::Duration::from_secs(5),
-        ))
+        );
+        options.env = Some(&publishing.environment);
+        executor.execute(options)
     };
     let denied = run_shim("ci")?;
     assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
@@ -1605,7 +1652,7 @@ printf 'agy 1.0.0\n'
     let saved_config = std::fs::read(state.join("config.toml"))?;
     std::fs::write(
         state.join("config.toml"),
-        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
+        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
     )?;
     let mut redraw_task = task.clone();
     redraw_task.route = run::RequestedRoute::Named { required_family: None,
@@ -1778,7 +1825,7 @@ printf 'agy 1.0.0\n'
     assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
     assert_eq!(
         launch.route.model.as_deref(),
-        Some("cursor/gpt-5.3-codex-low")
+        Some("cursor/composer-2.5")
     );
     assert_eq!(launch.argv[0], executable.as_os_str());
     let scratch = paths.temporary.join("candidate-0");

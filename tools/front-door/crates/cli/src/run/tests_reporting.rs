@@ -195,7 +195,12 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
                 )
                 .unwrap();
             assert_eq!(decoded.outcome, run::Outcome::Failed);
-            assert_eq!(decoded.reason.as_deref(), Some(reason.as_str()));
+            let expected = if result == "{" && suffix.is_empty() {
+                "provider protocol frame ended before the record was complete"
+            } else {
+                reason.as_str()
+            };
+            assert_eq!(decoded.reason.as_deref(), Some(expected));
         }
     }
 }

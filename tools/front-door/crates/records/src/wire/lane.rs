@@ -38,6 +38,8 @@ lane_row! {
         superseded_by: Option<String> => nullable(string());
         cause: Option<crate::run::SettlementReason> => nullable(settlement_reason_schema());
         state: String => string();
+        presence: Option<LanePresence> => nullable(choices(&["live", "unattended", "unknown", "settling"]));
+        recorded_state: Option<String> => nullable(string());
         exit_code: Option<i64> => nullable(integer());
         reason: Option<String> => nullable(string());
         settlement: Option<LaneSettlement> => nullable(object(&[("reason", nullable(string()))], &[]));
@@ -70,9 +72,14 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
+        steering: crate::run::SteeringStatus => object(&[
+            ("state", choices(&["queued", "resumed", "not_continued"])),
+            ("operations", array(object(&[("operation_id", string()), ("message_id", string())], &[]))),
+            ("successor", nullable(string())),
+        ], &[("cause", choices(&["session_unavailable", "session_mismatch", "session_proof_incomplete", "terminal_stop", "continuation_refused"]))]);
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "context_handoff", "blocked", "lane_token_lost"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "project_binding_directory_unsafe", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "empty_writer_result", "context_handoff", "blocked", "lane_token_lost", "steered"]);
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
@@ -178,6 +185,7 @@ pub struct LaneProjectionFacts {
     pub lane_class: Option<String>,
     pub overdue: Option<bool>,
     pub stale: Option<bool>,
+    pub presence: Option<LanePresence>,
     pub result_path: Option<crate::StructuredPathWire>,
     pub transcript: Option<LaneTranscript>,
     pub cache_read_share: Option<f64>,
@@ -187,6 +195,16 @@ pub struct LaneProjectionFacts {
     pub retained_git_objects: Option<crate::StructuredPathWire>,
     /// Retention evicted the attempt's bulk payload; its records remain.
     pub payload_evicted: bool,
+}
+
+/// Current native liveness observation for a durable attempt state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanePresence {
+    Live,
+    Unattended,
+    Unknown,
+    Settling,
 }
 
 fn project_route(route: Option<&crate::run::RouteRecord>) -> Value {
@@ -228,6 +246,31 @@ impl LaneRow {
     pub fn project(lane: &crate::run::AttemptRecord, facts: LaneProjectionFacts) -> Self {
         use crate::run::AttemptState;
         let (mut state, mut terminal_reason) = Self::state_and_reason(&lane.state);
+        let recorded_state = state.clone();
+        if let Some(presence) = facts.presence {
+            state = match presence {
+                LanePresence::Live => "running",
+                LanePresence::Unattended => "unattended",
+                LanePresence::Unknown => "unknown",
+                LanePresence::Settling => "settling",
+            }
+            .to_owned();
+            if presence != LanePresence::Live {
+                let target = lane.key.to_string();
+                terminal_reason = Some(match presence {
+                    LanePresence::Unattended => format!(
+                        "the writer process is gone; run `provenant reconcile {target}` to settle the attempt before retrying"
+                    ),
+                    LanePresence::Unknown => format!(
+                        "the writer process state cannot be verified; run `provenant reconcile {target}` to inspect recovery before retrying"
+                    ),
+                    LanePresence::Settling => format!(
+                        "the writer exited and recovery is pending; run `provenant reconcile {target}` to finish settlement"
+                    ),
+                    LanePresence::Live => unreachable!(),
+                });
+            }
+        }
         // Settlement reasons are closed, locally recorded facts, unlike the
         // terminal state's free text, which can contain provider output.
         if let Some(reason) = lane.settlement_reason
@@ -380,6 +423,8 @@ impl LaneRow {
             matches!(lane.state, AttemptState::Terminal { .. }).then_some(LaneSettlement {
                 reason: terminal_reason,
             });
+        let recorded_state =
+            (facts.presence.is_some() && state != recorded_state).then_some(recorded_state);
         Self {
             project_id: lane.project_id.to_string(),
             graph: lane.key.graph().to_owned(),
@@ -412,6 +457,8 @@ impl LaneRow {
                 }
             },
             state,
+            presence: facts.presence,
+            recorded_state,
             exit_code,
             reason,
             settlement,
@@ -461,6 +508,7 @@ impl LaneRow {
             protected_paths: json!(protected_paths),
             delivery,
             continuation: json!(lane.continuation),
+            steering: lane.steering.clone(),
             cache_read_share: facts.cache_read_share,
             result_path: json!(facts.result_path),
             transcript: facts.transcript,
@@ -547,6 +595,7 @@ pub fn provider_seconds(provider_ms: Option<u64>) -> Option<f64> {
 impl crate::run::TerminalCause {
     pub const ALL: &'static [Self] = &[
         Self::SourceViewRefused,
+        Self::ProjectBindingDirectoryUnsafe,
         Self::AccountLoginRequired,
         Self::RouteResolutionRefused,
         Self::AccessPolicyRefused,
@@ -576,6 +625,7 @@ impl crate::run::TerminalCause {
         Self::ContextHandoff,
         Self::Blocked,
         Self::LaneTokenLost,
+        Self::Steered,
     ];
 }
 
@@ -587,6 +637,7 @@ mod terminal_cause_tests {
     fn every_terminal_cause_is_covered(cause: TerminalCause) {
         match cause {
             TerminalCause::SourceViewRefused
+            | TerminalCause::ProjectBindingDirectoryUnsafe
             | TerminalCause::AccountLoginRequired
             | TerminalCause::RouteResolutionRefused
             | TerminalCause::AccessPolicyRefused
@@ -615,7 +666,8 @@ mod terminal_cause_tests {
             | TerminalCause::EmptyWriterResult
             | TerminalCause::ContextHandoff
             | TerminalCause::Blocked
-            | TerminalCause::LaneTokenLost => {}
+            | TerminalCause::LaneTokenLost
+            | TerminalCause::Steered => {}
         }
     }
 

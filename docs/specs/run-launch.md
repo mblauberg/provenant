@@ -9,9 +9,18 @@ Paths are relative to `tools/front-door/`.
 
 Admission commits the reservation and attempt together. A verified worktree has
 at most one writer; resource probes do not hold the shared registry lock or run
-inside the transaction. Busy capacity is not a queue. Uncertain custody keeps
-its ownership until release is proved.
+inside the transaction. Busy capacity is not a queue. Direct-run custody uses
+the same captured project and actor identity as the run store. Uncertain custody
+keeps its ownership until release is proved.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
+
+A launch is uncertain only once its reservation may record a handoff. A host
+that cannot hold provider custody refuses before that point: the attempt ends
+with `unsupported_platform` and its custody is withdrawn, never reported as an
+unknown launch awaiting a receipt. A launch cancelled or refused before it
+spawns needs no custody, so it records `never_spawned` the same way on every
+host.
+- Why: a launch that cannot start must not look like a lost lane.
 
 Permanent pre-admission refusals are durable outcomes of their operation. Replay
 returns the refusal without preparing again; a failure to store it is not

@@ -44,6 +44,14 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         &roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
     )?;
+    let layout = worktrees::project_layout_for_binding(
+        &executor,
+        &binding,
+        utility.git_program_path(),
+        &worktrees::project_layout_git_environment(),
+        Duration::from_secs(5),
+        &cancel,
+    )?;
     let worktree_state = state
         .join("worktrees")
         .join(binding.project_id().to_string());
@@ -57,6 +65,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         &worktrees::WorktreeContext {
             home: &home,
             repo: &repo,
+            layout: &layout,
             binding: &binding,
             project_state: &project_state,
             executor: &executor,
@@ -120,7 +129,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
-            model: "cursor/gpt-5.3-codex-low".into(),
+            model: "cursor/composer-2.5".into(),
             effort: None,
         },
         account: None,
@@ -491,6 +500,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
 #[test]
 fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/fabric.md#session-ready-steering
     use provenant_core::{AttemptId, Digest};
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -708,6 +718,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 policy: &launch_policy,
                 command: None,
                 route: &route,
+                provider_model: None,
                 confined: &plan,
                 prompt: &prompt,
                 continuation: Some(&continuation),
@@ -825,10 +836,29 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 transcript
             );
         } else {
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("retained provider continuation is missing or expired"));
-            assert!(error.contains("attempt-private state"));
-            assert!(error.contains("start a new lane"));
+            let error = result.unwrap_err();
+            if AdapterSpec::get(adapter).is_some_and(|spec| {
+                spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            }) {
+                assert!(matches!(
+                    &error,
+                    ContinuationError::Provider(
+                        provenant_providers::ProviderError::UnknownIdentity
+                    )
+                ));
+                assert_eq!(
+                    error.boundary_class(),
+                    provenant_records::diagnostic::BoundaryClass::Authority
+                );
+            } else {
+                let error = error.to_string();
+                assert!(error.contains("retained provider continuation is missing or expired"));
+                assert_eq!(
+                    error.contains("attempt-private state"),
+                    AdapterSpec::get(adapter).is_some_and(|spec| spec.relocated_session_state)
+                );
+                assert!(error.contains("start a new lane"));
+            }
             if adapter == "opencode" {
                 let temp = tempfile::tempdir()?;
                 let root = temp.path().canonicalize()?;

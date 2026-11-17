@@ -471,6 +471,9 @@ fn agy_registration_and_quota_follow_the_google_identity() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = quota_rig()?;
     support::clear_accounts(&rig)?;
+    let account = rig.home.join(".agy-work");
+    fs::create_dir_all(account.join("Library/Keychains"))?;
+    fs::write(account.join("Library/Keychains/login.keychain-db"), "")?;
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     let agy = bin.join("agy");
@@ -496,7 +499,7 @@ cat "$HOME/agy-usage"
         "../crates/providers/src/quota/fixtures/agy.json"
     ))?;
     fs::write(
-        rig.home.join("agy-usage"),
+        account.join("agy-usage"),
         serde_json::to_vec(&fixture["payload"])?,
     )?;
     let register = || -> Result<serde_json::Value> {
@@ -507,7 +510,7 @@ cat "$HOME/agy-usage"
             "--adapter",
             "agy",
             "--directory",
-            rig.home.to_str().ok_or("home path")?,
+            account.to_str().ok_or("account path")?,
             "--json",
         ])?;
         assert_eq!(
@@ -526,12 +529,12 @@ cat "$HOME/agy-usage"
     let stale_lock = rig.state.join("probe-0123456789abcdef01234567.lock");
     fs::create_dir(&stale)?;
     fs::write(&stale_lock, b"")?;
-    fs::write(rig.home.join("agy-email"), "one@example.test")?;
+    fs::write(account.join("agy-email"), "one@example.test")?;
     let one = register()?.as_str().ok_or("account key")?.to_owned();
     let fingerprint = provenant_providers::identity::fingerprint("one@example.test")
         .ok_or("fixture fingerprint")?;
     assert_eq!(one, format!("agy-google-{}", &fingerprint[..12]));
-    let cwd = fs::read_to_string(rig.home.join("agy-cwd"))?;
+    let cwd = fs::read_to_string(account.join("agy-cwd"))?;
     let cwd = std::path::Path::new(cwd.trim());
     assert_eq!(cwd.parent(), Some(fs::canonicalize(&rig.state)?.as_path()));
     assert!(
@@ -557,7 +560,7 @@ cat "$HOME/agy-usage"
     }]);
     fs::write(&record_path, serde_json::to_vec(&record)?)?;
 
-    fs::write(rig.home.join("agy-email"), "two@example.test")?;
+    fs::write(account.join("agy-email"), "two@example.test")?;
     let two = register()?.as_str().ok_or("second account key")?.to_owned();
     assert_ne!(one, two);
     assert_eq!(
@@ -573,7 +576,7 @@ cat "$HOME/agy-usage"
     )?)?;
     assert_eq!(second["account"]["account_key"], two);
     assert_eq!(second["refusals"], serde_json::json!([]));
-    fs::write(rig.home.join("agy-email"), "one@example.test")?;
+    fs::write(account.join("agy-email"), "one@example.test")?;
     assert_eq!(register()?, one);
     // Registering the first identity again replaces its reading with a fresh
     // probe under the same key, and keeps its refusal.
@@ -599,7 +602,7 @@ cat "$HOME/agy-usage"
     // A changed sign-in must never publish usage into the registered scope.
     record["last_attempt_unix_seconds"] = serde_json::json!(at - 60);
     fs::write(&record_path, serde_json::to_vec(&record)?)?;
-    fs::write(rig.home.join("agy-email"), "two@example.test")?;
+    fs::write(account.join("agy-email"), "two@example.test")?;
     assert_eq!(
         code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
         0
@@ -609,7 +612,7 @@ cat "$HOME/agy-usage"
     assert_eq!(refused["snapshot"], record["snapshot"]);
 
     // Missing identity cannot silently register a label-based account.
-    fs::write(rig.home.join("agy-email"), "")?;
+    fs::write(account.join("agy-email"), "")?;
     let out = rig.command(&[
         "accounts",
         "register",
@@ -617,7 +620,7 @@ cat "$HOME/agy-usage"
         "--adapter",
         "agy",
         "--directory",
-        rig.home.to_str().ok_or("home path")?,
+        account.to_str().ok_or("account path")?,
         "--json",
     ])?;
     assert_ne!(code(&out), 0);
@@ -723,13 +726,13 @@ cat "$HOME/agy-usage"
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../crates/providers/src/quota/fixtures/agy.json"
     ))?;
+    let first = rig.home.join(".agy-first");
+    fs::create_dir_all(first.join("Library/Keychains"))?;
+    fs::write(first.join("Library/Keychains/login.keychain-db"), "")?;
     let second = rig.home.join(".agy-second");
     fs::create_dir_all(second.join("Library/Keychains"))?;
     fs::write(second.join("Library/Keychains/login.keychain-db"), "")?;
-    for (directory, email) in [
-        (&rig.home, "one@example.test"),
-        (&second, "two@example.test"),
-    ] {
+    for (directory, email) in [(&first, "one@example.test"), (&second, "two@example.test")] {
         fs::write(directory.join("agy-email"), email)?;
         fs::write(
             directory.join("agy-usage"),
@@ -737,7 +740,7 @@ cat "$HOME/agy-usage"
         )?;
     }
     let mut keys = Vec::new();
-    for (label, directory) in [("first", &rig.home), ("second", &second)] {
+    for (label, directory) in [("first", &first), ("second", &second)] {
         let out = rig.command(&[
             "accounts",
             "register",
@@ -773,14 +776,14 @@ cat "$HOME/agy-usage"
     };
     // Registration ran agy twice under each account's own HOME: once to read
     // the identity and once to probe that account's quota.
-    assert_eq!(probed(&rig.home)?, 2);
+    assert_eq!(probed(&first)?, 2);
     assert_eq!(probed(&second)?, 2);
     assert_eq!(
         code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
         0
     );
     // Both readings are fresh, so the tick probes neither account again.
-    assert_eq!(probed(&rig.home)?, 2);
+    assert_eq!(probed(&first)?, 2);
     assert_eq!(probed(&second)?, 2);
     let out = rig.command(&["quota", "show", "--json"])?;
     assert_eq!(

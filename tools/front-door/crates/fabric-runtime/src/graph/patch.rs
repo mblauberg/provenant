@@ -639,7 +639,9 @@ fn retry_node_scope(
         }
     }
     // Settled consumers keep the generations they observed, including any
-    // internal outputs they selected directly. Pending consumers see the redo.
+    // internal outputs they selected directly. Composite rows are derived
+    // from their current members, so they must not snapshot a member being
+    // retried. Pending consumers see the redo.
     let mut affected = reset_ids.clone();
     loop {
         let before = affected.len();
@@ -652,18 +654,49 @@ fn retry_node_scope(
             break;
         }
     }
+    // A member retry also changes the enclosing composite's derived export.
+    // Settled external consumers must keep the composite generation they
+    // observed, alongside snapshots of the directly reset members.
+    let mut snapshot_ids = reset_ids.clone();
+    snapshot_ids.extend(
+        expanded
+            .nodes
+            .iter()
+            .filter(|node| node.composite.is_some() && affected.contains(&node.id))
+            .map(|node| node.id.clone()),
+    );
     for consumer in &mut candidate.nodes {
         if !reset_ids.contains(&consumer.id)
             && affected.contains(&consumer.id)
             && consumer.state.settled()
         {
-            let snapshots = &mut consumer.settled_dependency_snapshots;
-            for prior in graph
-                .checkpoint
+            let composite_members = expanded
                 .nodes
                 .iter()
-                .filter(|node| reset_ids.contains(&node.id) && node.state.settled())
-            {
+                .find(|node| node.id == consumer.id && node.composite.is_some())
+                .map(|node| node.composite_members.as_slice());
+            let is_composite_member = |id: &str| {
+                composite_members.is_some_and(|members| {
+                    members.iter().any(|member| {
+                        id == member
+                            || id
+                                .strip_prefix(member)
+                                .is_some_and(|suffix| suffix.starts_with("--"))
+                    })
+                })
+            };
+            let snapshots = &mut consumer.settled_dependency_snapshots;
+            if composite_members.is_some() {
+                // Composite outputs and state are derived from current member
+                // settlement, even when the composite itself was settled.
+                snapshots.retain(|id, _| !is_composite_member(id));
+            }
+            for prior in graph.checkpoint.nodes.iter().filter(|node| {
+                node.id != consumer.id
+                    && snapshot_ids.contains(&node.id)
+                    && node.state.settled()
+                    && !is_composite_member(&node.id)
+            }) {
                 let mut snapshot = prior.clone();
                 snapshot.settled_dependency_snapshots.clear();
                 snapshot.previous_attempts.clear();
@@ -1513,17 +1546,30 @@ pub(super) fn commit(
             progress.skip_reason = Some(format!("skipped by patch revision {revision}"));
         }
     }
+    composites::reconcile_checkpoint(plan, checkpoint);
     plans::remaining(checkpoint, preview, limits);
     revision
 }
 
-/// Whether an admitted patch skipped `id`.
+/// Whether the checkpoint row still carries an admitted patch skip for `id`.
+/// A retry resets the row and clears its patch skip reason.
 pub(super) fn skipped_by_patch(checkpoint: &GraphCheckpoint, id: &str) -> bool {
+    let Some(reason) = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == id)
+        .and_then(|progress| progress.skip_reason.as_deref())
+    else {
+        return false;
+    };
     checkpoint
         .expansions
         .iter()
         .filter_map(|expansion| expansion.patch.as_ref())
-        .any(|record| record.skipped.iter().any(|skipped| skipped == id))
+        .any(|record| {
+            record.skipped.iter().any(|skipped| skipped == id)
+                && reason == format!("skipped by patch revision {}", record.revision)
+        })
 }
 
 pub(super) fn correct_review_verdict(

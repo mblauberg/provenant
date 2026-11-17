@@ -191,8 +191,6 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    crate::process_os::provider::ensure_supported()?;
     if owned.command.protected_commands.len() > 128
         || owned
             .command
@@ -724,6 +722,7 @@ const USAGE_KEYS: usize = 65_536;
 struct Events {
     terminal: std::sync::atomic::AtomicBool,
     rejected: std::sync::atomic::AtomicBool,
+    identity_conflict: std::sync::atomic::AtomicBool,
     usage: std::sync::Mutex<Usage>,
 }
 /// Live token usage: one figure per provider call, summed, and the context
@@ -756,6 +755,14 @@ impl Events {
     fn context(&self) -> Option<u64> {
         self.usage.lock().ok().and_then(|usage| usage.context)
     }
+
+    /// Protocol rejection and a validated provider identity conflict both
+    /// make the live stream unsafe to continue. The latter remains separately
+    /// sealed in ProcessExit for Run's continuation decision.
+    fn protocol_rejection_observed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.rejected.load(Ordering::Relaxed) || self.identity_conflict.load(Ordering::Acquire)
+    }
 }
 impl provenant_os::capture::DecodedEventSink for Events {
     fn try_send(
@@ -769,6 +776,9 @@ impl provenant_os::capture::DecodedEventSink for Events {
             }
             provenant_os::capture::FrameEvent::ProtocolRejected => {
                 self.rejected.store(true, Ordering::Relaxed)
+            }
+            provenant_os::capture::FrameEvent::IdentityConflict => {
+                self.identity_conflict.store(true, Ordering::Release)
             }
             provenant_os::capture::FrameEvent::Usage {
                 key,
@@ -1049,6 +1059,21 @@ impl Driver<'_> {
                     decoder,
                     events: &out_events,
                 });
+        if let Some(identity) = child.identity() {
+            let source = provenant_os::capture::CaptureSourceIdentity {
+                attempt: self.reservation.scope.attempt.to_string(),
+                generation: self.reservation.scope.generation,
+                boot: identity.boot.clone(),
+                pid: identity.pid,
+                native_start: identity.native_start,
+            };
+            if let Some(decoder) = hooks.stdout_decoder {
+                decoder.bind_source(&source);
+            }
+            if let Some(decoder) = hooks.stderr_decoder {
+                decoder.bind_source(&source);
+            }
+        }
         let err_decoder =
             hooks
                 .stderr_decoder
@@ -1076,6 +1101,7 @@ impl Driver<'_> {
         let mut stop_at = None;
         let mut killed = false;
         let mut terminal = false;
+        let mut capture_drain_truncated = false;
         let mut last_checkpoint = None;
         let mut last_observation_ms: Option<u64> = None;
         let mut last_cpu_observation_ms = 0;
@@ -1264,8 +1290,8 @@ impl Driver<'_> {
                 && (out_events.terminal.load(Ordering::Relaxed)
                     || err_events.terminal.load(Ordering::Relaxed));
             terminal |= newly_terminal;
-            let rejected = out_events.rejected.load(Ordering::Relaxed)
-                || err_events.rejected.load(Ordering::Relaxed);
+            let rejected = out_events.protocol_rejection_observed()
+                || err_events.protocol_rejection_observed();
             let tokens = out_events.tokens().saturating_add(err_events.tokens());
             if plan.token_budget > 0
                 && !budget_warned
@@ -1336,6 +1362,7 @@ impl Driver<'_> {
             } else if let Some(reason) = request {
                 match reason {
                     machine::StopReason::ExplicitCancellation => Event::Cancel,
+                    machine::StopReason::Steered => Event::Steer,
                     machine::StopReason::ProtocolRejected => Event::ProtocolRejected,
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
                     machine::StopReason::TokenBudget => Event::TokenBudget,
@@ -1388,8 +1415,11 @@ impl Driver<'_> {
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
                         let outcome = stop_delivery_outcome(child.stop(false));
-                        if reason == machine::StopReason::ExplicitCancellation
-                            && outcome == DeliveryOutcome::Delivered
+                        if matches!(
+                            reason,
+                            machine::StopReason::ExplicitCancellation
+                                | machine::StopReason::Steered
+                        ) && outcome == DeliveryOutcome::Delivered
                         {
                             cancel_delivered_before_exit = true;
                         }
@@ -1425,7 +1455,10 @@ impl Driver<'_> {
                 let reason = stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup);
                 let outcome = stop_delivery_outcome(child.stop(true));
                 if exit.is_none()
-                    && reason == machine::StopReason::ExplicitCancellation
+                    && matches!(
+                        reason,
+                        machine::StopReason::ExplicitCancellation | machine::StopReason::Steered
+                    )
                     && outcome == DeliveryOutcome::Delivered
                 {
                     cancel_delivered_before_exit = true;
@@ -1456,6 +1489,7 @@ impl Driver<'_> {
                 let pipes_done = child.stdout.is_none() && child.stderr.is_none();
                 if pipes_done || drain_deadline.is_some_and(|deadline| now >= deadline) {
                     if !pipes_done {
+                        capture_drain_truncated = true;
                         warn(
                             &mut warnings,
                             &mut omitted_warnings,
@@ -1609,6 +1643,8 @@ impl Driver<'_> {
                     scope: Scope,
                     guardian: &'a ProcessIdentity,
                     provider: Option<&'a ProcessIdentity>,
+                    descendants: &'a [ProcessIdentity],
+                    census_complete: bool,
                     priority: Option<i32>,
                     phase: Phase,
                     stdout_bytes: u64,
@@ -1629,6 +1665,9 @@ impl Driver<'_> {
                     scope: self.reservation.scope,
                     guardian: &self.guardian,
                     provider: self.reservation.provider.as_ref(),
+                    descendants: &self.reservation.descendants,
+                    census_complete: !self.reservation.census_incomplete
+                        && self.reservation.omitted_descendants == 0,
                     priority: child.priority,
                     phase: state.phase(),
                     stdout_bytes: out.outcome().total_bytes,
@@ -1855,6 +1894,25 @@ impl Driver<'_> {
             }
         }
         let mut totals = totals.into_iter();
+        let stdout = totals.next().unwrap_or_default();
+        let stderr = totals.next().unwrap_or_default();
+        let provider_identity_conflict = out_events
+            .identity_conflict
+            .load(std::sync::atomic::Ordering::Acquire)
+            || hooks
+                .stdout_decoder
+                .is_some_and(|decoder| decoder.identity_conflict_observed());
+        let provider_identity_eof_fragment = hooks
+            .stdout_decoder
+            .is_some_and(|decoder| decoder.identity_eof_fragment_observed());
+        let provider_identity_evidence_incomplete = hooks.stdout_decoder.is_some()
+            && (capture_drain_truncated
+                || stdout.oversized_frames > 0
+                || stdout.decoder_lost_frames > 0
+                || stdout.read_failed
+                || hooks
+                    .stdout_decoder
+                    .is_some_and(|decoder| decoder.identity_evidence_incomplete()));
         let record = ProcessExit {
             schema_version: 1,
             scope: self.reservation.scope,
@@ -1864,6 +1922,9 @@ impl Driver<'_> {
             priority: child.priority,
             stop_reason,
             cancel_delivered_before_exit: Some(cancel_delivered_before_exit),
+            provider_identity_conflict,
+            provider_identity_evidence_incomplete,
+            provider_identity_eof_fragment,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,
@@ -1888,8 +1949,8 @@ impl Driver<'_> {
                 Vec::new()
             },
             settlement_evidence: self.settlement_evidence,
-            stdout: totals.next().unwrap_or_default(),
-            stderr: totals.next().unwrap_or_default(),
+            stdout,
+            stderr,
             warnings: warnings.clone(),
             omitted_warnings,
             extra: Default::default(),
@@ -2128,10 +2189,19 @@ impl Driver<'_> {
         drop(self._custody.take());
         // Worktree exclusion spans settlement retries; attempt custody is free.
         let settled = (|| {
-            if holder
-                .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
-                .is_err()
+            if let Err(error) =
+                holder.terminal(&self.holder_context, &self.attempt, &exit, &recovery)
             {
+                if let Err(persist_error) = crate::settlement_progress::terminal_failed(
+                    &self.attempt,
+                    self.reservation.scope,
+                    &error.to_string(),
+                ) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "cannot retain terminal failure: {persist_error}"
+                    );
+                }
                 return false;
             }
             let verified = self

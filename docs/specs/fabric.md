@@ -17,6 +17,10 @@ own use, flags and limits. Paths are relative to `tools/front-door/`.
 
 ## Identity and store
 
+Chair custody and session checkpoints derive the actor through the same
+harness-aware inbox identity. When `PROVENANT_SESSION_ID` is unset, custody
+uses the saved session for that actor if one exists.
+
 ### Projects never merge by guess
 
 `ProjectId` derives from the host and canonical Git common directory, so linked
@@ -144,10 +148,118 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
-### Live steering unavailable
+### Implementation planning
 
-Every provider currently returns `control_unsupported` for live steering; delivery transports come later (2.1, #3278).
-The host verifies launch evidence and ownership before reading steering input.
+An `implement` or `implement.issue` brief is sized by a read-only plan node
+before its writer starts, unless the brief is bounded. `bounded=true` gives the
+writer the brief directly; `implement.plan` and `implement.fix` never add a
+plan node. `run implement --no-plan` is shorthand for `--set bounded=true` on
+any `implement` or `implement.*` template, and other templates ignore it.
+- Why: an open brief must be split before a junior writer takes it, while a
+  brief already sized as one slice should not pay for a planner.
+- Owner: `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+
+### Composite settlement
+
+A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. An explicit `GraphPatch` skip of a composite remains authoritative until a later replacement or retry supersedes it; reconciliation still recomputes the other active composite boundaries in the same checkpoint. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.
+- Why: recovery must validate a checkpoint against the topology it records.
+- Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
+
+### Session-ready steering
+
+`provenant steer` accepts bounded, operation-idempotent instructions for the
+exact running graph attempt. Each accepted operation has its own durable text
+and receipt; settlement combines them in arrival order into one continuation.
+The host's shared adapter stream decoder records the first validated session
+identity against the admitted provider route and spawned process identity. It
+requests an interrupt through the attempt's existing custody owner only after
+that readiness record is durable. If readiness is not yet available, the text
+stays queued while the provider continues. After settlement, the graph resumes
+the same provider, model, account and session with the saved instructions as
+the next user turn. It must preserve writer custody and must not fall back to a
+fresh session when retained provider state is missing or expired.
+For native provider launches, the host records one session root for the final
+prepared candidate and binds it to the selected provider, model and account.
+Terminal settlement and the next prepared launch check that host-owned selector
+against the sealed applied route; no mutable account registry lookup or broad
+home scan can redirect identity. Codex uses the selected root to read its
+unchanged v1 rollout metadata and validates the exact saved session and model,
+including a locally discovered account whose selection is not persisted in the
+accounts registry. The provider receives the exact saved session ID and its
+existing stream decoder must confirm that identity and route; missing, expired,
+unreadable or contradictory state stays not-continued. Native account state is
+not scanned or copied into the successor. Sandboxed state continues from
+attempt-private storage; providers that explicitly retain state there, such as
+OpenCode, continue through that same private-state owner.
+The guardian preserves the typed `steered` stop through exit publication, and
+Run admits that continuation only when the intentional interrupt was delivered
+before exit. A stream identity error also leaves a route- and process-bound
+conflict fence when the rejected first frame yields no usable session event;
+that fence is not session-readiness evidence. The guardian seals this live
+conflict separately from the bounded stdout tail, so a failed ledger write or a
+discarded head frame cannot erase it. Oversized frames, undecodable
+delimiter-complete frames, unreadable output, or drain-truncated live output
+also seal incomplete identity evidence; settlement leaves that result
+unsettled instead of admitting a same-session continuation. The guardian
+immediately routes a live identity conflict through its existing protocol
+rejection stop path while preserving the separate conflict evidence for
+settlement. It separately records an incomplete JSON record in the final bytes
+only when the stream reaches actual EOF. That final fragment is tolerated only
+after a delivered `ExplicitCancellation` or `Steered` stop; natural completion
+and uncertain signal delivery remain unsettled. A parseable final record still
+passes through the shared adapter checks, so a session or model mismatch always
+fences continuation, including when that record has no trailing newline.
+
+The receipt says `queued` only after the text is durable. It does not claim a
+provider interrupt or resumed continuation; graph/run status owns those later
+outcomes. Status exposes `queued`, `resumed` or `not_continued`,
+the stable operation and message IDs, and the successor when known. A
+launcher’s typed `launched` receipt records admission but leaves the status
+`queued`. `resumed` requires the child's observed session to match the
+predecessor session and its sealed applied route to retain the provider, model
+and account. Optional model telemetry keeps the configured identity policy:
+missing telemetry alone does not negate the session acknowledgement, while a
+known contradiction fences continuation. A later terminal session mismatch or
+incomplete session/capture proof changes that
+interim status to `not_continued`; Run retains the earlier live acknowledgement
+fact with the terminal disposition. Terminal matching evidence finalises
+`resumed`. The disposition is durable in Run even if child evidence is later
+retained or collected. Busy, skipped, empty and uncertain launch results stay
+`queued`; a terminal refusal, verified session mismatch or incomplete terminal
+proof becomes `not_continued` with a closed safe cause. The original text
+remains in the private durable ledger in every outcome. Status never
+echoes the steering text into generic receipts or status. Replaying an
+operation with the same text returns the same intent, while reusing its ID
+with different text conflicts. The host verifies launch evidence and
+ownership before reading steering input. At local graph admission, the host stamps graph, node and attempt identity from the work key; an accepted request replay preserves that stored identity, and caller-supplied flags never establish it. If natural completion races with
+readiness or the interrupt request, settlement adopts the durable intent when
+terminal session evidence is valid. A different typed stop wins and leaves the
+saved input without an automatic continuation; a later owner cancel still wins
+after a delivered `Steered` stop without changing that stop's evidence. If the
+live session or process identity changes, or the terminal session disagrees
+with the bound expectation, status records the safe mismatch cause instead of
+starting a fresh session.
+
+Owner cancellation and same-session graph continuation admission serialise on
+the parent attempt's publication fence. A cancellation accepted before a child
+exists leaves a durable explicit-stop intent for the gate; if the child was
+already admitted, graph cancellation follows the validated continuation chain
+and targets its current leaf. The durable intent does not assert signal delivery.
+Steer and owner stops share one sealed cancel marker per attempt. Only a
+well-formed `Steered` request for exactly that attempt scope and its request ID
+leaves the marker non-stopping; admission, re-queue, import and continuation
+read any other present marker, including an undecodable or foreign one, as a
+stop.
+- Why: a marker Run cannot positively match must fail closed, as settlement
+  already does.
+
+This is continuation transport for #3318, not live input injection. Adapters
+advertise support as `continuation` only when their run path can retain and
+resume the provider session; other routes remain `unsupported`. The shared
+live decoder uses each adapter's existing stream parser, so readiness does not
+need a second provider parser or a new control protocol. Live injection may
+later optimise the same contract without changing its receipt or control
+identity.
 Only the current live continuation leaf may receive control; authenticated
 peer requests must also match the origin and receiver identities. Missing,
 conflicting, terminal or unverifiable ownership is refused.
@@ -179,7 +291,8 @@ resets or creates a worktree to satisfy a binding.
 Registered linked worktrees are verified at their real paths wherever they
 live, including `.claude/worktrees` and locations outside the project.
 Declared credential stores still refuse every overlapping source or grant;
-project-local agent configuration only warns. Explanation and launch
+project-local agent configuration is advisory, with overlap warnings off by
+default and configurable through `CONFINEMENT_SOURCE_AGENT_CONFIG_NONE`. Explanation and launch
 preparation share the same source admission decision.
 - Why: scouts share read access while review and repair keep one immutable subject.
 
@@ -270,5 +383,9 @@ dead. An uncertain remote mutation is resolved by the owner's receipt, never
 resent. Remote attempts bind the origin identity, and transferred Git objects
 are verified before use. Protocol mismatch is refused before decoding;
 credentials do not cross hosts.
+
+A peer locator identifies a registered Git common directory. Git's verified
+worktree inventory selects the checkout that owns project configuration; a
+bare common directory remains its own host-only layout root.
 
 - Why: a remote guess or resent mutation could free a live lane or apply twice.

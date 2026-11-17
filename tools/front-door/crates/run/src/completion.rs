@@ -33,9 +33,15 @@ impl RunStore {
         attempt: &Directory,
         record: &AttemptRecord,
         decoded: &Decoded,
-    ) -> Result<HandoffResult> {
+    ) -> Result<provenant_records::handoff::HandoffParse> {
+        let parsed = decoded.handoff_report();
         if let Some(handoff) = read_snapshot(attempt)? {
-            return with_scope_report(attempt, handoff);
+            let handoff = with_scope_report(attempt, handoff)?;
+            return Ok(provenant_records::handoff::HandoffParse {
+                trailing_verdict_tolerated: parsed.trailing_verdict_tolerated
+                    && handoff.as_ref().is_ok_and(Option::is_some),
+                handoff,
+            });
         }
         let interrupted = !decoded.complete
             || matches!(
@@ -46,7 +52,7 @@ impl RunStore {
                     | Outcome::TimedOut
                     | Outcome::Lost
             );
-        let handoff = match decoded.handoff() {
+        let handoff = match parsed.handoff {
             Ok(None) if interrupted => self
                 .progress_handoff(attempt, record)
                 .unwrap_or_else(|_| Err(HandoffError::new("$", "progress handoff unreadable"))),
@@ -64,7 +70,12 @@ impl RunStore {
                 HANDOFF_RECORD_BYTES as u64,
             )?;
         }
-        Ok(handoff)
+        let trailing_verdict_tolerated =
+            parsed.trailing_verdict_tolerated && handoff.as_ref().is_ok_and(Option::is_some);
+        Ok(provenant_records::handoff::HandoffParse {
+            handoff,
+            trailing_verdict_tolerated,
+        })
     }
 
     fn progress_handoff(
@@ -506,7 +517,9 @@ mod tests {
             Some(expected.clone())
         );
         assert_eq!(
-            store.capture_handoff(&attempt, &record, &decoded())??,
+            store
+                .capture_handoff(&attempt, &record, &decoded())?
+                .handoff?,
             Some(expected.clone())
         );
         assert_eq!(store.handoff(&record)??, Some(expected));
@@ -673,7 +686,8 @@ mod tests {
                 result.outcome = Outcome::Succeeded;
                 result.result = Handoff::from_json(&serde_json::to_vec(&value)?)?.fenced();
                 let safe = store
-                    .capture_handoff(&attempt, &record, &result)??
+                    .capture_handoff(&attempt, &record, &result)?
+                    .handoff?
                     .ok_or("final snapshot")?;
                 assert!(!safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
                 assert!(safe.fenced().contains("[REDACTED]"));
@@ -707,6 +721,33 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn final_handoff_records_the_single_trailing_verdict_tolerance() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let mut result = decoded();
+        result.complete = true;
+        result.outcome = Outcome::Succeeded;
+        result.result = format!(
+            "{}\nVERDICT: PASS\n",
+            Handoff::from_json(&snapshot("done"))?.fenced()
+        );
+
+        let captured = store.capture_handoff(&attempt, &record, &result)?;
+        assert!(captured.trailing_verdict_tolerated);
+        assert!(captured.handoff.as_ref().is_ok_and(Option::is_some));
+        assert_eq!(store.handoff(&record)?, captured.handoff);
+        Ok(())
+    }
+
     #[test]
     fn oversized_handoff_brief_does_not_block_settlement() -> TestResult {
         let temp = tempfile::tempdir()?;
@@ -725,7 +766,7 @@ mod tests {
         let attempt = store.attempt_dir(id, false)?;
         let mut result = decoded();
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
-        store.capture_handoff(&attempt, &old, &result)??;
+        store.capture_handoff(&attempt, &old, &result)?.handoff?;
         store
             .db
             .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
@@ -763,7 +804,8 @@ mod tests {
         grant(&mut record, &base.join("candidate-0"))?;
         assert!(
             store
-                .capture_handoff(&attempt, &record, &decoded())??
+                .capture_handoff(&attempt, &record, &decoded())?
+                .handoff?
                 .is_none()
         );
         seal(
@@ -776,7 +818,8 @@ mod tests {
         grant(&mut record, &base.join("candidate-1"))?;
         assert!(
             store
-                .capture_handoff(&attempt, &record, &decoded())??
+                .capture_handoff(&attempt, &record, &decoded())?
+                .handoff?
                 .is_none()
         );
         grant(&mut record, &base.join("candidate-0"))?;
@@ -786,7 +829,8 @@ mod tests {
         result.result = "Completed prose without a declaration".into();
         assert!(
             store
-                .capture_handoff(&attempt, &record, &result)??
+                .capture_handoff(&attempt, &record, &result)?
+                .handoff?
                 .is_none()
         );
         let done = Handoff::from_json(&snapshot("done"))?.fenced();
@@ -794,13 +838,15 @@ mod tests {
         result.result = example.clone();
         assert!(
             store
-                .capture_handoff(&attempt, &record, &result)??
+                .capture_handoff(&attempt, &record, &result)?
+                .handoff?
                 .is_none()
         );
         result.result = format!("{example}\n{done}");
         assert!(
             !store
-                .capture_handoff(&attempt, &record, &result)??
+                .capture_handoff(&attempt, &record, &result)?
+                .handoff?
                 .ok_or("missing final")?
                 .unfinished()
         );
@@ -830,7 +876,9 @@ mod tests {
             // An ungranted location is absent evidence, even if it has a file.
             grant(&mut record, temp.path())?;
             assert_eq!(
-                store.capture_handoff(&attempt, &record, &decoded())?,
+                store
+                    .capture_handoff(&attempt, &record, &decoded())?
+                    .handoff,
                 Ok(None)
             );
             grant(&mut record, &base.join("candidate-0"))?;
@@ -847,8 +895,8 @@ mod tests {
                 )?;
             }
             let result = store.capture_handoff(&attempt, &record, &decoded())?;
-            assert!(result.is_err());
-            assert_eq!(store.handoff(&record)?, result);
+            assert!(result.handoff.is_err());
+            assert_eq!(store.handoff(&record)?, result.handoff);
         }
         Ok(())
     }
@@ -886,14 +934,14 @@ mod tests {
             result.outcome = Outcome::Succeeded;
             result.result = format!("```handoff\n{value}\n```");
             let captured = store.capture_handoff(&attempt, &record, &result)?;
-            let error = captured.as_ref().unwrap_err();
+            let error = captured.handoff.as_ref().unwrap_err();
             assert_eq!(error.dropped[0].field, "verify[0]");
             assert_eq!(
                 error.retained["remaining"],
                 serde_json::json!(["Unfinished work"])
             );
             assert!(!serde_json::to_string(error)?.contains(secret));
-            assert_eq!(store.handoff(&record)?, captured);
+            assert_eq!(store.handoff(&record)?, captured.handoff);
             result.result = Handoff::from_json(&snapshot("done"))?.fenced();
             assert_eq!(store.capture_handoff(&attempt, &record, &result)?, captured);
         }

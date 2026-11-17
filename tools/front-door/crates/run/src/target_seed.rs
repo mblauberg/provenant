@@ -2,20 +2,32 @@
 #[cfg(any(unix, test))]
 use crate::cargo_seed::codes;
 use provenant_os::fs::{Directory, LockGuard, LockMode};
+use sha2::{Digest, Sha256};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
+    /// Hash of the canonical shared Git directory whose verify-base was built.
+    pub project_key: String,
     pub rustc_vv: String,
     pub host_triple: String,
     pub commit: String,
     pub profile: String,
+    pub cargo_profile: provenant_config::CargoBuildProfile,
     pub features: Vec<String>,
     pub flags: Vec<String>,
+}
+
+/// Hash a verified repository handle's canonical common Git directory for
+/// stable host-seed ownership. Linked checkouts share that directory and key.
+pub fn project_key(common_git_dir: &Path) -> String {
+    provenant_core::hex(&Sha256::digest(
+        common_git_dir.as_os_str().as_encoded_bytes(),
+    ))
 }
 
 /// Select the project's Cargo build directory using the same workspace selector
@@ -54,8 +66,77 @@ pub fn store_path(state: &Path) -> PathBuf {
     state.join("cargo-target-seeds")
 }
 
-/// The exclusive lock also protects readers for the duration of their clone.
-pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+/// Resolve host Cargo tools from the same Cargo home used by lanes, independent
+/// of the daemon's PATH. Errors are stable diagnostics and disclose the path
+/// searched without consulting a shell or guessing a home directory.
+pub fn cargo_tool(environment: &[(OsString, OsString)], tool: &str) -> io::Result<PathBuf> {
+    let home = environment
+        .iter()
+        .find(|(key, _)| key == "HOME")
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| io::Error::other(format!("{tool} unresolved: HOME not set")))?;
+    let cargo_home = provenant_confinement::cargo::CargoHome::resolve(&home, |name| {
+        environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    })?;
+    let candidate = cargo_home.path.join("bin").join(tool);
+    if !std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(io::Error::other(format!(
+            "{tool} unresolved: searched {}",
+            candidate.display()
+        )));
+    }
+    // Keep the shim name: rustup selects the invoked proxy from argv[0].
+    Ok(candidate)
+}
+
+/// Cargo environment settings that change which compiler, target, or untracked
+/// build flags a shared seed represents. Values stay in the native Cargo
+/// environment; callers use this only to decide whether caching is eligible.
+pub fn unsupported_seed_build_environment_key(key: &OsStr) -> Option<&'static str> {
+    let key = key.to_str()?;
+    match key {
+        "RUSTC" => Some("RUSTC"),
+        "CARGO_BUILD_RUSTC" => Some("CARGO_BUILD_RUSTC"),
+        "RUSTC_WRAPPER" => Some("RUSTC_WRAPPER"),
+        "RUSTC_WORKSPACE_WRAPPER" => Some("RUSTC_WORKSPACE_WRAPPER"),
+        "CARGO_BUILD_RUSTC_WRAPPER" => Some("CARGO_BUILD_RUSTC_WRAPPER"),
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER" => Some("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"),
+        "CARGO_BUILD_TARGET" => Some("CARGO_BUILD_TARGET"),
+        "RUSTFLAGS" => Some("RUSTFLAGS"),
+        "CARGO_ENCODED_RUSTFLAGS" => Some("CARGO_ENCODED_RUSTFLAGS"),
+        "CARGO_BUILD_RUSTFLAGS" => Some("CARGO_BUILD_RUSTFLAGS"),
+        "CARGO_PROFILE_DEV_DEBUG" | "CARGO_INCREMENTAL" | "CARGO_TARGET_DIR" => None,
+        "RUSTUP_AUTO_INSTALL" => None,
+        _ if key.starts_with("RUSTUP_") => Some("RUSTUP_*"),
+        _ if key.starts_with("CARGO_TARGET_") => Some("CARGO_TARGET_*"),
+        _ if key.starts_with("CARGO_PROFILE_") => Some("CARGO_PROFILE_*"),
+        _ => None,
+    }
+}
+
+/// Find an unsupported build override without exposing any environment value.
+pub fn unsupported_seed_build_environment(
+    environment: &[(OsString, OsString)],
+) -> Option<&'static str> {
+    environment.iter().find_map(|(key, value)| {
+        let key_text = key.to_str()?;
+        if key_text == "RUSTUP_AUTO_INSTALL" && value != "0" {
+            return Some("RUSTUP_AUTO_INSTALL");
+        }
+        unsupported_seed_build_environment_key(key)
+    })
+}
+
+/// Apply the same bounded TOML policy to live Cargo config files and config
+/// blobs read from a pinned verify-base tree. Input bytes are never retained.
+pub fn cargo_config_seed_eligibility(bytes: &[u8]) -> Result<(), &'static str> {
+    crate::cargo_seed::cargo_config_seed_eligibility(bytes)
+}
+
+fn open_store_directory(state: &Path) -> Result<Directory, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(state)?;
     let root = Directory::open_anchor(state)?;
     let name = OsStr::new("cargo-target-seeds");
@@ -75,7 +156,37 @@ pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
     directory
         .open_verified_directory(generations)?
         .make_private()?;
+    Ok(directory)
+}
+
+/// The exclusive lock also protects readers for the duration of their clone.
+pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+    let directory = open_store_directory(state)?;
     Ok(directory.try_lock(OsStr::new("store.lock"), LockMode::Exclusive)?)
+}
+
+/// Reacquire the store for publication after a build without dropping its
+/// completed stage on a short reader or collector lock. The bounded wait is
+/// supplied by the caller and is safe while holding the build lock: collectors
+/// and refresh probes take the store lock first and only try the build lock
+/// without waiting.
+pub fn lock_store_for_publication(
+    state: &Path,
+    timeout_seconds: u64,
+) -> Result<LockGuard, Box<dyn std::error::Error>> {
+    use provenant_core::{CancelToken, Clock, WaitBudget};
+    use std::ffi::OsStr;
+
+    let directory = open_store_directory(state)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), timeout_seconds)?;
+    Ok(directory.lock(
+        OsStr::new("store.lock"),
+        LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    )?)
 }
 
 /// Serialises host builds and protects their staging trees from GC.
@@ -87,10 +198,10 @@ pub fn lock_build(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
 
 pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    let argv = ["rustc".into(), "-vV".into()];
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| key != "RUSTUP_AUTO_INSTALL")
-        .collect();
+    let mut env: Vec<_> = std::env::vars_os().collect();
+    let rustc = cargo_tool(&env, "rustc")?;
+    let argv = [rustc.into_os_string(), "-vV".into()];
+    env.retain(|(key, _)| key != "RUSTUP_AUTO_INSTALL");
     env.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     let mut options = ExecOptions::new(&argv, worktree, std::time::Duration::from_secs(30));
     options.env = Some(&env);
@@ -138,7 +249,6 @@ pub(crate) fn lane_rustc_metadata_cancellable(
     let rustup_home = home.join(".rustup");
     let mut saw_home = false;
     for (key, value) in environment {
-        let key = key.to_string_lossy();
         if key == "RUSTUP_HOME" {
             if saw_home || Path::new(value) != rustup_home {
                 return Err(codes::RUSTUP_HOME_UNEXPECTED);
@@ -148,7 +258,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
             if value != "0" {
                 return Err(codes::RUSTUP_AUTO_INSTALL_UNEXPECTED);
             }
-        } else if key.starts_with("RUSTUP_") || key == "RUSTC" || key == "CARGO_BUILD_RUSTC" {
+        } else if unsupported_seed_build_environment_key(key).is_some() {
             return Err(codes::TOOLCHAIN_ENV_OVERRIDE);
         }
     }
@@ -324,6 +434,124 @@ mod lane_probe_tests {
     use super::*;
 
     #[test]
+    fn seed_cargo_resolves_from_fixture_cargo_home_without_path() {
+        let root = tempfile::tempdir().unwrap();
+        let cargo = root.path().join("custom cargo").join("bin").join("cargo");
+        std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+        std::fs::write(&cargo, "fixture").unwrap();
+        let environment = [
+            (OsString::from("HOME"), root.path().as_os_str().to_owned()),
+            (
+                OsString::from("CARGO_HOME"),
+                root.path().join("custom cargo").into_os_string(),
+            ),
+        ];
+
+        assert_eq!(cargo_tool(&environment, "cargo").unwrap(), cargo);
+    }
+
+    #[test]
+    fn seed_eligibility_rejects_unrecorded_compiler_and_target_overrides() {
+        for (key, expected) in [
+            ("RUSTC", "RUSTC"),
+            ("CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC"),
+            ("RUSTC_WRAPPER", "RUSTC_WRAPPER"),
+            ("RUSTC_WORKSPACE_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"),
+            ("CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"),
+            (
+                "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+                "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            ),
+            ("CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET"),
+            (
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+                "CARGO_TARGET_*",
+            ),
+            ("RUSTFLAGS", "RUSTFLAGS"),
+            ("CARGO_ENCODED_RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"),
+            ("CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"),
+            ("CARGO_PROFILE_TEST_DEBUG", "CARGO_PROFILE_*"),
+            ("RUSTUP_TOOLCHAIN", "RUSTUP_*"),
+        ] {
+            assert_eq!(
+                unsupported_seed_build_environment_key(OsStr::new(key)),
+                Some(expected),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            unsupported_seed_build_environment_key(OsStr::new("CARGO_TARGET_DIR")),
+            None
+        );
+        assert_eq!(
+            unsupported_seed_build_environment_key(OsStr::new("CARGO_PROFILE_DEV_DEBUG")),
+            None
+        );
+        let env = [
+            (OsString::from("RUSTC"), OsString::from("/secret/compiler")),
+            (OsString::from("CARGO_INCREMENTAL"), OsString::from("1")),
+        ];
+        assert_eq!(unsupported_seed_build_environment(&env), Some("RUSTC"));
+        assert!(
+            !format!("{:?}", unsupported_seed_build_environment(&env)).contains("/secret/compiler")
+        );
+        assert_eq!(
+            unsupported_seed_build_environment(&[(
+                OsString::from("RUSTUP_AUTO_INSTALL"),
+                OsString::from("1")
+            )]),
+            Some("RUSTUP_AUTO_INSTALL")
+        );
+        assert_eq!(
+            unsupported_seed_build_environment(&[(
+                OsString::from("RUSTUP_AUTO_INSTALL"),
+                OsString::from("0")
+            )]),
+            None
+        );
+    }
+
+    #[test]
+    fn seed_cargo_config_predicate_rejects_compiler_and_target_selection() {
+        for (config, expected) in [
+            (
+                "[build]\nrustc = 'secret compiler'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[build]\nrustc-wrapper = 'secret wrapper'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[build]\ntarget = 'x86_64-unknown-linux-gnu'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nlinker = 'secret linker'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[env]\nCARGO_BUILD_TARGET = 'x86_64-unknown-linux-gnu'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+        ] {
+            assert_eq!(
+                cargo_config_seed_eligibility(config.as_bytes()),
+                Err(expected),
+                "{config:?}"
+            );
+        }
+        assert_eq!(
+            cargo_config_seed_eligibility(b"[env]\nRUST_MIN_STACK = '8388608'\n"),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn cargo_selection_uses_project_configuration_and_skips_non_cargo() {
         let root = tempfile::tempdir().unwrap();
         assert!(
@@ -461,5 +689,27 @@ mod lane_probe_tests {
         let mut overridden = env.to_vec();
         overridden.push(("RUSTUP_TOOLCHAIN".into(), "nightly".into()));
         assert!(lane_rustc_metadata(&worktree, &home, &overridden).is_err());
+        for key in [
+            "RUSTC",
+            "CARGO_BUILD_RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_TARGET",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "CARGO_PROFILE_TEST_DEBUG",
+            "RUSTUP_TOOLCHAIN",
+        ] {
+            let mut overridden = env.to_vec();
+            overridden.push((key.into(), "custom override".into()));
+            assert!(
+                lane_rustc_metadata(&worktree, &home, &overridden).is_err(),
+                "{key}"
+            );
+        }
     }
 }

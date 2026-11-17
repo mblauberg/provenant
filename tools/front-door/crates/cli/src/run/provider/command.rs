@@ -26,6 +26,23 @@ fn executable_unavailable(program: &str) -> PrepareError {
     }
 }
 
+fn command_executable(
+    program: &str,
+    cwd: &Path,
+    lane_path: &run::FilteredLanePath,
+    locate_override: Option<&ExecutableLocator<'_>>,
+) -> Result<PathBuf, PrepareError> {
+    if program.contains('/') {
+        Ok(cwd.join(program))
+    } else if let Some(locate) = locate_override {
+        locate(program).map_err(|_| executable_unavailable(program))
+    } else {
+        lane_path
+            .resolve(program)
+            .map_err(|_| executable_unavailable(program))
+    }
+}
+
 /// Resolve only a host-configured entry. The result enters the ordinary lane
 /// launcher, supervisor, guardian and settlement path below this edge.
 pub(super) fn prepare_command(
@@ -33,7 +50,7 @@ pub(super) fn prepare_command(
     task: &run::TaskRequest,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    locate_override: Option<&ExecutableLocator<'_>>,
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
@@ -61,6 +78,10 @@ pub(super) fn prepare_command(
         .map(|entry| entry.adapter)
         .ok_or_else(|| unavailable(format!("{provider} is not registered")))?;
     let roots = registry.roots.ok_or("routing context is unavailable")?;
+    let project = registry
+        .project_id
+        .ok_or("selected project identity is unavailable")?;
+    let project_binding = super::confinement::registered_project_binding(roots, project)?;
     let config = crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
     let command = config.domains.fabric.commands.get(name).ok_or_else(|| {
         unavailable(format!(
@@ -73,23 +94,39 @@ pub(super) fn prepare_command(
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
     let source = source_cwd(registry, task)?;
+    let git = canonical(&match registry.host {
+        Some(host) => host.git.clone(),
+        None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
+    })?;
+    let fallback_cancel = provenant_core::CancelToken::new();
+    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
+    let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     let isolated = task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
         let assets = registry.assets.ok_or("product assets are unavailable")?;
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
-        let git = canonical(&match registry.host {
-            Some(host) => host.git.clone(),
-            None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
-        })?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
     };
-    let invocation = if program.contains('/') {
-        cwd.join(program)
-    } else {
-        locate(program).map_err(|_| executable_unavailable(program))?
+    let requester_cwd = registry.cwd.unwrap_or(&source);
+    let project_path = match task.writer.as_ref() {
+        Some(writer) => writer.project.as_path(),
+        None => requester_cwd,
     };
+    let worktree_path = if task.writer.is_some() { &cwd } else { &source };
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())
+        .map_err(|error| error.to_string())?;
+    let lane_path = crate::run::filtered_requester_lane_path(
+        registry.host,
+        project_path,
+        worktree_path,
+        &utility,
+        &git_executor,
+        cancel,
+        project_binding.as_ref(),
+    )?;
+    let invocation = command_executable(program, &cwd, &lane_path, locate_override)?;
     let executable = canonical(&invocation).map_err(|_| executable_unavailable(program))?;
     let runtimes = command
         .runtimes
@@ -98,14 +135,7 @@ pub(super) fn prepare_command(
         .collect::<Result<Vec<_>, _>>()?;
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let assets = registry.assets.ok_or("product assets are unavailable")?;
-    let project = registry
-        .project_id
-        .ok_or("selected project identity is unavailable")?;
     let launch_policy = run::launch_policy(roots.state.as_path(), &project.to_string(), task);
-    let git = canonical(&match registry.host {
-        Some(host) => host.git.clone(),
-        None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
-    })?;
     let (scratch_directory, scratch_name) =
         super::preparation::fresh_scratch_directory(&paths.temporary, provider, None)?;
     let scratch = scratch_directory
@@ -205,6 +235,7 @@ pub(super) fn prepare_command(
             images: &[],
             policy: &launch_policy,
             route: &route,
+            provider_model: None,
             command: Some(provenant_providers::command::Invocation {
                 argv: &command.argv,
                 runtimes: &runtimes,
@@ -220,6 +251,8 @@ pub(super) fn prepare_command(
             host_var: &|key| {
                 if key == provenant_core::consumer_env::SANDBOX {
                     Some(sandbox.env_value().into())
+                } else if key == "PATH" {
+                    Some(lane_path.path().to_os_string())
                 } else {
                     host_provider_var(registry, key)
                 }
@@ -244,16 +277,15 @@ pub(super) fn prepare_command(
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join(&scratch_name));
     }
-    if let Some(warning) =
+    let mut launch_warnings =
         super::preparation::image_input_warning(provider, &task.access.attachments)
-    {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "{warning}");
-    }
-    for warning in super::preparation::ignore_file_warnings(provider, task, roots.state.as_path()) {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "{warning}");
-    }
+            .into_iter()
+            .collect::<Vec<_>>();
+    launch_warnings.extend(super::preparation::ignore_file_warnings(
+        provider,
+        task,
+        roots.state.as_path(),
+    ));
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()
@@ -297,8 +329,8 @@ pub(super) fn prepare_command(
             policy.mandatory_mut().add_state_read(root)?;
         }
     }
+    set_cargo_profile(&mut spec.env, &settings, !sandbox.effective);
     if sandbox.effective {
-        set_cargo_profile(&mut spec.env, &settings);
         set_cargo_jobs(
             &mut spec.env,
             registry
@@ -355,6 +387,7 @@ pub(super) fn prepare_command(
                 .map_err(|_| unavailable("invalid tool closure receipt".into()))?,
         ),
         discovery_warnings: Some(warnings),
+        launch_warnings,
         project_paths: Some(
             serde_json::from_value(project_paths)
                 .map_err(|_| unavailable("invalid project path receipt".into()))?,
@@ -368,6 +401,7 @@ pub(super) fn prepare_command(
         .ok_or_else(|| unavailable("host Cargo binding was not finalised".into()))?;
     Ok(run::PreparedLaunch {
         limits,
+        continuation_expectation: None,
         skipped_routes: Vec::new(),
         argv: spec.argv,
         environment: spec.env,
@@ -389,6 +423,31 @@ pub(super) fn prepare_command(
             backend: None,
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_slash_path_stays_on_the_configured_path_route()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&worktree)?;
+        let lane_path =
+            run::FilteredLanePath::from_path(std::ffi::OsStr::new(""), &project, &worktree)?;
+
+        let explicit = project.join("tools/runner");
+        assert_eq!(
+            command_executable("tools/runner", &project, &lane_path, None)?,
+            explicit
+        );
+        assert!(command_executable("runner", &project, &lane_path, None).is_err());
+        Ok(())
+    }
 }
 
 #[cfg(feature = "fixture")]
@@ -686,18 +745,14 @@ pub(super) fn scratch_cargo_output(
 pub(super) fn set_cargo_profile(
     env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     settings: &provenant_config::LaneBuildSettings,
+    inherit_host_environment: bool,
 ) {
-    for (name, value) in [
-        (
-            "CARGO_INCREMENTAL",
-            if settings.incremental() { "1" } else { "0" },
-        ),
-        ("CARGO_PROFILE_DEV_DEBUG", settings.debug_level()),
-    ] {
-        if !env.iter().any(|(existing, _)| existing == name) {
-            env.push((name.into(), value.into()));
-        }
-    }
+    let host_environment = if inherit_host_environment {
+        std::env::vars_os().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let _ = settings.apply_cargo_build_profile(env, &host_environment);
 }
 
 /// A candidate that did not launch, typed by why it was skipped.

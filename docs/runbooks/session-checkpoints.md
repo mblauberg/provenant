@@ -17,6 +17,8 @@ Saves, hooks and hand-off share one inbox actor: host plus
 `CODEX_THREAD_ID` (Codex) or `CLAUDECODE=1`, `CLAUDE_CODE_SESSION_ID`,
 `CLAUDE_SESSION_ID` (Claude); with markers for both, or none, pass
 `--client claude|codex`. Lanes cannot save (`IN_LANE`).
+Fabric custody uses the same harness-aware actor. When `PROVENANT_SESSION_ID`
+is unset, it uses the saved session for that actor if one exists.
 
 A save under a changed label or old binding returns `IDENTITY`. Recover with
 `provenant workflow session save SESSION --file FILE --client HARNESS --rebind`;

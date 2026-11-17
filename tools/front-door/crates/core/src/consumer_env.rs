@@ -185,7 +185,7 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         HOME,
         Lane,
         Evolving,
-        "The attempt's private home, where provider credentials and caches are staged. It is never the caller's home.",
+        "The home directory selected during provider launch preparation. Unsandboxed lanes use the caller's home by default; a provider or selected account may choose an account-specific or private home in either mode. Provider cache and credential locations may also differ from HOME.",
         EVERY_LANE,
     ),
     var(

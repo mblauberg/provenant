@@ -153,6 +153,11 @@ impl RegisteredAccount {
     }
 }
 
+/// Whether two account configuration trees overlap, including equality.
+pub fn account_directories_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 /// Immutable registry of detected identities. A selected account cannot include
 /// another registered account's config tree in its state grants.
 pub struct Accounts(Vec<RegisteredAccount>);
@@ -163,9 +168,20 @@ impl Accounts {
         }
         for (index, account) in accounts.iter().enumerate() {
             if accounts.iter().skip(index + 1).any(|other| {
-                (account.adapter == other.adapter && account.key == other.key)
-                    || account.directory.starts_with(&other.directory)
-                    || other.directory.starts_with(&account.directory)
+                let same_identity = account.adapter == other.adapter && account.key == other.key;
+                let local_login = |account: &RegisteredAccount| {
+                    provenant_records::AdapterSpec::get(&account.adapter)
+                        .is_some_and(|spec| spec.is_unregistered_local(&account.key))
+                };
+                // Entries for an adapter with only a local login are metadata
+                // associations, not distinct trees that require isolation.
+                let shared_local_login = account.adapter == other.adapter
+                    && provenant_records::AdapterSpec::get(&account.adapter)
+                        .is_some_and(provenant_records::AdapterSpec::uses_shared_local_login);
+                same_identity
+                    || (account_directories_overlap(&account.directory, &other.directory)
+                        && !(account.adapter == other.adapter
+                            && (local_login(account) || local_login(other) || shared_local_login)))
             }) {
                 return Err(crate::ProviderError::IdentityMismatch);
             }
@@ -194,5 +210,65 @@ impl Accounts {
             })?;
         account.validate_route(route)?;
         Ok(account)
+    }
+}
+
+#[cfg(test)]
+mod account_registry_tests {
+    use super::*;
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn agy_home_login_can_coexist_with_an_isolated_registered_identity() {
+        let home = std::path::PathBuf::from("/fixture/home");
+        let local = RegisteredAccount::new("agy", "local", home.clone()).unwrap();
+        let isolated =
+            RegisteredAccount::new("agy", "agy-registered", home.join(".agy-work")).unwrap();
+        assert!(Accounts::new(vec![local, isolated]).is_ok());
+    }
+
+    #[test]
+    fn registered_account_roots_must_still_not_overlap_each_other() {
+        let home = std::path::PathBuf::from("/fixture/home");
+        let first = RegisteredAccount::new("agy", "agy-first", home.join(".agy-work")).unwrap();
+        let nested =
+            RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/nested")).unwrap();
+        assert!(matches!(
+            Accounts::new(vec![first, nested]),
+            Err(crate::ProviderError::IdentityMismatch)
+        ));
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn shared_local_login_metadata_accounts_can_share_a_directory() {
+        let store = std::path::PathBuf::from("/fixture/home/.local/share/opencode");
+        let go = RegisteredAccount::new("opencode", "opencode-go", store.clone()).unwrap();
+        let zen = RegisteredAccount::new("opencode", "opencode-zen", store).unwrap();
+        assert!(Accounts::new(vec![go, zen]).is_ok());
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn shared_local_login_does_not_allow_cross_adapter_overlap() {
+        let store = std::path::PathBuf::from("/fixture/home/.local/share/opencode");
+        let opencode = RegisteredAccount::new("opencode", "opencode-go", store.clone()).unwrap();
+        let cursor = RegisteredAccount::new("cursor", "cursor-one", store).unwrap();
+        assert!(matches!(
+            Accounts::new(vec![opencode, cursor]),
+            Err(crate::ProviderError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn local_login_does_not_hide_cross_provider_root_overlap() {
+        let home = std::path::PathBuf::from("/fixture/home");
+        let local = RegisteredAccount::new("agy", "local", home.clone()).unwrap();
+        let other_provider =
+            RegisteredAccount::new("codex", "work", home.join(".codex/work")).unwrap();
+        assert!(matches!(
+            Accounts::new(vec![local, other_provider]),
+            Err(crate::ProviderError::IdentityMismatch)
+        ));
     }
 }

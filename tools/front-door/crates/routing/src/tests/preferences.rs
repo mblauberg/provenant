@@ -62,7 +62,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         "fixture-capabilities".into(),
         vec![
             RoutePoolMember {
-                model: ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                model: ModelId::parse("cursor/composer-2.5")?,
                 weight: 1,
                 effort: None,
                 efforts: vec![],
@@ -118,7 +118,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         (false, NetworkAccess::Open, false, "codex"),
         (false, NetworkAccess::Provider, true, "codex"),
     ] {
-        let mut query = request("cursor/gpt-5.3-codex-low")?;
+        let mut query = request("cursor/composer-2.5")?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse("fixture-capabilities")?);
         query.intent.writes = writes;
         query.intent.network = Some(network);
@@ -146,7 +146,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
                         && candidate.exclusion.is_some())
             );
         }
-        let mut explicit = request("cursor/gpt-5.3-codex-low")?;
+        let mut explicit = request("cursor/composer-2.5")?;
         explicit.intent = query.intent;
         assert_eq!(
             matches!(
@@ -175,7 +175,7 @@ fn image_input_preference_keeps_pool_weights_and_falls_back()
             "image-fixture".into(),
             vec![
                 RoutePoolMember {
-                    model: ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                    model: ModelId::parse("cursor/composer-2.5")?,
                     weight: cursor_weight,
                     effort: None,
                     efforts: vec![],
@@ -218,7 +218,7 @@ fn image_input_preference_keeps_pool_weights_and_falls_back()
         ctx.availability = &available;
         ctx.access = &access;
         ctx.launch_specs = Some(&lookup);
-        let mut query = request("cursor/gpt-5.3-codex-low")?;
+        let mut query = request("cursor/composer-2.5")?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse("image-fixture")?);
         query.intent.image_input = true;
         let mut seen = std::collections::BTreeSet::new();

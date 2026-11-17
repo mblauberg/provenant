@@ -16,6 +16,10 @@ pub enum FrameEvent {
     Progress,
     Terminal,
     ProtocolRejected,
+    /// The live provider stream contradicted its admitted identity. This is
+    /// separate from the frame's ordinary event so it can be sealed by
+    /// process custody even when the provider's state-store write fails.
+    IdentityConflict,
     /// Tokens one provider call reported while the attempt runs. `key`
     /// identifies the call, so a call that is reported again replaces its
     /// earlier figure instead of adding to it.
@@ -29,6 +33,18 @@ pub enum FrameEvent {
     },
 }
 
+/// Native process that owns the stream being decoded. The supervisor binds it
+/// after spawn and before the first read, so a decoder can attach facts to the
+/// exact live source even if its reservation update is still being published.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureSourceIdentity {
+    pub attempt: String,
+    pub generation: u64,
+    pub boot: String,
+    pub pid: i64,
+    pub native_start: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("provider frame could not be decoded")]
 pub struct DecodeFailure;
@@ -37,6 +53,35 @@ pub struct DecodeFailure;
 /// or signalling capability. Frames and partial frames are capped at FRAME_LIMIT.
 pub trait FrameDecoder: Send + Sync {
     fn decode(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure>;
+
+    /// Decode the final unterminated frame at an actual stream EOF. This is
+    /// distinct from a partial frame delivered early as a terminal signal.
+    fn decode_eof_fragment(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+        self.decode(frame)
+    }
+
+    /// Whether any live frame contradicted this decoder's bound identity.
+    /// This monotonic summary also covers source changes that arrive between
+    /// frames and therefore cannot emit an event from `decode` itself.
+    fn identity_conflict_observed(&self) -> bool {
+        false
+    }
+
+    /// Whether live stream parsing lost enough information that identity
+    /// continuity cannot be established from every delimiter-complete frame.
+    fn identity_evidence_incomplete(&self) -> bool {
+        false
+    }
+
+    /// Whether the final unterminated frame was an incomplete provider record.
+    /// This fact does not excuse loss from any delimiter-complete frame.
+    fn identity_eof_fragment_observed(&self) -> bool {
+        false
+    }
+
+    /// Bind subsequent frames to the spawned provider process. Called before
+    /// capture starts; decoders that do not need process identity may ignore it.
+    fn bind_source(&self, _identity: &CaptureSourceIdentity) {}
 
     /// Whether this decoder reports token usage while the attempt runs, which
     /// is what lets a token budget end it. A provider that reports usage only
@@ -247,7 +292,7 @@ impl Frames {
         if !self.bytes.is_empty()
             && !self.oversized
             && !self.partial_terminal_sent
-            && sink.is_some_and(|sink| self.deliver(&sink).is_err())
+            && sink.is_some_and(|sink| self.deliver_eof(&sink).is_err())
         {
             out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
         }
@@ -255,10 +300,34 @@ impl Frames {
     }
 
     fn deliver(&self, sink: &FrameDelivery<'_>) -> Result<(), QueueLoss> {
+        self.deliver_with_boundary(sink, false)
+    }
+
+    fn deliver_eof(&self, sink: &FrameDelivery<'_>) -> Result<(), QueueLoss> {
+        self.deliver_with_boundary(sink, true)
+    }
+
+    fn deliver_with_boundary(
+        &self,
+        sink: &FrameDelivery<'_>,
+        eof_fragment: bool,
+    ) -> Result<(), QueueLoss> {
         match sink {
             FrameDelivery::Raw(sink) => sink.try_frame(&self.bytes),
-            FrameDelivery::Provider { decoder, events } => match decoder.decode(&self.bytes) {
-                Ok(event) => events.try_send(event),
+            FrameDelivery::Provider { decoder, events } => match if eof_fragment {
+                decoder.decode_eof_fragment(&self.bytes)
+            } else {
+                decoder.decode(&self.bytes)
+            } {
+                Ok(event) => {
+                    let event_result = events.try_send(event);
+                    let conflict_result = if decoder.identity_conflict_observed() {
+                        events.try_send(FrameEvent::IdentityConflict)
+                    } else {
+                        Ok(())
+                    };
+                    event_result.and(conflict_result)
+                }
                 Err(_) => Err(QueueLoss::Full),
             },
         }
@@ -428,6 +497,35 @@ mod tests {
         }
     }
 
+    struct ConflictDecoder;
+    impl FrameDecoder for ConflictDecoder {
+        fn decode(&self, _frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+            Ok(FrameEvent::Terminal)
+        }
+        fn identity_conflict_observed(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct BoundaryDecoder {
+        complete_frames: std::sync::atomic::AtomicUsize,
+        eof_fragments: std::sync::atomic::AtomicUsize,
+    }
+    impl FrameDecoder for BoundaryDecoder {
+        fn decode(&self, _frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+            self.complete_frames
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(FrameEvent::Progress)
+        }
+
+        fn decode_eof_fragment(&self, _frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+            self.eof_fragments
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(FrameEvent::Progress)
+        }
+    }
+
     #[derive(Default)]
     struct EventSink {
         events: Mutex<Vec<FrameEvent>>,
@@ -508,7 +606,7 @@ mod tests {
         }
     }
 
-    fn provider<'a>(decoder: &'a TestDecoder, events: &'a EventSink) -> FrameDelivery<'a> {
+    fn provider<'a>(decoder: &'a dyn FrameDecoder, events: &'a EventSink) -> FrameDelivery<'a> {
         FrameDelivery::Provider { decoder, events }
     }
 
@@ -561,6 +659,34 @@ mod tests {
     }
 
     #[test]
+    fn actual_eof_residual_uses_its_own_decoder_boundary() {
+        let decoder = BoundaryDecoder::default();
+        let events = EventSink::default();
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Discard,
+            Some(provider(&decoder, &events)),
+            None,
+        )
+        .unwrap();
+        capture.push(b"complete\nresidual").unwrap();
+        capture.finish();
+
+        assert_eq!(
+            decoder
+                .complete_frames
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            decoder
+                .eof_fragments
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(events.collected(), vec![FrameEvent::Progress; 2]);
+    }
+
+    #[test]
     fn tail_retains_latest_bytes_across_chunks() {
         let mut capture = StreamCapture::new(StreamPolicy::Tail { limit: 4 }, None, None).unwrap();
         capture.push(b"abc").unwrap();
@@ -595,6 +721,25 @@ mod tests {
         assert!(capture.outcome().bytes.is_empty());
         assert!(capture.outcome().truncated);
         assert_eq!(events.collected(), vec![FrameEvent::Terminal]);
+    }
+
+    #[test]
+    fn live_identity_conflict_is_separate_from_the_frame_event_and_tail() {
+        let decoder = ConflictDecoder;
+        let events = EventSink::default();
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Capture { limit: 0 },
+            Some(provider(&decoder, &events)),
+            None,
+        )
+        .unwrap();
+        assert!(capture.push(b"identity-conflict\n").is_ok());
+        capture.finish();
+        assert!(capture.outcome().bytes.is_empty());
+        assert_eq!(
+            events.collected(),
+            vec![FrameEvent::Terminal, FrameEvent::IdentityConflict]
+        );
     }
 
     #[test]

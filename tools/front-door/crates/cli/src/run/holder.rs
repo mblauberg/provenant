@@ -9,6 +9,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 struct QuotaFrames {
     decoder: Mutex<Option<&'static dyn provenant_os::capture::FrameDecoder>>,
     evidence: Arc<Mutex<Option<QuotaCapture>>>,
+    source: Mutex<Option<provenant_os::capture::CaptureSourceIdentity>>,
+    identity_conflict_observed: std::sync::atomic::AtomicBool,
+    identity_evidence_incomplete: std::sync::atomic::AtomicBool,
+    identity_eof_fragment_observed: std::sync::atomic::AtomicBool,
+    // Capture invokes one stream decoder serially; scope the existing parser's
+    // typed EOF error without adding another provider parser.
+    eof_fragment_in_progress: std::sync::atomic::AtomicBool,
     stderr: bool,
 }
 struct QuotaCapture {
@@ -17,10 +24,55 @@ struct QuotaCapture {
     attempt: Directory,
     state_root: PathBuf,
     route: run::RouteRecord,
+    holder_context: Vec<u8>,
     shared: bool,
     recorded: bool,
+    pending_session: Option<String>,
+    session_ready: Option<String>,
+    pending_conflict_session: Option<String>,
+    ready_source: Option<provenant_os::capture::CaptureSourceIdentity>,
+    pending_source_conflict: bool,
+    pending_identity_conflict: bool,
+    identity_conflict: bool,
 }
+
 impl provenant_os::capture::FrameDecoder for QuotaFrames {
+    fn bind_source(&self, identity: &provenant_os::capture::CaptureSourceIdentity) {
+        let changed = if let Ok(mut source) = self.source.lock() {
+            let changed = source.as_ref().is_some_and(|saved| saved != identity);
+            *source = Some(identity.clone());
+            changed
+        } else {
+            false
+        };
+        if changed
+            && let Ok(mut guard) = self.evidence.lock()
+            && let Some(capture) = guard.as_mut()
+            && capture.session_ready.is_some()
+        {
+            capture.pending_source_conflict = true;
+            self.identity_conflict_observed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn decode_eof_fragment(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        self.eof_fragment_in_progress
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.decode(frame);
+        self.eof_fragment_in_progress
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn identity_eof_fragment_observed(&self) -> bool {
+        self.identity_eof_fragment_observed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn decode(
         &self,
         frame: &[u8],
@@ -30,29 +82,160 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             Some(decoder) => decoder.decode(frame)?,
             None => FrameEvent::Progress,
         };
+        let eof_fragment = self
+            .eof_fragment_in_progress
+            .load(std::sync::atomic::Ordering::Acquire);
+        let source = self.source.lock().ok().and_then(|source| source.clone());
         let mut guard = self.evidence.lock().map_err(|_| DecodeFailure)?;
-        if let Some(capture) = guard.as_mut().filter(|capture| !capture.recorded) {
-            let events = if self.stderr && result == FrameEvent::Terminal {
+        if let Some(capture) = guard.as_mut() {
+            let mut stream_identity_conflict = false;
+            let events: Vec<ProviderEvent> = if self.stderr && result == FrameEvent::Terminal {
                 provenant_providers::opencode::stderr_quota(frame)
                     .into_iter()
                     .collect()
             } else if self.stderr {
                 Vec::new()
             } else {
-                let mut line = frame.to_vec();
-                line.push(b'\n');
-                capture
-                    .adapter
-                    .observe(&mut capture.stream, &line)
-                    .unwrap_or_default()
+                let observed = if eof_fragment {
+                    capture
+                        .adapter
+                        .observe_eof_fragment(&mut capture.stream, frame)
+                } else {
+                    let mut line = frame.to_vec();
+                    line.push(b'\n');
+                    capture.adapter.observe(&mut capture.stream, &line)
+                };
+                match observed {
+                    Ok(events) => events,
+                    Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                        stream_identity_conflict = true;
+                        Vec::new()
+                    }
+                    Err(provenant_providers::ProviderError::IncompleteFrame) if eof_fragment => {
+                        self.identity_eof_fragment_observed
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        self.identity_evidence_incomplete
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        Vec::new()
+                    }
+                }
             };
-            if let Some(ProviderEvent::QuotaLimited {
-                pool,
-                resets_in_seconds,
-                ..
-            }) = events
-                .into_iter()
-                .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
+            if !self.stderr {
+                capture.pending_identity_conflict |= stream_identity_conflict;
+                for session in events.iter().filter_map(|event| match event {
+                    ProviderEvent::Session(session) => Some(session),
+                    _ => None,
+                }) {
+                    if capture.identity_conflict {
+                        break;
+                    }
+                    match capture.session_ready.as_deref() {
+                        Some(ready) if ready != session => {
+                            capture
+                                .pending_conflict_session
+                                .get_or_insert_with(|| session.clone());
+                        }
+                        Some(_) => {}
+                        None => match capture.pending_session.as_deref() {
+                            Some(first) if first != session => {
+                                capture
+                                    .pending_conflict_session
+                                    .get_or_insert_with(|| session.clone());
+                            }
+                            Some(_) => {}
+                            None => capture.pending_session = Some(session.clone()),
+                        },
+                    }
+                }
+                let source_conflict = capture.pending_source_conflict
+                    && capture.ready_source.as_ref() != source.as_ref();
+                if capture.pending_identity_conflict
+                    || capture.pending_conflict_session.is_some()
+                    || source_conflict
+                {
+                    self.identity_conflict_observed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                if (capture.pending_session.is_some()
+                    || capture.pending_conflict_session.is_some()
+                    || capture.pending_source_conflict
+                    || capture.pending_identity_conflict)
+                    && let Some(source) = source.as_ref()
+                    && let Ok((context, store)) = run::HolderContext::open(&capture.holder_context)
+                {
+                    let clock = SystemClock::new();
+                    let cancel = CancelToken::new();
+                    let call = run::Request {
+                        clock: &clock,
+                        cancel: &cancel,
+                    };
+                    if capture.session_ready.is_none()
+                        && let Some(session) = capture.pending_session.as_deref()
+                        && store
+                            .record_provider_session_ready(
+                                context.attempt_id,
+                                &capture.route,
+                                session,
+                                source,
+                                &call,
+                            )
+                            .unwrap_or(false)
+                    {
+                        capture.session_ready = Some(session.to_owned());
+                        capture.ready_source = Some(source.clone());
+                        capture.pending_session = None;
+                    }
+                    let conflict_session = capture.pending_conflict_session.clone().or_else(|| {
+                        (capture.pending_source_conflict
+                            && capture.ready_source.as_ref() != Some(source))
+                        .then(|| capture.session_ready.clone())
+                        .flatten()
+                    });
+                    if !capture.identity_conflict
+                        && (capture.pending_identity_conflict
+                            || (capture.session_ready.is_some() && conflict_session.is_some()))
+                    {
+                        let recorded = if capture.pending_identity_conflict {
+                            store.record_provider_identity_conflict(
+                                context.attempt_id,
+                                &capture.route,
+                                source,
+                                &call,
+                            )
+                        } else if let Some(session) = conflict_session.as_deref() {
+                            store.record_provider_session_ready(
+                                context.attempt_id,
+                                &capture.route,
+                                session,
+                                source,
+                                &call,
+                            )
+                        } else {
+                            Ok(false)
+                        }
+                        .unwrap_or(false);
+                        if recorded {
+                            // The RunStore has durably marked this identity
+                            // disagreement; no later frame can make it safe again.
+                            capture.identity_conflict = true;
+                            capture.pending_conflict_session = None;
+                            capture.pending_source_conflict = false;
+                            capture.pending_identity_conflict = false;
+                        }
+                    }
+                }
+            }
+            if !capture.recorded
+                && let Some(ProviderEvent::QuotaLimited {
+                    pool,
+                    resets_in_seconds,
+                    ..
+                }) = events
+                    .into_iter()
+                    .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
             {
                 let now = SystemClock::new().unix_seconds();
                 let evidence = QuotaEvidence {
@@ -73,6 +256,15 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             }
         }
         Ok(result)
+    }
+
+    fn identity_conflict_observed(&self) -> bool {
+        self.identity_conflict_observed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn identity_evidence_incomplete(&self) -> bool {
+        self.identity_evidence_incomplete
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn partial_terminal(&self, frame: &[u8]) -> bool {
         self.decoder
@@ -300,14 +492,12 @@ impl Holder for HostHolder<'_> {
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
         let record = store
-            .record(
-                context.attempt_id,
-                &run::Request {
-                    clock: &clock,
-                    cancel: &cancel,
-                },
-            )
+            .record(context.attempt_id, &call)
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
         let registration = provenant_providers::REGISTRY.iter().find(|entry| {
             Some(entry.adapter.id())
@@ -329,10 +519,29 @@ impl Holder for HostHolder<'_> {
             .map_err(|_| custody::CustodyError::InvalidRecord)? =
             registration.and_then(|entry| entry.stderr_decoder);
         if let (Some(registration), Some(route)) = (registration, record.applied_route.clone()) {
-            let stream = registration
-                .adapter
-                .stream(None)
+            let continuation = store
+                .continuation_expectation(context.attempt_id, &call)
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
+            let stream = match continuation.as_ref() {
+                Some(continuation) => {
+                    let model =
+                        super::stream_model(&route).ok_or(custody::CustodyError::InvalidRecord)?;
+                    registration
+                        .adapter
+                        .stream_for_continuation(&continuation.session, &model)
+                        .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?
+                }
+                None => {
+                    let mut stream = registration
+                        .adapter
+                        .stream(None)
+                        .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
+                    if let Some(model) = super::stream_model(&route) {
+                        stream.expect_model(&model);
+                    }
+                    stream
+                }
+            };
             let (configuration_root, _) = context.disk_roots();
             *self
                 .stdout_frames
@@ -344,8 +553,16 @@ impl Holder for HostHolder<'_> {
                 attempt: attempt.try_clone()?,
                 state_root: context.roots.state_root.clone(),
                 route,
+                holder_context: raw.to_vec(),
                 shared: configuration_root == context.roots.state_root,
                 recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
             });
         }
         let Some(fabric) = self.fabric(raw)? else {
@@ -444,6 +661,357 @@ mod tests {
     use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs};
     use provenant_records::CanonicalV1;
 
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn provider_identity_mismatches_are_retained_for_host_conflict_recording()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::capture::FrameDecoder;
+
+        let temp = tempfile::tempdir()?;
+        let attempt_path = temp.path().join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let registration = &provenant_providers::agy::REGISTRATION;
+        let source = provenant_os::capture::CaptureSourceIdentity {
+            attempt: "fixture-attempt".into(),
+            generation: 1,
+            boot: "fixture-boot".into(),
+            pid: 123,
+            native_start: 456,
+        };
+        let route = run::RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/gemini-3.8-flash".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::run::stream_model(&route).as_deref(),
+            Some("gemini-3.8-flash")
+        );
+        const EXPECTED_SESSION: &str = "FIXTURE_SESSION_IDENTIFIER";
+        let initial =
+            include_str!("../../../../tests/fixtures/providers/agy/live-read_only-resume.jsonl")
+                .lines()
+                .next()
+                .ok_or("Agy resume fixture has no initial frame")?;
+        // Agy streams newline-delimited JSON; complete the valid producer frame
+        // before injecting a later identity mismatch.
+        let mut initial_frame = initial.as_bytes().to_vec();
+        initial_frame.push(b'\n');
+
+        let stream = registration
+            .adapter
+            .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+        let first_frame = QuotaFrames {
+            decoder: Mutex::new(None),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: temp.path().into(),
+                route: route.clone(),
+                holder_context: Vec::new(),
+                shared: true,
+                recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
+            }))),
+            source: Mutex::new(Some(source.clone())),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+            stderr: false,
+        };
+        let wrong_first_model =
+            br#"{"event":"init","conversation_id":"FIXTURE_SESSION_IDENTIFIER","init":{"model":"other-model"}}"#;
+        assert_eq!(
+            first_frame.decode(wrong_first_model),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(first_frame.identity_conflict_observed());
+        assert!(
+            first_frame
+                .evidence
+                .lock()
+                .map_err(|_| "capture lock")?
+                .as_ref()
+                .ok_or("capture")?
+                .pending_identity_conflict
+        );
+
+        let stream = registration
+            .adapter
+            .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+        let wrong_first_session = QuotaFrames {
+            decoder: Mutex::new(None),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: temp.path().into(),
+                route: route.clone(),
+                holder_context: Vec::new(),
+                shared: true,
+                recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
+            }))),
+            source: Mutex::new(Some(source.clone())),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+            stderr: false,
+        };
+        assert_eq!(
+            wrong_first_session.decode(
+                br#"{"event":"init","conversation_id":"fresh-session","init":{"model":"gemini-3.8-flash"}}"#
+            ),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(wrong_first_session.identity_conflict_observed());
+        assert!(
+            wrong_first_session
+                .evidence
+                .lock()
+                .map_err(|_| "capture lock")?
+                .as_ref()
+                .ok_or("capture")?
+                .pending_identity_conflict
+        );
+
+        for mismatch in [
+            br#"{"event":"init","conversation_id":"another-session","init":{"model":"gemini-3.8-flash"}}"#
+                .as_slice(),
+            br#"{"event":"init","conversation_id":"FIXTURE_SESSION_IDENTIFIER","init":{"model":"other-model"}}"#.as_slice(),
+        ] {
+            let mut stream = registration
+                .adapter
+                .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+            let observed = registration.adapter.observe(&mut stream, &initial_frame)?;
+            assert!(observed.contains(&ProviderEvent::Session(EXPECTED_SESSION.into())));
+            assert!(observed.contains(&ProviderEvent::Model("gemini-3.8-flash".into())));
+            let frames = QuotaFrames {
+                decoder: Mutex::new(None),
+                evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                    adapter: registration.adapter,
+                    stream,
+                    attempt: Directory::open_anchor(&attempt_path)?,
+                    state_root: temp.path().into(),
+                    route: route.clone(),
+                    holder_context: Vec::new(),
+                    shared: true,
+                    recorded: false,
+                    pending_session: None,
+                    session_ready: Some(EXPECTED_SESSION.into()),
+                    pending_conflict_session: None,
+                    ready_source: Some(source.clone()),
+                    pending_source_conflict: false,
+                    pending_identity_conflict: false,
+                    identity_conflict: false,
+                }))),
+                source: Mutex::new(Some(source.clone())),
+                identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+                identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+                identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+                eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+                stderr: false,
+            };
+            assert_eq!(
+                frames.decode(mismatch),
+                Ok(provenant_os::capture::FrameEvent::Progress)
+            );
+            assert!(frames.identity_conflict_observed());
+            let guard = frames.evidence.lock().map_err(|_| "capture lock")?;
+            let capture = guard.as_ref().ok_or("capture")?;
+            assert!(capture.pending_identity_conflict);
+            assert!(!capture.identity_conflict);
+        }
+        let malformed = QuotaFrames {
+            decoder: Mutex::new(None),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream: registration.adapter.stream(None)?,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: temp.path().into(),
+                route,
+                holder_context: Vec::new(),
+                shared: true,
+                recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
+            }))),
+            source: Mutex::new(Some(source)),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+            stderr: false,
+        };
+        assert_eq!(
+            malformed.decode(b"not-json"),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!malformed.identity_conflict_observed());
+        assert!(malformed.identity_evidence_incomplete());
+        Ok(())
+    }
+
+    #[test]
+    fn only_an_actual_eof_incomplete_record_is_a_final_fragment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::capture::FrameDecoder;
+
+        let temp = tempfile::tempdir()?;
+        let attempt_path = temp.path().join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let registration = &provenant_providers::agy::REGISTRATION;
+        let source = provenant_os::capture::CaptureSourceIdentity {
+            attempt: "fixture-attempt".into(),
+            generation: 1,
+            boot: "fixture-boot".into(),
+            pid: 123,
+            native_start: 456,
+        };
+        let route = run::RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/expected-model".into()),
+            ..Default::default()
+        };
+        let make_frames = || -> Result<QuotaFrames, Box<dyn std::error::Error>> {
+            let stream = registration
+                .adapter
+                .stream_for_continuation("s1", "expected-model")?;
+            Ok(QuotaFrames {
+                decoder: Mutex::new(None),
+                evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                    adapter: registration.adapter,
+                    stream,
+                    attempt: Directory::open_anchor(&attempt_path)?,
+                    state_root: temp.path().into(),
+                    route: route.clone(),
+                    holder_context: Vec::new(),
+                    shared: true,
+                    recorded: false,
+                    pending_session: None,
+                    session_ready: None,
+                    pending_conflict_session: None,
+                    ready_source: None,
+                    pending_source_conflict: false,
+                    pending_identity_conflict: false,
+                    identity_conflict: false,
+                }))),
+                source: Mutex::new(Some(source.clone())),
+                identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+                identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+                identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+                eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+                stderr: false,
+            })
+        };
+
+        let partial = br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model""#;
+        let init = br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model"}}"#;
+        let eof = make_frames()?;
+        assert_eq!(
+            eof.decode(init),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert_eq!(
+            eof.decode_eof_fragment(partial),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(eof.identity_eof_fragment_observed());
+        assert!(!eof.identity_evidence_incomplete());
+        let mut stop = super::super::tests::clean_exit();
+        stop.stop_reason = Some(provenant_supervisor::machine::StopReason::Steered);
+        stop.cancel_delivered_before_exit = Some(true);
+        stop.provider_identity_eof_fragment = eof.identity_eof_fragment_observed();
+        let mut stdout = init.to_vec();
+        stdout.push(b'\n');
+        stdout.extend_from_slice(partial);
+        let decoded = Registry::default().decode_inner(
+            &route,
+            &stdout,
+            &[],
+            &stop,
+            Path::new("/nonexistent"),
+            false,
+        )?;
+        assert_eq!(decoded.session.as_deref(), Some("s1"));
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider output is partial")
+        );
+        assert_ne!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::IdentityMismatch)
+        );
+
+        let complete = make_frames()?;
+        assert_eq!(
+            complete.decode(partial),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!complete.identity_eof_fragment_observed());
+        assert!(complete.identity_evidence_incomplete());
+        let mut malformed_stop = super::super::tests::clean_exit();
+        malformed_stop.stop_reason = Some(provenant_supervisor::machine::StopReason::Steered);
+        malformed_stop.cancel_delivered_before_exit = Some(true);
+        malformed_stop.provider_identity_evidence_incomplete =
+            complete.identity_evidence_incomplete();
+        let mut malformed_stdout = init.to_vec();
+        malformed_stdout.push(b'\n');
+        malformed_stdout.extend_from_slice(partial);
+        malformed_stdout.push(b'\n');
+        let decoded = Registry::default().decode_inner(
+            &route,
+            &malformed_stdout,
+            &[],
+            &malformed_stop,
+            Path::new("/nonexistent"),
+            false,
+        )?;
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider protocol is malformed")
+        );
+
+        let valid_tail = make_frames()?;
+        assert_eq!(
+            valid_tail.decode_eof_fragment(init),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!valid_tail.identity_eof_fragment_observed());
+        assert!(!valid_tail.identity_evidence_incomplete());
+
+        let valid_mismatch = make_frames()?;
+        let wrong_model =
+            br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#;
+        assert_eq!(
+            valid_mismatch.decode_eof_fragment(wrong_model),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!valid_mismatch.identity_eof_fragment_observed());
+        assert!(valid_mismatch.identity_conflict_observed());
+        Ok(())
+    }
+
     #[test]
     fn quota_event_survives_guardian_death_and_recovery_writes_once()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -509,9 +1077,22 @@ mod tests {
                 attempt: Directory::open_anchor(&attempt_path)?,
                 state_root: state.clone(),
                 route: quota_test_route(),
+                holder_context: Vec::new(),
                 shared: true,
                 recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
             }))),
+            source: Mutex::new(None),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         frames.decode(br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#)?;
@@ -656,9 +1237,22 @@ mod tests {
                 attempt: Directory::open_anchor(&attempt)?,
                 state_root: state.clone(),
                 route: quota_test_route(),
+                holder_context: Vec::new(),
                 shared: true,
                 recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
             }))),
+            source: Mutex::new(None),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         let frame = br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#;
@@ -776,7 +1370,7 @@ mod tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: temp.path().to_path_buf(),

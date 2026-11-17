@@ -101,7 +101,11 @@ pub(crate) fn advance_graphs_after_settlement(
         read_prompts: true,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let session = provenant_cli::run::Session { store, context };
+    let session = provenant_cli::run::Session {
+        store,
+        context,
+        chair: None,
+    };
     let store = &session.store;
     // The holder admitted this successor before releasing predecessor custody.
     // Launch only now, through the ordinary host resume path. Replaying this
@@ -115,6 +119,52 @@ pub(crate) fn advance_graphs_after_settlement(
         };
         provenant_cli::run::launch_budget_wrap_up(&session, run, &edge, &call, host)
             .map_err(|failure| std::io::Error::other(failure.message))?;
+    }
+    let before_steer = store.record(settled.attempt_id, &call)?;
+    if matches!(
+        before_steer.state,
+        provenant_run::AttemptState::Terminal { .. }
+    ) && !store.steer_intent(settled.attempt_id, &call)?.is_empty()
+    {
+        let successor = match store.prepare_steer_continuation(settled.attempt_id, &call) {
+            Ok(successor) => successor,
+            Err(error) => {
+                if let Some(cause) = steer_refusal_cause(&error) {
+                    store.record_steer_not_continued(settled.attempt_id, cause, &call)?;
+                    None
+                } else {
+                    let operation = store
+                        .attempt_operation(settled.attempt_id, &call)?
+                        .operation_id;
+                    if let Some(graph) = matching_graph_hint(
+                        &roots.state,
+                        settled.project_id,
+                        &before_steer,
+                        &operation,
+                    ) {
+                        let _ = FileJournal::set_advance_error(
+                            &roots.state,
+                            settled.project_id,
+                            &graph,
+                            Some(&error.to_string()),
+                        );
+                    }
+                    return Err(Box::new(error));
+                }
+            }
+        };
+        if let Some(run) = successor {
+            let edge = provenant_cli::run::Edge {
+                roots: &roots,
+                home: &settled.roots.home,
+                assets: &settled.roots.checkout,
+                cwd: &host.cwd,
+            };
+            let started =
+                provenant_cli::run::launch_graph_continuation(&session, run, &edge, &call, host)
+                    .map_err(|failure| std::io::Error::other(failure.message))?;
+            store.record_steer_launch_result(settled.attempt_id, run, &started, &call)?;
+        }
     }
     let record = store.record(settled.attempt_id, &call)?;
     let operation = store
@@ -142,6 +192,21 @@ pub(crate) fn advance_graphs_after_settlement(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn steer_refusal_cause(
+    error: &provenant_run::RunError,
+) -> Option<provenant_records::run::SteeringCause> {
+    use provenant_records::run::SteeringCause;
+    match error {
+        provenant_run::RunError::SteerSessionUnavailable
+        | provenant_run::RunError::ProviderStateExpired => Some(SteeringCause::SessionUnavailable),
+        provenant_run::RunError::SteerSessionMismatch => Some(SteeringCause::SessionMismatch),
+        provenant_run::RunError::ContinuationRefused { .. }
+        | provenant_run::RunError::RecordedRefusal(_)
+        | provenant_run::RunError::WriterLineage(_) => Some(SteeringCause::ContinuationRefused),
+        _ => None,
+    }
 }
 
 /// Wake only the graph owned by this host-custodied attempt, after admission.

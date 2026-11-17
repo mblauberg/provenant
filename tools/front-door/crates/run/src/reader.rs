@@ -792,13 +792,17 @@ impl RunStore {
             return Err(RunError::Validation("attempt index identity"));
         }
         validate_attempt(&record)?;
-        // A budget wrap-up is one run-internal same-session successor. Graph
-        // observations already follow this field and wait on the successor.
+        // Budget wrap-up and graph steering are host-owned same-session
+        // successors. Graph observations wait for the successor to settle.
         record.superseded_by = self
             .db
             .query_row(
-                "SELECT id FROM attempts WHERE continues=?1 AND operation=?2 AND refused=0",
-                params![id.to_string(), format!("budget-wrap-up-{id}")],
+                "SELECT id FROM attempts WHERE continues=?1 AND (operation=?2 OR operation=?3) AND refused=0",
+                params![
+                    id.to_string(),
+                    format!("budget-wrap-up-{id}"),
+                    format!("graph-steer-{id}")
+                ],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -806,6 +810,9 @@ impl RunStore {
                 AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
             })
             .transpose()?;
+        // Steering text stays in its private ledger; status carries only
+        // stable operation/message IDs and the graph-owned successor.
+        record.steering = self.steering_status(id, call)?;
         let receipt: Option<(i64, Vec<u8>)> = self
             .db
             .query_row(

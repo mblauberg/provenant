@@ -15,7 +15,7 @@ use provenant_os::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
-    os::unix::ffi::OsStringExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -26,6 +26,8 @@ pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
+    #[serde(skip)]
+    lane_path: Option<FilteredLanePath>,
     /// Where the lane can write: its worktree and the project's lane areas.
     /// Host transport refuses configuration and programs located there.
     #[serde(default)]
@@ -153,6 +155,122 @@ fn publish_pickup(
         .require_durable()
         .map_err(RunError::from)
 }
+/// One owner for the lane PATH value and its automatic executable lookup.
+/// Both the search directories and resolved symlink targets stay outside the
+/// selected project and worktree.
+#[derive(Clone)]
+pub struct FilteredLanePath {
+    path: OsString,
+    directories: Vec<PathBuf>,
+    excluded_roots: Vec<PathBuf>,
+}
+
+impl FilteredLanePath {
+    /// Capture the retained requester PATH, or the host's captured search path
+    /// when the request predates PATH retention. Ambient PATH is read only when
+    /// no host handoff exists.
+    pub fn for_requester(
+        host: Option<&crate::HostLaunchContext>,
+        project: &Path,
+        worktree: &Path,
+    ) -> std::io::Result<Self> {
+        Self::for_requester_excluding_roots(host, &[project, worktree])
+    }
+
+    /// Capture the requester PATH and remove every project, executor, and
+    /// worktree root that must not supply automatic tools to the lane.
+    pub fn for_requester_excluding_roots(
+        host: Option<&crate::HostLaunchContext>,
+        excluded_roots: &[&Path],
+    ) -> std::io::Result<Self> {
+        let path = match host {
+            Some(host) => match &host.lane_path {
+                Some(path) => OsString::from_vec(path.clone()),
+                None => std::env::join_paths(&host.executable_search_path)
+                    .map_err(std::io::Error::other)?,
+            },
+            None => std::env::var_os("PATH").unwrap_or_default(),
+        };
+        Self::from_path_excluding_roots(&path, excluded_roots)
+    }
+
+    /// Filter and retain a PATH value for a host-owned delivery operation.
+    pub fn from_path(path: &OsStr, project: &Path, worktree: &Path) -> std::io::Result<Self> {
+        Self::from_path_excluding_roots(path, &[project, worktree])
+    }
+
+    /// Filter a PATH value against every verified root owned by the request.
+    pub fn from_path_excluding_roots(path: &OsStr, roots: &[&Path]) -> std::io::Result<Self> {
+        let mut excluded_roots = Vec::with_capacity(roots.len());
+        for root in roots {
+            let root = std::fs::canonicalize(root)?;
+            if !excluded_roots.contains(&root) {
+                excluded_roots.push(root);
+            }
+        }
+        let mut directories = Vec::new();
+        for directory in std::env::split_paths(path).filter(|path| path.is_absolute()) {
+            let Ok(directory) = std::fs::canonicalize(directory) else {
+                continue;
+            };
+            if excluded_roots
+                .iter()
+                .any(|root| directory.starts_with(root))
+                || directories.contains(&directory)
+            {
+                continue;
+            }
+            directories.push(directory);
+        }
+        let path = std::env::join_paths(&directories).map_err(std::io::Error::other)?;
+        Ok(Self {
+            path,
+            directories,
+            excluded_roots,
+        })
+    }
+
+    pub fn path(&self) -> &OsStr {
+        &self.path
+    }
+
+    /// Find a bare executable name on the filtered PATH. The returned path is
+    /// the original PATH candidate, preserving safe command symlinks.
+    pub fn resolve(&self, name: &str) -> std::result::Result<PathBuf, String> {
+        let name_path = Path::new(name);
+        if name.is_empty()
+            || name.contains('/')
+            || name_path.components().count() != 1
+            || !matches!(
+                name_path.components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+        {
+            return Err("automatic executable lookup requires a bare name".into());
+        }
+        for directory in &self.directories {
+            let candidate = directory.join(name);
+            if !candidate.is_file() || !provenant_os::sys::is_executable(&candidate) {
+                continue;
+            }
+            let Ok(target) = std::fs::canonicalize(&candidate) else {
+                continue;
+            };
+            if self
+                .excluded_roots
+                .iter()
+                .any(|root| target.starts_with(root))
+                || !target.is_file()
+                || !provenant_os::sys::is_executable(&target)
+            {
+                continue;
+            }
+            return Ok(candidate);
+        }
+        Err(format!("{name} executable was not found on filtered PATH"))
+    }
+}
+
 // Runtime cancellation is host-local, absent from handoffs and equality.
 impl Clone for HostDeliveryContext {
     fn clone(&self) -> Self {
@@ -160,6 +278,7 @@ impl Clone for HostDeliveryContext {
             environment: self.environment.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
+            lane_path: self.lane_path.clone(),
             lane_roots: self.lane_roots.clone(),
             cancellation: self.cancellation.clone(),
             facts: self.facts.clone(),
@@ -738,6 +857,7 @@ impl HostDeliveryContext {
                 .collect(),
             bound: None,
             tools: None,
+            lane_path: None,
             lane_roots: Vec::new(),
             cancellation: None,
             facts: Default::default(),
@@ -1301,6 +1421,22 @@ impl HostDeliveryContext {
         if let Some(run_state) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) {
             self.lane_roots.push(PathBuf::from(run_state));
         }
+        let captured_path = self
+            .environment
+            .iter()
+            .find(|(key, _)| key == b"PATH")
+            .map(|(_, value)| OsString::from_vec(value.clone()))
+            .unwrap_or_default();
+        let lane_path =
+            FilteredLanePath::from_path(&captured_path, &writer.project, &writer.worktree)
+                .map_err(|_| prepare_error(DeliveryPrepareStep::Environment, "PATH is invalid"))?;
+        let path_bytes = lane_path.path().as_bytes().to_vec();
+        if let Some((_, value)) = self.environment.iter_mut().find(|(key, _)| key == b"PATH") {
+            *value = path_bytes;
+        } else {
+            self.environment.push((b"PATH".to_vec(), path_bytes));
+        }
+        self.lane_path = Some(lane_path);
         for (key, value) in &mut self.environment {
             let name = std::str::from_utf8(key).unwrap_or_default();
             if name == "GIT_SSH_COMMAND" && !value.is_empty() {
@@ -1310,28 +1446,19 @@ impl HostDeliveryContext {
                 ));
             }
             let path = OsString::from_vec(value.clone());
-            if name == "PATH" {
-                let paths: Vec<_> = std::env::split_paths(&path)
-                    .filter(|p| p.is_absolute())
-                    .filter_map(|p| std::fs::canonicalize(p).ok())
-                    .filter(|p| !p.starts_with(&writer.worktree) && !p.starts_with(&writer.project))
-                    .collect();
-                *value = std::env::join_paths(paths)
-                    .map_err(|_| {
-                        prepare_error(DeliveryPrepareStep::Environment, "PATH is invalid")
-                    })?
-                    .into_vec();
-            } else if matches!(
-                name,
-                "HOME"
-                    | "XDG_CONFIG_HOME"
-                    | "GH_CONFIG_DIR"
-                    | "GIT_CONFIG_GLOBAL"
-                    | "GIT_CONFIG_SYSTEM"
-                    | "GIT_SSH"
-                    | "GIT_ASKPASS"
-                    | "SSH_ASKPASS"
-            ) && !value.is_empty()
+            if name != "PATH"
+                && matches!(
+                    name,
+                    "HOME"
+                        | "XDG_CONFIG_HOME"
+                        | "GH_CONFIG_DIR"
+                        | "GIT_CONFIG_GLOBAL"
+                        | "GIT_CONFIG_SYSTEM"
+                        | "GIT_SSH"
+                        | "GIT_ASKPASS"
+                        | "SSH_ASKPASS"
+                )
+                && !value.is_empty()
             {
                 *value = host_path(Path::new(&path), writer)
                     .map_err(|error| {
@@ -1356,28 +1483,20 @@ impl HostDeliveryContext {
             return host_path(&path, writer)
                 .map_err(|error| prepare_error(DeliveryPrepareStep::GitExecutable, error));
         }
-        let path = self
-            .environment
-            .iter()
-            .find(|(k, _)| k == b"PATH")
-            .map(|(_, v)| OsString::from_vec(v.clone()))
-            .ok_or_else(|| {
+        let candidate = self
+            .lane_path
+            .as_ref()
+            .ok_or_else(|| prepare_error(DeliveryPrepareStep::GhExecutable, "PATH is unavailable"))?
+            .resolve(tool)
+            .map_err(|_| {
                 prepare_error(
                     DeliveryPrepareStep::GhExecutable,
-                    format!("{tool} is unavailable: PATH is unset"),
+                    format!("{tool} is unavailable on filtered PATH"),
                 )
             })?;
-        std::env::split_paths(&path)
-            .filter(|p| p.is_absolute())
-            .map(|p| p.join(tool))
-            .filter_map(|p| std::fs::canonicalize(p).ok())
-            .find(|p| !p.starts_with(&writer.worktree) && provenant_os::sys::is_executable(p))
-            .ok_or_else(|| {
-                prepare_error(
-                    DeliveryPrepareStep::GhExecutable,
-                    format!("{tool} is unavailable on PATH"),
-                )
-            })
+        host_path(&candidate, writer)
+            .map_err(|error| prepare_error(DeliveryPrepareStep::GhExecutable, error))?;
+        Ok(candidate)
     }
     pub(super) fn command(
         &self,
@@ -3341,6 +3460,117 @@ pub(crate) fn deliver_once(
 #[cfg(test)]
 mod stored_format_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn requester_path_value_and_automatic_lookup_share_filtered_directories() -> std::io::Result<()>
+    {
+        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+
+        fn executable(path: &Path) -> std::io::Result<()> {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        }
+
+        let temp = tempfile::tempdir()?;
+        // The filtered PATH holds canonical directories; a canonical root keeps
+        // expected lookups comparable where the temporary directory is a link.
+        let root = &std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let worktree = root.join("worktree");
+        let retained = root.join("retained-bin");
+        let captured = root.join("captured-bin");
+        let project_bin = project.join("bin");
+        let worktree_bin = worktree.join("bin");
+        let shared = root.join("shared-tool");
+        for directory in [
+            &project,
+            &worktree,
+            &retained,
+            &captured,
+            &project_bin,
+            &worktree_bin,
+        ] {
+            std::fs::create_dir_all(directory)?;
+        }
+
+        executable(&retained.join("which"))?;
+        executable(&captured.join("which"))?;
+        executable(&captured.join("fallback-tool"))?;
+        executable(&shared)?;
+        executable(&project_bin.join("project-tool"))?;
+        executable(&worktree_bin.join("worktree-tool"))?;
+        std::os::unix::fs::symlink(shared, retained.join("safe-alias"))?;
+        std::os::unix::fs::symlink(
+            project_bin.join("project-tool"),
+            retained.join("project-link"),
+        )?;
+        std::os::unix::fs::symlink(
+            worktree_bin.join("worktree-tool"),
+            retained.join("worktree-link"),
+        )?;
+
+        let mut host = crate::HostLaunchContext::from_environment(
+            &root.join("state"),
+            &project,
+            PathBuf::from("/usr/bin/git"),
+        );
+        host.executable_search_path = vec![captured.clone()];
+        host.lane_path = Some(
+            std::env::join_paths([
+                retained.as_path(),
+                project_bin.as_path(),
+                worktree_bin.as_path(),
+            ])
+            .map_err(std::io::Error::other)?
+            .as_os_str()
+            .as_bytes()
+            .to_vec(),
+        );
+
+        let selected = FilteredLanePath::for_requester(Some(&host), &project, &worktree)?;
+        let directories = std::env::split_paths(selected.path()).collect::<Vec<_>>();
+        assert_eq!(directories, [std::fs::canonicalize(&retained)?]);
+        assert_eq!(
+            selected.resolve("which").map_err(std::io::Error::other)?,
+            retained.join("which")
+        );
+        assert_eq!(
+            selected
+                .resolve("safe-alias")
+                .map_err(std::io::Error::other)?,
+            retained.join("safe-alias")
+        );
+        assert!(selected.resolve("project-link").is_err());
+        assert!(selected.resolve("worktree-link").is_err());
+        assert!(selected.resolve("./which").is_err());
+
+        host.lane_path = None;
+        let captured_path = FilteredLanePath::for_requester(Some(&host), &project, &worktree)?;
+        assert_eq!(
+            captured_path
+                .resolve("which")
+                .map_err(std::io::Error::other)?,
+            captured.join("which")
+        );
+
+        host.lane_path = Some(
+            std::env::join_paths([project_bin.as_path(), worktree_bin.as_path()])
+                .map_err(std::io::Error::other)?
+                .as_os_str()
+                .as_bytes()
+                .to_vec(),
+        );
+        let empty = FilteredLanePath::for_requester(Some(&host), &project, &worktree)?;
+        assert!(empty.path().is_empty());
+        assert!(empty.resolve("fallback-tool").is_err());
+
+        let process_path = std::env::var_os("PATH").unwrap_or_default();
+        let without_host = FilteredLanePath::for_requester(None, &project, &worktree)?;
+        let expected = FilteredLanePath::from_path(&process_path, &project, &worktree)?;
+        assert_eq!(without_host.path(), expected.path());
+        Ok(())
+    }
 
     #[derive(Clone, Copy)]
     enum StoredDeliveryShape {

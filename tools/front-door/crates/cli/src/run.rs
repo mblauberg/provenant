@@ -48,6 +48,29 @@ pub use output::*;
 pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
     provider::find_executable(name)
 }
+
+/// Capture the requester's filtered PATH policy for a project and selected
+/// checkout, resolving linked-checkout roots through the verified inventory.
+pub fn filtered_requester_lane_path(
+    host: Option<&run::HostLaunchContext>,
+    project_path: &Path,
+    worktree_path: &Path,
+    utility: &provenant_confinement::UtilityRuntime,
+    executor: &dyn provenant_os::exec::Executor,
+    cancel: &CancelToken,
+    binding: Option<&provenant_config::ProjectBinding>,
+) -> Result<run::FilteredLanePath, String> {
+    provider::confinement::filtered_requester_lane_path(
+        host,
+        project_path,
+        worktree_path,
+        utility,
+        executor,
+        cancel,
+        binding,
+    )
+}
+
 #[cfg(feature = "fixture")]
 pub use provider::{apply_fixture_setup, prepare_fixture, writer_fixture_plan};
 pub use provider::{graph_inputs_directory, graph_node_inputs_directory};
@@ -57,6 +80,17 @@ pub use status::*;
 pub use submit::*;
 pub use telemetry::*;
 pub use worktree::*;
+
+/// Run route records qualify model IDs with the adapter, while provider stream
+/// events carry the bare wire ID. Strip only that exact leading adapter token.
+pub(super) fn stream_model(route: &run::RouteRecord) -> Option<String> {
+    let provider = route.provider.as_deref()?;
+    let model = route.model.as_deref()?;
+    model
+        .strip_prefix(&format!("{provider}/"))
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+}
 
 /// The first typed refusal is sealed beside the attempt before quota publication.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -600,8 +634,43 @@ impl run::Providers for Registry<'_> {
         provider_state: &Path,
         context: Option<&run::HolderContext>,
     ) -> Result<run::Decoded, String> {
-        let Some(context) = context else {
-            return self.decode_inner(route, stdout, stderr, exit, provider_state, false);
+        self.decode_captures_with_continuation(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            run::ContinuationDecodeContext {
+                context,
+                expectation: None,
+            },
+        )
+    }
+
+    fn decode_captures_with_continuation(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        continuation: run::ContinuationDecodeContext<'_>,
+    ) -> Result<run::Decoded, String> {
+        let continuation_session = continuation
+            .expectation
+            .map(|expectation| expectation.session.as_str());
+        let Some(context) = continuation.context else {
+            return self.decode_inner_expected(
+                route,
+                stdout,
+                stderr,
+                exit,
+                provider_state,
+                DecodeOptions {
+                    host_settlement: false,
+                    expected_session: continuation_session,
+                },
+            );
         };
         let (configuration_root, _) = context.disk_roots();
         // Every branch carries the holder home: without it the OpenCode
@@ -614,7 +683,17 @@ impl run::Providers for Registry<'_> {
                 home: holder_home,
                 ..Default::default()
             }
-            .decode_inner(route, stdout, stderr, exit, provider_state, false);
+            .decode_inner_expected(
+                route,
+                stdout,
+                stderr,
+                exit,
+                provider_state,
+                DecodeOptions {
+                    host_settlement: false,
+                    expected_session: continuation_session,
+                },
+            );
         }
         let mut inputs = provenant_core::RootInputs::new(
             context.roots.home.clone(),
@@ -630,13 +709,16 @@ impl run::Providers for Registry<'_> {
                     home: holder_home,
                     ..Default::default()
                 }
-                .decode_inner(
+                .decode_inner_expected(
                     route,
                     stdout,
                     stderr,
                     exit,
                     provider_state,
-                    false,
+                    DecodeOptions {
+                        host_settlement: false,
+                        expected_session: continuation_session,
+                    },
                 )?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
@@ -658,7 +740,17 @@ impl run::Providers for Registry<'_> {
             state_root: Some(configuration_root),
             ..Default::default()
         };
-        registry.decode_inner(route, stdout, stderr, exit, provider_state, true)
+        registry.decode_inner_expected(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            DecodeOptions {
+                host_settlement: true,
+                expected_session: continuation_session,
+            },
+        )
     }
     fn prepare(
         &self,
@@ -680,6 +772,20 @@ impl run::Providers for Registry<'_> {
         self.decode_inner(route, stdout, &[], exit, provider_state, false)
     }
 }
+
+fn strip_final_eof_fragment(stdout: &[u8]) -> &[u8] {
+    stdout
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&[], |newline| &stdout[..=newline])
+}
+
+#[derive(Clone, Copy)]
+struct DecodeOptions<'a> {
+    host_settlement: bool,
+    expected_session: Option<&'a str>,
+}
+
 impl Registry<'_> {
     fn decode_inner(
         &self,
@@ -690,6 +796,45 @@ impl Registry<'_> {
         provider_state: &Path,
         host_settlement: bool,
     ) -> Result<run::Decoded, String> {
+        self.decode_inner_expected(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            DecodeOptions {
+                host_settlement,
+                expected_session: None,
+            },
+        )
+    }
+
+    fn decode_inner_expected(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        options: DecodeOptions<'_>,
+    ) -> Result<run::Decoded, String> {
+        let DecodeOptions {
+            host_settlement,
+            expected_session,
+        } = options;
+        let captured_stdout_len = stdout.len();
+        let identity_evidence = run::ProviderIdentityEvidence::classify(
+            exit.provider_identity_conflict,
+            exit.provider_identity_evidence_incomplete,
+            exit.provider_identity_eof_fragment,
+            exit.stop_reason,
+            exit.cancel_delivered_before_exit,
+        );
+        let stdout = if identity_evidence.tolerates_final_eof_fragment() {
+            strip_final_eof_fragment(stdout)
+        } else {
+            stdout
+        };
         let result_event_usage = route
             .provider
             .as_deref()
@@ -711,6 +856,18 @@ impl Registry<'_> {
             partial_signals: Vec::new(),
             turns: Vec::new(),
         };
+        let unproven = |reason: &str| run::Decoded {
+            terminal_cause: None,
+            outcome: run::Outcome::Unsettled,
+            result: String::new(),
+            complete: false,
+            observed_route: None,
+            usage: run::UsageRecord::default(),
+            session: None,
+            reason: Some(reason.into()),
+            partial_signals: Vec::new(),
+            turns: Vec::new(),
+        };
         let Some(adapter) = REGISTRY
             .iter()
             .find(|r| Some(r.adapter.id()) == route.provider.as_deref())
@@ -721,12 +878,37 @@ impl Registry<'_> {
         let model_observation = provenant_records::AdapterSpec::get(adapter.id())
             .map(|spec| spec.model_observation)
             .unwrap_or(provenant_records::ModelObservation::Stream);
-        let Ok(mut state) = adapter.stream(None) else {
-            return Ok(failed("provider stream is unavailable"));
+        let model = stream_model(route);
+        let mut state = match expected_session {
+            Some(session) => {
+                let Some(model) = model.as_deref() else {
+                    return Ok(unproven(
+                        "resumed provider route has no model identity for session validation",
+                    ));
+                };
+                match adapter.stream_for_continuation(session, model) {
+                    Ok(state) => state,
+                    Err(_) => return Ok(failed("provider stream is unavailable")),
+                }
+            }
+            None => {
+                let Ok(mut state) = adapter.stream(None) else {
+                    return Ok(failed("provider stream is unavailable"));
+                };
+                if let Some(model) = model.as_deref() {
+                    state.expect_model(model);
+                }
+                state
+            }
         };
-        let (mut events, parse_error) = match adapter.observe(&mut state, stdout) {
-            Ok(events) => (events, None),
-            Err(error) => (Vec::new(), Some(error.to_string())),
+        let (mut events, parse_error, identity_mismatch) = match adapter.observe(&mut state, stdout)
+        {
+            Ok(events) => (events, None, false),
+            Err(error) => (
+                Vec::new(),
+                Some(error.to_string()),
+                matches!(error, provenant_providers::ProviderError::IdentityMismatch),
+            ),
         };
         // The prepared route key was checked against the provider identity port.
         // Keep it as observed usage identity only while the adapter still sees an authenticated stream.
@@ -754,12 +936,36 @@ impl Registry<'_> {
                     | provenant_supervisor::machine::StopReason::ContextHandoff
             )
         );
-        let Ok(outcome) = adapter.finish(
+        let outcome = adapter.finish(
             state,
             provenant_providers::ExitObservation { code, timed_out },
-        ) else {
-            return Ok(failed("provider outcome is malformed"));
+        );
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let mismatch = identity_mismatch
+                    || matches!(error, provenant_providers::ProviderError::IdentityMismatch);
+                let mut decoded = failed(if mismatch {
+                    "provider identity mismatch"
+                } else {
+                    "provider outcome is malformed"
+                });
+                if mismatch {
+                    decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                }
+                return Ok(decoded);
+            }
         };
+        if identity_mismatch {
+            let mut decoded = failed("provider identity mismatch");
+            decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+            return Ok(decoded);
+        }
+        if expected_session.is_some() && outcome.session().is_none() {
+            return Ok(unproven(
+                "resumed provider did not report its retained session",
+            ));
+        }
         events.extend(outcome.final_events().iter().cloned());
         let state_root = self
             .state_root
@@ -791,12 +997,23 @@ impl Registry<'_> {
         {
             events.push(event);
         }
+        let native_codex_home_required = route
+            .sandbox
+            .as_ref()
+            .is_none_or(|sandbox| !sandbox.effective);
         let rollout =
             (model_observation == provenant_records::ModelObservation::Rollout).then(|| {
                 outcome
                     .session()
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)
-                    .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
+                    .and_then(|thread| {
+                        provider::observe_codex_rollout(
+                            provider_state,
+                            thread,
+                            route,
+                            native_codex_home_required,
+                        )
+                    })
             });
         // The typed reason survives into the terminal record for diagnosis.
         let mut rollout_error = rollout
@@ -944,7 +1161,7 @@ impl Registry<'_> {
                 account_key: account_key.clone(),
                 ..route.clone()
             });
-            if exit.stdout.bytes > stdout.len() as u64 {
+            if exit.stdout.bytes > captured_stdout_len as u64 {
                 decoded
                     .result
                     .insert_str(0, "[output truncated; retained tail]\n");
@@ -1035,6 +1252,9 @@ impl Registry<'_> {
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
+        }
+        if identity_mismatch {
+            decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
         }
         if result_fallback && decoded.outcome == run::Outcome::Succeeded {
             decoded.reason.get_or_insert_with(|| {
@@ -1265,6 +1485,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
 pub struct Session {
     pub store: run::RunStore,
     pub context: run::ExecutionContext,
+    pub chair: Option<Result<provenant_records::custody::Chair, String>>,
 }
 impl Session {
     pub fn service(&self) -> run::Service<'_> {
@@ -1291,14 +1512,34 @@ fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     })
 }
 fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
-    let context = execution_context(edge)?;
+    let fabric = if crate::fabric::in_lane() {
+        crate::fabric::Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd)
+    } else {
+        crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)
+    }
+    .map_err(|error| match error {
+        crate::fabric::EdgeError::Config(error) => Fail::config(Status::Invalid, error),
+        error => Fail::new(Status::Error, ErrorKind::Identity, error.to_string()),
+    })?;
+    let context = run::ExecutionContext {
+        state_root: fabric.roots.state.clone(),
+        project_id: fabric.identity.project,
+        actor_id: fabric.identity.inbox.actor,
+        read_prompts: true,
+    };
+    let chair = (!fabric.in_lane)
+        .then(|| crate::fabric::current_chair(&fabric).map_err(|error| error.to_string()));
     let mut store =
         run::RunStore::open(&context, call)?.with_writer_registry(edge.roots.state.as_path());
     // Inside a lane the host binding may be unreadable; the trace then omits it.
     if let Ok(host) = provenant_config::bind_host(edge.roots) {
         store = store.with_host(host);
     }
-    Ok(Session { store, context })
+    Ok(Session {
+        store,
+        context,
+        chair,
+    })
 }
 fn open_read_only(
     edge: &Edge<'_>,

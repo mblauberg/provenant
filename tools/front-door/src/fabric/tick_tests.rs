@@ -45,7 +45,7 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),

@@ -102,6 +102,314 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
 }
 
 #[test]
+fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{collections::HashMap, os::unix::fs::PermissionsExt};
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    let path_fixture = tempfile::tempdir()?;
+    let home = path_fixture.path().join("host-home");
+    let selected_node = path_fixture.path().join("nvm/versions/node/v24.0.1");
+    let later_node = path_fixture.path().join("later-node-prefix");
+    let pnpm_package = path_fixture.path().join("pnpm-10");
+    let selected_bin = selected_node.join("bin");
+    let later_bin = later_node.join("bin");
+    let pnpm_bin = pnpm_package.join("bin");
+    for path in [
+        selected_bin.join("node"),
+        selected_bin.join("npm"),
+        later_bin.join("node"),
+        later_bin.join("npm"),
+        pnpm_bin.join("pnpm"),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("program parent"))?;
+        std::fs::write(&path, b"fixture executable")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::write(
+        pnpm_package.join("package.json"),
+        r#"{"name":"pnpm","version":"10.33.2"}"#,
+    )?;
+    std::fs::create_dir_all(later_node.join("etc"))?;
+    std::fs::write(later_node.join("etc/npmrc"), "cache=/later-node-cache\n")?;
+    let path = std::env::join_paths([&selected_bin, &pnpm_bin, &later_bin])?;
+    let host = HashMap::from([
+        (
+            provenant_core::consumer_env::SANDBOX.to_owned(),
+            "off".into(),
+        ),
+        ("PATH".to_owned(), path),
+        ("HOME".to_owned(), home.clone().into_os_string()),
+    ]);
+    // Native preparation inherits the runner's environment directly. The
+    // host lookup for cache binding must agree with those inherited XDG and
+    // package-manager values; only HOME and PATH are fixture overrides.
+    let native_host_environment = std::env::vars_os().collect::<Vec<_>>();
+    let host_var = |name: &str| {
+        host.get(name).cloned().or_else(|| {
+            native_host_environment
+                .iter()
+                .find(|(key, _)| key.to_str().is_some_and(|key| key == name))
+                .map(|(_, value)| value.clone())
+        })
+    };
+    let host_value = |name: &str| {
+        host_var(name).or_else(|| {
+            let uppercase = name.to_ascii_uppercase();
+            (uppercase != name).then(|| host_var(&uppercase)).flatten()
+        })
+    };
+    let selector_values = |env: &[(std::ffi::OsString, std::ffi::OsString)], key: &str| {
+        let mut values = env
+            .iter()
+            .filter(|(name, _)| {
+                name.to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(key))
+            })
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    };
+    let expected_npm = host_value("npm_config_cache")
+        .map(std::path::PathBuf::from)
+        .or_else(
+            || match crate::package_cache::npm_global_cache(&home, &host_var) {
+                crate::package_cache::Setting::Missing => {
+                    Some(crate::package_cache::npm_default_cache(&home))
+                }
+                crate::package_cache::Setting::Present(path) => path,
+            },
+        );
+    let expected_corepack = host_value("COREPACK_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let base = host_var("XDG_CACHE_HOME")
+                .or_else(|| host_var("LOCALAPPDATA"))
+                .map(std::path::PathBuf::from);
+            match base {
+                Some(path) => path.is_absolute().then(|| path.join("node/corepack")),
+                None => home
+                    .is_absolute()
+                    .then(|| home.join(".cache/node/corepack")),
+            }
+        });
+    let expected_pnpm_cache_default = host_var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join("pnpm"))
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                home.join("AppData/Local/pnpm-cache")
+            } else if cfg!(target_os = "macos") {
+                home.join("Library/Caches/pnpm")
+            } else {
+                home.join(".cache/pnpm")
+            }
+        });
+    let expected_pnpm_store_default =
+        if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_some() {
+            None
+        } else {
+            Some(
+                host_var("XDG_DATA_HOME")
+                    .map(std::path::PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .map(|path| path.join("pnpm/store"))
+                    .unwrap_or_else(|| {
+                        if cfg!(target_os = "windows") {
+                            home.join("AppData/Local/pnpm/store")
+                        } else if cfg!(target_os = "macos") {
+                            home.join("Library/pnpm/store")
+                        } else {
+                            home.join(".local/share/pnpm/store")
+                        }
+                    }),
+            )
+        };
+    let expected_pnpm_cache = host_value("pnpm_config_cache_dir")
+        .or_else(|| host_value("npm_config_cache_dir"))
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            match crate::package_cache::pnpm_global_path(&home, &host_var, "cacheDir", "cache-dir")
+            {
+                crate::package_cache::Setting::Missing => Some(expected_pnpm_cache_default.clone()),
+                crate::package_cache::Setting::Present(path) => path,
+            }
+        });
+    let expected_pnpm_store = host_value("pnpm_config_store_dir")
+        .or_else(|| host_value("npm_config_store_dir"))
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            match crate::package_cache::pnpm_global_path(&home, &host_var, "storeDir", "store-dir")
+            {
+                crate::package_cache::Setting::Missing => expected_pnpm_store_default.clone(),
+                crate::package_cache::Setting::Present(path) => path,
+            }
+        });
+    let keychain_root = tempfile::tempdir()?;
+    let account_home = keychain_root.path().join("accounts/agy-work");
+    let keychain = account_home.join("Library/Keychains/login.keychain-db");
+    std::fs::create_dir_all(keychain.parent().expect("keychain parent"))?;
+    std::fs::write(&keychain, b"fixture keychain metadata only")?;
+    let account = identity::RegisteredAccount::new("agy", "cache-fixture", account_home.clone())
+        .map_err(|error| std::io::Error::other(format!("Agy fixture account: {error}")))?;
+    let project = tempfile::tempdir()?;
+    std::fs::create_dir_all(project.path().join(".git"))?;
+    let project_root = project.path();
+    let prompt = Prompt::new("fixture".into());
+
+    for id in ["agy", "opencode", "codex", "cursor"] {
+        let mut route = route(id, "fixture-model");
+        let authentication = match id {
+            "agy" => {
+                route.account_key = Some(account.key().to_owned());
+                Some("keychain")
+            }
+            _ => {
+                route.account_key = None;
+                Some("login")
+            }
+        };
+        let base_plan = fixture_access_plan(Access::ReadOnly, authentication, false);
+        let mut permissions = base_plan.permissions().clone();
+        // The package-config fixture needs a real temp cwd; bind that cwd into
+        // read_roots and keep credential roots aligned with fixture_input HOME.
+        permissions.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        permissions.read_roots = vec![crate::launch::subtree(project_root)];
+        let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base_plan.scope(),
+            permissions,
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .expect("cache fixture cwd is inside its read root");
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .expect("native adapter")
+            .adapter;
+        let mut input = fixture_input(&route, &plan, &prompt, project_root, None);
+        input.host_var = &host_var;
+        input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        input.provenant.home = &home;
+        if id == "agy" {
+            input.account = Some(&account);
+        }
+        let prepared = adapter
+            .prepare(input)
+            .map_err(|error| std::io::Error::other(format!("{id} preparation failed: {error}")))?;
+        let selected_home = prepared
+            .env
+            .iter()
+            .find(|(key, _)| key == "HOME")
+            .map(|(_, value)| std::path::PathBuf::from(value))
+            .expect("selected HOME");
+        let configured = |key: &str| {
+            prepared
+                .env
+                .iter()
+                .find(|(name, _)| {
+                    name.to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(key))
+                })
+                .map(|(_, value)| std::path::PathBuf::from(value))
+        };
+        if id == "agy" {
+            assert_eq!(selected_home, account_home);
+            assert_eq!(
+                configured("npm_config_cache").as_ref(),
+                expected_npm.as_ref(),
+                "Agy must bind npm's default cache while its account HOME differs"
+            );
+            assert_eq!(
+                configured("COREPACK_HOME").as_ref(),
+                expected_corepack.as_ref(),
+                "Agy must bind Corepack downloads while its account HOME differs"
+            );
+            for (legacy, current, expected) in [
+                (
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    expected_pnpm_cache.as_ref(),
+                ),
+                (
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    expected_pnpm_store.as_ref(),
+                ),
+            ] {
+                let explicit_legacy = host_value(legacy).map(std::path::PathBuf::from);
+                let explicit_current = host_value(current).map(std::path::PathBuf::from);
+                if explicit_legacy.is_none() && explicit_current.is_none() {
+                    assert_eq!(configured(legacy).as_ref(), expected);
+                    assert!(configured(current).is_none());
+                } else {
+                    assert_eq!(configured(legacy), explicit_legacy);
+                    assert_eq!(configured(current), explicit_current);
+                }
+            }
+        }
+        if id == "opencode" {
+            assert_eq!(
+                configured("npm_config_cache"),
+                host_value("npm_config_cache").map(std::path::PathBuf::from),
+                "OpenCode keeps the host npm selector"
+            );
+            assert_eq!(
+                configured("COREPACK_HOME").as_ref(),
+                expected_corepack.as_ref(),
+                "OpenCode keeps private XDG state while Corepack downloads stay shared"
+            );
+            for (legacy, current, expected) in [
+                (
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    expected_pnpm_cache.as_ref(),
+                ),
+                (
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    expected_pnpm_store.as_ref(),
+                ),
+            ] {
+                let explicit_legacy = host_value(legacy).map(std::path::PathBuf::from);
+                let explicit_current = host_value(current).map(std::path::PathBuf::from);
+                if explicit_legacy.is_none() && explicit_current.is_none() {
+                    assert_eq!(configured(legacy).as_ref(), expected);
+                    assert!(configured(current).is_none());
+                } else {
+                    assert_eq!(configured(legacy), explicit_legacy);
+                    assert_eq!(configured(current), explicit_current);
+                }
+            }
+            assert!(prepared.env.iter().any(|(key, value)| {
+                key == "XDG_CACHE_HOME" && value == "/fixture/state/cache"
+            }));
+        }
+        if matches!(id, "codex" | "cursor") {
+            for key in [
+                "npm_config_cache",
+                "COREPACK_HOME",
+                "pnpm_config_cache_dir",
+                "npm_config_cache_dir",
+                "pnpm_config_store_dir",
+                "npm_config_store_dir",
+            ] {
+                assert_eq!(
+                    selector_values(&prepared.env, key),
+                    selector_values(&native_host_environment, key),
+                    "{id} changed or injected {key}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn codex_uses_host_cargo_home_with_private_build_outputs() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;

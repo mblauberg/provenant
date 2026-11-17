@@ -35,6 +35,24 @@ Custody facts such as lost, unsettled or cancelled retain priority; the malforme
 handoff evidence still survives in their sealed stop.
 - Why: unfinished work must not appear complete or lose its handoff.
 
+The canonical review result order is a standalone verdict followed by the
+final handoff. Every review prompt, including synthesis and the one automatic
+verdict correction, states that order and never invites text after the
+handoff. As a narrow provider-order tolerance, a valid closed final
+handoff may be followed by exactly one recognised standalone verdict, and
+nothing else. ResultCapture owns verdict recognition, so the tolerated line is
+any form it counts, and it requires exactly one canonical verdict outside
+fenced blocks. In turn-aware settlement, a later
+text-only acknowledgement may preserve an earlier handoff only when no verdict
+follows it. Once a verdict follows a handoff, the entire suffix from that
+handoff must be the sole recognised verdict: prose before or after it, another
+verdict, or a repeated handoff remains malformed. Provider-turn boundaries
+still decide whether later tool work invalidates an earlier handoff.
+Settlement records an accepted order tolerance in the terminal reason; the
+sealed handoff payload keeps its existing schema.
+- Why: tolerate providers that append their verdict after the closed handoff
+  without broadening handoff completion authority.
+
 The handoff declaration owns its fields, per-field decoding and validation.
 Decoding a valid JSON object retains independently valid fields and forward
 fields, and drops an invalid declared field whole, even when only an array item
@@ -78,6 +96,17 @@ A context handoff stops with a typed cause and a fresh graph continuation can
 receive the handoff. A dirty budget boundary takes precedence, and handoff is
 deferred during budget wrap-up.
 - Why: a continuation needs the prior work and a reliable reason for stopping.
+
+Provider identity conflicts and incomplete evidence from delimiter-complete
+frames, capture loss, oversize, read failure or drain timeout always fence a
+same-session steer continuation. The guardian records an incomplete JSON
+record at actual EOF separately; settlement may ignore only that final
+fragment after a confirmed delivered explicit cancellation or steering
+interrupt. Natural completion and uncertain delivery leave the attempt
+unsettled, and a parseable final record remains subject to the ordinary session
+and model identity checks.
+- Why: an expected interrupted tail may end mid-record without excusing loss of
+  evidence about the provider's session.
 
 ## Retention and disclosure
 

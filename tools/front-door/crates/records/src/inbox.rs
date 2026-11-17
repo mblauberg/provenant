@@ -237,6 +237,8 @@ pub enum AnswerDeliveryState {
 pub enum AnswerTransport {
     FabricMail,
     ProviderHook,
+    /// Stored steering text supplied as the next turn to the same provider session.
+    ProviderContinuation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

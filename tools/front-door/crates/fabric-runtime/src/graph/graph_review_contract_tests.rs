@@ -454,6 +454,35 @@ fn review_contract_accepts_verdict_followed_only_by_handoff() {
     assert_eq!(progress.advance_error_code, None);
 }
 
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
+    let mut node = review("review.tests", "review");
+    node.required_verdict = None;
+    let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Reviewed\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let response = format!(
+        "{}\n{handoff}\nVERDICT: PASS\n",
+        answer(json!([]), "").trim_end()
+    );
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Succeeded);
+    assert_eq!(
+        progress.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: PASS")
+    );
+    assert_eq!(progress.advance_error_code, None);
+}
+
 /// A long review ending in one verdict, a blank line and a pretty-printed
 /// handoff block is one verdict. Size alone (past the run store's head
 /// window) costs neither complete findings nor the verdict.
@@ -722,6 +751,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
     }
 }
 
+// Spec: docs/specs/run-settlement.md#settlement
 #[test]
 fn malformed_lens_is_corrected_once_without_repeating_siblings() {
     for corrected in [true, false] {
@@ -791,6 +821,16 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
             .position(|prompt| prompt.contains("only automatic verdict correction"))
             .unwrap();
         assert_eq!(correction, 1);
+        // Every review prompt, the correction and the synthesis alike, asks for
+        // the verdict line first and the closed handoff as the very last thing.
+        assert_eq!(owner.prompts.len(), 3);
+        for prompt in &owner.prompts {
+            assert!(
+                prompt.contains(super::review::VERDICT_THEN_HANDOFF),
+                "{prompt}"
+            );
+            assert!(!prompt.contains("may follow"), "{prompt}");
+        }
         assert_eq!(owner.calls[correction].0.node_id, retried.id);
         assert_eq!(
             owner

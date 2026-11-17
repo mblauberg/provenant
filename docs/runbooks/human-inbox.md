@@ -93,11 +93,13 @@ as informational warnings.
 
 ## Steering
 
-`provenant steer TARGET --brief TEXT` or `--brief-file PATH`, and `provenant
-chair message SESSION --text-stdin --channel CHANNEL`, record up to 4 KiB of
-guidance as Fabric mail with no authority; both are refused inside a lane. `chair message` queues to
-that session's own mailbox, read with `provenant fabric mail read --session
-SESSION`. No lane adapter delivers `steer` live today: it refuses with
-`control_unsupported` and records nothing (`retry` is the continuation). Per-
-adapter support is published as `provider_controls` in `provenant help --all
---json`.
+`provenant steer TARGET --brief TEXT` or `--brief-file PATH` durably queues up
+to 4 KiB of guidance for the exact running graph attempt. On continuation
+routes, the shared stream decoder waits for a route-bound session identity,
+then custody interrupts the current provider and the graph resumes that same
+session with the saved text. This is next-turn continuation, not live input
+injection. Status reports operation/message IDs and successor state without
+printing steering text. `chair message SESSION --text-stdin --channel CHANNEL`
+continues to queue guidance as Fabric mail for that session's own mailbox,
+read with `provenant fabric mail read --session SESSION`. Per-adapter steering
+support is published as `provider_controls` in `provenant help --all --json`.

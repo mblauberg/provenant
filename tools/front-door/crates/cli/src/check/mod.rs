@@ -302,7 +302,7 @@ fn checked_bytes(output: ExecOutcome) -> Result<Vec<u8>, CheckError> {
 /// around every component and the final byte read.
 pub(super) enum WorkingFile {
     Bytes(Vec<u8>),
-    Symlink(Vec<u8>),
+    Symlink { path: PathBuf, target: Vec<u8> },
     Missing,
 }
 pub(super) fn read_file(
@@ -312,13 +312,14 @@ pub(super) fn read_file(
 ) -> Result<WorkingFile, CheckError> {
     let relative = RelativePath::parse(path).map_err(provenant_records::PathWireError::from)?;
     let mut components = relative.as_path().components().peekable();
-    read_file_at(root, &mut components, limit, 0)
+    read_file_at(root, &mut components, limit, 0, &mut PathBuf::new())
 }
 fn read_file_at<'a>(
     directory: &provenant_os::fs::Directory,
     components: &mut std::iter::Peekable<std::path::Components<'a>>,
     limit: u64,
     depth: usize,
+    path: &mut PathBuf,
 ) -> Result<WorkingFile, CheckError> {
     if depth > 128 {
         return Err(CheckError::Evidence("tracked path exceeds depth bound"));
@@ -330,9 +331,13 @@ fn read_file_at<'a>(
         std::path::Component::Normal(name) => name,
         _ => return Err(CheckError::Evidence("invalid tracked path component")),
     };
+    path.push(name);
     let before = match directory.metadata_at(name, false) {
         Ok(value) => value,
-        Err(error) if error.is_not_found() => return Ok(WorkingFile::Missing),
+        Err(error) if error.is_not_found() => {
+            path.pop();
+            return Ok(WorkingFile::Missing);
+        }
         Err(error) => return Err(error.into()),
     };
     if before.kind == FileKind::Symlink {
@@ -340,9 +345,12 @@ fn read_file_at<'a>(
         if !same_metadata(&before, &directory.metadata_at(name, false)?) {
             return Err(CheckError::Evidence("tracked symlink changed"));
         }
-        return Ok(WorkingFile::Symlink(
-            target.as_os_str().as_encoded_bytes().to_vec(),
-        ));
+        let link_path = path.clone();
+        path.pop();
+        return Ok(WorkingFile::Symlink {
+            path: link_path,
+            target: target.as_os_str().as_encoded_bytes().to_vec(),
+        });
     }
     if components.peek().is_some() {
         if before.kind != FileKind::Directory {
@@ -354,10 +362,11 @@ fn read_file_at<'a>(
         if !before.same_identity(&child.metadata()?) {
             return Err(CheckError::Evidence("tracked directory changed"));
         }
-        let result = read_file_at(&child, components, limit, depth + 1)?;
+        let result = read_file_at(&child, components, limit, depth + 1, path)?;
         if !same_metadata(&before, &directory.metadata_at(name, false)?) {
             return Err(CheckError::Evidence("tracked directory changed"));
         }
+        path.pop();
         return Ok(result);
     }
     if before.kind != FileKind::Regular {
@@ -387,6 +396,7 @@ fn read_file_at<'a>(
             "tracked input changed during inspection",
         ));
     }
+    path.pop();
     Ok(WorkingFile::Bytes(bytes))
 }
 fn same_metadata(a: &Metadata, b: &Metadata) -> bool {

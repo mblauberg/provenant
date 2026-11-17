@@ -273,33 +273,8 @@ fn prepare(
     })
     .to_string();
     let package = package_grant(input.executable, &mut omitted_discovery, input.policy)?;
-    // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
-    let bin = plan.scratch.path.join("bin");
-    let writer = access == Access::WorktreeWrite;
     let defaults = crate::launch::tool_search_path(input.home, true, input.policy)?;
-    let path = match std::env::join_paths(
-        std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
-    ) {
-        Ok(path) => path,
-        Err(_) if !writer => {
-            crate::launch::policy_warning(
-                input.policy,
-                "OPENCODE_PREPARE_NONE_2",
-                "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
-            )?;
-            defaults
-        }
-        Err(_) => {
-            return Err(input.policy.boundary_error(
-                "OPENCODE_PREPARE_GIT_ISOLATION",
-                provenant_records::policy::Facts::violation(
-                    "the private Git launcher cannot be placed first in PATH",
-                ),
-                ProviderError::InvalidPath,
-            ));
-        }
-    };
-    let mut env = base_env(input, &plan.scratch.path, path);
+    let mut env = base_env(input, &plan.scratch.path, defaults)?;
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)
@@ -374,11 +349,6 @@ fn prepare(
         SetupStep::Symlink {
             link: data.join("auth.json"),
             target: host_data.join("auth.json"),
-        },
-        SetupStep::CreateDir(bin.clone()),
-        SetupStep::Symlink {
-            link: bin.join("git"),
-            target: input.provenant.git.to_owned(),
         },
     ];
     // Mirror ordinary provider settings as individual links. Lane-owned
@@ -485,6 +455,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state: crate::SessionStateLocation::AttemptPrivate,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables,
@@ -1979,7 +1950,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
 
     #[cfg(unix)]
     #[test]
-    fn read_only_search_path_skips_unencodable_git_shim_directory() {
+    fn search_path_is_independent_of_unencodable_git_shim_directory() {
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
         let base = crate::tests::read_only_plan("/fixture", Some("login"));
         let scratch = tempfile::tempdir().unwrap();
@@ -2014,15 +1985,18 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
         let defaults = crate::launch::tool_search_path(input.home, true, input.policy).unwrap();
         assert_eq!(path, &defaults);
-        assert!(matches!(
-            prepare(
-                &input,
-                Access::WorktreeWrite,
-                Session::Fresh,
-                OpenCode.stream(None).unwrap()
-            ),
-            Err(ProviderError::InvalidPath)
-        ));
+        let writer = prepare(
+            &input,
+            Access::WorktreeWrite,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .expect("OpenCode's provider builder leaves Git wrapper setup to shared finalisation");
+        assert_eq!(
+            writer.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
+            defaults,
+            "provider preparation must not add a private Git prefix"
+        );
     }
 
     #[test]
@@ -2201,12 +2175,12 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                     _ => panic!("unexpected setup step: {step:?}"),
                 }
             }
+            // OpenCode's provider builder leaves Git wrapper setup to the
+            // shared finaliser; it does not create the removed private prefix.
+            assert!(!project_parent.join("scratch/bin/git").exists());
             assert_eq!(
-                project_parent
-                    .join("scratch/bin/git")
-                    .canonicalize()
-                    .unwrap(),
-                git
+                spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
+                crate::launch::tool_search_path(&home, true, input.policy).unwrap()
             );
             assert!(spec.profile.spec.runtime_reads.contains(&subtree(&package)));
             let directories = required_anchors(plan.permissions(), &spec.profile, None)

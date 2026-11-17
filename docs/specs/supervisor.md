@@ -47,6 +47,59 @@ then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
+### Read-only writer presence
+
+Status uses the recorded boot, PID and native start identity for the guardian,
+provider and tracked descendants. It reports a writer as live only when the
+guardian or provider's exact identity is present and non-zombie. A changed boot
+proves the old process tree is gone. Same-boot absence remains unknown even
+with a complete census: the durable process checkpoint can predate a fork into
+another session or process group, and the census cannot identify that untracked
+child after reparenting. A sealed process exit reports settlement as pending.
+Missing or malformed checkpoints, reused PIDs, inaccessible processes and
+incomplete censuses are unknown. Status only projects these facts; scoped
+reconciliation rechecks custody before changing attempt state.
+- Why: a dead guardian or recycled PID cannot hide a surviving provider child,
+  and uncertainty must not be turned into a running writer or an unsafe retry.
+- Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
+
+### Tick-driven settlement
+
+Tick queues recovery for settling and unattended attempts in every registered
+project, using one bounded host process census for the pass. Failed project
+recovery does not prevent other projects or scheduled tasks from running.
+A sealed exit remains settlement evidence when the census is unavailable;
+live attempts and same-boot unknown attempts retain their automatic fence.
+Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
+native settlement locks rather than duplicating settlement work. The guardian
+persists a failed terminal publication in the scoped settlement journal so a
+status read can explain the pending settlement without consulting stderr.
+- Why: losing the guardian or its immediate terminal publication must not lose
+  the automatic path to a terminal attempt.
+- Owner: `src/tick.rs`, `crates/run/src/controls.rs`,
+  `crates/supervisor/src/settlement_progress.rs`
+
+### Explicit abandonment
+
+A chair may explicitly abandon a nonterminal writer with a reason when its
+presence is not live, its native writer lease is free and the configured
+worktree process census positively reports `Free`. Same-boot unknown presence
+is eligible only with both exclusion and positive non-occupancy evidence.
+Live presence, held exclusion and every non-free or incomplete occupancy
+result refuse abandonment with typed blocking evidence. Launch and attempt
+custody stay excluded during the decision. This escape hatch does not change
+the proof required by automatic reconciliation.
+
+The explicit loss intent is durable before the attempt is committed `lost`;
+repeating an interrupted abandonment with the same reason finishes it. An
+incomplete intent remains visibly settling until that retry. Abandonment warns
+that the attempt was declared lost and retains all attempt evidence, scratch,
+worktree contents and private Git. A never-dispatched queued attempt keeps its
+existing evidence-preserving cancellation behaviour.
+- Why: a dead guardian on the same boot needs a deliberate recovery path without
+  turning an incomplete process census into permission to reuse a worktree.
+- Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
+
 ### Guardian holds custody past its owner
 
 The guardian keeps the provider, attempt lock and writer lease after its owner
@@ -93,8 +146,10 @@ unconfirmed sync is `durability_unconfirmed`, never absent.
 The writer reservation is published before spawn and cleared only after
 quiescence and run's terminal commit, or an authorised reconcile; the worktree
 flock stays held through import and [publication](run.md#publication-order). A
-missing or malformed reservation refuses recovery of that attempt, and scratch
-deletion needs a verified settlement commit.
+missing or malformed reservation refuses automatic recovery of that attempt;
+[explicit abandonment](#explicit-abandonment) instead requires native exclusion
+and positive worktree non-occupancy. Scratch deletion needs a verified settlement
+commit.
 - Why: a writer must never be freed on a partial or forged settlement.
 
 ### Stable locks and atomic writes
@@ -158,6 +213,11 @@ report its refusal code and reason or sourced warnings.
 Unsupported confinement fails `ConfinementUnavailable` and never widens
 access. An optional root that resolves into a declared credential root is
 omitted with a warning.
+
+Registered Git projects' declared worktree allocation roots remain protected
+from extra host write grants, including before those roots exist. Resolve the
+project port table from the verified primary checkout in Git's worktree
+inventory; the common Git directory's parent does not establish that owner.
 - Why: one broad grant silently voids the boundary.
 - Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
   `crates/cli/src/run/provider/confinement.rs`
@@ -173,13 +233,30 @@ compare-and-swap.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment, PATH, tool caches and
-credentials in place. Provider account selectors still choose the registered
-account and its required credentials. Credential
-values stay in the live launch, never in prompts or receipts. Native launches
-skip skill copies, tool dependency discovery, credential symlink inventory and
-the build-slot shim. Every lane still binds the host Cargo home and private
-target/build directories before seed validation.
+Unsandboxed lanes inherit the host environment. `FilteredLanePath` selects
+retained requester PATH, otherwise captured host search path, or process PATH
+only without a host handoff. It filters canonical directories and executable
+symlink targets under the primary project and selected worktree, including both
+roots for linked checkouts and requesters starting in a subdirectory. Lane
+model/account identity and version probes, bare commands and native provider
+launches share that PATH. Sandboxed launches prepend required private wrappers,
+then retain requester PATH precedence before fixed tool-search fallbacks. PATH
+entries do not add filesystem or executable grants.
+Host delivery filters its captured host PATH through the same owner for tool
+lookup. Explicit
+program paths stay explicit. Graph retries capture PATH before changing state,
+then save it with any retry patch under one journal lock. A capture failure
+leaves the previous binding intact; a deliberately empty PATH remains a valid
+captured value. Remote peers record their own PATH at ingress because origin
+directories may not exist there.
+
+Provider preparation may select an account-specific home or redirect state and
+cache paths in either confinement mode; account selectors choose the registered
+account and its required credentials. Credential values stay in the live launch,
+never in prompts or receipts. Native launches skip skill copies, tool dependency
+discovery, credential symlink inventory and the build-slot shim. Every lane still
+binds the host Cargo home and private target/build directories before seed
+validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
@@ -227,6 +304,13 @@ refuses credential-bearing URLs.
 
 ## Worktrees
 
+### Managed writer path owner
+
+`run --branch` uses primary root/ports regardless of cwd; relative
+`--worktree` stays cwd-relative.
+- Why: roots differ.
+- Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
+
 ### One writer; removal never forces
 
 Git's own inventory is the worktree registry. One writer holds each linked
@@ -234,6 +318,9 @@ worktree, and custody outlives the requesting call. `worktree remove` refuses
 the primary, a live writer or observed process, and has no force. Dirty work
 requires explicit discard, with its recoverable archive captured before removal;
 it deletes a branch only with current landing evidence or explicit discard.
+A persisted writer reservation remains a custody fence when its kernel lock is
+absent: read-only occupancy is unknown until run-owned reconciliation settles
+the attempt, and cache guards refuse the slot without clearing its evidence.
 - Why: removing a tree under a live writer destroys its work.
 - Owner: `crates/confinement/src/worktrees.rs`
 
@@ -260,5 +347,7 @@ cache, and foreign, detached or idle worktree collection requires the declared
 retention policy and complete current custody, run and process evidence.
 Shallow history, conflicted comparisons, moved tips and unavailable evidence
 keep the candidate.
+Removal previews use the same cleanliness and ignored-output eligibility
+checks as apply; a preview never reports dirty user data as removable.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/confinement/src/cache.rs`

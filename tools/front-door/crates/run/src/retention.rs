@@ -94,13 +94,21 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
+        self.ensure_provider_state_not_expired(id)?;
+        Ok(lease)
+    }
+
+    /// Check the retention marker while the caller holds the attempt's
+    /// publication fence. The caller's exclusive lock also excludes GC, so it
+    /// can preserve the usual retention guarantee without reacquiring a lock.
+    pub(crate) fn ensure_provider_state_not_expired(&self, id: AttemptId) -> Result<()> {
         let attempt = self.attempt_dir(id, false)?;
         match attempt.metadata_at(OsStr::new(EXPIRED), false) {
             Ok(_) => return Err(RunError::ProviderStateExpired),
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-        Ok(lease)
+        Ok(())
     }
 
     /// Collect provider state and logs for indexed terminal attempts across
@@ -429,7 +437,7 @@ impl RunStore {
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
         let continuing: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1 AND terminal=0)",
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1 AND terminal=0) OR EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1 AND resolved=0)",
             [&id],
             |row| row.get(0),
         )?;

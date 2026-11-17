@@ -10,8 +10,11 @@ recovers any partial or crashed install.
 
 `./install.sh` installs the release for the checkout's exact tag, else the latest.
 `--tag vX.Y.Z` selects one; `--source [DIR]` builds a checkout with its pinned
-toolchain (`--yes` accepts a missing-toolchain install). Releases are
-`aarch64-apple-darwin` only; other hosts must use `--source`. The script
+toolchain (`--yes` accepts a missing-toolchain install). Agent installation
+discovers `rustc` on the installing shell PATH.
+`provenant check install` warns if an installed agent PATH would prevent a
+trusted rustup toolchain from being selected; reinstall from a shell whose PATH
+finds the rustup shim to refresh it. Releases are `aarch64-apple-darwin` only; other hosts must use `--source`. The script
 verifies the package SHA-256 before running anything from it. State defaults to
 `~/.local/share/provenant/v2` and the binary to `~/.local/bin`; override with
 `--state-dir`, `PROVENANT_STATE_DIR` and `--bin-dir` (absolute paths).
@@ -48,8 +51,10 @@ different versions: fix the reported cause and rerun; there is no distributed
 rollback.
 
 Drain first: no lane should run across a binary swap. Check
-`provenant status`, collect `provenant output TARGET`, and only then `retry`
-unfinished work.
+`provenant status` and the current attempt custody and process evidence, then
+collect `provenant output TARGET`. A workflow still labelled Running can retain
+an exited attempt; confirm its process identity before treating it as a live
+writer. Preserve unfinished work and retry it after installation.
 
 If installation fails after stopping agents, the output names the stopped
 agents and those that may still be running, prints the quoted state directory
@@ -63,6 +68,12 @@ quiescent for the whole operation; preflight cannot make a multi-host install
 atomic.
 
 ### Test a candidate binary
+
+CI's macOS release smoke retains a checked package in the
+`candidate-release-<workflow SHA>` artifact for seven days. Verify its checksum,
+commit, tree and platform metadata against the intended candidate before
+extracting it. This smoke build disables LTO; the published release remains the
+installation target.
 
 Run an uninstalled candidate only with its own `--state-dir`, with
 `PROVENANT_ROOT` set to its checkout. A candidate can change persisted state;
@@ -91,9 +102,12 @@ source change. `--binary PATH` packages another build.
 
 ## Install
 
-Quit Claude Code and any other selected client or config editor before the
-preview, and keep them closed through `check install`; Claude rewrites
-`~/.claude.json` while running. Claude accounts live in exactly
+Inspect the preview for native configuration files it will write. Keep clients
+and editors that can rewrite those files closed from the preview through
+`check install`; the installer checks for drift before each write, but that is
+not an atomic compare-and-swap. In particular, quit Claude Code when the plan
+writes `~/.claude.json`, which Claude rewrites while running. Managed instruction
+or skill links alone do not require closing a client. Claude accounts live in exactly
 `~/.claude-$LABEL`; sign in there before registering. `~/.claude` is a sign-in
 source, never an account.
 

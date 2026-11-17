@@ -37,6 +37,11 @@ pub(super) fn read_inner(
         }
         found => found?,
     };
+    let census = provenant_supervisor::census::ProcessObserver::census(
+        &provenant_supervisor::census::SystemProcessObserver,
+        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+    )
+    .ok();
     let mut stores: VecDeque<_> =
         VecDeque::from([(roots.state.clone(), 0u64, None::<(ProjectId, AttemptId)>)]);
     let mut nodes = Vec::new();
@@ -157,12 +162,13 @@ pub(super) fn read_inner(
                         *missing += 1;
                     }
                 }
-                let projected = crate::run::project_lane(
+                let projected = crate::run::project_lane_with_census(
                     attempt,
                     &[],
                     state.as_path(),
                     clock.wall_now().ok(),
-                    false,
+                    attempt.superseded_by.is_none(),
+                    census.as_ref().ok_or(()),
                 );
                 nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"parents":{"dispatch":parents.0,"continuation":parents.1},"metadata":{"operation":lane.operation,"attempt":projected}}));
             }

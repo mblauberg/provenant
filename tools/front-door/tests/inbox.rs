@@ -455,6 +455,7 @@ impl provenant_run::Providers for Indexed {
     {
         Ok(provenant_run::PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: vec![],
             stdin: vec![],

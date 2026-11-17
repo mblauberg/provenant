@@ -824,8 +824,16 @@ mod tests {
         let state = std::path::Path::new("/trusted/state");
         let launch =
             crate::fabric::recovery_launch(state, std::path::Path::new("/trusted/cwd")).unwrap();
-        // A forged row has nowhere to name an executable or a config root.
-        assert!(launch.executables.is_empty());
+        // Recovery captures host inputs instead of trusting a persisted row.
+        let search: Vec<_> = std::env::var_os("PATH")
+            .map(|path| {
+                std::env::split_paths(&path)
+                    .filter(|path| path.is_absolute())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(launch.executable_search_path, search);
+        assert!(launch.lane_path.is_none());
         assert_eq!(launch.configuration_root, state);
     }
 

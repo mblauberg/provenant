@@ -1,6 +1,11 @@
 //! Deterministic contract for review template results and coverage.
 use super::*;
 
+/// The one result order every review prompt states: one verdict line after the
+/// findings and prose, then the closed handoff as the very last thing. Settlement
+/// tolerates only a lone verdict after the handoff, so prompts never invite it.
+pub(super) const VERDICT_THEN_HANDOFF: &str = "After all findings and prose, write exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Then put the shared closed handoff block last, with nothing after it.";
+
 pub(super) fn partial(outputs: &NodeOutputs) -> bool {
     outputs.partial
 }
@@ -95,10 +100,11 @@ pub(super) fn contract_error(
     // blocks. `verdict_error` also carries source truncation, which is
     // diagnosed by findings availability below; a captured verdict is not
     // reported as malformed for that reason.
-    if !matches!(
-        outputs.verdict.as_deref(),
-        Some("VERDICT: PASS" | "VERDICT: FAIL" | "VERDICT: INCONCLUSIVE")
-    ) {
+    if !outputs
+        .verdict
+        .as_deref()
+        .is_some_and(provenant_records::result_capture::is_review_verdict)
+    {
         let cause = match outputs.verdict.as_deref() {
             Some(other) => format!("`{other}` is not VERDICT: PASS, FAIL or INCONCLUSIVE"),
             None => result
@@ -262,7 +268,7 @@ pub(super) fn correct_verdict(
     };
     let mut next = checkpoint.clone();
     let brief = format!(
-        "{}\n\nThe previous reply had an invalid final verdict. Return the findings and end with exactly one final line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow. This is the only automatic verdict correction.",
+        "{}\n\nThe previous reply had an invalid verdict. Return the findings. {VERDICT_THEN_HANDOFF} This is the only automatic verdict correction.",
         node.prompt
     );
     if let Err(error) = patch::correct_review_verdict(

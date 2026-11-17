@@ -65,7 +65,7 @@ disallowed_methods = "deny"
 
 [package]
 name = "provenant"
-version = "2.0.1"
+version = "2.0.3"
 default-run = "provenant"
 edition.workspace = true
 rust-version.workspace = true
@@ -148,6 +148,11 @@ debug = "line-tables-only"
 # The test profile inherits dev, including these overrides, to reuse artefacts.
 [profile.dev.package."*"]
 debug = 0
+
+# `check release` scans the whole running binary with a regex set; unoptimised
+# regex search makes each check take seconds in debug and test builds.
+[profile.dev.package.regex-automata]
+opt-level = 3
 
 # Optimise proc-macros and their dependencies without emitting build-script DWARF.
 [profile.dev.build-override]

@@ -14,6 +14,14 @@ pub(crate) struct NodeDigest {
     pub ci: Value,
     pub result_path: Option<String>,
     pub provider_error: Option<String>,
+    pub review_verdict: Option<String>,
+    pub findings_count: Option<usize>,
+    pub findings_available: Option<bool>,
+    pub review_partial: Option<bool>,
+    /// The selected Run attempt's stored state, separate from graph node state.
+    pub attempt_state: Option<String>,
+    /// This host's current liveness projection for the selected attempt.
+    pub attempt_presence: Option<String>,
     pub line: String,
     pub state: String,
     pub settled: bool,
@@ -61,6 +69,13 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
         .filter_map(|(node, attempt)| {
             let key: WorkKey = serde_json::from_value(node["work_key"].clone()).ok()?;
             let state = text(&node["state"], 64).unwrap_or_else(|| "unknown".into());
+            let attempt_state = (attempt["kind"] == "attempt")
+                .then(|| text(&attempt["state"], 64))
+                .flatten();
+            let attempt_presence = text(&attempt["presence"], 64).or_else(|| {
+                matches!(attempt_state.as_deref(), Some("running" | "starting"))
+                    .then(|| "unknown".to_owned())
+            });
             let settled = if node["kind"] == "node" {
                 matches!(
                     state.as_str(),
@@ -73,7 +88,15 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let recorded_outcome = text(&attempt["outcome"], 64);
             let outcome = if node["kind"] == "node" && state != "failed" {
-                state.clone()
+                if state == "running"
+                    && attempt_state.as_deref().is_some_and(|attempt_state| {
+                        !matches!(attempt_state, "running" | "starting" | "queued")
+                    })
+                {
+                    attempt_state.clone().unwrap_or_else(|| state.clone())
+                } else {
+                    state.clone()
+                }
             } else {
                 recorded_outcome
                     .filter(|outcome| state != "failed" || outcome.as_str() != "succeeded")
@@ -96,6 +119,12 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let result_path = path_text(&attempt["result_path"]);
             let provider_error = text(&attempt["provider_error"], 1024);
+            let review_verdict = text(&node["review_verdict"], 128);
+            let findings_count = node["findings_count"]
+                .as_u64()
+                .and_then(|count| usize::try_from(count).ok());
+            let findings_available = node["findings_available"].as_bool();
+            let review_partial = node["review_partial"].as_bool();
             let handoff_error = attempt["handoff"].get("Err").and_then(|value| {
                 serde_json::from_value::<provenant_records::handoff::HandoffError>(value.clone())
                     .ok()
@@ -107,8 +136,20 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let open_asks = node["open_asks"].as_array().cloned().unwrap_or_default();
             let evidence_error = text(&attempt["evidence_error"], 200);
-            let mut line = format!(
-                "{key} {state} outcome={outcome} cause={} branch={} pr={} ci={} result_path={}",
+            let current_state = attempt_presence
+                .as_deref()
+                .or(attempt_state.as_deref())
+                .unwrap_or(&state);
+            let mut line = if attempt_state.is_some() {
+                format!(
+                    "{key} {current_state} node_state={state} attempt_state={} outcome={outcome}",
+                    attempt_state.as_deref().unwrap_or("unknown")
+                )
+            } else {
+                format!("{key} {state} outcome={outcome}")
+            };
+            line.push_str(&format!(
+                " cause={} branch={} pr={} ci={} result_path={}",
                 cause.as_deref().unwrap_or("-"),
                 branch.as_deref().unwrap_or("-"),
                 if pr["reference"].is_null() {
@@ -131,7 +172,24 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                     )
                 },
                 result_path.as_deref().unwrap_or("-")
-            );
+            ));
+            if let Some(presence) = &attempt_presence {
+                line.push_str(&format!(" attempt_presence={presence}"));
+            }
+            if let Some(verdict) = &review_verdict {
+                line.push_str(&format!(" verdict={verdict}"));
+            }
+            if let Some(count) = findings_count {
+                let availability = match findings_available {
+                    Some(true) => "available",
+                    Some(false) => "incomplete",
+                    None => "availability_unknown",
+                };
+                line.push_str(&format!(" findings={count} ({availability})"));
+            }
+            if review_partial == Some(true) {
+                line.push_str(" review_partial=true");
+            }
             if let Some(status) = &handoff_status {
                 line.push_str(&format!(" handoff_status={status}"));
             }
@@ -178,6 +236,12 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 ci,
                 result_path,
                 provider_error,
+                review_verdict,
+                findings_count,
+                findings_available,
+                review_partial,
+                attempt_state,
+                attempt_presence,
                 line,
                 state,
                 settled,
@@ -270,5 +334,72 @@ pub(super) fn graph_snapshot(
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
         advance_error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn selected_attempt_digest_preserves_graph_state_and_writer_presence() {
+        // Spec: docs/specs/cli.md#status-selection
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::{Value, json};
+
+        fn rows(attempt_state: &str, presence: Option<&str>) -> Vec<Value> {
+            let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+            let key = json!(key);
+            let mut attempt = json!({
+                "kind":"attempt",
+                "work_key":key,
+                "state":attempt_state,
+                "graph_state":"running",
+                "cause_code":"steered"
+            });
+            if let Some(presence) = presence {
+                attempt["presence"] = json!(presence);
+            }
+            vec![
+                json!({"kind":"node","work_key":key,"state":"running"}),
+                attempt,
+            ]
+        }
+
+        let digest = node_digests(&rows("cancelled", None)).remove(0);
+
+        assert_eq!(
+            digest.state, "running",
+            "durable graph node state remains intact"
+        );
+        assert_eq!(digest.attempt_state.as_deref(), Some("cancelled"));
+        assert_eq!(digest.outcome, "cancelled");
+        assert_eq!(digest.attempt_presence, None);
+        assert!(!digest.settled, "the graph still requires settlement");
+        assert!(digest.line.contains("cancelled node_state=running"));
+        assert!(!digest.line.contains("running outcome=running"));
+
+        for (recorded_presence, presence) in [
+            (Some("live"), "live"),
+            (Some("unattended"), "unattended"),
+            (Some("settling"), "settling"),
+            (Some("unknown"), "unknown"),
+            (None, "unknown"),
+        ] {
+            let digest = node_digests(&rows("running", recorded_presence)).remove(0);
+
+            assert_eq!(digest.state, "running");
+            assert_eq!(digest.attempt_state.as_deref(), Some("running"));
+            assert_eq!(digest.attempt_presence.as_deref(), Some(presence));
+            assert!(digest.line.contains(&format!(
+                "{presence} node_state=running attempt_state=running"
+            )));
+            assert!(
+                digest
+                    .line
+                    .contains(&format!("attempt_presence={presence}"))
+            );
+            assert!(!digest.settled);
+        }
     }
 }

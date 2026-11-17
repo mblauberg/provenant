@@ -1036,6 +1036,7 @@ fn main() -> Result<()> {
             images: &[],
             command: None,
             route: &route,
+            provider_model: None,
             confined: &plan,
             prompt: &prompt,
             continuation: continuation.as_ref(),

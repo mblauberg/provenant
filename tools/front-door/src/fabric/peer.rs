@@ -1,6 +1,6 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
 pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<Vec<HostHealth>, Box<dyn std::error::Error>> {
@@ -66,6 +66,42 @@ fn peer_read_only(action: &PeerAction) -> bool {
         ),
         _ => false,
     }
+}
+
+fn prepare_peer_project_roots(
+    globals: &provenant_cli::Globals,
+    roots: provenant_core::Roots,
+    common: &Path,
+    read_only: bool,
+    product: crate::roots::Product,
+) -> Result<(provenant_core::Roots, provenant_config::ProjectBinding), Box<dyn std::error::Error>> {
+    let location = provenant_config::ProjectLocation::new(common.to_path_buf())?;
+    let existing = provenant_config::lookup_project(&roots, &location)?;
+    if read_only && existing.is_none() {
+        return Err(PeerError::Project.into());
+    }
+
+    // Resolve the verified layout and root protection before allocating a
+    // project binding or host identity in the supplied state root.
+    let (project_root, git_metadata) =
+        Context::workspace_for_common_location(&roots, common, existing.as_ref())?;
+    let workspace = match git_metadata.as_deref() {
+        Some(common) => crate::roots::Workspace::VerifiedLayout {
+            root: &project_root,
+            git_metadata: Some(common),
+        },
+        None => crate::roots::Workspace::At(&project_root),
+    };
+    let resolved = crate::roots::resolve(globals, workspace, product)?;
+
+    let binding = match existing {
+        Some(binding) => binding,
+        None => provenant_config::bind_project(&resolved.roots, location)?,
+    };
+    if !read_only && provenant_config::lookup_host(&resolved.roots)?.is_none() {
+        provenant_config::bind_host(&resolved.roots)?;
+    }
+    Ok((resolved.roots, binding))
 }
 
 fn validate_graph_steer(
@@ -276,7 +312,7 @@ pub fn peer(
         )?;
         let home = host.home;
         if !in_process {
-            let state = host.roots.state;
+            let state = host.roots.state.clone();
             // Only an unreachable agent falls back; a sent request is never repeated.
             let reply =
                 match provenant_fabric_runtime::peer_agent::forward(state.as_path(), &bytes)? {
@@ -296,24 +332,18 @@ pub fn peer(
         if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
-        let cwd = if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
-            common.parent().ok_or(PeerError::Project)?.to_path_buf()
-        } else {
-            common
-        };
-        let resolved = crate::roots::resolve(
+        let (project_roots, binding) = prepare_peer_project_roots(
             globals,
-            crate::roots::Workspace::At(&cwd),
+            host.roots,
+            &common,
+            peer_read_only(&request.action),
             crate::roots::Product::Required,
         )?;
-        let assets = resolved.assets;
+        let assets = host.assets;
         // An answer without an operation ID is refused below, after peer validation,
         // and must not initialise writable project state on its way there.
-        let mut context = if peer_read_only(&request.action) {
-            Context::open_read_only(resolved.roots, &home, &cwd)?
-        } else {
-            Context::open(resolved.roots, &home, &cwd)?
-        };
+        let mut context = Context::open_for_project(project_roots, &home, &binding)?;
+        let cwd = context.project_root.clone();
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
             return Err(PeerError::Project.into());
@@ -556,12 +586,20 @@ pub fn peer(
                         extra: Default::default(),
                     }
                 } else {
-                    peer_result(owner.snapshots_local(targets, &cancel), |data| {
-                        PeerResult::RunStatuses {
+                    peer_result(
+                        owner.snapshots_local(targets, &cancel).map(|mut data| {
+                            for attempt in &mut data {
+                                provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(
+                                    attempt,
+                                );
+                            }
+                            data
+                        }),
+                        |data| PeerResult::RunStatuses {
                             data,
                             extra: Default::default(),
-                        }
-                    })
+                        },
+                    )
                 }
             }
             PeerAction::CancelSubmission { .. } => peer_result(
@@ -612,6 +650,7 @@ pub fn peer(
                                 after,
                             )?);
                         }
+                        value.project_peer_diagnostics();
                         Ok(value)
                     });
                 peer_result(observed, |value| PeerResult::Run {
@@ -708,13 +747,13 @@ pub fn peer(
             ),
             PeerAction::Output { input, .. } => peer_result(
                 owner
-                    .output(input.clone(), budget, &cancel)
+                    .output_for_peer(input.clone(), budget, &cancel)
                     .and_then(|mut data| {
                         let (OutputResult::Chunk { peer, target, .. }
                         | OutputResult::Artifact { peer, target, .. }) = &mut data;
                         let mut fields = peer_graph_fields(&peer_factory, target.attempt)?;
                         fields.peer_subtree = None;
-                        peer.merge_graph(fields);
+                        peer.merge(fields);
                         Ok(data)
                     }),
                 |data| PeerResult::Output {
@@ -722,22 +761,30 @@ pub fn peer(
                     extra: Default::default(),
                 },
             ),
-            PeerAction::RunEvents { after, limit, .. } => {
-                peer_result(owner.events(*after, *limit, &cancel), |data| {
-                    PeerResult::RunEvents {
-                        data,
-                        extra: Default::default(),
+            PeerAction::RunEvents { after, limit, .. } => peer_result(
+                owner.events(*after, *limit, &cancel).map(|mut data| {
+                    for event in &mut data.items {
+                        provenant_fabric_runtime::runs::project_peer_run_event_diagnostics(event);
                     }
-                })
-            }
-            PeerAction::Lanes { all, limit, .. } => {
-                peer_result(owner.lanes_local(*all, *limit, &cancel), |data| {
-                    PeerResult::RunStatuses {
-                        data,
-                        extra: Default::default(),
+                    data
+                }),
+                |data| PeerResult::RunEvents {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
+            PeerAction::Lanes { all, limit, .. } => peer_result(
+                owner.lanes_local(*all, *limit, &cancel).map(|mut data| {
+                    for attempt in &mut data {
+                        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(attempt);
                     }
-                })
-            }
+                    data
+                }),
+                |data| PeerResult::RunStatuses {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::LaneWaits { targets, .. } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {
@@ -1181,6 +1228,7 @@ pub(crate) fn peer_submit_graph(
             directory: factory.cwd.clone(),
             peer_origin_context: Some(origin.clone()),
             peer_submission_digest: Some(submission_digest),
+            requester_path: Some(factory.requester_lane_path()?),
             extra: Default::default(),
             document: document.clone(),
         })
@@ -1622,26 +1670,13 @@ pub(super) fn checked_output_origin(
     mut output: OutputResult,
     expected: &provenant_records::WorkKey,
 ) -> Result<OutputResult, FacadeError> {
-    let (OutputResult::Chunk { peer, extra, .. } | OutputResult::Artifact { peer, extra, .. }) =
-        &mut output;
-    if !peer_origin_matches(&peer.graph, expected) {
+    let (OutputResult::Chunk { peer, .. } | OutputResult::Artifact { peer, .. }) = &mut output;
+    if !peer_origin_matches(peer, expected) {
         return Err(FacadeError::StateCorrupt);
     }
-    // Serde's flatten does not consume the keys of a flattened struct that
-    // itself flattens a struct, so every peer key is also retained in `extra`.
-    // Drop those copies so only the typed fields below reach the projection.
-    if let Ok(serde_json::Value::Object(owned)) = serde_json::to_value(&*peer) {
-        extra.retain(|key, _| !owned.contains_key(key));
-    }
-    // These authenticate the peer read; the CLI output schema contains lane
-    // fields only. Consume transport metadata before rendering the payload.
-    let length = peer.length;
-    let planner_fallback = peer.planner_fallback.clone();
-    *peer = provenant_records::run::PeerOutputFields {
-        length,
-        planner_fallback,
-        ..Default::default()
-    };
+    // Graph identity authenticates the peer read. Output length and planner
+    // fallback remain owned by the output envelope for the CLI projection.
+    *peer = Default::default();
     Ok(output)
 }
 
@@ -1792,4 +1827,118 @@ pub(super) fn peer_retained_receipt(
     .map_err(graph_journal_error)?
     .map(|checkpoint| peer_graph_receipt(factory, operation_id.clone(), &graph, &checkpoint))
     .transpose()
+}
+
+#[cfg(test)]
+mod peer_project_root_tests {
+
+    #[test]
+    fn peer_refusal_precedes_binding_writes_and_holds_bare_common_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::RootInputs;
+
+        fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into())
+            }
+        }
+
+        // Spec: docs/specs/run-git.md#project-layout-ownership
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let assets = base.join("assets");
+        let source = base.join("source");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&assets)?;
+        std::fs::create_dir_all(&source)?;
+        git(&source, &["init", "-q", "--initial-branch=main"])?;
+        git(&source, &["config", "user.name", "Fixture"])?;
+        git(
+            &source,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        std::fs::write(source.join("README.md"), "bare root boundary fixture\n")?;
+        git(&source, &["add", "README.md"])?;
+        git(&source, &["commit", "-qm", "initial"])?;
+
+        for name in ["bare-store", ".git"] {
+            let parent = base.join(name.replace('.', "dot"));
+            std::fs::create_dir_all(&parent)?;
+            let common = parent.join(name);
+            git(
+                &base,
+                &[
+                    "clone",
+                    "--bare",
+                    "-q",
+                    source.to_str().ok_or("source path")?,
+                    common.to_str().ok_or("common path")?,
+                ],
+            )?;
+            let state = common.join("state");
+            std::fs::create_dir_all(&state)?;
+            std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            let mut inputs = RootInputs::new(home.clone(), assets.clone());
+            inputs.state_dir = Some(state.clone());
+            inputs.workspaces.push(home.clone());
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let globals = provenant_cli::Globals {
+                state_dir: Some(state.clone()),
+                ..Default::default()
+            };
+
+            assert!(!state.join("projects").exists());
+            assert!(!state.join("host-id").exists());
+            let refusal = prepare_peer_project_roots(
+                &globals,
+                roots,
+                &common,
+                false,
+                crate::roots::Product::Optional,
+            );
+            assert!(refusal.is_err(), "state under {common:?} was admitted");
+            assert!(!state.join("projects").exists());
+            assert!(!state.join("host-id").exists());
+        }
+
+        let plain = base.join("plain-project");
+        std::fs::create_dir_all(&plain)?;
+        git(&plain, &["init", "-q", "--initial-branch=main"])?;
+        let common = plain.join(".git");
+        let state = plain.join("state");
+        std::fs::create_dir_all(&state)?;
+        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let mut inputs = RootInputs::new(home, assets);
+        inputs.state_dir = Some(state.clone());
+        inputs.workspaces.push(base.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let globals = provenant_cli::Globals {
+            state_dir: Some(state.clone()),
+            ..Default::default()
+        };
+        let (roots, binding) = prepare_peer_project_roots(
+            &globals,
+            roots,
+            &common,
+            false,
+            crate::roots::Product::Optional,
+        )?;
+        assert_eq!(binding.common_dir(), common);
+        assert!(roots.state.as_path().join("projects").is_dir());
+        assert!(roots.state.as_path().join("host-id").is_file());
+        Ok(())
+    }
 }

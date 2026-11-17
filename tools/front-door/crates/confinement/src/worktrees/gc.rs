@@ -77,6 +77,8 @@ impl PreviewWalk {
 pub enum CollectionMode {
     Outputs,
     Worktrees,
+    /// Landing cleanup removes declared output and retires under one writer lease.
+    LandingCleanup,
 }
 
 #[derive(Clone, Copy)]
@@ -181,7 +183,11 @@ pub fn branch_candidate(
 ) -> WorktreeInfo {
     WorktreeInfo {
         warnings: Vec::new(),
-        path: context.repo.root_path().into(),
+        path: context
+            .layout
+            .project()
+            .unwrap_or(context.layout.root())
+            .into(),
         branch: Some(reference.as_str().into()),
         head: tip,
         dirty: WorktreeCondition::Clean,
@@ -264,10 +270,22 @@ fn refuse_unqualified_pending_retirement(
 }
 
 fn validate_forge_head(
-    feeds: &dyn RetirementFeeds,
+    feeds: Option<&dyn RetirementFeeds>,
     branch: &GitRefName,
     evidence: &LandedEvidence,
 ) -> Result<(), WorktreeError> {
+    // Git-backed proof is revalidated against retained refs and does not
+    // depend on a forge feed. Only a merge without a commit needs that feed.
+    if !matches!(
+        &evidence.source,
+        LandingSource::ForgeMerged {
+            merge_commit: None,
+            ..
+        }
+    ) {
+        return Ok(());
+    }
+    let feeds = feeds.ok_or(WorktreeError::RegistrationUnconfirmed)?;
     validate_forge_observation(feeds.forge(branch), evidence)
 }
 
@@ -1317,8 +1335,8 @@ fn collect_impl(
         Some(entries) => entries,
         None => context.facts.fresh_inventory(context, cancel)?,
     };
-    let primary = canonicalize(context.repo.root_path())?;
-    let ports = provenant_config::PortTable::read_for(Some(&primary), &context.host_state()?)
+    let primary = context.layout.project().map(canonicalize).transpose()?;
+    let ports = provenant_config::PortTable::read_for(primary.as_deref(), &context.host_state()?)
         .map_err(WorktreeError::PortConfiguration)?;
     let layout_roots = ports.worktree_layout.roots.clone();
     let known_refs = RefLedger::observe_context(context)?
@@ -1342,8 +1360,10 @@ fn collect_impl(
         || lanes
             .iter()
             .any(|lane| !lane.primary && matches!(lane.owner, Ok(None)));
-    let first_foreign = policy.mode == CollectionMode::Worktrees
-        && foreign_seen
+    let first_foreign = matches!(
+        policy.mode,
+        CollectionMode::Worktrees | CollectionMode::LandingCleanup
+    ) && foreign_seen
         && policy.include_foreign
         && preview_foreign
         && first_foreign_pass(context)?;
@@ -1382,7 +1402,11 @@ fn collect_impl(
         .map(|feeds| feeds.integration_bases())
         .unwrap_or_default();
     for lane in lanes {
-        if lane.primary || lane.path == primary {
+        if lane.primary
+            || primary
+                .as_ref()
+                .is_some_and(|primary| lane.path == *primary)
+        {
             continue;
         }
         let class = if matches!(lane.owner, Ok(Some(_))) {
@@ -1451,7 +1475,7 @@ fn collect_impl(
             // Only retiring a worktree needs the durable owner; output-only
             // collection records no retirement.
             if !dry
-                && policy.mode == CollectionMode::Worktrees
+                && policy.mode != CollectionMode::Outputs
                 && (policy.retirement_port.is_none() || policy.retirement_feeds.is_none())
             {
                 row.detail = Some("durable retirement owner unavailable".into());
@@ -1485,40 +1509,18 @@ fn collect_impl(
             };
             let protected =
                 output_protection(context, locked.verified.repo(), policy.keep, cancel)?;
-            let output = if (policy.terminal)(&lane.path) {
-                &mut report.output
-            } else {
-                &mut report.idle_output
-            };
-            let output_start = output.len();
-            walk_output(
-                locked.verified.repo().root_dir(),
-                &lane.path,
-                Path::new(""),
-                &effective,
-                &layout_roots,
-                &protected,
-                output,
-                0,
-                &preview_walk,
-            )?;
-
-            let output_bytes = output[output_start..]
-                .iter()
-                .filter(|entry| entry.removed || entry.reason == "would_remove")
-                .map(|entry| entry.bytes)
-                .fold(0_u64, u64::saturating_add);
-            let output_errors = output[output_start..]
-                .iter()
-                .filter(|entry| !entry.removed && entry.reason != "would_remove")
-                .map(|entry| RetentionIssue {
-                    path: entry.path.clone(),
-                    operation: "remove declared output".into(),
-                    cause: entry.reason.clone(),
-                })
-                .collect::<Vec<_>>();
-            report.byte_errors.extend(output_errors);
-            report.bytes = report.bytes.saturating_add(output_bytes);
+            let mut output_bytes = 0;
+            if policy.mode != CollectionMode::LandingCleanup {
+                output_bytes = collect_lane_output(
+                    &lane.path,
+                    locked.verified.repo(),
+                    &effective,
+                    &layout_roots,
+                    &protected,
+                    &mut report,
+                    &preview_walk,
+                )?;
+            }
             if policy.mode == CollectionMode::Outputs {
                 row.detail = Some("output retention only".into());
                 return Ok(());
@@ -1641,22 +1643,6 @@ fn collect_impl(
                     SelectedRetirement::Idle
                 }
             };
-            if dry {
-                precheck_removal(
-                    context,
-                    locked.verified.repo(),
-                    policy.regenerable,
-                    policy.keep,
-                    cancel,
-                )?;
-                // The same verdict, submodule evidence included, that applying
-                // reaches before it removes the tree.
-                super::lifecycle::removal_verdict(
-                    &worktree_cleanliness_at(context, locked.verified.repo(), cancel)?,
-                    false,
-                    true,
-                )?;
-            }
             let decision = if dry {
                 None
             } else {
@@ -1691,18 +1677,11 @@ fn collect_impl(
             } else {
                 None
             };
-            drop(locked);
             let eligible = |census: bool| -> Result<(), WorktreeError> {
                 if let SelectedRetirement::Subsumed(evidence) = &action {
                     validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
                     if let Some(branch) = branch.as_ref() {
-                        validate_forge_head(
-                            policy
-                                .retirement_feeds
-                                .ok_or(WorktreeError::RegistrationUnconfirmed)?,
-                            branch,
-                            evidence,
-                        )?;
+                        validate_forge_head(policy.retirement_feeds, branch, evidence)?;
                     }
                 }
 
@@ -1724,36 +1703,73 @@ fn collect_impl(
                     Ok(())
                 }
             };
-            eligible(true)?;
-            if !dry {
+            let precheck = |verified: &VerifiedWorktree| {
+                let cleanliness = worktree_cleanliness_at(context, verified.repo(), cancel)?;
+                super::lifecycle::removal_verdict(&cleanliness, false, true)?;
+                precheck_removal(
+                    context,
+                    verified.repo(),
+                    policy.regenerable,
+                    policy.keep,
+                    cancel,
+                )
+            };
+            if dry {
+                eligible(true)?;
+                precheck(&locked.verified)?;
+                if policy.mode == CollectionMode::LandingCleanup {
+                    output_bytes = collect_lane_output(
+                        &lane.path,
+                        locked.verified.repo(),
+                        &effective,
+                        &layout_roots,
+                        &protected,
+                        &mut report,
+                        &preview_walk,
+                    )?;
+                }
+                drop(locked);
+                if let Some(cache) = planned_cache {
+                    report.caches.push(cache);
+                }
+                report.worktrees.removed.push(lane.clone());
+                if action.removes_reference(branch.as_ref())
+                    && let Some(branch) = &branch
+                {
+                    report
+                        .worktrees
+                        .pruned_refs
+                        .push(branch.short_name().into());
+                }
+            } else {
                 let port = policy
                     .retirement_port
                     .ok_or(WorktreeError::RegistrationUnconfirmed)?;
                 let decision = decision
                     .clone()
                     .ok_or(WorktreeError::RegistrationUnconfirmed)?;
-                let mut removed = remove_tree_when_before_delete(
-                    context,
-                    entry,
-                    lane.head,
-                    cancel,
-                    &eligible,
-                    Some(&settings),
-                    Repository::Remove,
-                    |verified, path, _archive| {
+                let mut before_output = |verified: &VerifiedWorktree| {
+                    precheck(verified)?;
+                    output_bytes = collect_lane_output(
+                        &lane.path,
+                        verified.repo(),
+                        &effective,
+                        &layout_roots,
+                        &protected,
+                        &mut report,
+                        &preview_walk,
+                    )?;
+                    Ok(())
+                };
+                let before_delete =
+                    |verified: &VerifiedWorktree, path: &Path, _archive: Option<&ArchiveInfo>| {
                         if canonicalize(path)? != canonicalize(&lane.path)? {
                             return Err(WorktreeError::IdentityChanged);
                         }
                         if let SelectedRetirement::Subsumed(evidence) = &action {
                             validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
                             if let Some(branch) = branch.as_ref() {
-                                validate_forge_head(
-                                    policy
-                                        .retirement_feeds
-                                        .ok_or(WorktreeError::RegistrationUnconfirmed)?,
-                                    branch,
-                                    evidence,
-                                )?;
+                                validate_forge_head(policy.retirement_feeds, branch, evidence)?;
                             }
                         }
                         let retirement = begin_worktree_retirement(
@@ -1761,8 +1777,34 @@ fn collect_impl(
                         )?;
                         active_retirement = Some(retirement);
                         Ok(())
-                    },
-                )?;
+                    };
+                let mut removed = if policy.mode == CollectionMode::LandingCleanup {
+                    remove_tree_when_before_delete_locked(
+                        context,
+                        entry,
+                        lane.head,
+                        locked,
+                        cancel,
+                        &eligible,
+                        Some(&settings),
+                        Repository::Remove,
+                        Some(&mut before_output),
+                        before_delete,
+                    )?
+                } else {
+                    drop(locked);
+                    eligible(true)?;
+                    remove_tree_when_before_delete(
+                        context,
+                        entry,
+                        lane.head,
+                        cancel,
+                        &eligible,
+                        Some(&settings),
+                        Repository::Remove,
+                        before_delete,
+                    )?
+                };
                 report.worktrees.removed.push(removed.info.clone());
                 let mut retirement = active_retirement
                     .clone()
@@ -1836,19 +1878,6 @@ fn collect_impl(
                     }
                 }
                 report.removals.extend(retirement.removals());
-            } else {
-                if let Some(cache) = planned_cache {
-                    report.caches.push(cache);
-                }
-                report.worktrees.removed.push(lane.clone());
-                if action.removes_reference(branch.as_ref())
-                    && let Some(branch) = &branch
-                {
-                    report
-                        .worktrees
-                        .pruned_refs
-                        .push(branch.short_name().into());
-                }
             }
             if let Some(bytes) = tree_bytes {
                 report.bytes = report
@@ -1928,6 +1957,55 @@ fn collect_impl(
         acknowledge_foreign_preview(context)?;
     }
     Ok(report)
+}
+
+fn collect_lane_output(
+    lane: &Path,
+    repo: &VerifiedRepo,
+    policy: &WorktreeGcPolicy<'_>,
+    layout_roots: &[PathBuf],
+    protected: &ProtectedPaths,
+    report: &mut WorktreeGcReport,
+    preview_walk: &PreviewWalk,
+) -> Result<u64, WorktreeError> {
+    let (output_bytes, output_errors) = {
+        let output = if (policy.terminal)(lane) {
+            &mut report.output
+        } else {
+            &mut report.idle_output
+        };
+        let output_start = output.len();
+        walk_output(
+            repo.root_dir(),
+            lane,
+            Path::new(""),
+            policy,
+            layout_roots,
+            protected,
+            output,
+            0,
+            preview_walk,
+        )?;
+
+        let output_bytes = output[output_start..]
+            .iter()
+            .filter(|entry| entry.removed || entry.reason == "would_remove")
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add);
+        let output_errors = output[output_start..]
+            .iter()
+            .filter(|entry| !entry.removed && entry.reason != "would_remove")
+            .map(|entry| RetentionIssue {
+                path: entry.path.clone(),
+                operation: "remove declared output".into(),
+                cause: entry.reason.clone(),
+            })
+            .collect::<Vec<_>>();
+        (output_bytes, output_errors)
+    };
+    report.byte_errors.extend(output_errors);
+    report.bytes = report.bytes.saturating_add(output_bytes);
+    Ok(output_bytes)
 }
 
 /// Removal needs a fresh positive census. Custody accepts an unobservable
@@ -2429,11 +2507,9 @@ fn prepare_removal_before(
     preview_only: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
-    let ports = provenant_config::PortTable::read_for(
-        Some(context.repo.root_path()),
-        &context.host_state()?,
-    )
-    .map_err(WorktreeError::PortConfiguration)?;
+    let ports =
+        provenant_config::PortTable::read_for(context.layout.project(), &context.host_state()?)
+            .map_err(WorktreeError::PortConfiguration)?;
     let layout_roots = ports.worktree_layout.roots;
     let protected = output_protection(context, repo, keep, cancel)?;
     let mut policy = WorktreeGcPolicy {

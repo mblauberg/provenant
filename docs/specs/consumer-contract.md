@@ -122,8 +122,11 @@ the file set may change in any release.
 
 Channels: `lane` variables are set in every lane process, `lane_or_caller`
 ones are also read from the caller, `port_command` ones are given to repository
-port commands, and `caller` ones are read only from the caller. `HOME` is
-listed because a lane's home is never the caller's.
+port commands, and `caller` ones are read only from the caller. `HOME` is the
+home selected during provider launch preparation. Unsandboxed lanes use the
+caller's home by default; a provider or selected account may choose an
+account-specific or private home in either mode. Provider cache and credential
+locations may also differ from `HOME`.
 
 | Variable | Channel | Stability | Meaning | When |
 |---|---|---|---|---|
@@ -136,7 +139,7 @@ listed because a lane's home is never the caller's.
 | `PROVENANT_STATE_DIR` | lane_or_caller | evolving | State root. A caller sets it to use a root other than `~/.local/share/provenant/v2`; in a lane it names the attempt's private store. | every lane; when a caller leaves it unset the default root applies |
 | `PROVENANT_AGENT_LABEL` | lane_or_caller | evolving | The agent name inbox, fabric and checkpoint writes are attributed to: `lane-<attempt>` in a lane. A caller may set it to name itself. | every lane; when a caller leaves it unset the harness identity applies |
 | `PROVENANT_PARENT_ATTEMPT_ID` | lane | evolving | The lane's own attempt. A `provenant run` inside the lane records it as the parent. | every lane |
-| `HOME` | lane | evolving | The attempt's private home, where provider credentials and caches are staged. It is never the caller's home. | every lane |
+| `HOME` | lane | evolving | The home directory selected during provider launch preparation. Unsandboxed lanes use the caller's home by default; a provider or selected account may choose an account-specific or private home in either mode. Provider cache and credential locations may also differ from `HOME`. | every lane |
 | `PROVENANT_GIT` | lane_or_caller | evolving | The Git executable Provenant runs. In a lane it is the wrapped Git the lane must use. | every lane; when a caller leaves it unset Git is found on PATH |
 | `PROVENANT_LANE_HEAD` | lane | evolving | The branch the writer lane delivers to. | lanes whose task names a head branch |
 | `PROVENANT_LANE_BASE` | lane | evolving | The branch the lane's head is based on. | lanes whose task names both a head and a base |
@@ -174,7 +177,9 @@ listed because a lane's home is never the caller's.
 ## State root
 
 The state root is `~/.local/share/provenant/v2` unless `PROVENANT_STATE_DIR`
-names another. The 1.x root `~/.local/share/provenant/v1` is never written by
+names another. The default root does not warn merely because the working
+workspace is the home directory or its ancestor. An unusual root's advisory
+overlaps are reported once per state-root digest. The 1.x root `~/.local/share/provenant/v1` is never written by
 2.x, so reinstalling 1.x finds its state as it was left. This tier is evolving.
 
 - Why: two majors must be able to coexist and roll back without migration.
@@ -224,7 +229,9 @@ because `provenant process-tree --json` is read through it.
 Inside a lane where `PROVENANT_PROCESS_TREE` is set, `provenant process-tree
 --json` returns the envelope with the supervisor's latest sample as `data`, or
 `unavailable` when no fresh, complete sample exists. Consumers may rely on
-these fields; new fields may be added. This tier is stable.
+these fields; new fields may be added. With no `--root`, the command returns the
+supervised command's complete sampled subtree. `--root PID` selects a subtree
+within that sample. This tier is stable.
 
 | Object | Field |
 |---|---|

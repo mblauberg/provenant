@@ -1,3 +1,39 @@
+// Capture only PATH, never the credential-bearing delivery environment.
+impl super::Factory {
+    pub(crate) fn requester_lane_path(&self) -> Result<Vec<u8>, FacadeError> {
+        use std::os::unix::ffi::OsStringExt;
+        let Some(git) = self
+            .host_launch
+            .as_ref()
+            .map(|host| host.git.clone())
+            .or_else(provenant_os::git::git_executable)
+        else {
+            return Err(FacadeError::io("capture requester PATH"));
+        };
+        let binding = provenant_config::registered_projects(&self.context.roots)
+            .map_err(|_| FacadeError::io("capture requester PATH"))?
+            .into_iter()
+            .find(|binding| binding.project_id() == self.context.identity.project);
+        let cancel = CancelToken::new();
+        let utility = provenant_confinement::UtilityRuntime::read_only(
+            &git,
+            self.context.roots.state.as_path(),
+        )
+        .map_err(|_| FacadeError::io("capture requester PATH"))?;
+        let path = provenant_cli::run::filtered_requester_lane_path(
+            self.host_launch.as_ref(),
+            &self.cwd,
+            &self.cwd,
+            &utility,
+            &self.executor,
+            &cancel,
+            binding.as_ref(),
+        )
+        .map_err(|_| FacadeError::io("capture requester PATH"))?;
+        Ok(path.path().to_os_string().into_vec())
+    }
+}
+
 use super::*;
 
 /// Called once, as soon as a submitted graph's first checkpoint is saved.
@@ -980,6 +1016,7 @@ impl Factory {
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
                     peer_origin_context: None,
                     peer_submission_digest: None,
+                    requester_path: Some(self.requester_lane_path()?),
                     extra: Default::default(),
                     bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
@@ -1386,19 +1423,10 @@ impl Factory {
             }
         };
         let mut first_error = None;
-        for mut target in targets {
-            if target
-                .host
-                .is_none_or(|host| host == self.context.identity.host)
-            {
-                let store = owner.store(cancel)?;
-                let call = owner.call(cancel);
-                let mut record = store.record(target.attempt, &call).map_err(run_error)?;
-                while let Some(next) = record.superseded_by {
-                    target.attempt = next;
-                    record = store.record(next, &call).map_err(run_error)?;
-                }
-            }
+        for target in targets {
+            // RunStore arbitrates cancellation against continuation admission
+            // under the parent publication fence, then follows the validated
+            // successor chain if a child already won admission.
             let operation_id =
                 graph_operation(&format!("graph-cancel-{}", target.attempt), &attempt.key)?;
             if let Err(error) = owner.run(

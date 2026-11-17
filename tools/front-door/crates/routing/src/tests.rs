@@ -626,3 +626,137 @@ mod quality;
 mod quotas;
 mod readiness;
 mod selection;
+
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    let cursor = provenant_config::ProviderSettings {
+        models: Some(vec!["auto".into(), "composer-*".into(), "grok-*".into()]),
+        ..provenant_config::ProviderSettings::default()
+    };
+    for members in catalogue.pools.values() {
+        for member in members
+            .iter()
+            .filter(|member| member.model.adapter() == "cursor")
+        {
+            assert!(cursor.permits_model(member.model.model()));
+            assert_eq!(member.weight, 1);
+            assert!(matches!(member.model.model(), "composer-2.5" | "grok-4.7"));
+        }
+    }
+    let legacy = ModelId::parse("cursor/gpt-5.3-codex-low")?;
+    assert!(catalogue.model(&legacy).is_some());
+    assert!(
+        catalogue
+            .pools
+            .values()
+            .flatten()
+            .all(|member| member.model != legacy)
+    );
+
+    // The compiled Cursor scope shapes shipped pools, not an owner's pool.
+    config.pools.insert(
+        "owner-cursor".into(),
+        vec![RoutePoolMember {
+            model: legacy.clone(),
+            weight: 1,
+            effort: None,
+            efforts: Vec::new(),
+            free: false,
+        }],
+    );
+    let owner_pool = RouteRequest {
+        choice: RouteChoice::NamedRoute(RouteName::parse("owner-cursor")?),
+        ..request("cursor/auto")?
+    };
+    let mut route_with_fallback = RouteRequest {
+        choice: RouteChoice::NamedRoute(RouteName::parse("senior")?),
+        ..request("cursor/auto")?
+    };
+    route_with_fallback.fallback = Fallback::Models(BoundedModels::new(vec![legacy.clone()])?);
+    config
+        .provider_scopes
+        .get_mut("cursor")
+        .expect("compiled Cursor scope exists")
+        .out_of_scope_pin = provenant_config::OutOfScopePin::Refuse;
+    let ctx = context(&catalogue, &config, now()?);
+    let selected = resolve_with_seed(&owner_pool, &ctx, "owner-cursor", 0)?;
+    assert_eq!(selected.adapter, "cursor");
+    assert_eq!(selected.model, legacy.model());
+    let route = resolve_with_seed(&route_with_fallback, &ctx, "scope-fallback", 0)?;
+    assert!(route.alternatives.as_slice().iter().any(|alternative| {
+        alternative.adapter == "cursor" && alternative.model == legacy.model()
+    }));
+    assert!(matches!(
+        resolve(&request(legacy.as_str())?, &ctx),
+        Err(RoutingError::UnsupportedLaunch(_))
+    ));
+
+    config.provider_scopes.insert(
+        "cursor".into(),
+        provenant_config::ProviderSettings {
+            models: Some(vec!["auto".into()]),
+            ..provenant_config::ProviderSettings::default()
+        },
+    );
+    config
+        .explicit_provider_model_scopes
+        .insert("cursor".into());
+    let pool = RouteRequest {
+        choice: RouteChoice::NamedRoute(RouteName::parse("senior")?),
+        ..request("cursor/auto")?
+    };
+    let mut restricted_fallback = pool.clone();
+    restricted_fallback.fallback = Fallback::Models(BoundedModels::new(vec![legacy.clone()])?);
+    let pin = request("cursor/grok-4.7")?;
+    {
+        let ctx = context(&catalogue, &config, now()?);
+        // No selected pool candidate may escape the configured scope.
+        let result = resolve_with_seed(&pool, &ctx, "scope", 0)?;
+        assert!(result.adapter != "cursor" || result.model == "auto");
+        let result = resolve_with_seed(&restricted_fallback, &ctx, "scope-fallback", 0)?;
+        assert!(result.alternatives.as_slice().iter().all(|alternative| {
+            alternative.adapter != "cursor" || alternative.model != legacy.model()
+        }));
+        assert!(resolve(&pin, &ctx).is_ok());
+        assert!(matches!(
+            resolve(&owner_pool, &ctx),
+            Err(RoutingError::NoEligiblePoolMember { .. })
+        ));
+    }
+    config
+        .provider_scopes
+        .get_mut("cursor")
+        .unwrap()
+        .out_of_scope_pin = provenant_config::OutOfScopePin::Refuse;
+    let ctx = context(&catalogue, &config, now()?);
+    assert!(resolve(&pin, &ctx).is_err());
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn catalogue_launch_suffix_preserves_canonical_identity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let grok = ModelId::parse("cursor/grok-4.7")?;
+    for effort in ["low", "medium", "high", "xhigh"] {
+        assert_eq!(
+            catalogue.launch_model(&grok, Some(effort)),
+            format!("grok-4.7-{effort}")
+        );
+    }
+    assert_eq!(catalogue.launch_model(&grok, None), "grok-4.7");
+    assert_eq!(
+        catalogue.launch_model(&ModelId::parse("cursor/composer-2.5")?, Some("high")),
+        "composer-2.5"
+    );
+    assert_eq!(
+        catalogue.launch_model(&ModelId::parse("cursor/grok-4.7-high")?, Some("high")),
+        "grok-4.7-high"
+    );
+    Ok(())
+}

@@ -25,7 +25,8 @@ pub enum ControlSupport {
     LiveInjection,
     /// Left in Fabric mail for the session to read.
     MailOnly,
-    /// No live path; only `retry` continues the work.
+    /// Saved for the next provider turn; it cannot inject at a live tool boundary.
+    #[serde(rename = "continuation")]
     ContinuationOnly,
     Unsupported,
 }
@@ -34,11 +35,16 @@ impl ControlSupport {
     pub fn delivers(self) -> bool {
         matches!(self, Self::LiveInjection | Self::MailOnly)
     }
+    pub fn continues(self) -> bool {
+        self == Self::ContinuationOnly
+    }
     pub fn reason(self) -> &'static str {
         match self {
             Self::LiveInjection => "injected at a tool boundary of the live session",
             Self::MailOnly => "delivered as Fabric mail for the session to read",
-            Self::ContinuationOnly => "no live control path; use retry to continue",
+            Self::ContinuationOnly => {
+                "saves input durably; requests an interrupt only after the live adapter validates its session, then resumes the same session after settlement"
+            }
             Self::Unsupported => "the adapter offers no control path for this launch",
         }
     }
@@ -98,7 +104,11 @@ pub fn control_capabilities() -> Vec<ControlCapability> {
                 provider: spec.id,
                 launch,
                 support,
-                transport: support.delivers().then_some(AnswerTransport::FabricMail),
+                transport: if support.continues() {
+                    Some(AnswerTransport::ProviderContinuation)
+                } else {
+                    support.delivers().then_some(AnswerTransport::FabricMail)
+                },
                 reason: support.reason(),
                 actions: vec![
                     action("cancel", lane, owned(lane, "applies to lanes only")),
@@ -190,17 +200,26 @@ mod tests {
     }
 
     #[test]
-    fn lanes_declare_no_delivery_until_a_lane_transport_exists() {
+    fn lanes_publish_the_transport_their_control_support_uses() {
         for row in control_capabilities() {
-            assert_eq!(row.transport.is_some(), row.support.delivers());
+            assert_eq!(
+                row.transport.is_some(),
+                row.support.delivers() || row.support.continues()
+            );
             if row.launch == LaunchKind::Lane {
                 assert!(!row.support.delivers(), "{:?}", row.provider);
+                assert_eq!(
+                    row.transport,
+                    row.support
+                        .continues()
+                        .then_some(AnswerTransport::ProviderContinuation)
+                );
             }
         }
     }
 
     #[test]
-    fn resumable_adapters_are_continuation_only_and_commands_are_unsupported() {
+    fn resumable_adapters_publish_continuation_and_commands_are_unsupported() {
         for row in control_capabilities()
             .iter()
             .filter(|row| row.launch == LaunchKind::Lane)
@@ -225,7 +244,16 @@ mod tests {
         let value = serde_json::to_value(&row).unwrap();
         assert_eq!(value["provider"], "claude");
         assert_eq!(value["launch"], "lane");
-        assert_eq!(value["support"], "continuation_only");
+        assert_eq!(value["support"], "continuation");
+        assert_eq!(value["transport"], "provider_continuation");
+        assert_eq!(
+            serde_json::from_value::<ControlSupport>(serde_json::json!("continuation")).unwrap(),
+            ControlSupport::ContinuationOnly
+        );
+        assert!(
+            serde_json::from_value::<ControlSupport>(serde_json::json!("continuation_only"))
+                .is_err()
+        );
         let names: Vec<_> = value["actions"]
             .as_array()
             .unwrap()

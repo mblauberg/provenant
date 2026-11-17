@@ -617,6 +617,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
             free: false,
             model: ModelId::parse(id)?,
             efforts: vec![],
+            effort_suffix: false,
             evidence_ref: "synthetic-controls".into(),
             family: None,
             trains_on_prompts: None,

@@ -177,6 +177,18 @@ pub fn launch_budget_wrap_up(
     launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
 }
 
+/// Launch a queued same-session graph continuation after predecessor custody
+/// has settled and been released.
+pub fn launch_graph_continuation(
+    session: &Session,
+    attempt: AttemptId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: &run::HostLaunchContext,
+) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
+}
+
 /// The detached launcher's entry point. It reopens the admitted run and uses
 /// the ordinary host launch path, including writer custody and guardian handoff.
 pub fn launch_worker(id: AttemptId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
@@ -405,6 +417,24 @@ impl run::Providers for PreparedProvider<'_> {
         self.fallback
             .decode_captures(route, stdout, stderr, exit, provider_state, context)
     }
+    fn decode_captures_with_continuation(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        continuation: run::ContinuationDecodeContext<'_>,
+    ) -> Result<run::Decoded, String> {
+        self.fallback.decode_captures_with_continuation(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            continuation,
+        )
+    }
 }
 
 pub(super) fn with_chair_index<T>(
@@ -479,7 +509,6 @@ pub(super) fn launch_on_host_with_wait(
             graph_directory: None,
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
-            executables: std::collections::BTreeMap::new(),
             executable_search_path: std::env::var_os("PATH")
                 .map(|path| {
                     std::env::split_paths(&path)
@@ -487,6 +516,7 @@ pub(super) fn launch_on_host_with_wait(
                         .collect()
                 })
                 .unwrap_or_default(),
+            lane_path: None,
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             default_account_directories: run::HostLaunchContext::default_account_directories(),
@@ -513,13 +543,12 @@ pub(super) fn launch_on_host_with_wait(
     // names none. The canonical request stays unchanged; custody owns identity.
     if request.chair.is_none() && request.parent.is_none() && !crate::fabric::in_lane() {
         let bind = || -> Result<(), Box<dyn std::error::Error>> {
-            let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
-            if context.identity.project != session.context.project_id
-                || crate::workflow::session_actor(&context, None).map_err(std::io::Error::other)?
-                    != session.context.actor_id
-            {
-                return Err("direct run custody identity could not be verified".into());
-            }
+            let chair = session
+                .chair
+                .as_ref()
+                .ok_or("direct run chair unavailable")?
+                .as_ref()
+                .map_err(|error| std::io::Error::other(error.clone()))?;
             let graph = graph_for_attempt(session, attempt, call)
                 .map_err(|fail| std::io::Error::other(fail.message))?;
             let index_call = provenant_fabric_store::Request {
@@ -535,7 +564,7 @@ pub(super) fn launch_on_host_with_wait(
                 session.context.project_id,
                 &subject,
                 &provenant_records::custody::Holder::Chair {
-                    chair: crate::fabric::current_chair(&context),
+                    chair: chair.clone(),
                 },
                 provenant_records::custody::Origin::Provenant,
                 &index_call,
@@ -549,7 +578,9 @@ pub(super) fn launch_on_host_with_wait(
             )?;
             Ok(())
         };
-        if let Err(error) = bind() {
+        if let Err(error) = bind()
+            && (session.chair.is_some() || std::env::args_os().any(|arg| arg == "--full"))
+        {
             provenant_fabric_runtime::custody::warning(format_args!(
                 "direct run custody pending: {error}"
             ));
@@ -649,15 +680,6 @@ pub(super) fn launch_on_host_with_wait(
         let task = &request.task;
         let operation = session.store.attempt_operation(attempt.attempt_id, call)?;
         let mut host = host.clone();
-        if !inherited_host {
-            // Called after preparation, while its selected provider lease is held.
-            for registration in REGISTRY {
-                let name = registration.adapter.id();
-                if let Ok(path) = provider::find_executable(name) {
-                    host.executables.insert(name.into(), path);
-                }
-            }
-        }
         if let Some(writer) = task.writer.as_ref() {
             host.cwd = writer.worktree.clone();
             provenant_confinement::worktrees::with_context(

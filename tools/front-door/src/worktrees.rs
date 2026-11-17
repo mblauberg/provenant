@@ -39,6 +39,8 @@ pub(crate) enum Error {
     #[error(transparent)]
     Root(#[from] roots::RootError),
     #[error(transparent)]
+    Fabric(#[from] provenant_cli::fabric::EdgeError),
+    #[error(transparent)]
     Worktree(#[from] WorktreeError),
     #[error(transparent)]
     Permissions(#[from] provenant_confinement::permissions::PermissionError),
@@ -146,6 +148,7 @@ impl Error {
                 | WorktreeError::IncompleteCensus { .. }
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
+                | WorktreeError::ProjectLayoutUnresolved
                 | WorktreeError::PrimaryMoved,
             ) => Outcome::Refused,
             Self::Worktree(WorktreeError::Cancelled) => Outcome::Cancelled,
@@ -347,7 +350,7 @@ fn execute(
                     if authority.identity.project != context.binding.project_id() {
                         return Err(Error::InvalidScope);
                     }
-                    let chair = provenant_cli::fabric::current_chair(&authority);
+                    let chair = provenant_cli::fabric::current_chair(&authority)?;
                     let retirement = crate::custody::RetirementWriter::open(
                         roots,
                         context.binding.project_id(),
@@ -1120,15 +1123,29 @@ struct GcProject {
     path: PathBuf,
 }
 
+fn require_non_bare_gc_repository(bare: Option<bool>) -> Result<(), Error> {
+    match bare {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::GcObservation(
+            "GC cannot run on a bare repository because it has no primary checkout",
+        )),
+        None => Err(Error::GcObservation(
+            "GC cannot verify whether the repository is bare; a verified primary checkout is required",
+        )),
+    }
+}
+
 fn gc_project(
     roots: &provenant_core::Roots,
     home: &Path,
     project: &Path,
+    owner: (provenant_config::ProjectBinding, worktrees::ProjectLayout),
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
     read_only: bool,
 ) -> Result<GcProject, Error> {
-    with_context_mode(
+    let (binding, layout) = owner;
+    with_context_mode_with_owner(
         roots,
         home,
         project,
@@ -1140,16 +1157,19 @@ fn gc_project(
         workers,
         facts,
         read_only,
+        Some((binding, layout)),
         |context, cancel| {
-            if gc_primary_checkout(
+            require_non_bare_gc_repository(facts.bare_setting(
                 context.repo,
                 context.executor,
                 context.utility,
-                facts,
+                context.utility_budget,
                 cancel,
-            )? != context.repo.root_path()
-            {
-                return Err(Error::GcObservation("GC requires the primary checkout"));
+            )?)?;
+            if context.layout.project() != Some(context.repo.root_path()) {
+                return Err(Error::GcObservation(
+                    "GC requires the verified primary checkout; a linked checkout cannot serve as the GC owner",
+                ));
             }
             Ok(GcProject {
                 binding: context.binding.clone(),
@@ -1165,37 +1185,6 @@ fn gc_project(
             })
         },
     )
-}
-
-fn gc_primary_checkout<'a>(
-    repo: &'a provenant_confinement::repo::VerifiedRepo,
-    executor: &dyn provenant_os::exec::Executor,
-    runtime: &UtilityRuntime,
-    facts: &worktrees::RepoFacts,
-    cancel: &CancelToken,
-) -> Result<&'a Path, Error> {
-    if facts.bare_setting(
-        repo,
-        executor,
-        runtime,
-        UtilityBudget::bounded(Duration::from_secs(5))?,
-        cancel,
-    )? != Some(false)
-    {
-        return Err(Error::GcObservation(
-            "GC cannot select a primary checkout for a bare repository or unknown repository configuration",
-        ));
-    }
-    let common = repo.common_git_dir();
-    if common.file_name() == Some(OsStr::new(".git")) {
-        common.parent().ok_or(Error::InvalidScope)
-    } else if repo.private_git_dir() == common {
-        Ok(repo.root_path())
-    } else {
-        Err(Error::GcObservation(
-            "GC cannot use a linked worktree as the primary checkout",
-        ))
-    }
 }
 
 /// What `land` did to a merged branch's registered worktree.
@@ -1282,7 +1271,7 @@ pub(crate) fn retention_event(
             let retirement = crate::custody::RetirementWriter::open(
                 &resolved.roots,
                 context.binding.project_id(),
-                provenant_cli::fabric::current_chair(&authority),
+                provenant_cli::fabric::current_chair(&authority)?,
                 context.clock,
                 cancel,
             )?;
@@ -1417,34 +1406,6 @@ pub(crate) fn land_cleanup(
                 .wall_now()
                 .map(|now| i128::from(now.as_micros()) * 1_000)
                 .map_err(|_| Error::Budget)?;
-            let collected = worktrees::collect(
-                context,
-                std::slice::from_ref(&lane),
-                &worktrees::WorktreeGcPolicy {
-                    upstream: None,
-                    terminal: &terminal,
-                    no_live_lanes: &no_live_lanes,
-                    regenerable: &regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: now_ns,
-                    include_foreign: false,
-                    mode: provenant_confinement::worktrees::CollectionMode::Outputs,
-                    proof: None,
-                    upstream_reference: None,
-                    retirement_port: None,
-                    retirement_feeds: None,
-                    integration_patterns: &[],
-                    excluded_paths: &[],
-                    dry_run: false,
-                },
-                cancel,
-            )?;
-            landed.output = collected
-                .output
-                .into_iter()
-                .filter(|entry| entry.removed)
-                .map(|entry| entry.path)
-                .collect();
             let integration_ref =
                 provenant_confinement::repo::GitRefName::remote_tracking(integration)
                     .map_err(|_| Error::InvalidScope)?;
@@ -1464,7 +1425,7 @@ pub(crate) fn land_cleanup(
             if identity.identity.project != project_id {
                 return Err(Error::InvalidScope);
             }
-            let chair = provenant_cli::fabric::current_chair(&identity);
+            let chair = provenant_cli::fabric::current_chair(&identity)?;
             let retirement = crate::custody::RetirementWriter::open(
                 &roots,
                 project_id,
@@ -1474,29 +1435,32 @@ pub(crate) fn land_cleanup(
             )?;
             let retention_owner = crate::retention_owner::Owner::new(&roots, &home, &project)
                 .with_merge_observation(&evidence);
-            match worktrees::collect_selected(
-                context,
-                std::slice::from_ref(&lane),
-                &worktrees::WorktreeGcPolicy {
-                    upstream: Some(integration_tip),
-                    mode: provenant_confinement::worktrees::CollectionMode::Worktrees,
-                    proof: Some(&evidence),
-                    upstream_reference: Some(integration_ref.as_str()),
-                    terminal: &terminal,
-                    no_live_lanes: &no_live_lanes,
-                    regenerable: &regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: now_ns,
-                    include_foreign: true,
-                    retirement_port: Some(&retirement),
-                    retirement_feeds: Some(&retention_owner),
-                    integration_patterns: &[],
-                    excluded_paths: &[],
-                    dry_run: false,
-                },
-                cancel,
-            ) {
+            let policy = worktrees::WorktreeGcPolicy {
+                upstream: Some(integration_tip),
+                mode: provenant_confinement::worktrees::CollectionMode::LandingCleanup,
+                proof: Some(&evidence),
+                upstream_reference: Some(integration_ref.as_str()),
+                terminal: &terminal,
+                no_live_lanes: &no_live_lanes,
+                regenerable: &regenerable,
+                keep: &settings.keep,
+                written_before_ns: now_ns,
+                include_foreign: true,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retention_owner),
+                integration_patterns: &[],
+                excluded_paths: &[],
+                dry_run: false,
+            };
+            match worktrees::collect_selected(context, std::slice::from_ref(&lane), &policy, cancel)
+            {
                 Ok(outcome) => {
+                    landed.output = outcome
+                        .output
+                        .into_iter()
+                        .filter(|entry| entry.removed)
+                        .map(|entry| entry.path)
+                        .collect();
                     landed.removed = outcome
                         .worktrees
                         .removed
@@ -1569,14 +1533,40 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     if command.scheduled {
         let selection = provenant_config::registered_gc_project_selection(&roots)?;
         skipped_transient = selection.skipped_transient;
+        let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
+        let runtime = UtilityRuntime::read_only(&git, roots.state.as_path())?.with_lane_roots(
+            provenant_confinement::utility::lane_state_roots(roots.state.as_path()),
+        );
+        let executor = SystemExecutor::new(1)?;
+        let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+        let cancel = CancelToken::new();
         for binding in selection.projects {
             let common = binding.common_dir();
-            let path = if common.file_name() == Some(OsStr::new(".git")) {
-                common.parent().ok_or(Error::InvalidScope)?
-            } else {
-                common
+            // The utility owns bound layout resolution, including trusted
+            // local bare provenance for a checkout-less common directory.
+            let layout =
+                match runtime.project_layout_for_binding(&executor, &binding, budget, &cancel) {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        unobserved_projects.push(common.to_owned());
+                        continue;
+                    }
+                };
+            let Some(path) = layout.project().map(Path::to_path_buf) else {
+                // Scheduled worktree GC requires a verified primary checkout;
+                // a bare common directory is an allocation owner, not a checkout.
+                unobserved_projects.push(layout.root().to_owned());
+                continue;
             };
-            match gc_project(&roots, &home, path, workers, &facts, command.dry_run) {
+            match gc_project(
+                &roots,
+                &home,
+                &path,
+                (binding, layout),
+                workers,
+                &facts,
+                command.dry_run,
+            ) {
                 Ok(project) => {
                     project_ids.push(project.binding.project_id());
                     projects.push(project);
@@ -1610,8 +1600,49 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        let primary = gc_primary_checkout(&repo, &executor, &runtime, &facts, &CancelToken::new())?;
-        let selected = gc_project(&roots, &home, primary, workers, &facts, command.dry_run)?;
+        require_non_bare_gc_repository(facts.bare_setting(
+            &repo,
+            &executor,
+            &runtime,
+            UtilityBudget::bounded(Duration::from_secs(5))?,
+            &CancelToken::new(),
+        )?)?;
+        let location = if repo.private_git_dir() == repo.common_git_dir() {
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                repo.common_git_dir(),
+                repo.root_path(),
+            )?
+        } else {
+            provenant_config::ProjectLocation::new(repo.common_git_dir())?
+        };
+        let binding = if command.dry_run {
+            provenant_config::lookup_project(&roots, &location)?.ok_or(Error::GcObservation(
+                "GC preview requires an existing project binding",
+            ))?
+        } else {
+            provenant_config::bind_project(&roots, location)?
+        };
+        let layout = runtime.project_layout_for_binding(
+            &executor,
+            &binding,
+            UtilityBudget::bounded(Duration::from_secs(5))?,
+            &CancelToken::new(),
+        )?;
+        let primary = layout
+            .project()
+            .map(Path::to_path_buf)
+            .ok_or(Error::GcObservation(
+                "GC requires a verified primary checkout",
+            ))?;
+        let selected = gc_project(
+            &roots,
+            &home,
+            &primary,
+            (binding, layout),
+            workers,
+            &facts,
+            command.dry_run,
+        )?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
@@ -1928,7 +1959,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         Some(crate::custody::RetirementWriter::open(
                             roots,
                             context.binding.project_id(),
-                            provenant_cli::fabric::current_chair(&authority),
+                            provenant_cli::fabric::current_chair(&authority)?,
                             context.clock,
                             cancel,
                         )?)
@@ -2308,6 +2339,23 @@ fn with_context_mode<T>(
     read_only: bool,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
+    with_context_mode_with_owner(
+        roots, home, project, mutation, workers, facts, read_only, None, action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_context_mode_with_owner<T>(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    mutation: Duration,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    read_only: bool,
+    owner: Option<(provenant_config::ProjectBinding, worktrees::ProjectLayout)>,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
     // Preview only existing custody; an unbound project cannot grant mutation
     // authority and preview must not allocate its registration or lock files.
     let mut state = Directory::root(true)?;
@@ -2360,13 +2408,32 @@ fn with_context_mode<T>(
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = runtime.open_repo(&executor, project, budget, &cancel)?;
-    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())?;
-    let binding = if read_only {
-        provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
-            "GC preview requires an existing project binding",
-        ))?
+    let (binding, layout) = if let Some((binding, layout)) = owner {
+        let common = Directory::open_anchor(binding.common_dir())?;
+        if binding.common_dir() != repo.common_git_dir()
+            || !common.metadata()?.same_identity(&repo.common_identity())
+        {
+            return Err(worktrees::WorktreeError::IdentityChanged.into());
+        }
+        (binding, layout)
     } else {
-        provenant_config::bind_project(roots, location)?
+        let location = if repo.private_git_dir() == repo.common_git_dir() {
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                repo.common_git_dir(),
+                repo.root_path(),
+            )?
+        } else {
+            provenant_config::ProjectLocation::new(repo.common_git_dir())?
+        };
+        let binding = if read_only {
+            provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
+                "GC preview requires an existing project binding",
+            ))?
+        } else {
+            provenant_config::bind_project(roots, location)?
+        };
+        let layout = runtime.project_layout_for_binding(&executor, &binding, budget, &cancel)?;
+        (binding, layout)
     };
     let worktrees_state = if read_only {
         state.open_verified_directory(OsStr::new("worktrees"))?
@@ -2396,6 +2463,7 @@ fn with_context_mode<T>(
     let context = WorktreeContext {
         home,
         repo: &repo,
+        layout: &layout,
         binding: &binding,
         project_state: &project_state,
         executor: &executor,

@@ -38,7 +38,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
             journal.bind(graph::GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: rig.project.clone(),

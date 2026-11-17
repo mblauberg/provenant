@@ -1,6 +1,6 @@
 [package]
 name = "provenant-fabric-runtime"
-version = "2.0.1"
+version = "2.0.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ provenant-routing = { workspace = true }
 provenant-fabric-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 toml_edit = { workspace = true }

@@ -448,7 +448,7 @@ impl RunStore {
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
-        custody::launch(
+        let launched = custody::launch(
             OwnedLaunch {
                 command,
                 lease: &mut lease,
@@ -458,9 +458,28 @@ impl RunStore {
             },
             capture,
             reservation,
-        )
-        .map_err(|failure| HandOff::Uncertain(failure.error.to_string()))?;
+        );
+        if let Err(failure) = launched {
+            match launch_failure(&failure.error) {
+                uncertain @ HandOff::Uncertain(_) => return Err(uncertain),
+                refused => local_or_withdraw!(Err::<(), _>(refused)),
+            }
+        }
         Ok(())
+    }
+}
+
+/// A launch failure is uncertain once the reservation may record a handoff.
+/// A host that cannot hold provider custody refuses before that point, so the
+/// attempt ends with a typed cause instead of waiting for a receipt that never
+/// comes.
+fn launch_failure(error: &custody::CustodyError) -> HandOff {
+    match error {
+        custody::CustodyError::UnsupportedPlatform => HandOff::TypedLocal {
+            message: format!("provider custody: {error}"),
+            cause: TerminalCause::UnsupportedPlatform,
+        },
+        _ => HandOff::Uncertain(error.to_string()),
     }
 }
 
@@ -738,6 +757,29 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn only_a_possible_handoff_makes_a_launch_failure_uncertain() {
+        assert!(matches!(
+            launch_failure(&custody::CustodyError::UnsupportedPlatform),
+            HandOff::TypedLocal {
+                cause: TerminalCause::UnsupportedPlatform,
+                ..
+            }
+        ));
+        for error in [
+            custody::CustodyError::HandoffUnknown,
+            custody::CustodyError::ProfileHandoffUnknown,
+            custody::CustodyError::Timeout,
+            custody::CustodyError::InvalidRecord,
+        ] {
+            assert!(
+                matches!(launch_failure(&error), HandOff::Uncertain(_)),
+                "{error}"
+            );
+        }
+    }
+
     #[test]
     fn typed_handoff_preserves_boundary_and_terminal_cause() {
         use provenant_confinement::permissions::{AvailabilityReason, PermissionError};
@@ -824,6 +866,7 @@ mod tests {
         });
         let plan = PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -932,6 +975,7 @@ mod tests {
         assert!(record.requested_priority.is_none());
         let plan = || PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),

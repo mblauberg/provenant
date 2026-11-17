@@ -78,7 +78,7 @@ impl provenant_confinement::worktrees::WorkerObserver for UnknownWorkers {
 /// crash after durable exit.
 struct Fixture;
 /// Admission capacity is synthetic; process identity remains real for custody.
-struct FixtureResources;
+pub(crate) struct FixtureResources;
 impl provenant_run::Resources for FixtureResources {
     fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
         use provenant_supervisor::census::ProcessObserver;
@@ -753,7 +753,7 @@ pub(super) fn seed_graph_checkpoint(
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -957,6 +957,7 @@ impl provenant_run::Providers for WriterProvider {
                     )),
                     ..Default::default()
                 },
+                continuation_expectation: None,
                 skipped_routes: Vec::new(),
                 argv,
                 environment: Vec::new(),

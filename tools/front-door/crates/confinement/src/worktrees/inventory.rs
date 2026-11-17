@@ -12,6 +12,46 @@ pub struct RepoFacts {
     worktree_listings: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
 }
 
+/// Bounded inputs for one Git worktree inventory query.
+pub struct WorktreeInventoryQuery<'a> {
+    cwd: &'a Path,
+    git: &'a Path,
+    environment: &'a [(OsString, OsString)],
+    executor: &'a dyn Executor,
+    timeout: std::time::Duration,
+    cancel: &'a CancelToken,
+    bare_override: Option<bool>,
+}
+
+impl<'a> WorktreeInventoryQuery<'a> {
+    pub fn new(
+        cwd: &'a Path,
+        git: &'a Path,
+        environment: &'a [(OsString, OsString)],
+        executor: &'a dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &'a CancelToken,
+    ) -> Self {
+        Self {
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+            bare_override: None,
+        }
+    }
+
+    /// Override Git's bare interpretation while reading the inventory. The
+    /// override is an input to layout verification, never proof of that layout.
+    #[must_use]
+    pub fn with_bare_setting(mut self, bare: bool) -> Self {
+        self.bare_override = Some(bare);
+        self
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct RegistrationStamp {
     name: OsString,
@@ -432,54 +472,36 @@ impl RepoFacts {
         )?;
         match exit_code(&bare)? {
             0 => {
-                let roots = utility.lane_roots(repo)?;
+                let roots = utility.lane_roots(executor, repo, budget, cancel)?;
                 let lane_files = crate::utility::lane_configuration_files(
                     executor, repo, utility, budget, cancel,
                 )?;
-                if !bare.stdout.bytes.ends_with(&[0]) {
-                    return Err(WorktreeError::InvalidOutput);
-                }
-                let mut fields = bare.stdout.bytes.split(|byte| *byte == 0);
-                let mut selected = None;
-                let mut untrusted_bare = false;
-                while let Some(origin) = fields.next() {
-                    if origin.is_empty() && fields.clone().next().is_none() {
-                        break;
-                    }
-                    let path = origin
-                        .strip_prefix(b"file:")
-                        .ok_or(WorktreeError::InvalidOutput)?;
-                    if path.is_empty() {
-                        return Err(WorktreeError::InvalidOutput);
-                    }
-                    let path = PathBuf::from(OsString::from_vec(path.to_vec()));
-                    let path = if path.is_absolute() {
-                        path
-                    } else {
-                        repo.root_path().join(path)
-                    };
-                    let in_lane = roots.contains(&path);
-                    let path = crate::transport::normalise(&path);
-                    let value = fields.next().ok_or(WorktreeError::InvalidOutput)?;
-                    let value = match value {
-                        b"true" => true,
-                        b"false" => false,
-                        _ => return Err(WorktreeError::InvalidOutput),
-                    };
-                    if !in_lane && !lane_files.contains(&path) {
-                        selected = Some(value);
-                    } else {
-                        untrusted_bare |= value;
-                    }
-                }
-                // If a bare setting appears only through lane-controlled
-                // provenance, the primary worktree cannot be classified
-                // safely: an alias may hide a trusted occurrence of that file.
-                if selected != Some(true) && untrusted_bare {
-                    return Err(WorktreeError::InvalidOutput);
-                }
-                Ok(selected)
+                classify_bare_origins(repo, &bare.stdout.bytes, &roots, &lane_files)
             }
+            1 => Ok(None),
+            _ => Err(WorktreeError::InvalidOutput),
+        }
+    }
+
+    /// Resolve local bare origins from roots already known during layout
+    /// bootstrap, without recursively asking `UtilityRuntime` to resolve the
+    /// full owner first.
+    pub(crate) fn bare_setting_with_roots(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+        roots: &crate::transport::LaneRoots,
+    ) -> Result<Option<bool>, WorktreeError> {
+        let scalar = budget.with_stdout_cap(self.scalar_limit)?;
+        let lane_files = crate::utility::bootstrap_lane_configuration_files_with_roots(
+            executor, repo, utility, budget, cancel, roots,
+        )?;
+        let bare = UtilityRuntime::local_bare_origins(executor, repo, utility, scalar, cancel)?;
+        match exit_code(&bare)? {
+            0 => classify_bare_origins(repo, &bare.stdout.bytes, roots, &lane_files),
             1 => Ok(None),
             _ => Err(WorktreeError::InvalidOutput),
         }
@@ -525,26 +547,52 @@ impl RepoFacts {
         timeout: std::time::Duration,
         cancel: &CancelToken,
     ) -> Result<Vec<PathBuf>, WorktreeError> {
+        let inventory = self.discover_worktree_inventory(WorktreeInventoryQuery::new(
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+        ))?;
+        inventory_paths(&inventory)
+    }
+
+    /// Read raw Git worktree registrations from a directory selected by the
+    /// caller's sanitised environment. This lets owners resolve repositories
+    /// from a registered common directory without guessing its checkout path.
+    pub fn discover_worktree_inventory(
+        &self,
+        query: WorktreeInventoryQuery<'_>,
+    ) -> Result<Vec<u8>, WorktreeError> {
         use provenant_os::exec::{ExecOptions, StreamPolicy};
-        let argv = [
-            git.as_os_str().to_owned(),
+        let mut argv = vec![
+            query.git.as_os_str().to_owned(),
             "-c".into(),
             "core.fsmonitor=false".into(),
+        ];
+        if let Some(bare) = query.bare_override {
+            argv.extend(["-c".into(), format!("core.bare={bare}").into()]);
+        }
+        argv.extend([
             "worktree".into(),
             "list".into(),
             "--porcelain".into(),
             "-z".into(),
-        ];
-        let mut options = ExecOptions::new(&argv, cwd, timeout);
-        options.env = Some(environment);
+        ]);
+        let mut options = ExecOptions::new(&argv, query.cwd, query.timeout);
+        options.env = Some(query.environment);
         options.stdin = Some(b"");
-        options.cancel = Some(cancel);
+        options.cancel = Some(query.cancel);
         options.stdout = StreamPolicy::Capture {
             limit: self.inventory_limit,
         };
         options.stderr = StreamPolicy::Capture { limit: 4096 };
         options.stop_on_output_limit = true;
-        let output = executor.execute(options).map_err(UtilityError::from)?;
+        let output = query
+            .executor
+            .execute(options)
+            .map_err(UtilityError::from)?;
         if output.stdout.truncated {
             return Err(UtilityError::Truncated { stream: "stdout" }.into());
         }
@@ -560,7 +608,10 @@ impl RepoFacts {
         if output.termination != Termination::Exit(0) {
             return Err(WorktreeError::InvalidOutput);
         }
-        inventory_paths(&output.stdout.bytes)
+        // Parse once here so malformed or incomplete registrations never
+        // reach an owner that might turn them into path grants.
+        parse_worktree_list(&output.stdout.bytes)?;
+        Ok(output.stdout.bytes)
     }
 
     /// Read registered checkout paths without interpreting Git's quoted text
@@ -649,6 +700,10 @@ impl RepoFacts {
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        // Git can report an external separate-git-dir as the primary
+        // worktree path. Only the already verified layout owner can map that
+        // metadata alias back to a checkout; never infer it from a parent.
+        validate_binding(context)?;
         self.inventories
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -660,7 +715,12 @@ impl RepoFacts {
             context.utility_budget,
             cancel,
         )?;
-        parse_worktree_list(&bytes)
+        let mut entries = parse_worktree_list(&bytes)?;
+        // Revalidate after Git returns so a replaced project path cannot be
+        // used to reinterpret the inventory row.
+        validate_binding(context)?;
+        Self::restore_verified_primary_path(context, &mut entries)?;
+        Ok(entries)
     }
 
     pub(super) fn capture_inventory(
@@ -674,6 +734,54 @@ impl RepoFacts {
         let entries = self.read_inventory(context, cancel)?;
         self.remember_inventory(context, &entries, budget);
         Ok(entries)
+    }
+
+    /// Replace Git's external metadata-directory pseudo-primary with the
+    /// checkout that the context's verified layout proves owns this common dir.
+    /// The mapping applies only when Git supplied exactly one non-bare common-dir
+    /// row and did not also supply the verified checkout path.
+    fn restore_verified_primary_path(
+        context: &WorktreeContext<'_>,
+        entries: &mut [GitWorktree],
+    ) -> Result<(), WorktreeError> {
+        let Some(project) = context.layout.project() else {
+            return Ok(());
+        };
+        let common = canonicalize(context.repo.common_git_dir())?;
+        let project = canonicalize(project)?;
+        if project == common {
+            return Err(WorktreeError::InvalidOutput);
+        }
+
+        let mut metadata_primary = None;
+        let mut checkout_primary_present = false;
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.bare {
+                continue;
+            }
+            let path = match canonicalize(&entry.path) {
+                Ok(path) => path,
+                Err(error) if error.is_not_found() => {
+                    // A stale registration remains visible to the normal
+                    // inventory path; it is not evidence for a primary alias.
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if path == project {
+                checkout_primary_present = true;
+            } else if path == common && metadata_primary.replace(index).is_some() {
+                return Err(WorktreeError::InvalidOutput);
+            }
+        }
+
+        if let Some(index) = metadata_primary {
+            if checkout_primary_present {
+                return Err(WorktreeError::InvalidOutput);
+            }
+            entries[index].path = project;
+        }
+        Ok(())
     }
 
     fn remember_inventory(
@@ -817,11 +925,72 @@ impl Executor for FactExecutor<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitWorktree {
     pub(crate) path: PathBuf,
-    pub(crate) head: GitOid,
+    /// Bare registrations have no checkout HEAD field in Git's porcelain.
+    pub(crate) head: Option<GitOid>,
     pub(crate) branch: Option<GitRefName>,
     pub(super) locked: bool,
     pub(super) prunable: bool,
     pub(crate) bare: bool,
+}
+
+fn classify_bare_origins(
+    repo: &VerifiedRepo,
+    bytes: &[u8],
+    roots: &crate::transport::LaneRoots,
+    lane_files: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<bool>, WorktreeError> {
+    classify_bare_origins_at_root(repo.root_path(), bytes, roots, lane_files)
+}
+
+pub(crate) fn classify_bare_origins_at_root(
+    root: &Path,
+    bytes: &[u8],
+    roots: &crate::transport::LaneRoots,
+    lane_files: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<bool>, WorktreeError> {
+    if !bytes.ends_with(&[0]) {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let mut selected = None;
+    let mut untrusted_bare = false;
+    while let Some(origin) = fields.next() {
+        if origin.is_empty() && fields.clone().next().is_none() {
+            break;
+        }
+        let path = origin
+            .strip_prefix(b"file:")
+            .ok_or(WorktreeError::InvalidOutput)?;
+        if path.is_empty() {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        let in_lane = roots.contains(&path);
+        let path = crate::transport::normalise(&path);
+        let value = fields.next().ok_or(WorktreeError::InvalidOutput)?;
+        let value = match value {
+            b"true" => true,
+            b"false" => false,
+            _ => return Err(WorktreeError::InvalidOutput),
+        };
+        if !in_lane && !lane_files.contains(&path) {
+            selected = Some(value);
+        } else {
+            untrusted_bare |= value;
+        }
+    }
+    // If a bare setting appears only through lane-controlled provenance, the
+    // primary worktree cannot be classified safely: an alias may hide a
+    // trusted occurrence of that file.
+    if selected != Some(true) && untrusted_bare {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    Ok(selected)
 }
 
 fn inventory_paths(bytes: &[u8]) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -926,7 +1095,9 @@ pub(super) fn parse_worktree_record(fields: &[Vec<u8>]) -> Result<GitWorktree, W
         }
     }
     let path = path.ok_or(WorktreeError::InvalidOutput)?;
-    let head = head.ok_or(WorktreeError::InvalidOutput)?;
+    if (bare && (head.is_some() || branch.is_some() || detached)) || (!bare && head.is_none()) {
+        return Err(WorktreeError::InvalidOutput);
+    }
     if !detached && !bare && branch.is_none() {
         return Err(WorktreeError::InvalidOutput);
     }
@@ -1261,5 +1432,13 @@ mod path_tests {
         assert!(inventory_paths(b"worktree /truncated\0").is_err());
         assert!(inventory_paths(b"worktree relative\0bare\0\0").is_err());
         assert!(inventory_paths(b"\0\0").is_err());
+    }
+
+    #[test]
+    fn bare_registration_has_no_checkout_head() {
+        let trees = parse_worktree_list(b"worktree /bare\0bare\0\0").expect("bare inventory");
+        assert_eq!(trees.len(), 1);
+        assert!(trees[0].bare);
+        assert_eq!(trees[0].head, None);
     }
 }

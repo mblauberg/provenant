@@ -23,6 +23,8 @@ pub enum Phase {
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     ExplicitCancellation,
+    /// The chair queued a steering turn for this exact provider session.
+    Steered,
     WallDeadline,
     ProtocolRejected,
     SupervisorSignal,
@@ -226,6 +228,8 @@ pub enum Event {
     Progress,
     Terminal,
     Cancel,
+    /// The current provider turn was interrupted for a queued steering turn.
+    Steer,
     ProtocolRejected,
     SupervisorSignal,
     /// Live usage passed the token budget.
@@ -351,6 +355,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             }
             Event::Progress
             | Event::Terminal
+            | Event::Steer
             | Event::ProtocolRejected
             | Event::TokenBudget
             | Event::ContextHandoff
@@ -372,6 +377,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             Event::Cancel => {
                 request_stop(&mut state, StopReason::ExplicitCancellation, &mut effects)
             }
+            Event::Steer => request_stop(&mut state, StopReason::Steered, &mut effects),
             Event::ProtocolRejected => {
                 request_stop(&mut state, StopReason::ProtocolRejected, &mut effects)
             }
@@ -401,6 +407,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                     Event::Cancel => {
                         request_stop(&mut state, StopReason::ExplicitCancellation, &mut effects)
                     }
+                    Event::Steer => request_stop(&mut state, StopReason::Steered, &mut effects),
                     Event::ProtocolRejected => {
                         request_stop(&mut state, StopReason::ProtocolRejected, &mut effects)
                     }
@@ -503,6 +510,7 @@ mod tests {
     fn closed_reasons_and_phases_are_table_driven() {
         let cases = [
             (Event::Cancel, StopReason::ExplicitCancellation),
+            (Event::Steer, StopReason::Steered),
             (Event::ProtocolRejected, StopReason::ProtocolRejected),
             (Event::SupervisorSignal, StopReason::SupervisorSignal),
         ];
@@ -527,6 +535,16 @@ mod tests {
         let (prepared, effects) = step(prepared, Event::TokenBudget, Tick::at(1));
         assert_eq!(prepared.phase(), Phase::Prepared);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn steering_during_terminal_flush_keeps_its_stop_reason() {
+        let (terminal, effects) = step(running(), Event::Terminal, Tick::at(1));
+        assert_eq!(terminal.phase(), Phase::TerminalGrace);
+        assert_eq!(effects, vec![Effect::CloseStdin]);
+        let (stopping, effects) = step(terminal, Event::Steer, Tick::at(2));
+        assert_eq!(stopping.phase(), Phase::Stopping);
+        assert_eq!(effects, vec![Effect::DeliverStop(StopReason::Steered)]);
     }
 
     #[test]

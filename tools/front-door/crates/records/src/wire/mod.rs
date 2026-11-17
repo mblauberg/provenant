@@ -39,9 +39,10 @@ pub use cancel::{
 };
 pub use error::{CodeKind, EDGE_ERROR_CODES, EdgeErrorCode, error_schema};
 pub use lane::{
-    LaneList, LaneProjectionFacts, LaneRow, LaneSettlement, LaneTranscript, provider_seconds,
+    LaneList, LanePresence, LaneProjectionFacts, LaneRow, LaneSettlement, LaneTranscript,
+    provider_seconds,
 };
-pub use output::{ChunkBytes, OutputChunk, OutputData, ReviewerReceipt};
+pub use output::{ChunkBytes, CompositeChunk, OutputChunk, OutputData, ReviewerReceipt};
 
 /// Version of the planned typed wire contract; see the module notes.
 pub const SCHEMA_VERSION: u64 = 2;

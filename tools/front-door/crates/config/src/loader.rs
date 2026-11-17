@@ -455,7 +455,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             for key in keys {
                 let mut row = table.remove(&key);
                 let prefix = format!("providers.{key}");
-                let settings = recover_settings::<crate::ProviderSettings>(
+                let mut settings = recover_settings::<crate::ProviderSettings>(
                     &mut row,
                     &prefix,
                     &user_sites,
@@ -465,6 +465,15 @@ fn inspect<T: DeserializeOwned + Serialize>(
                         crate::providers::validate(&BTreeMap::from([(key.clone(), value.clone())]))
                     },
                 );
+                if !row
+                    .as_ref()
+                    .and_then(Item::as_table)
+                    .is_some_and(|t| t.contains_key("models"))
+                {
+                    settings.models = providers
+                        .get(&key)
+                        .and_then(|default| default.models.clone());
+                }
                 providers.insert(key.clone(), settings);
                 if let Some(row) = row {
                     table.insert(&key, row);
@@ -671,6 +680,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "update_interval_seconds",
             "update_timeout_seconds",
             "runtime_deadline_seconds",
+            "models",
+            "out_of_scope_pin",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }

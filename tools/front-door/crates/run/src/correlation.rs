@@ -318,13 +318,35 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let original = input();
         store.create(&original, &call)?;
-        let mut prior = original.attempt_id;
-        store.start(
-            original.attempt_id,
-            &crate::dispatch_tests::Ready,
-            &|_, _| Err(RunError::Validation("fixture host handoff")),
+        // A same-session resume needs a terminal parent with a sealed route
+        // and provider session. Build that synthetic predecessor directly so
+        // the fixture does not claim a provider launch it never performed.
+        store.mark_starting(
+            &store.record(original.attempt_id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
             &call,
         )?;
+        let running = store
+            .claim(original.attempt_id, &clock, &call)?
+            .ok_or("fixture parent was not admitted")?;
+        let mut parent_exit = crate::tests::exit();
+        parent_exit.scope = RunStore::scope(&running);
+        crate::dispatch_tests::seal_exit(&store, &parent_exit)?;
+        let mut parent_publication = crate::tests::publication();
+        parent_publication.started_at = running.started_at;
+        parent_publication.session = Some("fixture-session".into());
+        let parent = store.publish_terminal(
+            original.attempt_id,
+            running.revision,
+            &parent_publication,
+            &parent_exit,
+            &call,
+        )?;
+        assert_eq!(parent.session.as_deref(), Some("fixture-session"));
+        let mut prior = original.attempt_id;
         for (fresh, n) in [(false, 20_u8), (true, 30)] {
             let next = Resume {
                 extend: Vec::new(),
@@ -354,7 +376,7 @@ mod tests {
                 WorkCoverage::Unindexed
             );
             let handed = std::cell::Cell::new(false);
-            store.start(
+            let started = store.start(
                 run.attempt_id,
                 &crate::dispatch_tests::Ready,
                 &|record, _| {
@@ -364,7 +386,18 @@ mod tests {
                 },
                 &call,
             )?;
-            assert!(handed.get());
+            assert!(handed.get(), "start did not hand off: {started:?}");
+            assert!(
+                matches!(
+                    started.as_slice(),
+                    [Started::Refused {
+                        attempt,
+                        kind: RefusalKind::Handoff,
+                        ..
+                    }] if *attempt == run.attempt_id
+                ),
+                "unexpected launch receipt: {started:?}"
+            );
             assert_eq!(
                 validate_work(&context.state_root, &selector, &call)?,
                 WorkCoverage::Verified

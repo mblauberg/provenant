@@ -56,9 +56,9 @@ pub enum Command {
     Root,
     /// Read a fresh resident-memory sample of an owned lane process tree
     ProcessTree {
-        /// PID of the supervised command inside this lane
+        /// PID inside this lane's sampled tree (defaults to the supervised command)
         #[arg(long, catalog_u32_range = 1..=i32::MAX as i64)]
-        root: u32,
+        root: Option<u32>,
     },
     /// Post a human decision, assumption or question
     Ask(crate::inbox::Ask),
@@ -151,7 +151,7 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Live steering is unavailable on every provider (control_unsupported); delivery transports come later
+    /// Save input durably; interrupt after live session validation and resume the same session after settlement
     #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md"))]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes
@@ -639,6 +639,9 @@ pub struct GraphRunArgs {
     /// list or table as TOML; repeatable
     #[arg(long = "set")]
     pub set: Vec<String>,
+    /// Skip the planner for implementation templates by setting bounded=true
+    #[arg(long)]
+    pub no_plan: bool,
     /// Read a graph document (JSON or TOML)
     #[arg(long)]
     pub file: Option<PathBuf>,
@@ -692,7 +695,7 @@ pub enum Part {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Output {
-    /// Attempt to read, as NAME[/NODE[#N]]; a node reads its newest settled attempt
+    /// Output source, as NAME[/NODE[#N]]; composites expose their declared result
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
     /// Which part to read
@@ -747,7 +750,8 @@ pub struct Reconcile {
         catalog_graph_target()
     )]
     pub targets: Vec<Target>,
-    /// Abandon settlement of this writer attempt, preserving its evidence
+    /// Abandon this attempt, preserving evidence; a nonterminal writer is declared lost
+    /// only when presence is not live, its lease is free and its worktree census is free
     #[arg(
         long,
         value_name = "TARGET",
@@ -958,7 +962,7 @@ pub struct PipelineOptions {
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
-    /// Build and publish a host-owned Cargo target seed from origin/main
+    /// Build and publish a host-owned Cargo target seed from the configured verify base
     SeedBuild,
     /// Create a worktree on a new branch
     Create {

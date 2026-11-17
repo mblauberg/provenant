@@ -83,6 +83,26 @@ fn config_repair(globals: &Globals) -> String {
     command
 }
 
+fn config_projection(
+    error: &provenant_config::ConfigError,
+    globals: &Globals,
+) -> provenant_records::diagnostic::Diagnostic {
+    use provenant_records::diagnostic::{Destination, Diagnostic};
+    if let Some(diagnostic) =
+        provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+            error,
+            Destination::Local,
+        )
+    {
+        diagnostic
+    } else {
+        Diagnostic::new("CONFIG")
+            .category("configuration")
+            .detail(error.to_string())
+            .next(config_repair(globals))
+    }
+}
+
 fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
     file_error("--file", path, "input could not be read")
 }
@@ -376,14 +396,7 @@ fn invoke(
                 error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>();
             let projection = facade
                 .map(|error| error.diagnostic())
-                .or_else(|| {
-                    config.map(|cause| {
-                        provenant_records::diagnostic::Diagnostic::new("CONFIG")
-                            .category("configuration")
-                            .detail(cause.to_string())
-                            .next(config_repair(globals))
-                    })
-                })
+                .or_else(|| config.map(|cause| config_projection(cause, globals)))
                 .or_else(|| {
                     error
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
@@ -514,10 +527,19 @@ fn bare_model_detail(model: &str, error: &BareModelError) -> String {
     }
 }
 
+fn implementation_template(name: &str) -> bool {
+    name == "implement" || name.starts_with("implement.")
+}
+
 fn run_input(
     request: GraphRunArgs,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
+        let no_plan = request.no_plan;
+        let implementation = request
+            .template
+            .as_deref()
+            .is_some_and(implementation_template);
         let sandbox = request.sandbox_override();
         let brief_source = select_brief_source([
             request.brief.map(BriefSource::Text),
@@ -584,6 +606,9 @@ fn run_input(
         }
         if let Some(sandbox) = sandbox {
             parameters["attempt.sandbox"] = json!(sandbox);
+        }
+        if no_plan && implementation {
+            parameters["bounded"] = json!(true);
         }
         let mut policy_inputs = Vec::new();
         if let Some(BriefSource::File(path)) = &brief_source {
@@ -719,6 +744,43 @@ mod tests {
         assert!(repair.contains("'\\''"));
     }
 
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    #[test]
+    fn unsafe_project_binding_state_has_local_mode_and_owner_repairs() {
+        use std::path::PathBuf;
+
+        let path = PathBuf::from("/private/state with 'quote");
+        let mode_error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: path.clone(),
+            mode: 0o755,
+            owner_matches: true,
+        };
+        let mode = config_projection(&mode_error, &Globals::default());
+        assert!(mode.detail.as_deref().is_some_and(|detail| {
+            detail.contains("mode 0755") && detail.contains("other users can")
+        }));
+        let mode_repair = mode.next.unwrap();
+        assert!(mode_repair.contains("chmod 700 '/private/state with '\\''quote'"));
+        assert!(!mode_repair.contains("chown"));
+        assert!(!mode_error.to_string().contains("/private"));
+
+        let owner_error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path,
+            mode: 0o700,
+            owner_matches: false,
+        };
+        let owner = config_projection(&owner_error, &Globals::default());
+        assert!(
+            owner
+                .detail
+                .as_deref()
+                .is_some_and(|detail| { detail.contains("not owned by the current user") })
+        );
+        let owner_repair = owner.next.unwrap();
+        assert!(owner_repair.contains("sudo chown \"$(id -u)\""));
+        assert!(owner_repair.contains("&& chmod 700 '/private/state with '\\''quote'"));
+    }
+
     #[allow(
         dead_code,
         reason = "the custom worktree driver omits libtest functions"
@@ -742,12 +804,28 @@ mod tests {
             write_scope: Vec::new(),
             over: Vec::new(),
             set: Vec::new(),
+            no_plan: false,
             file: None,
             detached: false,
             sandbox: false,
             no_sandbox: false,
             explain: false,
         }
+    }
+
+    #[test]
+    fn no_plan_sets_bounded_for_implementation_templates() {
+        let mut request = run_request();
+        request.template = Some("implement".into());
+        request.no_plan = true;
+        let input = run_input(request).unwrap();
+        assert_eq!(input["set"]["bounded"], true);
+
+        let mut task = run_request();
+        task.template = Some("task".into());
+        task.no_plan = true;
+        let input = run_input(task).unwrap();
+        assert!(input["set"].get("bounded").is_none());
     }
 
     #[test]

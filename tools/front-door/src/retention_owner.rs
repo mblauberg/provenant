@@ -222,6 +222,8 @@ impl worktrees::RetirementFeeds for Owner<'_> {
     #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
         let context = self.context()?;
+        let chair =
+            provenant_cli::fabric::current_chair(&context).map_err(|error| error.to_string())?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -239,6 +241,10 @@ impl worktrees::RetirementFeeds for Owner<'_> {
             project: Some(context.identity.project),
             ..Default::default()
         };
+        // Reuse one bounded process census for the whole ledger walk. If it is
+        // unavailable, the shared projection preserves Unknown conservatively.
+        let mut census = None;
+        let mut census_observed = false;
         loop {
             let page = ledger.custody(&query, &call).map_err(|e| e.to_string())?;
             for record in page
@@ -251,17 +257,30 @@ impl worktrees::RetirementFeeds for Owner<'_> {
                     .any(|s| *s == record.subject || record.links.contains(s))
                 {
                     if matches!(record.holder, Holder::Chair { .. })
-                        && record
-                            .holder
-                            .belongs_to(&provenant_cli::fabric::current_chair(&context))
+                        && record.holder.belongs_to(&chair)
                     {
                         continue;
                     }
-                    match crate::custody::presence(
+                    if matches!(&record.holder, Holder::Attempt { .. })
+                        && record
+                            .holder
+                            .chair()
+                            .is_none_or(|holder_chair| holder_chair.host == chair.host)
+                        && !census_observed
+                    {
+                        census = provenant_supervisor::census::ProcessObserver::census(
+                            &provenant_supervisor::census::SystemProcessObserver,
+                            provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                        )
+                        .ok();
+                        census_observed = true;
+                    }
+                    match crate::custody::presence_with_census(
                         record,
                         self.roots,
-                        context.identity.inbox.host,
-                        context.identity.inbox.actor,
+                        chair.host,
+                        chair.actor,
+                        census.as_ref(),
                     ) {
                         HolderPresence::Unattended => {}
                         HolderPresence::Live => {

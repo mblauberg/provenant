@@ -1,6 +1,97 @@
 use super::*;
 
 #[test]
+fn bare_common_layout_creates_writer_from_linked_executor_checkout() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new()?;
+    fixture.run(&["branch", "-M", "main"])?;
+    let common = fixture._temp.path().join("bare-common");
+    let source = fixture.root.to_str().ok_or("source path")?;
+    let common_text = common.to_str().ok_or("common path")?;
+    let env = fixture_env(&fixture.home, fixture._temp.path());
+    run_fixture_git(
+        &fixture.executor,
+        &fixture.git,
+        fixture._temp.path(),
+        &env,
+        &["clone", "--bare", source, common_text],
+    )?;
+    let layout_state = fixture._temp.path().join("bare-layout-state");
+    provenant_os::fixture::private_state_dir(&layout_state)?;
+    let mut inputs = provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
+    inputs.state_dir = Some(layout_state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let bare_binding =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&common)?)?;
+    let bare_runtime = crate::UtilityRuntime::new(&fixture.git, &fixture.home, &layout_state)?;
+    let empty_bare_layout = bare_runtime.project_layout_for_binding(
+        &fixture.executor,
+        &bare_binding,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    assert_eq!(empty_bare_layout.root(), common.canonicalize()?);
+    assert_eq!(empty_bare_layout.project(), None);
+
+    let linked = fixture._temp.path().join("bare-linked");
+    let linked_text = linked.to_str().ok_or("linked path")?;
+    run_fixture_git(
+        &fixture.executor,
+        &fixture.git,
+        fixture._temp.path(),
+        &env,
+        &[
+            "--git-dir",
+            common_text,
+            "worktree",
+            "add",
+            "--detach",
+            linked_text,
+            "HEAD",
+        ],
+    )?;
+    fixture.root = linked;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    fs::create_dir(fixture.root.join(".provenant"))?;
+    let mut project_ports = provenant_config::PortTable::builtin();
+    project_ports.worktree_layout.roots = vec![PathBuf::from("project-writers")];
+    project_ports.worktree_layout.default = PathBuf::from("project-writers/<branch>");
+    fs::write(
+        fixture.root.join(".provenant/ports.json"),
+        serde_json::to_vec(&project_ports)?,
+    )?;
+    let mut host_ports = provenant_config::PortTable::builtin();
+    host_ports.worktree_layout.roots = vec![PathBuf::from("host-writers")];
+    host_ports.worktree_layout.default = PathBuf::from("host-writers/<branch>");
+    fs::write(
+        fixture._temp.path().join("ports.json"),
+        serde_json::to_vec(&host_ports)?,
+    )?;
+
+    let test = TestContext::new(&fixture)
+        .map_err(|error| std::io::Error::other(format!("context setup: {error}")))?;
+    assert_eq!(test.layout.root(), common.canonicalize()?);
+    assert_eq!(test.layout.project(), None);
+    let info = create(
+        &test.context(),
+        WorktreeCreate {
+            branch: "bare-layout-writer".into(),
+            base: Some(fixture.head()?.to_string()),
+        },
+        &cancel(),
+    )
+    .map_err(|error| std::io::Error::other(format!("writer creation: {error}")))?;
+
+    assert_eq!(info.path, common.join("host-writers/bare-layout-writer"));
+    assert!(info.path.is_dir());
+    Ok(())
+}
+
+#[test]
 fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(), Box<dyn Error>> {
     let source = Fixture::new()?;
     source.run(&["branch", "remote-only"])?;

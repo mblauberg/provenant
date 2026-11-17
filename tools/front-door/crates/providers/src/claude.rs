@@ -958,7 +958,7 @@ fn prepare(
     let mut setup = Vec::new();
 
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
-    let mut env = base_env(input, scratch, path);
+    let mut env = base_env(input, scratch, path)?;
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
         env.retain(|(key, _)| {
@@ -1016,6 +1016,13 @@ fn prepare(
     if input.sandboxed() {
         setup.push(SetupStep::CreateDir(config.clone()));
     }
+    let session_state = if input.sandboxed() {
+        crate::SessionStateLocation::AttemptPrivate
+    } else {
+        crate::SessionStateLocation::Native {
+            root: config.clone(),
+        }
+    };
     if let Some(user_skills) = &user_skills {
         setup.push(SetupStep::Symlink {
             link: config.join("skills"),
@@ -1063,6 +1070,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],

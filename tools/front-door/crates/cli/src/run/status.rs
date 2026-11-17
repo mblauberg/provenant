@@ -47,17 +47,33 @@ pub fn project_retained_attempt(
     id: AttemptId,
     edge: &Edge<'_>,
 ) -> Result<provenant_records::wire::LaneRow, Fail> {
+    let census = provenant_supervisor::census::ProcessObserver::census(
+        &provenant_supervisor::census::SystemProcessObserver,
+        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+    )
+    .ok();
+    project_retained_attempt_with_census(id, edge, census.as_ref().ok_or(()))
+}
+
+/// Project one retained attempt while sharing a command's bounded host census
+/// across a batch of contributions.
+pub fn project_retained_attempt_with_census(
+    id: AttemptId,
+    edge: &Edge<'_>,
+    census: std::result::Result<&provenant_supervisor::census::Census, ()>,
+) -> Result<provenant_records::wire::LaneRow, Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let session = read_session(edge, &call)?;
     let record = session.store.record(id, &call)?;
-    Ok(project_lane(
+    Ok(project_lane_with_census(
         &record,
         &[],
         session.context.state_root.as_path(),
         clock.wall_now().ok(),
-        false,
+        record.superseded_by.is_none(),
+        census,
     ))
 }
 
@@ -100,14 +116,131 @@ pub fn project_lane(
     now_wall: Option<WallTime>,
     observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        waits,
+        root,
+        now_wall,
+        HostView::from_observation(observe_host),
+        None,
+        false,
+    )
+}
+
+/// Project a status row using one bounded process census shared by the caller.
+/// `Err(())` records that census was unavailable, so each live attempt stays
+/// explicitly unknown instead of triggering one fresh host scan per row,
+/// while a sealed exit can still report settlement pending. A false
+/// `observe_host` also stays unknown for running attempts because this host
+/// cannot prove a remote writer dead or live.
+pub fn project_lane_with_census(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    now_wall: Option<WallTime>,
+    observe_host: bool,
+    census: std::result::Result<&provenant_supervisor::census::Census, ()>,
+) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        waits,
+        root,
+        now_wall,
+        HostView::from_observation(observe_host),
+        Some(census),
+        true,
+    )
+}
+
+/// Project a row for a reader that may be on another host. Presence comes from
+/// this host's sealed evidence without a census, so a finished attempt reads
+/// as settling, but no host-local artefact path or host file fact is
+/// projected: the row may cross a peer boundary.
+pub fn project_lane_presence_only(
+    lane: &run::AttemptRecord,
+    root: &Path,
+    now_wall: Option<WallTime>,
+) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        &[],
+        root,
+        now_wall,
+        HostView::PresenceOnly,
+        Some(Err(())),
+        true,
+    )
+}
+
+/// What a lane projection may read from, and publish about, this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostView {
+    /// Nothing: running attempts stay unknown and no host path is projected.
+    Unobserved,
+    /// Presence evidence only; host-local paths and file facts stay private.
+    PresenceOnly,
+    /// Presence plus host-local artefact paths for a caller on this host.
+    Local,
+}
+
+impl HostView {
+    fn from_observation(observe_host: bool) -> Self {
+        if observe_host {
+            Self::Local
+        } else {
+            Self::Unobserved
+        }
+    }
+
+    fn observes_presence(self) -> bool {
+        !matches!(self, Self::Unobserved)
+    }
+
+    fn projects_host_artifacts(self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
+fn project_lane_inner(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    now_wall: Option<WallTime>,
+    view: HostView,
+    census: Option<std::result::Result<&provenant_supervisor::census::Census, ()>>,
+    unknown_when_host_unobserved: bool,
+) -> provenant_records::wire::LaneRow {
     let usage = lane.effective_usage();
+    let host_artifacts = view.projects_host_artifacts();
+    let presence = if !view.observes_presence() {
+        (unknown_when_host_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
+            .then_some(provenant_records::wire::LanePresence::Unknown)
+    } else {
+        let observed = match census {
+            Some(Ok(census)) => run::attempt_presence_with_census(root, lane, census),
+            Some(Err(())) => run::attempt_presence_with_unavailable_census(root, lane),
+            None => run::attempt_presence(root, lane),
+        };
+        observed.map(|presence| match presence {
+            run::AttemptPresence::Live => provenant_records::wire::LanePresence::Live,
+            run::AttemptPresence::Unattended => provenant_records::wire::LanePresence::Unattended,
+            run::AttemptPresence::Unknown => provenant_records::wire::LanePresence::Unknown,
+            run::AttemptPresence::Settling => provenant_records::wire::LanePresence::Settling,
+        })
+    };
+    let stale = presence.and_then(|presence| match presence {
+        provenant_records::wire::LanePresence::Live => Some(false),
+        provenant_records::wire::LanePresence::Unattended
+        | provenant_records::wire::LanePresence::Settling => Some(true),
+        provenant_records::wire::LanePresence::Unknown => None,
+    });
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
     let waiting_for = wait.map(|wait| wait.waiting_for.description()).or_else(|| {
         lane.provider_silent_for_ms
             .0
             .map(run::provider_silence_reason)
             .or_else(|| {
-                (observe_host && matches!(lane.state, run::AttemptState::Starting { .. }))
+                (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
                     .then(|| "launch preparation".to_owned())
             })
     });
@@ -118,7 +251,7 @@ pub fn project_lane(
         .zip(lane.session.as_deref())
         .map(|(adapter, session)| {
             let attempt = artifact(root, lane, "");
-            let path = observe_host
+            let path = host_artifacts
                 .then(|| run::locate_transcript(&attempt, session, &lane.write_grants))
                 .flatten()
                 .map(|path| attempt.join(path));
@@ -129,7 +262,7 @@ pub fn project_lane(
                     .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             }
         });
-    let result_path = observe_host
+    let result_path = host_artifacts
         .then(|| {
             lane.result
                 .as_ref()
@@ -137,7 +270,7 @@ pub fn project_lane(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    let retained = (observe_host
+    let retained = (host_artifacts
         && lane.settlement_receipts.as_ref().is_some_and(|receipts| {
             matches!(
                 receipts.git_import,
@@ -164,10 +297,11 @@ pub fn project_lane(
             waiting_for,
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
-            stale: observe_host.then(|| run::holder_absent(root, lane)),
+            stale,
+            presence,
             result_path,
             transcript,
-            payload_evicted: observe_host
+            payload_evicted: host_artifacts
                 && artifact(
                     root,
                     lane,
@@ -233,9 +367,18 @@ fn session_inventory_page(
         out("{\"total\":0,\"next\":null}\n")?;
         return Ok((json!({}), String::new()));
     };
-    let session = Session { store, context };
-    // Match the normal listing's recovery of a dead guardian before observing
-    // the page; the hook reports only records this read actually completed.
+    let session = Session {
+        store,
+        context,
+        chair: None,
+    };
+    // One bounded host census serves the entire read-only page. If unavailable,
+    // rows remain Unknown and no read queues recovery or guesses from a PID.
+    let census = provenant_supervisor::census::ProcessObserver::census(
+        &provenant_supervisor::census::SystemProcessObserver,
+        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+    )
+    .ok();
     let mut query = lane_query(all, limit, after);
     query.newest_first = all;
     let mut failed = false;
@@ -244,12 +387,21 @@ fn session_inventory_page(
         let event = match entry {
             None => json!({"total": total, "next": next}),
             Some((cursor, lane)) => {
-                let (state, reason) = state_and_reason(&lane.state);
-                let reason = reason.or_else(|| {
-                    (!all)
-                        .then(|| session.store.lane_waits(std::slice::from_ref(lane), &call))
-                        .and_then(|waits| waits.first().map(|wait| wait.waiting_for.description()))
-                });
+                let waits = if all {
+                    Vec::new()
+                } else {
+                    session.store.lane_waits(std::slice::from_ref(lane), &call)
+                };
+                let projected = project_lane_with_census(
+                    lane,
+                    &waits,
+                    session.context.state_root.as_path(),
+                    clock.wall_now().ok(),
+                    lane.superseded_by.is_none(),
+                    census.as_ref().ok_or(()),
+                );
+                let state = projected.state;
+                let reason = projected.reason;
                 let finished = match &lane.state {
                     run::AttemptState::Terminal { finished_at, .. } => Some(*finished_at),
                     _ => None,
@@ -397,7 +549,11 @@ pub fn review_attempt_facts(edge: &Edge<'_>, ids: &[AttemptId]) -> Result<Vec<At
 fn read_session(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let (context, store) = open_read_only(edge, call)?;
     let store = store.ok_or_else(|| Fail::from(run::RunError::NotFound))?;
-    Ok(Session { store, context })
+    Ok(Session {
+        store,
+        context,
+        chair: None,
+    })
 }
 
 fn facts_of(

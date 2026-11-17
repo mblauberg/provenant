@@ -818,7 +818,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                 };
                 let request = resolve_request(query, context)?;
                 let rules = effective_exclusion_rules(&query.request.exclude, roots)?;
-                let route = provenant_routing::resolve_for_account_with_seed_excluding(
+                let mut route = provenant_routing::resolve_for_account_with_seed_excluding(
                     &request,
                     context,
                     None,
@@ -827,6 +827,12 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     &[],
                     &rules,
                 )?;
+                if matches!(request.choice, RouteChoice::Model(_))
+                    && let Some(scope) = context.config.provider_scopes.get(&route.adapter)
+                    && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)
+                {
+                    route.diagnostics.launch_warnings.push(warning);
+                }
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
                 let model_policy = context.config.model_policy.effective(
                     &model,

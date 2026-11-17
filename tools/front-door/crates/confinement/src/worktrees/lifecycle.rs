@@ -15,7 +15,14 @@ pub fn fast_forward(
     validate_binding(context)?;
     context.repo.revalidate()?;
     let path = canonicalize(path)?;
-    if path == canonicalize(context.repo.root_path())? {
+    if context
+        .layout
+        .project()
+        .map(canonicalize)
+        .transpose()?
+        .as_ref()
+        == Some(&path)
+    {
         return Err(WorktreeError::Primary);
     }
     let entries = context.facts.fresh_inventory(context, cancel)?;
@@ -24,13 +31,15 @@ pub fn fast_forward(
         .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
+    let entry_head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
     // Inventory is advisory until this worktree's writer custody is held.
     let locked = lock_worktree_for_launch(context, entry, cancel)?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
-    let current = matching_worktree(&fresh, branch, context.repo.root_path())?
+    let current = matching_worktree(&fresh, branch, context.layout.project())?
         .ok_or(WorktreeError::IdentityChanged)?;
+    let current_head = current.head.ok_or(WorktreeError::InvalidOutput)?;
     if canonicalize(&current.path)? != path
-        || current.head != entry.head
+        || current_head != entry_head
         || current.locked
         || current.prunable
     {
@@ -47,23 +56,23 @@ pub fn fast_forward(
     }
     // A retry or fallback writer resumes in a checkout that already holds work
     // committed past the pin; that descendant of the pin is not a divergence.
-    if current.head != head && is_ancestor(context, head, current.head, cancel)? {
+    if current_head != head && is_ancestor(context, head, current_head, cancel)? {
         return Ok(());
     }
-    if !is_ancestor(context, current.head, head, cancel)? {
+    if !is_ancestor(context, current_head, head, cancel)? {
         return Err(WorktreeError::SourceDiverged {
-            current: current.head,
+            current: current_head,
             target: head,
         });
     }
     repo.revalidate()?;
     let actual = context.facts.checkout_head(context, repo, cancel);
     match actual {
-        Ok(actual) if actual == current.head => {}
+        Ok(actual) if actual == current_head => {}
         Ok(_) | Err(WorktreeError::NotFound) => return Err(WorktreeError::IdentityChanged),
         Err(error) => return Err(error),
     }
-    if current.head != head {
+    if current_head != head {
         let _ = context.facts.take_inventory(context);
         context.workers.invalidate();
         let outcome = execute_git_mutation(
@@ -172,9 +181,10 @@ fn list_impl(
     report(total, None);
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
     let worker_evidence = context.workers.observe_evidence(&roots, false);
-    let primary = canonicalize(context.repo.root_path())?;
+    let primary = context.layout.project().map(canonicalize).transpose()?;
     let mut result = Vec::with_capacity(candidates.len());
     for (path, entry) in candidates {
+        let head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
         let branch_text = entry
             .branch
             .as_ref()
@@ -189,7 +199,7 @@ fn list_impl(
         let mut owner = Err("worktree registration could not be verified".to_owned());
         let mut owner_evidence = None;
         let mut registration_evidence = None;
-        let is_primary = path == primary;
+        let is_primary = primary.as_ref().is_some_and(|primary| path == *primary);
         let (dirty, disk, registration_unknown) = if is_primary {
             owner = Ok(None);
             (
@@ -304,7 +314,7 @@ fn list_impl(
             warnings: Vec::new(),
             path,
             branch: branch_text,
-            head: entry.head,
+            head,
             dirty,
             occupancy,
             owner,
@@ -438,12 +448,13 @@ fn create_with_default(
         .filter(|entry| !entry.prunable)
         .find(|entry| entry.branch.as_ref() == Some(&branch));
     if let Some(entry) = checked_out {
+        let head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
         return Err(if let Some(base) = request.base.as_deref() {
             let base_oid = pin_revision(context, facts, base, cancel)?;
-            if !is_ancestor(context, base_oid, entry.head, cancel)? {
+            if !is_ancestor(context, base_oid, head, cancel)? {
                 WorktreeError::BranchExistsWithBase {
                     branch: request.branch.clone(),
-                    head: entry.head,
+                    head,
                     base: base_oid,
                 }
             } else {
@@ -523,7 +534,7 @@ fn create_with_default(
         .parent()
         .and_then(Path::parent)
         .ok_or(WorktreeError::InvalidRequest)?;
-    let ports = provenant_config::PortTable::read_for(Some(context.repo.root_path()), state)
+    let ports = provenant_config::PortTable::read_for(context.layout.project(), state)
         .map_err(WorktreeError::PortConfiguration)?;
     let target_relative = ports
         .managed_writer_path(&request.branch)
@@ -534,14 +545,15 @@ fn create_with_default(
     let path_name = target_relative
         .file_name()
         .ok_or(WorktreeError::InvalidRequest)?;
+    let layout_device = context.layout.directory().metadata()?.device;
     let worktree_parent = open_or_create_layout_directory(
-        context.repo.root_dir(),
+        context.layout.directory(),
         parent_relative,
         true,
-        context.repo.root_identity().device,
+        layout_device,
     )?;
     let parent_identity = worktree_parent.metadata()?;
-    let target = canonicalize(context.repo.root_path())?.join(&target_relative);
+    let target = context.layout.root().join(&target_relative);
     match worktree_parent.metadata_at(path_name, false) {
         Ok(_) => return Err(WorktreeError::InvalidRequest),
         Err(error) if error.is_not_found() => {}
@@ -554,15 +566,15 @@ fn create_with_default(
     }
     let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
     let named_parent = open_or_create_layout_directory(
-        context.repo.root_dir(),
+        context.layout.directory(),
         parent_relative,
         false,
-        context.repo.root_identity().device,
+        layout_device,
     )?;
     if !parent_identity.same_identity(&named_parent.metadata()?) {
         return Err(WorktreeError::UnknownWriter);
     }
-    let primary_head = primary_head(context, facts, cancel)?;
+    let common_head = common_head(context, facts, cancel)?;
     if let Err(cause) = execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -587,7 +599,7 @@ fn create_with_default(
     // Creating a linked worktree must leave the primary's HEAD, branch or
     // detached, exactly as it was (#1331). A hook or race that moved it is
     // reported rather than hidden; the worktree stays for the operator.
-    if primary_head != self::primary_head(context, facts, cancel)? {
+    if common_head != self::common_head(context, facts, cancel)? {
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
@@ -596,8 +608,9 @@ fn create_with_default(
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(target.as_path()))
         .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+    let entry_head = entry.head.ok_or(WorktreeError::RegistrationUnconfirmed)?;
     if entry.branch.as_ref() != Some(&branch)
-        || entry.head != base
+        || entry_head != base
         || entry.locked
         || entry.prunable
     {
@@ -641,7 +654,7 @@ fn create_with_default(
         warnings,
         path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
-        head: entry.head,
+        head: entry_head,
         dirty,
         owner: Ok(None),
         primary: false,
@@ -781,11 +794,11 @@ pub(super) fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
     removed
 }
 
-/// The primary checkout's `HEAD` file (it lives in the common git dir, so a
-/// linked worktree finds it too) and, when symbolic, the commit it resolves to,
-/// so a reset or commit on the same branch also counts as a move. Read
-/// failures propagate: an unreadable snapshot must not disable the check.
-pub(super) fn primary_head(
+/// The shared common-directory `HEAD` file and, when symbolic, the commit it
+/// resolves to. This is the primary checkout's HEAD when one exists, and the
+/// default branch for a bare repository. Read failures propagate: an unreadable
+/// snapshot must not disable the check.
+pub(super) fn common_head(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,
     cancel: &CancelToken,
@@ -966,7 +979,10 @@ pub(super) fn tree_unchanged(
         .iter()
         .find(|tree| canonicalize(&tree.path).ok().as_deref() == Some(&canonical))
         .ok_or(WorktreeError::IdentityChanged)?;
-    if current.branch != entry.branch || current.head != head || current.locked || current.prunable
+    if current.branch != entry.branch
+        || current.head != Some(head)
+        || current.locked
+        || current.prunable
     {
         return Err(WorktreeError::IdentityChanged);
     }
@@ -976,16 +992,16 @@ pub(super) fn tree_unchanged(
 pub(super) fn matching_worktree<'a>(
     entries: &'a [GitWorktree],
     branch: &GitRefName,
-    repo_root: &Path,
+    primary_root: Option<&Path>,
 ) -> Result<Option<&'a GitWorktree>, WorktreeError> {
-    let repo_root = canonicalize(repo_root)?;
+    let primary_root = primary_root.map(canonicalize).transpose()?;
     let mut found = None;
     for entry in entries
         .iter()
         .filter(|entry| !entry.prunable && entry.branch.as_ref() == Some(branch))
     {
         let path = canonicalize(&entry.path)?;
-        if path == repo_root {
+        if primary_root.as_ref() == Some(&path) {
             return Err(WorktreeError::Primary);
         }
         if found.is_some() {
@@ -1058,10 +1074,71 @@ pub(super) fn remove_tree_when_before_delete(
         });
     }
     let canonical = canonicalize(&entry.path)?;
-    if canonical == canonicalize(context.repo.root_path())? {
+    if context
+        .layout
+        .project()
+        .map(canonicalize)
+        .transpose()?
+        .as_ref()
+        == Some(&canonical)
+    {
         return Err(WorktreeError::Primary);
     }
-    let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    let locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    remove_tree_when_before_delete_locked(
+        context,
+        entry,
+        expected_head,
+        locked,
+        cancel,
+        eligible,
+        output,
+        repository,
+        None,
+        before_delete,
+    )
+}
+
+/// Hook run under the writer lease before removal walks declared output.
+type BeforeOutput<'a> = &'a mut dyn FnMut(&VerifiedWorktree) -> Result<(), WorktreeError>;
+
+/// Continue the same fenced removal while the caller retains its verified
+/// writer lease. Landing uses `before_output` to prune declared output only
+/// after removal eligibility is established, then rechecks eligibility before
+/// the shared removal core can mutate Git state.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn remove_tree_when_before_delete_locked(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    expected_head: GitOid,
+    mut locked: LockedWorktree,
+    cancel: &CancelToken,
+    eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
+    output: Option<&provenant_config::ProjectGcSettings>,
+    repository: Repository,
+    before_output: Option<BeforeOutput<'_>>,
+    before_delete: impl FnOnce(
+        &VerifiedWorktree,
+        &Path,
+        Option<&ArchiveInfo>,
+    ) -> Result<(), WorktreeError>,
+) -> Result<RemovedTree, WorktreeError> {
+    if entry.locked || entry.prunable {
+        return Err(WorktreeError::GitEntryHeld {
+            locked: entry.locked,
+        });
+    }
+    let canonical = canonicalize(&entry.path)?;
+    if context
+        .layout
+        .project()
+        .map(canonicalize)
+        .transpose()?
+        .as_ref()
+        == Some(&canonical)
+    {
+        return Err(WorktreeError::Primary);
+    }
     context.repo.revalidate()?;
     tree_unchanged(
         &context.facts.fresh_inventory(context, cancel)?,
@@ -1069,6 +1146,12 @@ pub(super) fn remove_tree_when_before_delete(
         expected_head,
     )?;
     eligible(true)?;
+    if let Some(before_output) = before_output {
+        before_output(&locked.verified)?;
+        // Output walking can take long enough for eligibility evidence to
+        // change. Keep the same writer lease and revalidate before removal.
+        eligible(true)?;
+    }
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
     if prepared && !matches!(repository, Repository::Discard) {
@@ -1256,10 +1339,10 @@ pub(super) fn pin_integration(
 pub(super) fn named_worktree<'a>(
     entries: &'a [GitWorktree],
     name: &str,
-    root: &Path,
+    primary_root: Option<&Path>,
 ) -> Result<&'a GitWorktree, WorktreeError> {
     let branch = GitRefName::branch(name).ok();
-    let repo_root = canonicalize(root)?;
+    let primary_root = primary_root.map(canonicalize).transpose()?;
     let mut found: Option<&GitWorktree> = None;
     for (path, entry) in canonical_worktree_paths(entries)? {
         let by_branch = branch
@@ -1269,7 +1352,7 @@ pub(super) fn named_worktree<'a>(
         if !by_branch && !by_directory {
             continue;
         }
-        if path == repo_root {
+        if primary_root.as_ref() == Some(&path) {
             return Err(WorktreeError::Primary);
         }
         match found {
@@ -1531,7 +1614,7 @@ pub(super) fn remove_merged_candidate(
         retain(outcome, branch, reason);
         return Ok(());
     }
-    let entry = match matching_worktree(entries, branch, context.repo.root_path()) {
+    let entry = match matching_worktree(entries, branch, context.layout.project()) {
         Ok(entry) => entry,
         Err(error) => {
             retain(outcome, branch, retain_reason(&error));
@@ -1577,7 +1660,7 @@ pub(super) fn remove_merged_candidate(
             None
         }
         Some(entry) => {
-            if entry.head != tip {
+            if entry.head != Some(tip) {
                 retain(outcome, branch, RetainReason::Changed);
                 return Ok(());
             }
@@ -1721,9 +1804,9 @@ pub(super) fn remove_merged_candidate(
     Ok(())
 }
 
-/// The integration branch the primary checkout is on, pinned to its tip. A
-/// detached primary names no integration branch, so removal by name refuses.
-pub(super) fn primary_integration(
+/// The common repository's integration branch, pinned to its tip. A detached
+/// common HEAD names no integration branch, so removal by name refuses.
+pub(super) fn common_integration(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<(GitRefName, GitOid), WorktreeError> {
@@ -1924,11 +2007,11 @@ fn remove_with_owner(
                 }
                 let (integration, integration_tip) = match integration {
                     Some(text) => pin_integration(context, &text, cancel)?,
-                    None => primary_integration(context, cancel)?,
+                    None => common_integration(context, cancel)?,
                 };
                 let branch_tips = read_branch_tips(context, cancel)?;
-                let entry = named_worktree(&entries, &name, context.repo.root_path())?;
-                let tip = entry.head;
+                let entry = named_worktree(&entries, &name, context.layout.project())?;
+                let tip = entry.head.ok_or(WorktreeError::InvalidOutput)?;
 
                 let remove_named = |retirement_plan: Option<(
                     bool,

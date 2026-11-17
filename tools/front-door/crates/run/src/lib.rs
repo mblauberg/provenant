@@ -17,6 +17,7 @@ mod delivery;
 mod disk;
 mod git_context;
 mod holder;
+mod identity;
 mod launch;
 mod ledger;
 mod objects;
@@ -56,23 +57,27 @@ pub use admission::{
     LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
-    CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
-    holder_absent, overdue_at,
+    AttemptPresence, CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
+    TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
+    attempt_presence_with_unavailable_census, holder_absent, overdue_at,
 };
-pub use delivery::HostDeliveryContext;
+pub use delivery::{FilteredLanePath, HostDeliveryContext};
 pub use git_context::{
-    GitContext, continuation_history, ensure_local_branch, ensure_recorded_local_branch,
-    resolve_git_base, resolve_git_base_with_facts, review_merge_base, review_merge_base_between,
+    GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
+    ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,
+    review_diff_context_at, review_merge_base, review_merge_base_between,
 };
 pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
     writer_base,
 };
+pub use identity::ProviderIdentityEvidence;
 #[cfg(test)]
 pub(crate) use launch::fixture_refusal;
 pub use launch::{
-    Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers, RefusalKind,
-    Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency, launch_policy,
+    ContinuationDecodeContext, ContinuationExpectation, Decoded, LaunchPaths, PrepareRefusal,
+    PreparedLaunch, PreparedStart, Providers, RefusalKind, Started, WriteGrantLimit,
+    access_root_allowed, capture_plan, concurrency, launch_policy,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{
@@ -85,7 +90,7 @@ pub use retention::{
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,
     prepare_writer, prepare_writer_with_facts, resolve_reader_source, resolve_writer,
-    resolve_writer_proposal,
+    resolve_writer_proposal, trusted_lane_toolchain_diagnostic,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
@@ -417,6 +422,8 @@ pub enum HelperSafety {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("abandonment refused: {0}")]
+    AbandonBlocked(Box<settlement::AbandonmentRefusal>),
     #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
     RecordedRefusal(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("continuation preparation refused: {}", cause.detail())]
@@ -487,6 +494,14 @@ pub enum RunError {
     GitUnavailable,
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
+    #[error(
+        "live provider session or process identity changed, or the terminal session disagrees; accepted steering input stays recorded and no fresh session was started"
+    )]
+    SteerSessionMismatch,
+    #[error(
+        "provider did not retain a resumable session for the queued steering input; accepted text stays recorded and no fresh session was started"
+    )]
+    SteerSessionUnavailable,
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {}", .0.with_repair())]
@@ -649,6 +664,13 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::AbandonBlocked(evidence) => {
+                diagnostic = diagnostic.detail(if matches!(destination, provenant_records::diagnostic::Destination::Local) {
+                    evidence.to_string()
+                } else {
+                    "abandonment requires non-live presence, free exclusion and a free worktree census".into()
+                });
+            }
             Self::ContinuationRefused { cause } => {
                 diagnostic = diagnostic.detail(cause.detail());
             }
@@ -723,6 +745,24 @@ impl RunError {
             Self::Writer(error) => {
                 if let Some(action) = error.repair() {
                     diagnostic = diagnostic.next(action);
+                }
+                if let WorktreeError::ManagedPathMismatch {
+                    requested,
+                    expected,
+                } = error
+                {
+                    let detail = match (
+                        safe_path(requested, destination),
+                        safe_path(expected, destination),
+                    ) {
+                        (Some(requested), Some(expected)) => format!(
+                            "requested writer path {requested} does not match configured project path {expected}"
+                        ),
+                        _ => {
+                            "requested writer path does not match the configured project worktree layout".into()
+                        }
+                    };
+                    diagnostic = diagnostic.detail(detail);
                 }
                 if let WorktreeError::UnknownWriterAt { path }
                 | WorktreeError::CensusUnknown { path, .. }
@@ -1173,18 +1213,39 @@ mod diagnostic_projection_tests {
 
     #[test]
     fn unknown_occupancy_diagnostics_name_local_scope_without_leaking_remote_evidence() {
-        for cause in [
-            provenant_confinement::worktrees::WorktreeError::CensusUnknown {
-                path: PathBuf::from("/checkout/tree"),
-                detail: "process 123: cwd unreadable at /private/other".into(),
-            },
-            provenant_confinement::worktrees::WorktreeError::UnknownOccupancy {
-                path: PathBuf::from("/checkout/tree"),
-                detail: "process 123: cwd unreadable at /private/other".into(),
-            },
+        use provenant_confinement::worktrees::{Occupancy, WorktreeError};
+        for (error, expected_kind) in [
+            (
+                RunError::Writer(WorktreeError::CensusUnknown {
+                    path: PathBuf::from("/checkout/tree"),
+                    detail: "process 123: cwd unreadable at /private/other".into(),
+                }),
+                ErrorKind::WriterUnknown,
+            ),
+            (
+                RunError::Writer(WorktreeError::UnknownOccupancy {
+                    path: PathBuf::from("/checkout/tree"),
+                    detail: "process 123: cwd unreadable at /private/other".into(),
+                }),
+                ErrorKind::WriterUnknown,
+            ),
+            (
+                RunError::AbandonBlocked(Box::new(settlement::AbandonmentRefusal::Occupancy {
+                    path: PathBuf::from("/checkout/tree"),
+                    state: Occupancy::census_unknown("/checkout/tree".into(), "partial"),
+                    evidence: "process 123: cwd unreadable at /private/other".into(),
+                })),
+                ErrorKind::AbandonBlocked,
+            ),
+            (
+                RunError::AbandonBlocked(Box::new(settlement::AbandonmentRefusal::WriterLease {
+                    evidence: "/checkout/tree: process 123: cwd unreadable at /private/other"
+                        .into(),
+                })),
+                ErrorKind::AbandonBlocked,
+            ),
         ] {
-            let error = RunError::Writer(cause);
-            assert_eq!(ErrorKind::from(&error), ErrorKind::WriterUnknown);
+            assert_eq!(ErrorKind::from(&error), expected_kind);
             let local = error.diagnostic(Destination::Local);
             let detail = local.detail.unwrap();
             assert!(detail.contains("/checkout/tree"));

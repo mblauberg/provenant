@@ -103,26 +103,30 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
         } else {
             candidate.clone()
         };
+        let route = codex_resolved_route("gpt-6-luna", Some("selected-account-key"));
         let day = home.join("sessions/2026/10/24");
         std::fs::create_dir_all(base.join("candidate-0"))?;
         std::fs::create_dir_all(&candidate)?;
         std::fs::create_dir_all(&day)?;
         if native {
-            let selector = base.join("codex-observation-candidate-1.json");
-            let bytes = serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1,
-                "home": provenant_records::StructuredPathWire::from_path(&home)?,
-            }))?;
             // Host metadata uses its own explicit root, independently of
             // adapter setup's scratch-only file authority. Replay is idempotent.
             for _ in 0..2 {
-                write_setup_file(&[&base], &selector, &bytes, false)?;
+                write_native_session_location(&base, &home, &route)?;
             }
         }
         // Candidate-local bytes cannot redirect host observation.
         std::fs::write(
-            candidate.join("codex-observation-candidate-1.json"),
-            br#"{"schema_version":1,"home":"/unrelated-home"}"#,
+            candidate.join("native-session-location.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "provider": "codex",
+                "model": "gpt-6-luna",
+                "account_key": "selected-account-key",
+                "root": provenant_records::StructuredPathWire::from_path(
+                    std::path::Path::new("/unrelated-home")
+                )?,
+            }))?,
         )?;
         std::fs::write(
             day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
@@ -132,15 +136,31 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
                 serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
             ),
         )?;
-        assert_eq!(observe_codex_rollout(&base, thread)?.model, "gpt-6-luna");
-        assert!(observe_codex_rollout(&base, "another-thread").is_err());
+        let route_record = codex_route_record("gpt-6-luna", Some("selected-account-key"));
+        assert_eq!(
+            observe_codex_rollout(&base, thread, &route_record, native)?.model,
+            "gpt-6-luna"
+        );
+        assert!(observe_codex_rollout(&base, "another-thread", &route_record, native).is_err());
         if native {
             // Two fallback candidates can launch against the same login home.
-            std::fs::copy(
-                base.join("codex-observation-candidate-1.json"),
-                base.join("codex-observation-candidate-0.json"),
-            )?;
-            assert_eq!(observe_codex_rollout(&base, thread)?.model, "gpt-6-luna");
+            write_native_session_location(&base, &home, &route)?;
+            assert_eq!(
+                observe_codex_rollout(&base, thread, &route_record, native)?.model,
+                "gpt-6-luna"
+            );
+            let wrong_model = codex_route_record("other-model", Some("selected-account-key"));
+            assert!(observe_codex_rollout(&base, thread, &wrong_model, native).is_err());
+            assert!(
+                find_native_codex_rollout(
+                    &base,
+                    thread,
+                    "gpt-6-luna",
+                    Some("selected-account-key"),
+                    Some(candidate.as_path()),
+                )
+                .is_err()
+            );
         }
         // Independent homes that claim the same thread remain ambiguous.
         let other = base.join("candidate-0");
@@ -151,13 +171,354 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
             other_day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
         )?;
         if native {
-            std::fs::remove_file(base.join("codex-observation-candidate-0.json"))?;
+            let other_home = temp.path().join("other-native-account");
+            let other_native_day = other_home.join("sessions/2026/10/24");
+            std::fs::create_dir_all(&other_native_day)?;
+            std::fs::copy(
+                day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+                other_native_day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+            )?;
+            let other_route = codex_resolved_route("gpt-6-luna", Some("other-account"));
+            write_native_session_location(&base, &other_home, &other_route)?;
+            assert!(matches!(
+                observe_codex_rollout(&base, thread, &route_record, true),
+                Err(provenant_providers::ProviderError::IdentityMismatch)
+            ));
+            let other_route_record = codex_route_record("gpt-6-luna", Some("other-account"));
+            assert!(observe_codex_rollout(&base, thread, &other_route_record, true).is_ok());
+        } else {
+            assert!(matches!(
+                observe_codex_rollout(&base, thread, &route_record, native),
+                Err(provenant_providers::ProviderError::IdentityMismatch)
+            ));
         }
-        assert!(matches!(
-            observe_codex_rollout(&base, thread),
-            Err(provenant_providers::ProviderError::IdentityMismatch)
-        ));
     }
+    Ok(())
+}
+
+fn codex_resolved_route(
+    model: &str,
+    account_key: Option<&str>,
+) -> provenant_records::ResolvedRoute {
+    provenant_records::ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: model.into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: account_key.map(str::to_owned),
+        host: "fixture".into(),
+        alternatives: Default::default(),
+        exclusions: Vec::new(),
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 100,
+        },
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    }
+}
+
+fn codex_route_record(model: &str, account_key: Option<&str>) -> run::RouteRecord {
+    run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some(format!("codex/{model}")),
+        account_key: account_key.map(str::to_owned),
+        ..Default::default()
+    }
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn native_session_location_round_trip_is_bound_to_route_and_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest};
+
+    let temp = tempfile::tempdir()?;
+    let state_root = temp.path().join("state");
+    let attempt_id = AttemptId::from_bytes([8; 16]);
+    let provider_state = state_root
+        .join("attempts")
+        .join(attempt_id.to_string())
+        .join("provider-state");
+    let home = temp.path().join("native-home");
+    std::fs::create_dir_all(provider_state.join("candidate-0"))?;
+    let mut route = codex_resolved_route("fixture-model", Some("selected-account-key"));
+    route.adapter = "agy".into();
+    write_native_session_location(&provider_state, &home, &route)?;
+
+    assert_eq!(
+        native_session_location_for_route(
+            &provider_state,
+            "agy",
+            "fixture-model",
+            Some("selected-account-key"),
+        )?,
+        home
+    );
+    assert!(matches!(
+        native_session_location_for_route(
+            &provider_state,
+            "agy",
+            "fixture-model",
+            Some("different-account"),
+        ),
+        Err(NativeSessionLocationError::Mismatch)
+    ));
+    assert!(matches!(
+        native_session_location_for_route(
+            &provider_state,
+            "agy",
+            "other-model",
+            Some("selected-account-key"),
+        ),
+        Err(NativeSessionLocationError::Mismatch)
+    ));
+
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "key": {"project": "0123456789abcdef0123456789abcdef", "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": "0123456789abcdef0123456789abcdef",
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "agy", "model": "fixture-model"},
+        "applied_route": {"provider": "agy", "model": "agy/fixture-model", "account_key": "selected-account-key", "sandbox": {"effective": false}},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": "fixture-session", "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": provenant_records::FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    verify_native_continuation(&prior, &route, &home, &state_root)?;
+    let wrong_home = temp.path().join("different-home");
+    assert!(matches!(
+        verify_native_continuation(&prior, &route, &wrong_home, &state_root),
+        Err(ContinuationError::NativeSessionLocation(
+            NativeSessionLocationError::Mismatch
+        ))
+    ));
+    let mut other_account = route.clone();
+    other_account.account_key = Some("other-account".into());
+    assert!(matches!(
+        verify_native_continuation(&prior, &other_account, &home, &state_root),
+        Err(ContinuationError::RouteMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn native_codex_observation_uses_launch_selected_home_without_registered_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let provider_state = temp.path().join("provider-state");
+    let candidate = provider_state.join("candidate-0");
+    let home = temp.path().join("discovered-codex-home");
+    let session = "fixture-local-session";
+    let day = home.join("sessions/2026/11/16");
+    std::fs::create_dir_all(&candidate)?;
+    std::fs::create_dir_all(&day)?;
+    let route = codex_resolved_route("gpt-6-luna", None);
+    write_native_session_location(&provider_state, &home, &route)?;
+    std::fs::write(
+        day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+        ),
+    )?;
+
+    let route = codex_route_record("gpt-6-luna", None);
+    assert_eq!(
+        observe_codex_rollout(&provider_state, session, &route, true)?.model,
+        "gpt-6-luna"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn codex_terminal_observation_uses_final_route_bound_native_home()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let provider_state = temp.path().join("provider-state");
+    std::fs::create_dir_all(&provider_state)?;
+    let session = "same-session-id-in-two-accounts";
+    let home_a = temp.path().join("account-a");
+    let home_b = temp.path().join("account-b");
+    for home in [&home_a, &home_b] {
+        let day = home.join("sessions/2026/11/16");
+        std::fs::create_dir_all(&day)?;
+        std::fs::write(
+            day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+            ),
+        )?;
+    }
+
+    let route_a = codex_resolved_route("gpt-6-luna", Some("account-a"));
+    let record_a = codex_route_record("gpt-6-luna", Some("account-a"));
+    write_native_session_location(&provider_state, &home_a, &route_a)?;
+    assert_eq!(
+        observe_codex_rollout(&provider_state, session, &record_a, true)?.model,
+        "gpt-6-luna"
+    );
+
+    // A later prepared fallback candidate owns the one selector. The sealed
+    // applied route then picks its root without reading another account's
+    // matching session ID or model.
+    let route_b = codex_resolved_route("gpt-6-luna", Some("account-b"));
+    let record_b = codex_route_record("gpt-6-luna", Some("account-b"));
+    write_native_session_location(&provider_state, &home_b, &route_b)?;
+    assert!(matches!(
+        observe_codex_rollout(&provider_state, session, &record_a, true),
+        Err(provenant_providers::ProviderError::IdentityMismatch)
+    ));
+    assert_eq!(
+        observe_codex_rollout(&provider_state, session, &record_b, true)?.model,
+        "gpt-6-luna"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest};
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let state = base.join("state");
+    let attempt_id = AttemptId::from_bytes([7; 16]);
+    let provider_state = state
+        .join("attempts")
+        .join(attempt_id.to_string())
+        .join("provider-state");
+    std::fs::create_dir_all(provider_state.join("candidate-0"))?;
+    let native_home = base.join("registered-codex-home");
+    let session = "fixture-session-71";
+    let session_day = native_home.join("sessions/2026/11/16");
+    std::fs::create_dir_all(&session_day)?;
+    let rollout = session_day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl"));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+        ),
+    )?;
+    std::fs::write(
+        native_home.join("auth.json"),
+        "account credential remains in place",
+    )?;
+    let unrelated_session = "another-session";
+    std::fs::write(
+        session_day.join(format!(
+            "rollout-2026-11-16T00-00-01-{unrelated_session}.jsonl"
+        )),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":unrelated_session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
+        ),
+    )?;
+    let route = codex_resolved_route("gpt-6-luna", Some("selected-account-key"));
+    write_native_session_location(&provider_state, &native_home, &route)?;
+
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "key": {"project": "0123456789abcdef0123456789abcdef", "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": "0123456789abcdef0123456789abcdef",
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"},
+        "applied_route": {"provider": "codex", "model": "codex/gpt-6-luna", "account_key": "selected-account-key", "sandbox": {"effective": false}},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": session, "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": provenant_records::FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    let child_state = base.join("child/provider-state/candidate-0");
+    std::fs::create_dir_all(&child_state)?;
+    let continuation = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        ContinuationState {
+            state_root: &state,
+            config_root: &state,
+            private_state: &child_state,
+        },
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(continuation.session(), session);
+    verify_native_continuation(&prior, &route, &native_home, &state)?;
+    assert_eq!(
+        std::fs::read_dir(&child_state)?.count(),
+        0,
+        "the native account home is reused directly, not copied into child state"
+    );
+    assert!(native_home.join("auth.json").exists());
+    assert!(rollout.exists());
+    assert!(
+        session_day
+            .join(format!(
+                "rollout-2026-11-16T00-00-01-{unrelated_session}.jsonl"
+            ))
+            .exists()
+    );
+
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
+        ),
+    )?;
+    let wrong_session_model =
+        verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
+    assert!(matches!(
+        wrong_session_model,
+        ContinuationError::NativeSessionUnavailable
+    ));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+        ),
+    )?;
+
+    let wrong_home = base.join("different-account-home");
+    let refusal = verify_native_continuation(&prior, &route, &wrong_home, &state).unwrap_err();
+    assert!(matches!(
+        refusal,
+        ContinuationError::NativeSessionUnavailable
+    ));
+    assert!(!refusal.to_string().contains(session));
+
+    std::fs::remove_file(&rollout)?;
+    let missing = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
+    assert!(matches!(
+        missing,
+        ContinuationError::NativeSessionUnavailable
+    ));
     Ok(())
 }
 
@@ -411,14 +772,18 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         scope: PathScope::Exact,
     }));
     // A path-shaped provider directory is protected only when declared.
-    assert!(!mandatory
-        .credentials()
-        .iter()
-        .any(|entry| entry.path == home.join(".agy-unselected")));
+    assert!(
+        !mandatory
+            .credentials()
+            .iter()
+            .any(|entry| entry.path == home.join(".agy-unselected"))
+    );
 
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+// Spec: docs/specs/run-git.md#project-layout-ownership
 #[test]
 fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -428,28 +793,151 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let home = root.join("home");
     let source = root.join("source");
     let state = root.join("state");
-    let foreign_common = root.join("other-project/.git");
+    let foreign_project = root.join("other-project");
+    let wrong_project = root.join("wrong-project");
+    let metadata = root.join("metadata");
+    let foreign_common = metadata.join("external.git");
     let foreign = root.join("external-owned-checkout");
+    let unowned = root.join("unowned");
     for path in [
         &home,
         &source,
         &state,
-        &foreign,
-        &foreign_common.join("objects"),
+        &foreign_project,
+        &wrong_project,
+        &metadata,
     ] {
         std::fs::create_dir_all(path)?;
     }
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    std::fs::write(foreign_common.join("HEAD"), "ref: refs/heads/main\n")?;
+    let init = provenant_os::fixture::git_command()
+        .args(["init", "--quiet", "--separate-git-dir"])
+        .arg(&foreign_common)
+        .arg(&foreign_project)
+        .output()?;
+    assert!(
+        init.status.success(),
+        "separate Git directory init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    provenant_os::fixture::run_git(&wrong_project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &["commit", "--allow-empty", "-qm", "fixture"],
+    )?;
+    let foreign_arg = foreign.to_string_lossy();
+    let unowned_arg = unowned.to_string_lossy();
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            foreign_arg.as_ref(),
+            "HEAD",
+        ],
+    )?;
+    provenant_os::fixture::run_git(
+        &foreign_project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            unowned_arg.as_ref(),
+            "HEAD",
+        ],
+    )?;
+    let mut project_ports = provenant_config::PortTable::builtin();
+    project_ports.worktree_layout.roots = vec![PathBuf::from("project-writers")];
+    project_ports.worktree_layout.default = PathBuf::from("project-writers/<branch>");
+    std::fs::create_dir(foreign_project.join(".provenant"))?;
+    std::fs::write(
+        foreign_project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&project_ports)?,
+    )?;
+    let mut unrelated_ports = provenant_config::PortTable::builtin();
+    unrelated_ports.worktree_layout.roots = vec![PathBuf::from("unrelated-writers")];
+    unrelated_ports.worktree_layout.default = PathBuf::from("unrelated-writers/<branch>");
+    std::fs::create_dir(metadata.join(".provenant"))?;
+    std::fs::write(
+        metadata.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&unrelated_ports)?,
+    )?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    provenant_config::bind_project(
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, &state)?;
+    let location = utility
+        .project_location(
+            &executor,
+            &foreign_project,
+            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+            &provenant_core::CancelToken::new(),
+        )?
+        .location;
+    assert_eq!(location.common_dir(), foreign_common);
+    let binding = provenant_config::bind_project(&roots, location.clone())?;
+    let stale = provenant_config::bind_project(
         &roots,
-        provenant_config::ProjectLocation::new(&foreign_common)?,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            &foreign_common,
+            &wrong_project,
+        )?,
     )?;
-    let registration = foreign_common.join("worktrees/external");
-    std::fs::create_dir_all(&registration)?;
+    assert_eq!(stale.project_id(), binding.project_id());
+    let layout_environment = [
+        ("HOME", "/nonexistent"),
+        ("XDG_CONFIG_HOME", "/nonexistent"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
+    ]
+    .map(|(key, value)| (key.into(), value.into()));
+    let stale_layout = provenant_confinement::worktrees::project_layout_for_binding(
+        &executor,
+        &stale,
+        &git,
+        &layout_environment,
+        std::time::Duration::from_secs(5),
+        &provenant_core::CancelToken::new(),
+    );
+    assert!(matches!(
+        stale_layout,
+        Err(provenant_confinement::worktrees::WorktreeError::ProjectLayoutUnresolved)
+    ));
+    let linked_hint = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            &foreign_common,
+            &foreign,
+        )?,
+    )?;
+    let linked_layout = provenant_confinement::worktrees::project_layout_for_binding(
+        &executor,
+        &linked_hint,
+        &git,
+        &layout_environment,
+        std::time::Duration::from_secs(5),
+        &provenant_core::CancelToken::new(),
+    );
+    assert!(matches!(
+        linked_layout,
+        Err(provenant_confinement::worktrees::WorktreeError::ProjectLayoutUnresolved)
+    ));
+    provenant_config::bind_project(&roots, location)?;
+    let private = String::from_utf8(provenant_os::fixture::run_git(
+        &foreign,
+        &["rev-parse", "--absolute-git-dir"],
+    )?)?;
+    let private = PathBuf::from(private.trim());
     let owner = WorktreeOwner {
         attempt_id: None,
         operation_id: None,
@@ -462,25 +950,14 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         reference: None,
     };
     std::fs::write(
-        registration.join("provenant-owner.json"),
+        private.join("provenant-owner.json"),
         serde_json::to_vec(&owner)?,
     )?;
-    std::fs::write(
-        registration.join("gitdir"),
-        format!("{}\n", foreign.join(".git").display()),
-    )?;
     // An unowned sibling's name is not an extra mandatory source boundary.
-    let unowned = foreign_common.join("worktrees/unowned");
-    std::fs::create_dir(&unowned)?;
-    std::fs::write(
-        unowned.join("gitdir"),
-        format!("{}\n", root.join("unowned/.git").display()),
-    )?;
     let registry = Registry {
         roots: Some(&roots),
         ..Default::default()
     };
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let selected = protected_worktrees(&registry, &source, &git)?;
     let inventory_for = |source: &Path| {
         provenant_confinement::permissions::MandatoryRoots::for_host(
@@ -494,21 +971,28 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     };
     let inventory = inventory_for(&source)?;
     let protected = inventory.protected().to_vec();
+    assert!(!foreign_project.join("project-writers").exists());
     assert!(protected.iter().any(|root| root.path == foreign));
     assert!(protected.iter().any(|root| root.path == foreign_common));
     assert!(
+        protected
+            .iter()
+            .any(|root| root.path == foreign_project.join("project-writers")),
+        "project allocation root under separate Gitdir owner is protected"
+    );
+    assert!(
         !protected
             .iter()
-            .any(|entry| entry.path == root.join("unowned"))
+            .any(|entry| entry.path == metadata.join("unrelated-writers")),
+        "the common directory parent is not a project layout owner"
     );
+    assert!(!protected.iter().any(|entry| entry.path == unowned));
     // A human checkout with active/retained writer custody is protected even
     // when it has no lane-provenance marker. Empty retired slots grant none.
-    let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(
-        &root.join("unowned"),
-    ));
+    let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(&unowned));
     assert!(
         provenant_confinement::worktrees::owned_worktree_paths(&foreign_common, &[custody_slot])?
-            .contains(&root.join("unowned"))
+            .contains(&unowned)
     );
     assert!(
         !inventory_for(&foreign)?
@@ -549,6 +1033,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         &foreign_common,
         &foreign.join("nested"),
         &foreign_common.join("refs"),
+        &foreign_project.join("project-writers/future-writer"),
     ] {
         assert!(matches!(
             mandatory.validate_extra_write(&PathGrant {
@@ -566,14 +1051,103 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             })
             .is_ok()
     );
+    assert!(
+        mandatory
+            .validate_extra_write(&PathGrant {
+                path: metadata.join("unrelated-writers/future-writer"),
+                scope: PathScope::Subtree,
+            })
+            .is_ok(),
+        "unrelated Git metadata parent must not inherit project allocation roots"
+    );
     // A checkout pruned after ownership was recorded is still denied by name.
-    std::fs::remove_dir(&foreign)?;
+    std::fs::remove_dir_all(&foreign)?;
     assert!(
         inventory_for(&source)?
             .protected()
             .iter()
             .any(|root| root.path == foreign)
     );
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+// Spec: docs/specs/run-git.md#project-layout-ownership
+#[test]
+fn launch_inventory_protects_each_registered_project_allocation_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The context-free host inventory no longer guesses layouts from a
+    // registered common directory (65c6ad0456). This Git-aware launch input
+    // owns the protection instead: every registered project's verified
+    // allocation root, including ones not yet created.
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let active_source = root.join("active-source");
+    for path in [&home, &state, &active_source] {
+        std::fs::create_dir_all(path)?;
+    }
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), active_source.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let mut allocations = Vec::new();
+    for (project, allocation) in [
+        ("source", ".claude/worktrees"),
+        ("other-project", "project-writers"),
+    ] {
+        let primary = root.join(project);
+        std::fs::create_dir_all(&primary)?;
+        provenant_os::fixture::run_git(&primary, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&primary, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(allocation)];
+        ports.worktree_layout.default = PathBuf::from(format!("{allocation}/<branch>"));
+        std::fs::create_dir(primary.join(".provenant"))?;
+        std::fs::write(
+            primary.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                primary.join(".git"),
+                &primary,
+            )?,
+        )?;
+        allocations.push(primary.join(allocation));
+    }
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    };
+    let protected = protected_worktrees(&registry, &active_source, &git)?;
+    let inventory = provenant_confinement::permissions::MandatoryRoots::for_host(
+        &roots,
+        &home,
+        &active_source,
+        &[],
+        &[],
+        &protected,
+    )?;
+    for allocation in allocations {
+        assert!(!allocation.exists(), "protection precedes the first checkout");
+        assert!(
+            protected.iter().any(|grant| grant.path == allocation
+                && grant.scope == PathScope::Subtree),
+            "{} is not protected",
+            allocation.display()
+        );
+        assert!(matches!(
+            inventory.validate_extra_write(&PathGrant {
+                path: allocation.join("later-checkout"),
+                scope: PathScope::Subtree,
+            }),
+            Err(provenant_confinement::permissions::PermissionError::ProtectedOverlap)
+        ));
+    }
     Ok(())
 }
 
@@ -657,6 +1231,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         policy: &launch_policy,
         command: None,
         route: &route,
+        provider_model: None,
         confined: &plan,
         prompt: &prompt,
         continuation: None,
@@ -1186,16 +1761,24 @@ fn absent_default_login_differs_from_directory_integrity_errors()
     spec.login_hint = "fixture login";
     let missing = temp.path().join("missing");
     assert!(
-        default_directory_error(&spec, &missing, "not found".into())
+        default_directory_error(&spec, &missing, "not found".into(), None)
             .to_string()
             .contains("fixture")
     );
     assert_eq!(
-        default_directory_error(&spec, &missing, "not found".into()).skip_kind(),
+        default_directory_error(&spec, &missing, "not found".into(), None).skip_kind(),
         SkipKind::AuthRequired
     );
+    let configured =
+        default_directory_error(&spec, &missing, "not found".into(), Some("CODEX_HOME"));
+    let configured_message = configured.to_string();
+    assert_eq!(configured.skip_kind(), SkipKind::Account);
+    assert!(configured_message.contains("CODEX_HOME"));
+    assert!(!configured_message.contains(&missing.display().to_string()));
+    assert!(configured_message.contains("check or unset CODEX_HOME"));
+    assert!(!configured_message.contains("login is missing"));
     assert_eq!(
-        default_directory_error(&spec, temp.path(), "permission denied".into()).skip_kind(),
+        default_directory_error(&spec, temp.path(), "permission denied".into(), None).skip_kind(),
         SkipKind::Account
     );
     #[cfg(unix)]
@@ -1203,7 +1786,7 @@ fn absent_default_login_differs_from_directory_integrity_errors()
         let broken = temp.path().join("broken-link");
         std::os::unix::fs::symlink(&missing, &broken)?;
         assert_eq!(
-            default_directory_error(&spec, &broken, "broken link".into()).skip_kind(),
+            default_directory_error(&spec, &broken, "broken link".into(), None).skip_kind(),
             SkipKind::Account
         );
     }
@@ -1312,9 +1895,10 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
     let state = base.join("state");
     let project = base.join("repo");
     let git_home = base.join("git-home");
-    for directory in [&home, &state, &project, &git_home] {
+    for directory in [&home, &project, &git_home] {
         std::fs::create_dir(directory)?;
     }
+    provenant_os::fixture::private_state_dir(&state)?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     std::fs::write(project.join("subject"), "registered source")?;
@@ -1381,7 +1965,9 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             &credentials,
             crate::run::SourceAdmissionMode::Registered,
         )?;
-        let prepared = source_cwd(&registry, &task)?;
+        assert_eq!(admission.path, source);
+        let prepared = source_cwd(&registry, &task)
+            .unwrap_or_else(|error| panic!("source {}: {error}", source.display()));
         assert_eq!(prepared, admission.path);
         assert!(
             !admission
@@ -1529,7 +2115,8 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
     task.access.source_identity = Some(source_identity(&source)?);
-    task.route = run::RequestedRoute::Adapter { required_family: None,
+    task.route = run::RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fake".into(),
@@ -1632,7 +2219,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &live,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )?;
@@ -1653,7 +2240,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &task,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )?;
@@ -1794,7 +2381,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &task,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )?;
@@ -1818,7 +2405,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &task,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )

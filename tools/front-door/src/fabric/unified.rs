@@ -277,6 +277,10 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             "open_asks",
             "result_summary",
             "evidence_error",
+            "review_verdict",
+            "findings_count",
+            "findings_available",
+            "review_partial",
         ] {
             row[field] = Value::Null;
         }
@@ -326,6 +330,22 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.result.as_ref())
                     .and_then(|result| result.path.as_ref())
+            );
+            row["review_verdict"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|outputs| outputs.verdict.as_ref())
+            );
+            row["findings_count"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|outputs| outputs.findings_available.map(|_| outputs.findings.len()))
+            );
+            row["findings_available"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|outputs| outputs.findings_available)
+            );
+            row["review_partial"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .map(|outputs| outputs.partial)
             );
             row["open_asks"] = json!(
                 run.checkpoint
@@ -585,6 +605,22 @@ pub(crate) fn enrich_status_rows_within(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
+    let local_prefix = format!("{}/", context.identity.host);
+    let local_census = rows
+        .iter()
+        .any(|row| {
+            row["kind"] == "attempt"
+                && row["attempt_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(&local_prefix))
+        })
+        .then(|| {
+            provenant_supervisor::census::ProcessObserver::census(
+                &provenant_supervisor::census::SystemProcessObserver,
+                provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+            )
+            .map_err(|_| ())
+        });
     let mut peer_executor = None;
     for row in rows.iter_mut() {
         if row["kind"] != "attempt" {
@@ -647,6 +683,7 @@ pub(crate) fn enrich_status_rows_within(
                         &failure.error.to_string(),
                         200
                     ));
+                    project_remote_attempt_unknown(row);
                     continue;
                 }
             };
@@ -696,12 +733,18 @@ pub(crate) fn enrich_status_rows_within(
         if let Some(subtree) = &record.peer.peer_subtree {
             row["peer_subtree"] = json!(subtree);
         }
-        let mut projected = provenant_cli::run::project_lane(
+        let census = local_census
+            .as_ref()
+            .and_then(|census| census.as_ref().ok())
+            .map(Ok)
+            .unwrap_or(Err(()));
+        let mut projected = provenant_cli::run::project_lane_with_census(
             &record,
             &waits,
             context.roots.state.as_path(),
             clock.wall_now().ok(),
-            host == context.identity.host,
+            host == context.identity.host && row["latest_attempt"] == true,
+            census,
         );
         if host == context.identity.host
             && let Some(store) = &store
@@ -728,6 +771,7 @@ pub(crate) fn enrich_status_rows_within(
         project_attempt_failure(row);
     }
     project_node_waits(rows);
+    project_node_liveness(rows);
     project_node_failures(rows);
     for row in rows.iter_mut() {
         if let Some(object) = row.as_object_mut() {
@@ -744,6 +788,22 @@ fn project_attempt_failure(row: &mut Value) {
             row["next"] = row["reason"].clone();
         }
     }
+}
+
+/// A peer error is no evidence that a checkpoint's Running writer is still
+/// present. Keep its durable state and expose the unavailable observation on
+/// the attempt so the current node cannot render as Running without proof.
+fn project_remote_attempt_unknown(row: &mut Value) {
+    if row["kind"] != "attempt" || row["state"] != "running" {
+        return;
+    }
+    row["graph_state"] = row["state"].clone();
+    row["recorded_state"] = row["state"].clone();
+    row["state"] = json!("unknown");
+    row["presence"] = json!("unknown");
+    row["reason"] = json!(
+        "remote writer presence is unavailable; retry status on the owning host when it is reachable"
+    );
 }
 
 /// Surface the latest attempt's typed cause on its failed node as well. The
@@ -856,6 +916,54 @@ fn project_node_waits(rows: &mut [Value]) {
     }
 }
 
+/// A checkpoint records the last durable node state. Project native liveness
+/// onto its current node without changing the checkpoint or confusing an
+/// unobservable writer with a live one.
+fn project_node_liveness(rows: &mut [Value]) {
+    let observations: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter(|row| {
+            row["kind"] == "attempt"
+                && row["latest_attempt"] == true
+                && row["recorded_state"] == "running"
+                && row["presence"].is_string()
+                && row["presence"] != "live"
+        })
+        .filter_map(|row| {
+            Some((
+                (
+                    row["graph_id"].as_str()?.to_owned(),
+                    row["node_id"].as_str()?.to_owned(),
+                ),
+                (
+                    row["state"].clone(),
+                    row["presence"].clone(),
+                    row["reason"].clone(),
+                ),
+            ))
+        })
+        .collect();
+    for row in rows
+        .iter_mut()
+        .filter(|row| row["kind"] == "node" && row["state"] == "running")
+    {
+        let key = (
+            row["graph_id"].as_str().unwrap_or_default().to_owned(),
+            row["node_id"].as_str().unwrap_or_default().to_owned(),
+        );
+        let Some((state, presence, reason)) = observations.get(&key) else {
+            continue;
+        };
+        row["recorded_state"] = json!("running");
+        row["state"] = state.clone();
+        row["presence"] = presence.clone();
+        if reason.is_string() {
+            row["reason"] = reason.clone();
+            row["next"] = reason.clone();
+        }
+    }
+}
+
 /// A target that names nothing, or names it ambiguously, as its envelope
 /// reports it. It carries its own outcome so the caller does not re-derive it.
 #[derive(Debug)]
@@ -948,6 +1056,28 @@ fn resolve_with_checkpoint(
         target,
         want,
     )
+}
+
+/// Resolve graph output from one status snapshot so declared root topology and
+/// checkpoint expansion ownership cannot come from different graph revisions.
+fn resolve_output_with_checkpoint(
+    factory: &Factory,
+    target: &provenant_cli::Target,
+) -> Result<(Resolved, provenant_fabric_runtime::graph::GraphCheckpoint), TargetFault> {
+    let mut read = None;
+    let resolved = provenant_cli::target::resolve_with_document(target, Want::Output, |name| {
+        let snapshot = FileJournal::read_status_snapshot(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            name,
+        )?;
+        read = snapshot.as_ref().map(|(_, checkpoint)| checkpoint.clone());
+        Ok(snapshot.map(|(execution, checkpoint)| (execution.document, checkpoint)))
+    })
+    .map_err(target_fault)?;
+    let checkpoint =
+        read.ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?;
+    Ok((resolved, checkpoint))
 }
 
 fn resolve_checkpoint(
@@ -1864,19 +1994,26 @@ fn host_graph_output(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
-    let (resolved, checkpoint) =
-        match resolve_with_checkpoint(factory, &command.target, Want::Attempt { settled: true }) {
-            Ok(found) => found,
-            // A node that failed before it launched has no attempt to read;
-            // its failure and remedy are still the answer.
-            Err(fault) if command.target.attempt.is_none() && fault.code == "NOT_FOUND" => {
-                return match unlaunched_failure_output(command, factory, budget, cancel)? {
-                    Some(reply) => Ok(reply),
-                    None => Err(fault.into()),
-                };
-            }
-            Err(fault) => return Err(fault.into()),
-        };
+    let (resolved, checkpoint) = match resolve_output_with_checkpoint(factory, &command.target) {
+        Ok(found) => found,
+        // A node that failed before it launched has no attempt to read;
+        // its failure and remedy are still the answer.
+        Err(fault) if command.target.attempt.is_none() && fault.code == "NOT_FOUND" => {
+            return match unlaunched_failure_output(command, factory, budget, cancel)? {
+                Some(reply) => Ok(reply),
+                None => Err(fault.into()),
+            };
+        }
+        Err(fault) => return Err(fault.into()),
+    };
+    let progress = checkpoint
+        .nodes
+        .iter()
+        .find(|node| Some(node.id.as_str()) == resolved.node.as_deref())
+        .ok_or(FacadeError::StateCorrupt)?;
+    if !progress.children.is_empty() {
+        return composite_graph_output(command, &resolved.graph, progress);
+    }
     let Some(reference) = resolved.attempt_ref.clone() else {
         let fault = TargetFault {
             outcome: provenant_records::Outcome::Invalid,
@@ -1906,6 +2043,125 @@ fn host_graph_output(
     selected.target = resolved.target();
     let reply = graph_attempt_output(selected, &reference, edge, factory, budget, cancel)?;
     Ok(with_graph_failures(reply, &failure_rows))
+}
+
+fn composite_graph_output(
+    command: &provenant_cli::Output,
+    graph: &str,
+    progress: &provenant_fabric_runtime::graph::NodeProgress,
+) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
+    if command.path {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            "a composite has no attempt artifact path; read its declared result",
+        ));
+    }
+    if !matches!(command.part, provenant_cli::Part::Result) {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            "a composite exposes its declared result, not an attempt prompt, stderr, transcript, events or receipt",
+        ));
+    }
+    let Some(outputs) = progress.outputs.as_ref() else {
+        return Ok(output_fail(
+            provenant_records::Outcome::Invalid,
+            "NOT_FOUND",
+            &format!(
+                "NOT_FOUND: {graph}/{} has no settled composite outputs",
+                progress.id
+            ),
+        ));
+    };
+    // A valid composite may export typed fields without declaring result text.
+    let result = outputs.result.as_ref();
+    let text = result.map_or("", |result| result.excerpt.as_str());
+    let length = text.len();
+    let tail = command
+        .tail
+        .map(|lines| lines.min(provenant_cli::limits::TAIL_LINES));
+    let mut start = if tail.is_some() {
+        length.saturating_sub(command.max_bytes as usize)
+    } else {
+        usize::try_from(command.offset)
+            .unwrap_or(usize::MAX)
+            .min(length)
+    };
+    let end = start.saturating_add(command.max_bytes as usize).min(length);
+    if let Some(lines) = tail {
+        let bounded_start = composite_tail_start(&text.as_bytes()[start..end], lines);
+        start += bounded_start;
+    }
+    let selected_bytes = &text.as_bytes()[start..end];
+    let (bytes, excerpt) =
+        match provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(
+            selected_bytes.to_vec(),
+        ) {
+            provenant_fabric_runtime::coordination::facade::OutputBytes::Utf8(text) => (
+                provenant_records::wire::ChunkBytes::Utf8(text.clone()),
+                text,
+            ),
+            provenant_fabric_runtime::coordination::facade::OutputBytes::Base64(text) => (
+                provenant_records::wire::ChunkBytes::Base64(text),
+                String::from_utf8_lossy(selected_bytes).into_owned(),
+            ),
+        };
+    let state = serde_json::to_value(progress.state)?
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+    let selected = json!({
+        "verdict": outputs.verdict,
+        "findings": outputs.findings,
+        "findings_available": outputs.findings_available,
+        "partial": outputs.partial,
+        "warnings": outputs.warnings,
+        "branch": outputs.branch,
+        "commit": outputs.commit,
+        "remaining": outputs.remaining,
+    });
+    let data = provenant_records::wire::OutputData::Composite(Box::new(
+        provenant_records::wire::CompositeChunk {
+            graph: graph.to_owned(),
+            node: progress.id.clone(),
+            state,
+            part: "result".into(),
+            offset: start as u64,
+            next_offset: end as u64,
+            length: result
+                .filter(|result| !result.truncated)
+                .map(|_| length as u64),
+            eof: result.is_none_or(|_| end == length),
+            complete: result.is_none_or(|result| !result.truncated),
+            digest: result.map(|result| result.digest.clone()),
+            bytes,
+            selected,
+            tail,
+            tail_clamped: command
+                .tail
+                .map(|lines| lines != lines.min(provenant_cli::limits::TAIL_LINES)),
+            to: None,
+            written: None,
+        },
+    ));
+    let data = serde_json::to_value(data)?;
+    Ok(provenant_cli::run::render_output(
+        command.clone(),
+        Ok((data, excerpt.to_owned())),
+    ))
+}
+
+fn composite_tail_start(bytes: &[u8], lines: u64) -> usize {
+    bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(bytes)
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
+        .map_or(0, |(index, _)| index + 1)
 }
 
 /// The failed or blocked node rows under a graph or node target.
@@ -2512,6 +2768,183 @@ mod tests {
     };
 
     #[test]
+    fn composite_output_preserves_every_public_typed_export() {
+        let commit = "1".repeat(40);
+        let progress = composite_progress(json!({
+            "schema_version": 2,
+            "result": {
+                "digest": "sha256:fixture",
+                "excerpt": "result bytes",
+                "truncated": false,
+                "path": null
+            },
+            "verdict": "VERDICT: PASS",
+            "findings": [],
+            "findings_available": true,
+            "branch": "feature/output",
+            "commit": commit,
+            "remaining": ["finish the export test"],
+            "warnings": []
+        }));
+        let command = provenant_cli::Output {
+            target: "typed-output/panel".parse().unwrap(),
+            part: provenant_cli::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 64,
+        };
+        let reply = composite_graph_output(&command, "typed-output", &progress).unwrap();
+        assert_eq!(reply.result.data["selected"]["branch"], "feature/output");
+        assert_eq!(reply.result.data["selected"]["commit"], commit);
+        assert_eq!(
+            reply.result.data["selected"]["remaining"],
+            json!(["finish the export test"])
+        );
+        let schema = provenant_records::wire::data_schema("output").unwrap();
+        provenant_records::wire::schema::validate(&schema, &reply.result.data).unwrap();
+    }
+
+    fn composite_progress(outputs: Value) -> provenant_fabric_runtime::graph::NodeProgress {
+        serde_json::from_value(json!({
+            "id": "panel",
+            "state": "succeeded",
+            "worktree": null,
+            "children": ["writer"],
+            "attempts": [],
+            "outputs": outputs
+        }))
+        .unwrap()
+    }
+
+    fn composite_output_command(offset: u64, max_bytes: u64) -> provenant_cli::Output {
+        provenant_cli::Output {
+            target: "typed-output/panel".parse().unwrap(),
+            part: provenant_cli::Part::Result,
+            to: None,
+            path: false,
+            offset,
+            tail: None,
+            max_bytes,
+        }
+    }
+
+    fn output_chunk_bytes(data: &Value) -> Vec<u8> {
+        match data["bytes"]["encoding"].as_str() {
+            Some("utf8") => data["bytes"]["data"]
+                .as_str()
+                .expect("UTF-8 chunk data")
+                .as_bytes()
+                .to_vec(),
+            Some("base64") => provenant_fabric_runtime::handoff::decode_base64(
+                data["bytes"]["data"].as_str().expect("base64 chunk data"),
+            )
+            .expect("valid base64 chunk"),
+            encoding => panic!("unexpected composite chunk encoding: {encoding:?}"),
+        }
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn composite_output_paginates_multibyte_text_as_bounded_bytes() {
+        let excerpt = "🧪éx";
+        let progress = composite_progress(json!({
+            "schema_version": 2,
+            "result": {
+                "digest": "sha256:fixture",
+                "excerpt": excerpt,
+                "truncated": false,
+                "path": null
+            },
+            "findings": [],
+            "warnings": []
+        }));
+        let schema = provenant_records::wire::data_schema("output").unwrap();
+
+        // Starting inside the four-byte character returns its next raw byte,
+        // losslessly, instead of slicing the Rust string at that offset.
+        let middle =
+            composite_graph_output(&composite_output_command(1, 1), "typed-output", &progress)
+                .unwrap();
+        assert_eq!(middle.result.status, provenant_records::Outcome::Ok);
+        assert_eq!(middle.result.data["offset"], 1);
+        assert_eq!(middle.result.data["next_offset"], 2);
+        assert_eq!(output_chunk_bytes(&middle.result.data).len(), 1);
+        provenant_records::wire::schema::validate(&schema, &middle.result.data).unwrap();
+
+        let mut offset = 0;
+        let mut bytes = Vec::new();
+        while offset < excerpt.len() as u64 {
+            let reply = composite_graph_output(
+                &composite_output_command(offset, 1),
+                "typed-output",
+                &progress,
+            )
+            .unwrap();
+            let data = &reply.result.data;
+            assert_eq!(data["offset"], offset);
+            let next_offset = data["next_offset"].as_u64().expect("next byte offset");
+            assert!(next_offset > offset);
+            let chunk = output_chunk_bytes(data);
+            assert_eq!(chunk.len() as u64, next_offset - offset);
+            assert!(chunk.len() <= 1);
+            assert_eq!(data["eof"], next_offset == excerpt.len() as u64);
+            provenant_records::wire::schema::validate(&schema, data).unwrap();
+            bytes.extend(chunk);
+            offset = next_offset;
+        }
+        assert_eq!(bytes, excerpt.as_bytes());
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn composite_output_returns_typed_exports_without_result_text() {
+        let commit = "1".repeat(40);
+        let progress = composite_progress(json!({
+            "schema_version": 2,
+            "result": null,
+            "verdict": "VERDICT: PASS",
+            "findings": [],
+            "findings_available": true,
+            "review_partial": true,
+            "warnings": ["typed-only source"],
+            "branch": "feature/output",
+            "commit": commit,
+            "remaining": ["finish the export test"]
+        }));
+        let reply =
+            composite_graph_output(&composite_output_command(0, 16), "typed-output", &progress)
+                .unwrap();
+
+        assert_eq!(reply.result.status, provenant_records::Outcome::Ok);
+        let data = &reply.result.data;
+        assert_eq!(data["graph"], "typed-output");
+        assert_eq!(data["node"], "panel");
+        assert_eq!(data["selected"]["verdict"], "VERDICT: PASS");
+        assert_eq!(data["selected"]["findings"], json!([]));
+        assert_eq!(data["selected"]["findings_available"], true);
+        assert_eq!(data["selected"]["partial"], true);
+        assert_eq!(data["selected"]["warnings"], json!(["typed-only source"]));
+        assert_eq!(data["selected"]["branch"], "feature/output");
+        assert_eq!(data["selected"]["commit"], commit);
+        assert_eq!(
+            data["selected"]["remaining"],
+            json!(["finish the export test"])
+        );
+        assert_eq!(data["bytes"], json!({"encoding":"utf8","data":""}));
+        assert_eq!(data["offset"], 0);
+        assert_eq!(data["next_offset"], 0);
+        assert_eq!(data["length"], Value::Null);
+        assert_eq!(data["digest"], Value::Null);
+        assert_eq!(data["eof"], true);
+        assert_eq!(data["complete"], true);
+        assert!(data.get("attempt_id").is_none());
+        let schema = provenant_records::wire::data_schema("output").unwrap();
+        provenant_records::wire::schema::validate(&schema, data).unwrap();
+    }
+
+    #[test]
     fn retry_brief_validates_the_resolved_target_and_single_node_before_input() {
         let graph: provenant_cli::Target = "work".parse().unwrap();
         let rows = [
@@ -2795,6 +3228,84 @@ mod tests {
     }
 
     #[test]
+    fn graph_status_projects_unobserved_writer_as_unknown_on_attempt_and_node() {
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["latest_attempt"] = json!(true);
+        attempt["recorded_state"] = json!("running");
+        attempt["state"] = json!("unknown");
+        attempt["presence"] = json!("unknown");
+        attempt["reason"] = json!(
+            "the writer process state cannot be verified; run `provenant reconcile g/parent` to inspect recovery before retrying"
+        );
+        project_node_liveness(&mut rows);
+
+        let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
+        assert_eq!(node["recorded_state"], "running");
+        assert_eq!(node["state"], "unknown");
+        assert_eq!(node["presence"], "unknown");
+        assert!(
+            node["next"]
+                .as_str()
+                .unwrap()
+                .contains("provenant reconcile")
+        );
+        let reading = render_graph_status(&rows);
+        let parent = reading
+            .lines()
+            .find(|line| line.starts_with("g/parent#"))
+            .unwrap();
+        assert!(parent.contains(" unknown "), "{reading}");
+        assert!(!parent.contains(" running "), "{reading}");
+    }
+
+    #[test]
+    fn remote_status_failure_downgrades_the_current_running_node_to_unknown() {
+        // Spec: docs/specs/cli.md#status-selection
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["latest_attempt"] = json!(true);
+        attempt["state"] = json!("running");
+        attempt["evidence_error"] = json!("peer status timed out");
+
+        project_remote_attempt_unknown(attempt);
+        project_node_liveness(&mut rows);
+
+        let attempt = rows.iter().find(|row| row["kind"] == "attempt").unwrap();
+        assert_eq!(attempt["recorded_state"], "running");
+        assert_eq!(attempt["state"], "unknown");
+        assert_eq!(attempt["presence"], "unknown");
+        assert_eq!(attempt["evidence_error"], "peer status timed out");
+        let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
+        assert_eq!(node["recorded_state"], "running");
+        assert_eq!(node["state"], "unknown");
+        assert_eq!(node["presence"], "unknown");
+        let reading = render_graph_status(&rows);
+        let parent = reading
+            .lines()
+            .find(|line| line.starts_with("g/parent#"))
+            .unwrap();
+        assert!(parent.contains(" unknown "), "{reading}");
+        assert!(!parent.contains(" running "), "{reading}");
+    }
+
+    #[test]
     fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
         let mut checkpoint = checkpoint("g");
         checkpoint.nodes[0].state = NodeState::Failed;
@@ -2999,7 +3510,7 @@ mod tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -3204,7 +3715,7 @@ mod tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: base.clone(),

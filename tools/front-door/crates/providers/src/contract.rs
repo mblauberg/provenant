@@ -14,6 +14,10 @@ pub enum ProviderError {
     },
     #[error("provider protocol is malformed")]
     Malformed,
+    /// The JSON frame ended before the input did. Only actual stream EOF may
+    /// classify this as a final fragment; a newline-complete frame is loss.
+    #[error("provider protocol frame ended before the record was complete")]
+    IncompleteFrame,
     #[error("provider protocol is malformed: {0}")]
     MalformedResult(String),
     #[error("provider stream exceeds its size bound")]
@@ -87,6 +91,7 @@ impl ProviderError {
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
             Self::PromptTooLarge { .. }
             | Self::Malformed
+            | Self::IncompleteFrame
             | Self::MalformedResult(_)
             | Self::Overflow
             | Self::PolicyActionUnsupported { .. }
@@ -489,6 +494,21 @@ pub trait Adapter: Sync {
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
+    /// Create the shared stream decoder bound to the retained session and
+    /// applied model when the continuation object itself is no longer present
+    /// at the custody/terminal boundary.
+    fn stream_for_continuation(
+        &self,
+        session: &str,
+        model: &str,
+    ) -> Result<StreamState, ProviderError> {
+        if session.is_empty() || model.is_empty() {
+            return Err(ProviderError::UnknownIdentity);
+        }
+        let mut state = self.stream(None)?;
+        state.bind_identity(session, model);
+        Ok(state)
+    }
     /// If a later line fails, events from earlier lines in that call are
     /// retained in `finish().final_events()` alongside the malformed outcome.
     fn observe(
@@ -496,6 +516,16 @@ pub trait Adapter: Sync {
         state: &mut StreamState,
         bytes: &[u8],
     ) -> Result<Vec<ProviderEvent>, ProviderError>;
+    /// Observe capture bytes at actual stream EOF, validating the final
+    /// unterminated record through the same bound stream decoder.
+    fn observe_eof_fragment(
+        &self,
+        state: &mut StreamState,
+        bytes: &[u8],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        state.check_adapter(self.id())?;
+        state.observe_eof_fragment(bytes)
+    }
     fn finish(
         &self,
         state: StreamState,

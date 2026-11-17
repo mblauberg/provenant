@@ -5,6 +5,7 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use thiserror::Error;
 #[derive(Debug, Error)]
@@ -171,6 +172,13 @@ pub enum Workspace<'a> {
     Home,
     /// A canonical directory the command has already chosen.
     At(&'a Path),
+    /// A path selected by the shared Git-layout resolver. The optional
+    /// metadata directory is added as a hard boundary, including when a bare
+    /// common directory is itself the workspace root.
+    VerifiedLayout {
+        root: &'a Path,
+        git_metadata: Option<&'a Path>,
+    },
 }
 
 /// Whether a command needs the installed product root. An optional product
@@ -206,25 +214,35 @@ pub fn resolve(
         Product::Required => Some(product_root()?),
         Product::Optional => None,
     };
-    let (project, home) = match workspace {
+    let (project, home, git_metadata) = match workspace {
         Workspace::Home => {
             let home = home()?;
-            (home.clone(), home)
+            (home.clone(), home, None)
         }
         Workspace::Directory => {
             let project = match &globals.project {
                 Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout)?,
                 None => fs::canonicalize(std::env::current_dir()?)?,
             };
-            (project, home()?)
+            (project, home()?, None)
         }
         Workspace::Project => (
             selected_project(globals.project.as_deref(), false)?,
             home()?,
+            None,
         ),
-        Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
-        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?),
-        Workspace::At(path) => (path.to_owned(), home()?),
+        Workspace::Checkout => (
+            selected_project(globals.project.as_deref(), true)?,
+            home()?,
+            None,
+        ),
+        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?, None),
+        Workspace::At(path) => (path.to_owned(), home()?, None),
+        Workspace::VerifiedLayout { root, git_metadata } => (
+            fs::canonicalize(root)?,
+            home()?,
+            git_metadata.map(fs::canonicalize).transpose()?,
+        ),
     };
     let assets = match installed {
         Some(assets) => assets,
@@ -242,6 +260,11 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
+    if let Some(metadata) = git_metadata
+        && !inputs.git_metadata.contains(&metadata)
+    {
+        inputs.git_metadata.push(metadata);
+    }
     let roots = provenant_os::fs::bind_roots(&inputs)?;
     report_warnings(&roots);
     Ok(Resolved {
@@ -254,6 +277,50 @@ pub fn resolve(
     })
 }
 
+/// Resolve the verified layout owner for a selected checkout. Git commands
+/// still run from that selected checkout; only primary-project configuration
+/// and managed-path allocation use the returned layout.
+pub fn project_layout(
+    roots: &Roots,
+    selected: &Path,
+) -> Result<provenant_confinement::worktrees::ProjectLayout, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
+    let binding = provenant_config::bind_project(roots, discovered.location)?;
+    // The utility owns bound layout resolution, including trusted local bare
+    // provenance for a checkout-less common directory.
+    Ok(utility.project_layout_for_binding(&executor, &binding, budget, &cancel)?)
+}
+
+/// Resolve a project layout without allocating a binding or updating its
+/// saved primary hint. A bound project keeps its binding-verified layout,
+/// including a bare common owner; unbound checkouts use Git's verified
+/// inventory only.
+pub fn project_layout_read_only(
+    roots: &Roots,
+    selected: &Path,
+) -> Result<provenant_confinement::worktrees::ProjectLayout, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
+    if let Some(binding) = provenant_config::lookup_project(roots, &discovered.location)? {
+        return Ok(utility.project_layout_for_binding(&executor, &binding, budget, &cancel)?);
+    }
+    let repo = utility.open_read_repo(&executor, selected, budget, &cancel)?;
+    Ok(
+        provenant_confinement::worktrees::project_layout_for_checkout(
+            &executor, &repo, &utility, budget, &cancel,
+        )?,
+    )
+}
+
 /// Resolve a new state candidate with every captured root input intact.
 pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, RootError> {
     let roots = context.with_state_dir(candidate, &provenant_os::fs::SystemPathResolver)?;
@@ -263,8 +330,25 @@ pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, Roo
 
 #[allow(clippy::print_stderr)] // Root warnings go to the operator before any output.
 fn report_warnings(roots: &Roots) {
-    for warning in roots.state.warnings() {
-        eprintln!("warning: {}", warning.message());
+    if !roots.state.warnings().is_empty() && first_root_warning(roots.state.as_path()) {
+        for warning in roots.state.warnings() {
+            eprintln!("warning: {}", warning.message());
+        }
+    }
+}
+
+// Like config warnings, use an atomic marker in the state root so concurrent
+// commands and scheduled ticks report an unusual root only once.
+fn first_root_warning(state: &Path) -> bool {
+    let digest = provenant_records::CanonicalV1::file_digest(state.as_os_str().as_encoded_bytes());
+    let name = format!("root-warning-{digest}");
+    let Ok(dir) = provenant_os::fs::Directory::open_anchor(state) else {
+        return true;
+    };
+    match dir.create_new(OsStr::new(&name)) {
+        Ok(_) => true,
+        Err(error) if error.is_exists() => false,
+        Err(_) => true,
     }
 }
 
@@ -293,6 +377,123 @@ pub(crate) fn home() -> Result<PathBuf, RootError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_layout_restores_a_verified_primary_with_an_external_git_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let checkout = root.join("checkout");
+        let git_dir = root.join("git-metadata");
+        let linked = root.join("linked");
+        for path in [&home, &state, &checkout] {
+            fs::create_dir_all(path)?;
+        }
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+
+        let mut inputs = RootInputs::new(home, checkout.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+        fs::write(checkout.join("tracked.txt"), "base\n")?;
+        provenant_os::fixture::run_git(&checkout, &["add", "tracked.txt"])?;
+        provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "base"])?;
+
+        let primary = project_layout_read_only(&roots, &checkout)?;
+        assert_eq!(primary.project(), Some(checkout.as_path()));
+        assert_eq!(primary.root(), checkout);
+        assert!(provenant_config::registered_projects(&roots)?.is_empty());
+
+        let primary = project_layout(&roots, &checkout)?;
+        assert_eq!(primary.project(), Some(checkout.as_path()));
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+
+        let from_linked = project_layout(&roots, &linked)?;
+        assert_eq!(from_linked.project(), Some(checkout.as_path()));
+        assert_eq!(from_linked.root(), checkout);
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    fn read_only_layout_keeps_a_bound_bare_common_owner() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let source = root.join("source");
+        let common = root.join("bare-common");
+        let linked = root.join("bare-linked");
+        for path in [&home, &state, &source] {
+            fs::create_dir_all(path)?;
+        }
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        let mut inputs = RootInputs::new(home, source.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::run_git(&source, &["init", "-q", "--initial-branch=main"])?;
+        fs::write(source.join("tracked.txt"), "base\n")?;
+        provenant_os::fixture::run_git(&source, &["add", "tracked.txt"])?;
+        provenant_os::fixture::run_git(&source, &["commit", "-qm", "base"])?;
+        let common_text = common.to_str().ok_or("non-UTF-8 fixture path")?;
+        provenant_os::fixture::run_git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                source.to_str().ok_or("non-UTF-8 fixture path")?,
+                common_text,
+            ],
+        )?;
+        provenant_os::fixture::run_git(
+            &root,
+            &[
+                "--git-dir",
+                common_text,
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().ok_or("non-UTF-8 fixture path")?,
+                "HEAD",
+            ],
+        )?;
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&common)?)?;
+
+        // A bound bare common directory is the allocation owner with no
+        // project checkout, whichever checkout or directory selects it.
+        for selected in [&linked, &common] {
+            let layout = project_layout_read_only(&roots, selected)?;
+            assert_eq!(layout.root(), common.as_path());
+            assert_eq!(layout.project(), None);
+        }
+        Ok(())
+    }
+
     #[test]
     fn git_boundaries_use_existing_metadata_and_preserve_installed_release_roots()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -350,6 +551,20 @@ mod tests {
                 }))
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/consumer-contract.md#state-root
+    fn unusual_root_warning_is_reported_once_per_root() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir(&first)?;
+        std::fs::create_dir(&second)?;
+        assert!(super::first_root_warning(&first));
+        assert!(!super::first_root_warning(&first));
+        assert!(super::first_root_warning(&second));
         Ok(())
     }
 

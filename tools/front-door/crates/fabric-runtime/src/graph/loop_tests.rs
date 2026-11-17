@@ -896,7 +896,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
             .bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),
@@ -1726,7 +1726,7 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
             .bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),

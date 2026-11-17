@@ -1,5 +1,140 @@
 use super::*;
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct NativeSessionLocation {
+    schema_version: u64,
+    provider: String,
+    model: String,
+    account_key: Option<String>,
+    root: provenant_records::StructuredPathWire,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum NativeSessionLocationError {
+    #[error(
+        "the prior native session location was not recorded; start a new lane because its session location cannot be proven"
+    )]
+    Missing,
+    #[error(
+        "the prior native session location is unreadable; check the selected provider state and retry"
+    )]
+    Unavailable,
+    #[error("the prior native session location record is invalid; start a new lane")]
+    Invalid,
+    #[error(
+        "the prior native session location differs from the selected provider, model, account, or home"
+    )]
+    Mismatch,
+}
+
+pub(super) fn write_native_session_location(
+    provider_state: &Path,
+    root: &Path,
+    route: &ResolvedRoute,
+) -> Result<(), String> {
+    if !root.is_absolute() || route.adapter.is_empty() || route.model.is_empty() {
+        return Err("native provider session location has an invalid route or root".into());
+    }
+    let location = NativeSessionLocation {
+        schema_version: 1,
+        provider: route.adapter.clone(),
+        model: route.model.clone(),
+        account_key: route.account_key.clone(),
+        root: provenant_records::StructuredPathWire::from_path(root)
+            .map_err(|error| error.to_string())?,
+    };
+    let bytes = serde_json::to_vec(&location).map_err(|error| error.to_string())?;
+    let selector = provider_state.join("native-session-location.json");
+    super::confinement::write_setup_file(&[provider_state], &selector, &bytes, false)
+}
+
+pub(super) fn native_session_location_for_route(
+    provider_state: &Path,
+    provider: &str,
+    model: &str,
+    account_key: Option<&str>,
+) -> Result<PathBuf, NativeSessionLocationError> {
+    let state = Directory::open_anchor(provider_state).map_err(|error| {
+        if error.is_not_found() {
+            NativeSessionLocationError::Missing
+        } else {
+            NativeSessionLocationError::Unavailable
+        }
+    })?;
+    let bytes = state
+        .read_stable(
+            std::ffi::OsStr::new("native-session-location.json"),
+            16 * 1024,
+        )
+        .map_err(|error| {
+            if error.is_not_found() {
+                NativeSessionLocationError::Missing
+            } else {
+                NativeSessionLocationError::Unavailable
+            }
+        })?;
+    let location: NativeSessionLocation =
+        serde_json::from_slice(&bytes).map_err(|_| NativeSessionLocationError::Invalid)?;
+    if location.schema_version != 1 || location.provider.is_empty() || location.model.is_empty() {
+        return Err(NativeSessionLocationError::Invalid);
+    }
+    if location.provider != provider
+        || location.model != model
+        || location.account_key.as_deref() != account_key
+    {
+        return Err(NativeSessionLocationError::Mismatch);
+    }
+    let root = location
+        .root
+        .to_path_buf()
+        .map_err(|_| NativeSessionLocationError::Invalid)?;
+    if !root.is_absolute() {
+        return Err(NativeSessionLocationError::Invalid);
+    }
+    Ok(root)
+}
+
+/// Read Codex's route-bound native root and find the exact validated rollout
+/// for `session`. The v1 rollout format remains unchanged; account config and
+/// sibling session data are not copied into the successor.
+pub(super) fn find_native_codex_rollout(
+    provider_state: &Path,
+    session: &str,
+    model: &str,
+    account_key: Option<&str>,
+    selected_home: Option<&Path>,
+) -> Result<Option<provenant_providers::codex_rollout::Turn>, provenant_providers::ProviderError> {
+    use provenant_providers::ProviderError;
+    if model.is_empty() {
+        return Err(ProviderError::UnknownIdentity);
+    }
+    let provider = provenant_records::Harness::Codex.spec().name;
+    let selected =
+        match native_session_location_for_route(provider_state, provider, model, account_key) {
+            Ok(home) => home,
+            Err(NativeSessionLocationError::Missing | NativeSessionLocationError::Unavailable) => {
+                return Ok(None);
+            }
+            Err(NativeSessionLocationError::Invalid | NativeSessionLocationError::Mismatch) => {
+                return Err(ProviderError::IdentityMismatch);
+            }
+        };
+    if selected_home.is_some_and(|expected| expected != selected.as_path()) {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    let expected_model = format!("{provider}/{model}");
+    let observed = provenant_providers::codex_rollout::observe(&selected, session)?;
+    let observed_model = if observed.model.contains('/') {
+        observed.model.clone()
+    } else {
+        format!("{provider}/{}", observed.model)
+    };
+    if observed_model != expected_model {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    Ok(Some(observed))
+}
+
 /// Host context for fresh account identity and version probes.
 pub(super) struct Probe<'a> {
     pub(super) roots: Option<&'a provenant_core::Roots>,
@@ -9,17 +144,43 @@ pub(super) struct Probe<'a> {
     pub(super) scratch: &'a Path,
 }
 
-/// Each explicit fallback candidate has its own private state, and only the
-/// launched one selects Codex's rollout home. Exactly one distinct home may match.
+/// Native rollout observation uses the launch-time selector only when the
+/// applied route was unsandboxed; sandboxed observation stays in candidate state.
 pub(crate) fn observe_codex_rollout(
     provider_state: &Path,
     thread: &str,
+    route: &run::RouteRecord,
+    native_home_required: bool,
 ) -> Result<provenant_providers::codex_rollout::Turn, provenant_providers::ProviderError> {
     use provenant_providers::ProviderError;
+    let provider = route
+        .provider
+        .as_deref()
+        .ok_or(ProviderError::UnknownIdentity)?;
+    if !AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.model_observation == provenant_records::ModelObservation::Rollout)
+    {
+        return Err(ProviderError::UnknownIdentity);
+    }
+    let model = route
+        .model
+        .as_deref()
+        .and_then(|model| model.split_once('/'))
+        .filter(|(prefix, _)| *prefix == provider)
+        .map(|(_, model)| model)
+        .ok_or(ProviderError::UnknownIdentity)?;
+    if native_home_required {
+        return find_native_codex_rollout(
+            provider_state,
+            thread,
+            model,
+            route.account_key.as_deref(),
+            None,
+        )?
+        .ok_or(ProviderError::UnknownIdentity);
+    }
     let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
     let mut observed = Err(ProviderError::UnknownIdentity);
-    let mut homes = std::collections::BTreeSet::new();
-    // Each candidate may also have one host-owned native-home selector.
     for entry in entries.take(128) {
         let name = entry
             .map_err(|_| ProviderError::UnknownIdentity)?
@@ -33,50 +194,23 @@ pub(crate) fn observe_codex_rollout(
             continue;
         }
         let candidate = provider_state.join(&name);
-        let directory =
-            Directory::open_anchor(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
-        let home = match directory.read_stable(
-            std::ffi::OsStr::new(&format!(
-                "codex-observation-{}.json",
-                name.to_string_lossy()
-            )),
-            16 * 1024,
-        ) {
-            Ok(bytes) => {
-                #[derive(serde::Deserialize)]
-                struct NativeHome {
-                    schema_version: u64,
-                    home: provenant_records::StructuredPathWire,
-                }
-                let record: NativeHome =
-                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
-                if record.schema_version != 1 {
-                    return Err(ProviderError::UnknownIdentity);
-                }
-                let home = record
-                    .home
-                    .to_path_buf()
-                    .map_err(|_| ProviderError::UnknownIdentity)?;
-                if !home.is_absolute() {
-                    return Err(ProviderError::UnknownIdentity);
-                }
-                home
-            }
-            Err(error) if error.is_not_found() => candidate,
-            Err(_) => return Err(ProviderError::UnknownIdentity),
-        };
-        // Native fallback candidates may select the same account home.
-        if !homes.insert(home.clone()) {
-            continue;
-        }
-        match provenant_providers::codex_rollout::observe(&home, thread) {
+        match provenant_providers::codex_rollout::observe(&candidate, thread) {
             Ok(_) if observed.is_ok() => return Err(ProviderError::IdentityMismatch),
             Ok(turn) => observed = Ok(turn),
             Err(ProviderError::UnknownIdentity) => {}
             Err(error) => return Err(error),
         }
     }
-    observed
+    let observed = observed?;
+    let observed_model = if observed.model.contains('/') {
+        observed.model.clone()
+    } else {
+        format!("{provider}/{}", observed.model)
+    };
+    if observed_model != format!("{provider}/{model}") {
+        return Err(ProviderError::IdentityMismatch);
+    }
+    Ok(observed)
 }
 
 /// Find the one private OpenCode database that identifies this session.
@@ -150,6 +284,8 @@ pub(super) enum AccountObservationError {
     VersionUnavailable(String),
     #[error("{0}")]
     Other(String),
+    #[error("{0}")]
+    ConfiguredDirectory(String),
 }
 impl From<String> for AccountObservationError {
     fn from(message: String) -> Self {
@@ -167,7 +303,7 @@ impl AccountObservationError {
         match self {
             Self::AuthRequired(_) => SkipKind::AuthRequired,
             Self::VersionUnavailable(_) => SkipKind::Unavailable,
-            Self::Other(_) => SkipKind::Account,
+            Self::Other(_) | Self::ConfiguredDirectory(_) => SkipKind::Account,
         }
     }
 }
@@ -176,10 +312,27 @@ pub(super) fn default_directory_error(
     spec: &AdapterSpec,
     path: &Path,
     detail: String,
+    configured_by: Option<&str>,
 ) -> AccountObservationError {
-    if std::fs::symlink_metadata(path)
-        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
+    let unavailable = std::fs::symlink_metadata(path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    if let Some(setting) = configured_by {
+        let action = if unavailable {
+            format!("check or unset {setting}, or restore that directory")
+        } else {
+            format!("check {setting} and access to that directory")
+        };
+        return AccountObservationError::ConfiguredDirectory(format!(
+            "configured {} account directory from {setting} is {}; {action}",
+            spec.name,
+            if unavailable {
+                "unavailable"
+            } else {
+                "unreadable"
+            },
+        ));
+    }
+    if unavailable {
         AccountObservationError::AuthRequired(format!(
             "default {} login is missing; run `{}`",
             spec.name, spec.login_hint
@@ -265,6 +418,7 @@ pub(super) fn codex_login_is_healthy(
             probe.home,
             &entry.directory,
             probe.scratch,
+            probe.executor.search_path(),
         ),
         Some(provenant_providers::host::LocalSignin::SignedIn)
     )
@@ -285,6 +439,7 @@ pub(super) fn cursor_login_is_healthy(
             probe.home,
             &entry.directory,
             probe.scratch,
+            probe.executor.search_path(),
         ),
         Some(provenant_providers::host::LocalSignin::SignedIn)
     )

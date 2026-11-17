@@ -3088,13 +3088,23 @@ impl BoundGraphOwner<'_> {
                     .and_then(|origin| origin.node_id.as_deref())
                     == Some(key.node_id.as_str())
             });
+            if !accepted {
+                // This owner is admitting a new leaf from the host-owned graph
+                // scheduler. Bind the graph marker to the work key here; the
+                // caller's WorkContext flag is never evidence, and accepted
+                // operation replay keeps its immutable stored request above.
+                let context = context.as_mut().ok_or(FacadeError::StateCorrupt)?;
+                if context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+                    || context.attempt != Some(key.attempt)
+                {
+                    return Err(FacadeError::StateCorrupt);
+                }
+                context.graph_template_launch = true;
+            }
             if peer_root && !accepted {
                 // The receiver's graph provenance was authenticated at peer
-                // ingress. Restamp its local attempt context for this graph.
-                context
-                    .as_mut()
-                    .ok_or(FacadeError::StateCorrupt)?
-                    .graph_template_launch = true;
+                // ingress; retain its source-head binding for the local attempt.
                 source_head = route.peer_source_head.clone();
             }
             let accepted_route = accepted_route.or(if peer_root {
@@ -4017,7 +4027,7 @@ mod journal_error_tests {
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             bases: bound,
             directory: factory.cwd.clone(),
             extra: Default::default(),
@@ -4409,15 +4419,17 @@ mod journal_error_tests {
             )
             .unwrap_err();
         assert_eq!(missing.code(), "state_corrupt");
-        // Exercise the other record writer too: adapter capability checks
-        // refuse inside RunService, after the graph owner has built its intent.
+        // Exercise RunService's saved preflight result too. Cursor accepts
+        // model and effort at this boundary, so an unknown Cursor model reaches
+        // route resolution instead. The command adapter declares no model
+        // support, which must be refused before a provider launch.
         let service_key = graph::AttemptKey {
             route_index: 1,
             attempt: 2,
             ..key.clone()
         };
         let unsupported: graph::GraphRoute = serde_json::from_value(serde_json::json!({
-            "adapter":"cursor", "model":"cursor/m", "effort":"high"
+            "adapter":"command", "model":"command/m", "effort":"high"
         }))?;
         // A distinct attempt of the node takes the next work-key number.
         let service_node = |prompt| {
@@ -4425,6 +4437,15 @@ mod journal_error_tests {
             input.context.attempt = Some(2);
             input
         };
+        let service_scope = GraphRefusalScope::new(
+            &owner,
+            &service_key,
+            &service_node("service preflight"),
+            &unsupported,
+            graph::AccessMode::ReadOnly,
+            None,
+            replay,
+        )?;
         let service_refusal = owner
             .observe_or_start(
                 &service_key,
@@ -4435,12 +4456,17 @@ mod journal_error_tests {
                 replay,
             )
             .unwrap_err();
+        assert!(matches!(
+            &service_refusal,
+            FacadeError::ConfinementRefused { .. }
+        ));
         let operation = graph_operation("graph-attempt-operation", &service_key)?;
         let saved = store
             .operation(&operation, &call)?
             .ok_or("service refusal")?;
+        assert_eq!(saved.state, provenant_run::OperationState::Refused);
         assert_eq!(saved.preflight_digest_version, Some(1));
-        assert!(saved.origin_intent_digest.is_some());
+        assert_eq!(saved.origin_intent_digest, Some(service_scope.digest));
         let repeated = owner
             .observe_or_start(
                 &service_key,
@@ -4452,6 +4478,7 @@ mod journal_error_tests {
             )
             .unwrap_err();
         assert_eq!(repeated.code(), service_refusal.code());
+        assert_eq!(repeated.to_string(), service_refusal.to_string());
         let changed = owner
             .observe_or_start(
                 &service_key,
@@ -4682,13 +4709,12 @@ mod peer_capture_tests {
         let chunk = |offset: u64| {
             let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
             OutputResult::Chunk {
-                peer: provenant_records::run::PeerOutputFields {
-                    graph: provenant_records::run::PeerGraphFields {
-                        peer_origin_work_key: Some(origin.clone()),
-                        ..Default::default()
-                    },
+                peer: provenant_records::run::PeerGraphFields {
+                    peer_origin_work_key: Some(origin.clone()),
                     ..Default::default()
                 },
+                length: Some(text.len() as u64),
+                planner_fallback: None,
                 extra: Default::default(),
                 target: target.clone(),
                 part: OutputPart::Result,
@@ -4729,11 +4755,10 @@ mod peer_capture_tests {
                             2 => *next_offset = offset,
                             3 => *digest = provenant_core::Digest::from_bytes([9; 32]),
                             4 => {
-                                peer.graph.peer_origin_work_key =
-                                    Some(origin.next_attempt().unwrap());
+                                peer.peer_origin_work_key = Some(origin.next_attempt().unwrap());
                             }
                             _ => {
-                                peer.graph.peer_origin_work_key = None;
+                                peer.peer_origin_work_key = None;
                             }
                         }
                     }

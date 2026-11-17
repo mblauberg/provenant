@@ -266,6 +266,13 @@ impl From<FixedDeadline> for String {
 pub struct RoutingConfig {
     #[serde(skip)]
     pub launch_policy: provenant_records::policy::Policy,
+    #[serde(skip, default = "provenant_config::provider_defaults")]
+    pub provider_scopes: BTreeMap<String, provenant_config::ProviderSettings>,
+    /// Providers whose `models` restriction was supplied by the owner rather
+    /// than inherited from the compiled defaults. The composition edge derives
+    /// this from config origins; it is not persisted in routing documents.
+    #[serde(skip)]
+    pub explicit_provider_model_scopes: BTreeSet<String>,
     /// Exact models excluded from every pool while their schedule is active.
     pub model_exclusions: ModelExclusions,
     pub model_choices: Vec<ModelChoiceOverride>,
@@ -307,6 +314,26 @@ pub struct RoutingConfig {
 }
 
 impl RoutingConfig {
+    /// Whether an automatic choice is allowed by the provider's model policy.
+    /// Compiled provider defaults constrain only shipped pools. An owner-defined
+    /// pool, route or model preference remains an intentional override unless
+    /// the owner explicitly set `providers.<adapter>.models`.
+    pub fn permits_automatic_model(&self, model: &ModelId, source: AutomaticModelSource) -> bool {
+        let scope_is_explicit = self
+            .explicit_provider_model_scopes
+            .contains(model.adapter());
+        let apply_scope = source == AutomaticModelSource::ShippedPool || scope_is_explicit;
+        !apply_scope || self.model_in_provider_scope(model)
+    }
+
+    /// Whether a model matches the effective provider patterns, including the
+    /// compiled default. Explicit pins use this with `out_of_scope_pin`.
+    pub fn model_in_provider_scope(&self, model: &ModelId) -> bool {
+        self.provider_scopes
+            .get(model.adapter())
+            .is_none_or(|settings| settings.permits_model(model.model()))
+    }
+
     /// The last matching row wins; removing it revokes the preference.
     pub fn preferred_model(
         &self,
@@ -324,6 +351,14 @@ impl RoutingConfig {
             .find(|row| row.matches(risk_tier, task_kind, now))
             .map(|row| &row.preferred)
     }
+}
+
+/// Origin of an automatic route candidate, used to separate bundled pool
+/// membership from models a workspace owner deliberately configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomaticModelSource {
+    ShippedPool,
+    OwnerConfiguration,
 }
 
 /// Settlement retries a lane may take; the run store seals at most this many
@@ -370,6 +405,8 @@ impl Default for RoutingConfig {
                         .expect("bundled routing defaults are valid");
                 Self {
                     launch_policy: Default::default(),
+                    provider_scopes: provenant_config::provider_defaults(),
+                    explicit_provider_model_scopes: BTreeSet::new(),
                     model_exclusions: asset.model_exclusions,
                     model_choices: asset.model_choices,
                     preference_sources: BTreeMap::new(),
@@ -1154,6 +1191,9 @@ pub struct ModelEntry {
     pub model: ModelId,
     /// Only exact controls with recording evidence. No guessed effort default.
     pub efforts: Vec<String>,
+    /// Append the supported effort to the provider model name at launch.
+    #[serde(default)]
+    pub effort_suffix: bool,
     pub evidence_ref: String,
     pub family: Option<String>,
     /// Covers prompt training and retention. Unknown is ineligible for confidential selection.
@@ -1412,6 +1452,28 @@ pub fn fixture_family_override(
     })
 }
 
+/// Override confidentiality evidence in a test-only, thread-local catalogue.
+#[cfg(feature = "fixture")]
+pub fn fixture_training_override(
+    model: &str,
+    trains: bool,
+) -> Result<FixtureFamilyOverride, RoutingError> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue.revision.push_str("-fixture");
+    let id = ModelId::parse(model)?;
+    let entry = catalogue
+        .models
+        .iter_mut()
+        .find(|entry| entry.model == id)
+        .ok_or(RoutingError::Catalogue)?;
+    entry.trains_on_prompts = Some(trains);
+    let previous = FIXTURE_CATALOGUE.with(|slot| slot.borrow_mut().replace(catalogue));
+    Ok(FixtureFamilyOverride {
+        previous,
+        _thread: std::marker::PhantomData,
+    })
+}
+
 impl Catalogue {
     /// The bundled catalogue, parsed and validated once per process. Routing
     /// resolves it for every lane, so rebuilding it dominated a multi-lane run.
@@ -1530,6 +1592,7 @@ impl Catalogue {
             if !seen.insert(&row.model)
                 || row.evidence_ref.is_empty()
                 || row.evidence_ref.len() > 512
+                || (row.effort_suffix && row.efforts.is_empty())
                 || row.efforts.len() > 16
                 || row.efforts.iter().any(|e| !effort_valid(e))
                 || row.family.as_deref().is_some_and(|f| !identifier(f))
@@ -1570,6 +1633,18 @@ impl Catalogue {
         }
         Ok(())
     }
+    /// Provider-facing model name, retaining the canonical ID for receipts.
+    pub fn launch_model(&self, id: &ModelId, effort: Option<&str>) -> String {
+        if let Some(entry) = self.model(id)
+            && entry.effort_suffix
+            && let Some(effort) = effort
+            && entry.efforts.iter().any(|supported| supported == effort)
+        {
+            return format!("{}-{effort}", id.model());
+        }
+        id.model().to_owned()
+    }
+
     pub fn model(&self, id: &ModelId) -> Option<&ModelEntry> {
         self.models.iter().find(|row| row.model == *id)
     }

@@ -296,8 +296,76 @@ mod tests {
             .unwrap()
     }
 
-    /// The body rows of the first table under `heading`, as trimmed cells; a
-    /// cell that is one code span loses its ticks.
+    /// Remove Markdown inline-code delimiters while preserving the cell text.
+    fn plain_cell(cell: &str) -> String {
+        let mut plain = String::with_capacity(cell.len());
+        let mut remaining = cell;
+        loop {
+            let Some(open) = remaining.find('`') else {
+                plain.push_str(remaining);
+                break;
+            };
+            let escaped = remaining[..open]
+                .bytes()
+                .rev()
+                .take_while(|byte| *byte == b'\\')
+                .count()
+                % 2
+                == 1;
+            if escaped {
+                plain.push_str(&remaining[..=open]);
+                remaining = &remaining[open + 1..];
+                continue;
+            }
+            plain.push_str(&remaining[..open]);
+            let open_ticks = remaining.as_bytes()[open..]
+                .iter()
+                .take_while(|byte| **byte == b'`')
+                .count();
+            let delimiter = &remaining[open..open + open_ticks];
+            let after_open = &remaining[open + open_ticks..];
+            let mut search = 0;
+            let close = loop {
+                let Some(relative) = after_open[search..].find(delimiter) else {
+                    break None;
+                };
+                let candidate = search + relative;
+                let end = candidate + open_ticks;
+                let follows_tick = candidate > 0 && after_open.as_bytes()[candidate - 1] == b'`';
+                let precedes_tick = end < after_open.len() && after_open.as_bytes()[end] == b'`';
+                if !follows_tick && !precedes_tick {
+                    break Some(candidate);
+                }
+                search = end;
+            };
+            let Some(close) = close else {
+                plain.push_str(&remaining[open..]);
+                return plain;
+            };
+            plain.push_str(&after_open[..close]);
+            remaining = &after_open[close + open_ticks..];
+        }
+        plain
+    }
+
+    #[test]
+    fn contract_cells_normalise_code_spans_but_keep_literal_backticks() {
+        assert_eq!(plain_cell("differs from `HOME`."), "differs from HOME.");
+        assert_eq!(plain_cell(r"literal \`HOME\`"), r"literal \`HOME\`");
+        assert_eq!(plain_cell("unbalanced `HOME"), "unbalanced `HOME");
+    }
+
+    #[test]
+    fn contract_comparison_normalises_code_spans_on_both_sides() {
+        let documented = table(
+            "\n## Surface\n\n| Contract |\n|---|\n| Run `provenant run` --json for lane-<attempt>. |\n",
+            "## Surface",
+        );
+        let declared = rows([["Run provenant run --json for `lane-<attempt>`.".to_owned()]]);
+        assert_eq!(documented, declared);
+    }
+
+    /// The body rows of the first table under `heading`, as trimmed cells.
     fn table(spec: &str, heading: &str) -> BTreeSet<Vec<String>> {
         let (_, section) = spec
             .split_once(&format!("\n{heading}\n"))
@@ -311,13 +379,7 @@ mod tests {
                 line.trim()
                     .trim_matches('|')
                     .split(" | ")
-                    .map(|cell| {
-                        let cell = cell.trim();
-                        match cell.strip_prefix('`').and_then(|c| c.strip_suffix('`')) {
-                            Some(code) if !code.contains('`') => code.to_owned(),
-                            _ => cell.to_owned(),
-                        }
-                    })
+                    .map(|cell| plain_cell(cell.trim()))
                     .collect()
             })
             .collect()
@@ -337,7 +399,7 @@ mod tests {
     {
         items
             .into_iter()
-            .map(|row| row.into_iter().collect())
+            .map(|row| row.into_iter().map(|cell| plain_cell(&cell)).collect())
             .collect()
     }
 

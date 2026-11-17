@@ -846,9 +846,16 @@ fn homebrew_node_tools_grant_the_prefix_but_not_var() -> Result<(), Box<dyn std:
 fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let account_dir = std::path::Path::new("/fixture/identities/opaque");
-    for (id, session, flag) in [
-        ("claude", "5e55-claude-session", "--resume"),
-        ("codex", "5e55-codex-thread", "resume"),
+    for (id, session, flag, authentication) in [
+        ("claude", "5e55-claude-session", "--resume", None),
+        ("codex", "5e55-codex-thread", "resume", Some("login")),
+        (
+            "agy",
+            "5e55-agy-conversation",
+            "--conversation",
+            Some("keychain"),
+        ),
+        ("opencode", "5e55-opencode-session", "-s", Some("login")),
     ] {
         let adapter = REGISTRY
             .iter()
@@ -857,10 +864,15 @@ fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
             .adapter;
         let route = route(id, "fixture-model");
         let continuation = Continuation::retained(id, session, &route, "fixture")?;
-        let account = identity::RegisteredAccount::new(id, "opaque-account", account_dir.into())?;
+        let account_path = if id == "agy" {
+            std::path::Path::new("/fixture/home")
+        } else {
+            account_dir
+        };
+        let account = identity::RegisteredAccount::new(id, "opaque-account", account_path.into())?;
         let token =
             (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
-        let plan = fixture_access_plan(Access::ReadOnly, (id == "codex").then_some("login"), true);
+        let plan = fixture_access_plan(Access::ReadOnly, authentication, true);
         let mut input = fixture_input(
             &route,
             &plan,
@@ -871,6 +883,7 @@ fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
         input.account = Some(&account);
         input.continuation = Some(&continuation);
         let launch = adapter.prepare(input)?;
+        assert_eq!(launch.stream.expected_session(), Some(session), "{id}");
         let argv: Vec<_> = launch
             .argv
             .iter()

@@ -203,6 +203,9 @@ pub(super) fn clean_exit() -> ExitObservation {
         omitted_reaped: 0,
         spared: vec![],
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: false,
+        provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
@@ -213,6 +216,115 @@ pub(super) fn clean_exit() -> ExitObservation {
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
     }
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        model: Some("agy/expected-model".into()),
+        ..Default::default()
+    };
+    let stdout = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"s1\",\"init\":{\"model\":\"expected-model\"}}\n",
+        "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"s1\",\"step_type\":\"agent_response\",\"text_delta\":\"partial"
+    );
+    let mut exit = clean_exit();
+    exit.stop_reason = Some(provenant_supervisor::machine::StopReason::Steered);
+    exit.cancel_delivered_before_exit = Some(true);
+    exit.provider_identity_eof_fragment = true;
+    let decoded = Registry::default().decode_inner(
+        &route,
+        stdout.as_bytes(),
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        false,
+    )?;
+    assert_eq!(decoded.session.as_deref(), Some("s1"));
+    assert_ne!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+
+    let wrong_model = concat!(
+        r#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#,
+        "\n"
+    )
+    .as_bytes();
+    let mut conflict_exit = exit;
+    conflict_exit.provider_identity_conflict = true;
+    conflict_exit.provider_identity_eof_fragment = false;
+    let mismatch = Registry::default().decode_inner(
+        &route,
+        wrong_model,
+        &[],
+        &conflict_exit,
+        Path::new("/nonexistent"),
+        false,
+    )?;
+    assert_eq!(
+        mismatch.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn std::error::Error>> {
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        model: Some("agy/gemini-3.8-flash".into()),
+        ..Default::default()
+    };
+    let decode = |stdout: &[u8]| {
+        Registry::default().decode_inner_expected(
+            &route,
+            stdout,
+            &[],
+            &clean_exit(),
+            Path::new("/nonexistent"),
+            DecodeOptions {
+                host_settlement: false,
+                expected_session: Some("retained-session"),
+            },
+        )
+    };
+    let matching = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"retained-session\",\"init\":{\"model\":\"gemini-3.8-flash\"}}\n",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"retained-session\",\"status\":\"SUCCESS\",\"response\":\"continued\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+    );
+    let decoded = decode(matching.as_bytes())?;
+    assert_eq!(decoded.session.as_deref(), Some("retained-session"));
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+
+    let fresh = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"fresh-session\",\"init\":{\"model\":\"gemini-3.8-flash\"}}\n",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"fresh-session\",\"status\":\"SUCCESS\",\"response\":\"continued\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+    );
+    let decoded = decode(fresh.as_bytes())?;
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+
+    let missing = br#"{"event":"result","result":{"conversation_id":"","status":"SUCCESS","response":"continued","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    let decoded = decode(missing)?;
+    assert_eq!(decoded.session, None);
+    assert_eq!(decoded.outcome, run::Outcome::Unsettled);
+
+    let conflict = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"retained-session\",\"init\":{\"model\":\"gemini-3.8-flash\"}}\n",
+        "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"fresh-session\",\"step_type\":\"agent_response\",\"text_delta\":\"continued\"}}\n"
+    );
+    let decoded = decode(conflict.as_bytes())?;
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+    Ok(())
 }
 
 /// Population of OpenCode's own session record: the synthetic v2
@@ -526,6 +638,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let session = Session {
         store: run::RunStore::open(&context, &call)?,
         context,
+        chair: None,
     };
     let edge = Edge {
         roots: &roots,
@@ -763,7 +876,7 @@ fn keyed(
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: edge.cwd.to_path_buf(),

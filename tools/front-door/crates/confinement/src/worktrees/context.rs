@@ -84,31 +84,26 @@ pub fn with_context_using_workers_and_facts<T>(
         .project_location(&executor, project, budget, cancel)?
         .repository
         .ok_or(WorktreeError::InvalidRequest)?;
-    let primary = selected
-        .common_git_dir()
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?
-        .to_path_buf();
-    // The selected checkout is commonly the primary itself. Its verified
-    // handle already contains the Git probes needed by this context.
-    let repo = if selected.root_path() == primary {
-        selected
+    let location = if selected.private_git_dir() == selected.common_git_dir() {
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            selected.common_git_dir(),
+            selected.root_path(),
+        )
     } else {
-        runtime.open_repo(&executor, &primary, budget, cancel)?
-    };
-    let binding = provenant_config::bind_project(
-        roots,
-        provenant_config::ProjectLocation::new(repo.common_git_dir())
-            .map_err(|_| WorktreeError::InvalidRequest)?,
-    )
+        provenant_config::ProjectLocation::new(selected.common_git_dir())
+    }
     .map_err(|_| WorktreeError::InvalidRequest)?;
+    let binding = provenant_config::bind_project(roots, location)
+        .map_err(|_| WorktreeError::InvalidRequest)?;
+    let layout = runtime.project_layout_for_repository(&executor, &selected, budget, cancel)?;
     let registry = child(&state, OsStr::new("worktrees"))?;
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
     let lock_budget =
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| WorktreeError::InvalidRequest)?;
     action(&WorktreeContext {
         home,
-        repo: &repo,
+        repo: &selected,
+        layout: &layout,
         binding: &binding,
         project_state: &project_state,
         executor: &executor,

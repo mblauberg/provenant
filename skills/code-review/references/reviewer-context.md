@@ -47,10 +47,24 @@ Each finding names the location, the mechanism and the fix. Claims that
 something is missing or unused cite the search that shows it. Give each
 finding a `trigger` with:
 
-- `sequence`: the real steps that reach the state;
+- `sequence`: one string describing the real steps in order that reach the
+  state; it is a string, not an array;
 - `reach`: `default_path`, `operator_mistake` or `attacker_or_unreachable`;
 - `observed`: `true` if you saw it happen in a run or its output, `false` if
   you inferred it from the code.
+
+For example: `"trigger":{"sequence":"Run the command, then observe the refusal","reach":"default_path","observed":true}`.
+
+## Result contract
+
+Write one findings block, then exactly one standalone verdict line outside all
+fenced blocks: `VERDICT: PASS`, `VERDICT: FAIL` or `VERDICT: INCONCLUSIVE`.
+Put the final fenced handoff after the verdict and leave no text after it. Do
+not repeat a findings block, handoff block or verdict line. The host captures
+exactly one canonical verdict outside fenced blocks. The canonical order is
+verdict then final handoff; if a provider emits one recognised standalone
+verdict as the only content after a valid closed handoff, the host accepts it
+and records that ordering tolerance. Other trailing text remains malformed.
 
 `proposed_fix` removes the cause, because a patch at the symptom leaves the
 next case open. A proposed guard says whether a design would make the state

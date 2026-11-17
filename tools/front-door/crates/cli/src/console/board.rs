@@ -124,6 +124,11 @@ pub(super) fn read(
         .map(|offset| token(&snapshot, high_water, offset))
         .transpose()?;
     if let Some(mut page) = page {
+        let census = provenant_supervisor::census::ProcessObserver::census(
+            &provenant_supervisor::census::SystemProcessObserver,
+            provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+        )
+        .ok();
         let attempts: Vec<_> = page.lanes.iter().map(|lane| lane.attempt.clone()).collect();
         for lane in &mut page.lanes {
             lane.attempt.last_output_at = None;
@@ -199,15 +204,25 @@ pub(super) fn read(
                     known.push(key)
                 }
             }
-            let attention = matches!(attempt.state, AttemptState::Terminal { outcome, .. }
+            let terminal_attention = matches!(attempt.state, AttemptState::Terminal { outcome, .. }
                 if !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled));
-            let projected = crate::run::project_lane(
+            let projected = crate::run::project_lane_with_census(
                 attempt,
                 &waits,
                 roots.state.as_path(),
                 clock.wall_now().ok(),
-                false,
+                attempt.superseded_by.is_none(),
+                census.as_ref().ok_or(()),
             );
+            let liveness_attention = matches!(
+                projected.presence,
+                Some(
+                    provenant_records::wire::LanePresence::Unattended
+                        | provenant_records::wire::LanePresence::Unknown
+                        | provenant_records::wire::LanePresence::Settling
+                )
+            );
+            let attention = terminal_attention || liveness_attention;
             lanes.push(json!({"lane_id":{"host":host,"key":work_key,
                 "attempt_id":projected.attempt_id},
                 "chair":chair,"metadata":{"operation":lane.operation, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),

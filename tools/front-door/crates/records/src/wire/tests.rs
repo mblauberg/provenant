@@ -1,5 +1,7 @@
 use super::schema::{absolute_path, path_wire, validate};
 use super::*;
+use crate::CanonicalV1;
+use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
 use serde_json::json;
 
 fn row() -> LaneRow {
@@ -15,6 +17,8 @@ fn row() -> LaneRow {
         superseded_by: None,
         cause: None,
         state: "running".into(),
+        presence: None,
+        recorded_state: None,
         exit_code: None,
         reason: None,
         settlement: None,
@@ -44,6 +48,7 @@ fn row() -> LaneRow {
         protected_paths: json!([]),
         delivery: Value::Null,
         continuation: Value::Null,
+        steering: None,
         cache_read_share: None,
         result_path: Value::Null,
         transcript: None,
@@ -122,6 +127,15 @@ fn lane_rows_validate_with_and_without_optional_members() {
         session: "s".into(),
         path: None,
     });
+    full.steering = Some(crate::run::SteeringStatus {
+        state: crate::run::SteeringState::Resumed,
+        operations: vec![crate::run::SteeringOperation {
+            operation_id: "steer-op".parse().unwrap(),
+            message_id: "6".repeat(32).parse().unwrap(),
+        }],
+        successor: Some("5".repeat(32).parse().unwrap()),
+        cause: None,
+    });
     accepted(&schema, &full);
     let value = serde_json::to_value(&full).unwrap();
     assert_eq!(value["requested_priority"], 10);
@@ -129,6 +143,43 @@ fn lane_rows_validate_with_and_without_optional_members() {
     assert_eq!(value["cause"], "declared_stop");
     assert_eq!(value["retry_of"], "3".repeat(32));
     assert_eq!(value["superseded_by"], "4".repeat(32));
+    assert_eq!(value["steering"]["state"], "resumed");
+    assert_eq!(
+        value["steering"]["operations"][0]["operation_id"],
+        "steer-op"
+    );
+    assert_eq!(
+        value["steering"]["operations"][0]["message_id"],
+        "6".repeat(32)
+    );
+    assert_eq!(value["steering"]["successor"], "5".repeat(32));
+    assert!(value["steering"].get("cause").is_none());
+    assert!(value["steering"].get("text").is_none());
+    let mut refused = full.clone();
+    refused.steering.as_mut().unwrap().state = crate::run::SteeringState::NotContinued;
+    refused.steering.as_mut().unwrap().successor = None;
+    refused.steering.as_mut().unwrap().cause = Some(crate::run::SteeringCause::SessionMismatch);
+    accepted(&schema, &refused);
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap()["steering"]["cause"],
+        "session_mismatch"
+    );
+    let mut incomplete = full.clone();
+    incomplete.steering.as_mut().unwrap().state = crate::run::SteeringState::NotContinued;
+    incomplete.steering.as_mut().unwrap().cause =
+        Some(crate::run::SteeringCause::SessionProofIncomplete);
+    accepted(&schema, &incomplete);
+    assert_eq!(
+        serde_json::to_value(incomplete).unwrap()["steering"]["cause"],
+        "session_proof_incomplete"
+    );
+    for cause in [
+        crate::run::TerminalCause::Steered,
+        crate::run::TerminalCause::EmptyWriterResult,
+    ] {
+        full.terminal_cause = Some(cause);
+        accepted(&schema, &full);
+    }
 }
 
 #[test]
@@ -143,6 +194,68 @@ fn lane_rows_reject_drift() {
     let mut value = serde_json::to_value(row()).unwrap();
     value["attempt_number"] = json!("1");
     rejected(&schema, value);
+}
+
+#[test]
+fn dead_and_unobservable_writer_projection_is_truthful_and_actionable()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/cli.md#status-selection
+    let project = ProjectId::from_bytes([9; 16]);
+    let target = crate::WorkKey::new(project, "status-test", "writer", 1)?;
+    let attempt: crate::run::AttemptRecord = serde_json::from_value(json!({
+        "schema_version": 1,
+        "key": target,
+        "attempt_id": AttemptId::from_bytes([2; 16]),
+        "project_id": project,
+        "attempt_number": 1,
+        "revision": 1,
+        "generation": 1,
+        "requested_route": {"kind":"named", "name":"fixture"},
+        "authority_digest": Digest::from_bytes([3; 32]),
+        "queued_at": WallTime::from_micros(1)?,
+        "state": {"state":"running"},
+        "usage": {},
+        "trace": {},
+        "read_only_writable": [],
+        "protected_paths": [],
+        "prompt": {
+            "path":{"encoding":"utf8", "path":"prompt"},
+            "digest":CanonicalV1::file_digest(b"fixture"),
+            "bytes":7,
+            "complete":true,
+            "redacted":false
+        }
+    }))?;
+    let dead = LaneRow::project(
+        &attempt,
+        LaneProjectionFacts {
+            presence: Some(LanePresence::Unattended),
+            stale: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(dead.state, "unattended");
+    assert_eq!(dead.recorded_state.as_deref(), Some("running"));
+    assert_eq!(dead.presence, Some(LanePresence::Unattended));
+    assert!(dead.reason.as_deref().is_some_and(|reason| {
+        reason.contains("provenant reconcile") && reason.contains(&target.to_string())
+    }));
+
+    let unknown = LaneRow::project(
+        &attempt,
+        LaneProjectionFacts {
+            presence: Some(LanePresence::Unknown),
+            stale: None,
+            ..Default::default()
+        },
+    );
+    assert_eq!(unknown.state, "unknown");
+    assert_eq!(unknown.recorded_state.as_deref(), Some("running"));
+    assert_eq!(unknown.stale, None);
+    assert!(unknown.reason.as_deref().is_some_and(|reason| {
+        reason.contains("cannot be verified") && reason.contains("provenant reconcile")
+    }));
+    Ok(())
 }
 
 #[test]
@@ -219,6 +332,24 @@ fn every_output_mode_matches_exactly_one_variant() {
             receipt: "line".into(),
             reviewer: json!({"provenance": "x"}),
             reviewer_provenance: json!("x"),
+        })),
+        OutputData::Composite(Box::new(CompositeChunk {
+            graph: "panel".into(),
+            node: "task".into(),
+            state: "succeeded".into(),
+            part: "result".into(),
+            offset: 0,
+            next_offset: 5,
+            length: Some(5),
+            eof: true,
+            complete: true,
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+            bytes: ChunkBytes::Utf8("hello".into()),
+            selected: json!({"verdict":"VERDICT: FAIL","findings":[]}),
+            tail: None,
+            tail_clamped: None,
+            to: None,
+            written: None,
         })),
         OutputData::Chunk(Box::new(chunk())),
     ];

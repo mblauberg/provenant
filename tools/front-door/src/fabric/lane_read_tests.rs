@@ -182,6 +182,9 @@ fn settled_attempt(
         omitted_reaped: 0,
         spared: Vec::new(),
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: false,
+        provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         omitted_spared: 0,
         warnings: Vec::new(),
         omitted_warnings: 0,
@@ -294,7 +297,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),

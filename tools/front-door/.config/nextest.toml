@@ -90,6 +90,12 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=command_adapter) & test(=command_lane_reads_its_supervisors_process_tree_through_the_cli)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Four real sandboxed command lanes in turn, each dispatched and settled. That
+# takes 18 to 26 seconds on macOS runners and passes 30 under shared load.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=command_adapter) & test(=command_pass_fail_truncation_and_spawn_failure_settle_without_models)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # Two data-home variants each launch four real graph providers against an open
 # WAL. Allow for shared-host contention without dropping session-read cases.
 [[profile.default.overrides]]
@@ -106,6 +112,14 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # an idle macOS runner and passes 30 seconds under shared-runner load.
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# A branch writer launched from a linked, separate-Git-directory or bare-linked
+# checkout makes one real launch: Git subprocesses, two host process censuses,
+# provider preparation and the Git confinement handoff. That takes 9 to 14
+# seconds on a developer Mac and 22 to 30+ seconds on shared runners.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=writer_cli_branch_from_linked_checkout_uses_primary_layout) | test(=writer_cli_branch_from_separate_git_directory_uses_saved_primary) | test(=writer_cli_branch_from_bare_linked_checkout_uses_common_layout))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # These graph fixtures perform durable settlement and, for paging, repeatedly
@@ -180,3 +194,26 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# Four CLI processes contend on one run store to exercise the first-launch
+# cutover guard. Reserve all nextest slots so other provider-dispatch tests do
+# not add process pressure; keep its assertions and inner waits, with one
+# bounded extra 30s interval for host-load spikes.
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_first_launches_pass_cutover_guard)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "10s", terminate-after = 6 }
+
+# These Git-history release fixtures crossed 20s while running together.
+# Reserve the full pool while retaining the normal CI deadline.
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=checks) & (test(=release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=release_ranges_check_commit_identity_across_a_shallow_boundary))'
+threads-required = "num-test-threads"
+
+# This bounded-evidence fixture launches six release checks and exceeded 30s
+# on macOS. Its measured aggregate work gets four 30s intervals; no other
+# fixture or product/runtime deadline changes.
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=checks) & test(=release_checks_legal_private_symlink_and_bounded_evidence)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }

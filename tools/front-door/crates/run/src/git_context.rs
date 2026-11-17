@@ -33,7 +33,7 @@ fn continuation_history_with(
     base: &str,
 ) -> Result<String> {
     let env = repository_environment(executor, git, cwd)?;
-    let base = resolve(executor, git, cwd, base, &env)?;
+    let base = resolve(executor, git, cwd, base, &env, None)?;
     let range = format!("{base}..HEAD");
     let (out, timed_out) = read_git_with_env(
         executor,
@@ -233,8 +233,11 @@ fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsStrin
 /// Where a lane can write: its linked worktree, the project's worktree and
 /// scratch areas, and the run state directory when one is set.
 fn lane_roots(
+    executor: &dyn Executor,
+    git: &Path,
     cwd: &Path,
     env: &[(OsString, OsString)],
+    host_state: Option<&Path>,
 ) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
     let get = |name: &str| {
         env.iter()
@@ -242,15 +245,66 @@ fn lane_roots(
             .map(|(_, value)| PathBuf::from(value))
     };
     let run_state = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).map(PathBuf::from);
-    let host_state = run_state.as_deref().unwrap_or(cwd);
+    let environment_state =
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
+    let host_state = host_state.or(environment_state.as_deref());
     let extra = transport::LaneRoots::new(run_state.clone());
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
-            transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)
+            let private = provenant_os::fs::canonicalize(&private)
+                .map_err(|_| transport::TransportError::Unreadable)?;
+            let common = provenant_os::fs::canonicalize(&common)
+                .map_err(|_| transport::TransportError::Unreadable)?;
+            let project = if private == common {
+                // The selected repository environment was just derived from
+                // this checkout with sanitised Git. It proves the primary
+                // directly and avoids requiring a saved binding at bootstrap.
+                if let Some(host_state) = host_state {
+                    let location = provenant_config::ProjectLocation::new(common.clone())
+                        .map_err(|_| transport::TransportError::Unreadable)?;
+                    let _ = provenant_config::lookup_project_at_state(host_state, &location)
+                        .map_err(|_| transport::TransportError::Unreadable)?;
+                }
+                Some(cwd.to_path_buf())
+            } else {
+                let utility = if let Some(state) = host_state {
+                    provenant_confinement::UtilityRuntime::read_only(git, state)
+                        .map_err(|_| transport::TransportError::Unreadable)?
+                        .with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
+                } else {
+                    provenant_confinement::UtilityRuntime::read_only_without_host_state(git)
+                        .map_err(|_| transport::TransportError::Unreadable)?
+                };
+                let cancel = provenant_core::CancelToken::new();
+                let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
+                    .map_err(|_| transport::TransportError::Unreadable)?;
+                let repo = utility
+                    .open_repo(executor, cwd, budget, &cancel)
+                    .map_err(|_| transport::TransportError::Unreadable)?;
+                if repo.common_git_dir() != common || repo.private_git_dir() != private {
+                    return Err(transport::TransportError::Unreadable);
+                }
+                let layout = utility
+                    .project_layout_for_repository(executor, &repo, budget, &cancel)
+                    .map_err(|_| transport::TransportError::Unreadable)?;
+                layout.project().map(Path::to_path_buf)
+            };
+            transport::LaneRoots::for_repository(
+                cwd,
+                &private,
+                &common,
+                project.as_deref(),
+                &extra,
+                host_state,
+            )
         }
         // An unreadable port table (for example inside a lane) narrows the
         // lane areas to the run state rather than refusing the advertisement.
-        _ => Ok(transport::LaneRoots::project(cwd, host_state).unwrap_or(extra)),
+        _ => Ok(match host_state {
+            Some(host_state) => transport::LaneRoots::project(cwd, host_state),
+            None => transport::LaneRoots::project_without_host_state(cwd),
+        }
+        .unwrap_or(extra)),
     }
 }
 
@@ -263,6 +317,7 @@ fn check_transport(
     cwd: &Path,
     env: &[(OsString, OsString)],
     transport_env: &[(OsString, OsString)],
+    host_state: Option<&Path>,
 ) -> Result<()> {
     let hardening = transport_args();
     let args: Vec<&str> = hardening
@@ -280,7 +335,7 @@ fn check_transport(
         reason: error.to_string(),
     };
     let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
-    let roots = lane_roots(cwd, env).map_err(refusal)?;
+    let roots = lane_roots(executor, git, cwd, env, host_state).map_err(refusal)?;
     transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
     transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }
@@ -370,6 +425,7 @@ fn resolve(
     cwd: &Path,
     base: &str,
     env: &[(OsString, OsString)],
+    host_state: Option<&Path>,
 ) -> Result<String> {
     let invalid = || RunError::InvalidBase(base.to_owned());
     if base.is_empty() || base.len() > 1024 || base.contains('\0') {
@@ -405,7 +461,7 @@ fn resolve(
         // The remote answers with host credentials and programs, so first
         // refuse any that a lane could have supplied.
         let transport_env = transport_environment(env);
-        check_transport(executor, git, cwd, env, &transport_env)?;
+        check_transport(executor, git, cwd, env, &transport_env, host_state)?;
         let oid = advertised_oid(executor, git, cwd, root, remote_name, env, &transport_env)
             .ok_or_else(invalid)?;
         verified = format!("{oid}{suffix}");
@@ -441,7 +497,7 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
     let env = repository_environment(&executor, git, cwd)
         .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
-    resolve_fetching(&executor, git, cwd, base, &env)
+    resolve_fetching(&executor, git, cwd, base, &env, None)
 }
 
 /// Resolve a graph base with the command's caps while retaining the read-only
@@ -457,7 +513,7 @@ pub fn resolve_git_base_with_facts(
     facts.with_executor(&executor, cancel, |executor| {
         let env = repository_environment(executor, git, cwd)
             .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
-        resolve_fetching(executor, git, cwd, base, &env)
+        resolve_fetching(executor, git, cwd, base, &env, None)
     })
 }
 
@@ -562,10 +618,13 @@ fn resolve_fetching(
     cwd: &Path,
     base: &str,
     env: &[(OsString, OsString)],
+    host_state: Option<&Path>,
 ) -> Result<String> {
-    match resolve(executor, git, cwd, base, env) {
-        Err(RunError::InvalidBase(_)) if fetch_tracking_ref(executor, git, cwd, base, env) => {
-            resolve(executor, git, cwd, base, env)
+    match resolve(executor, git, cwd, base, env, host_state) {
+        Err(RunError::InvalidBase(_))
+            if fetch_tracking_ref(executor, git, cwd, base, env, host_state) =>
+        {
+            resolve(executor, git, cwd, base, env, host_state)
         }
         result => result,
     }
@@ -579,6 +638,7 @@ fn fetch_tracking_ref(
     cwd: &Path,
     base: &str,
     env: &[(OsString, OsString)],
+    host_state: Option<&Path>,
 ) -> bool {
     let (root, _) = provenant_core::split_revision_root(base);
     let args = [
@@ -618,7 +678,7 @@ fn fetch_tracking_ref(
         return false;
     }
     let transport_env = transport_environment(env);
-    if check_transport(executor, git, cwd, env, &transport_env).is_err() {
+    if check_transport(executor, git, cwd, env, &transport_env, host_state).is_err() {
         return false;
     }
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
@@ -665,6 +725,108 @@ pub fn review_merge_base_between(git: &Path, cwd: &Path, head: &str, base: &str)
     Ok(value.to_owned())
 }
 
+/// The changed paths and size inputs for one already-pinned review range.
+/// `numstat` and `tree` are absent when size metadata could not be captured; a
+/// present empty numstat is a complete empty diff. Path selection remains
+/// available independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewDiffContext {
+    pub paths: Vec<String>,
+    pub numstat: Option<String>,
+    pub tree: Option<String>,
+}
+
+/// Read the review selection inputs from immutable commit IDs. The refs have
+/// already been resolved by the launch owner; this function accepts only full
+/// object IDs and never resolves their former names again.
+pub fn review_diff_context_at(
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+    head: &str,
+) -> Result<ReviewDiffContext> {
+    const PATH_LIMIT: usize = 4 * CONTEXT_LIMIT;
+    let base = provenant_core::GitOid::parse(base)
+        .map_err(|_| RunError::Validation("review base must be a pinned commit"))?
+        .to_string();
+    let head = provenant_core::GitOid::parse(head)
+        .map_err(|_| RunError::Validation("review head must be a pinned commit"))?
+        .to_string();
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, git, cwd)?;
+    let read_complete = |args: &[&str], limit: usize| -> Result<Vec<u8>> {
+        let (output, timed_out) = read_git_with_env(&executor, git, cwd, args, limit, &env)?;
+        if timed_out || output.truncated {
+            return Err(execution_error("pinned review diff was incomplete"));
+        }
+        Ok(output.bytes)
+    };
+    let merge_base_bytes = read_complete(&["merge-base", &base, &head], 256)?;
+    let merge_base = std::str::from_utf8(&merge_base_bytes)
+        .map_err(execution_error)?
+        .trim()
+        .to_owned();
+    if provenant_core::GitOid::parse(&merge_base).is_err() {
+        return Err(execution_error("pinned review merge base was invalid"));
+    }
+    let path_bytes = read_complete(
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &merge_base,
+            &head,
+            "--",
+        ],
+        PATH_LIMIT,
+    )?;
+    let paths = path_bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    let size_data = (|| -> Option<(String, String)> {
+        let numstat = String::from_utf8(
+            read_complete(
+                &[
+                    "diff",
+                    "--numstat",
+                    "--no-renames",
+                    "-z",
+                    &merge_base,
+                    &head,
+                    "--",
+                ],
+                CONTEXT_LIMIT,
+            )
+            .ok()?,
+        )
+        .ok()?;
+        let mut tree = Vec::new();
+        for revision in [&merge_base, &head] {
+            tree.extend(
+                read_complete(
+                    &["ls-tree", "-r", "-z", "--name-only", revision],
+                    CONTEXT_LIMIT,
+                )
+                .ok()?,
+            );
+        }
+        Some((numstat, String::from_utf8(tree).ok()?))
+    })();
+    let (numstat, tree) = size_data
+        .map(|(numstat, tree)| (Some(numstat), Some(tree)))
+        .unwrap_or((None, None));
+    Ok(ReviewDiffContext {
+        paths,
+        numstat,
+        tree,
+    })
+}
+
 /// Resolve the merge base against the locally recorded default origin branch.
 pub fn review_merge_base(git: &Path, cwd: &Path, head: &str) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
@@ -694,9 +856,10 @@ pub fn review_merge_base(git: &Path, cwd: &Path, head: &str) -> Result<String> {
     {
         return Ok(ids[1].to_owned());
     }
-    let default = resolve(&executor, git, cwd, "refs/remotes/origin/HEAD", &env).map_err(|_| {
-        RunError::Validation("cannot resolve origin's default branch; supply --base")
-    })?;
+    let default =
+        resolve(&executor, git, cwd, "refs/remotes/origin/HEAD", &env, None).map_err(|_| {
+            RunError::Validation("cannot resolve origin's default branch; supply --base")
+        })?;
     let (out, timed_out) = read_git_with_env(
         &executor,
         git,
@@ -728,31 +891,44 @@ pub struct GitContext {
     stat_timed_out: bool,
 }
 impl GitContext {
-    /// Capture a specified review head on the host.
-    pub fn capture_at(git: &Path, cwd: &Path, base: &str, head: &str) -> Result<Self> {
+    /// Capture a specified review head on the host using its validated state root.
+    pub fn capture_at(
+        git: &Path,
+        cwd: &Path,
+        host_state: &Path,
+        base: &str,
+        head: &str,
+    ) -> Result<Self> {
         let executor = SystemExecutor::new(1).map_err(execution_error)?;
-        Self::capture_with_head(&executor, git, cwd, base, head)
+        Self::capture_with_head(&executor, git, cwd, host_state, base, head)
     }
     /// Capture on the host once, before preparing any provider candidate.
-    pub fn capture(git: &Path, cwd: &Path, base: &str) -> Result<Self> {
+    pub fn capture(git: &Path, cwd: &Path, host_state: &Path, base: &str) -> Result<Self> {
         let executor = SystemExecutor::new(1).map_err(execution_error)?;
-        Self::capture_with(&executor, git, cwd, base)
+        Self::capture_with(&executor, git, cwd, host_state, base)
     }
 
-    fn capture_with(executor: &dyn Executor, git: &Path, cwd: &Path, base: &str) -> Result<Self> {
-        Self::capture_with_head(executor, git, cwd, base, "HEAD")
+    fn capture_with(
+        executor: &dyn Executor,
+        git: &Path,
+        cwd: &Path,
+        host_state: &Path,
+        base: &str,
+    ) -> Result<Self> {
+        Self::capture_with_head(executor, git, cwd, host_state, base, "HEAD")
     }
 
     fn capture_with_head(
         executor: &dyn Executor,
         git: &Path,
         cwd: &Path,
+        host_state: &Path,
         base: &str,
         head: &str,
     ) -> Result<Self> {
         let env = repository_environment(executor, git, cwd)?;
-        let base = resolve(executor, git, cwd, base, &env)?;
-        let head = resolve(executor, git, cwd, head, &env)?;
+        let base = resolve(executor, git, cwd, base, &env, Some(host_state))?;
+        let head = resolve(executor, git, cwd, head, &env, Some(host_state))?;
         let range = format!("{base}..{head}");
         let (log, log_timed_out) = read_git_with_env(
             executor,
@@ -1200,7 +1376,7 @@ mod tests {
         let head = oid()?;
         git(&["checkout", "-q", "--detach", &base])?;
         let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let context = GitContext::capture_at(&binary, temp.path(), &base, &head)?;
+        let context = GitContext::capture_at(&binary, temp.path(), temp.path(), &base, &head)?;
         assert_eq!(context.head, head);
         assert!(String::from_utf8_lossy(&context.log.bytes).contains("reviewed"));
         let scratch = tempfile::tempdir()?;
@@ -1267,6 +1443,7 @@ mod tests {
             &executor,
             Path::new("/fixture/git"),
             Path::new("/fixture/repo"),
+            Path::new("/fixture/state"),
             "main",
         )?;
         let scratch = tempfile::tempdir()?;
@@ -1309,6 +1486,7 @@ mod tests {
             &Timeout(InspectGit(Mutex::new(Vec::new()))),
             Path::new("/fixture/git"),
             Path::new("/fixture/repo"),
+            Path::new("/fixture/state"),
             "main",
         )?;
         let scratch = tempfile::tempdir()?;
@@ -1335,6 +1513,7 @@ mod tests {
             &InspectGit(Mutex::new(Vec::new())),
             Path::new("/fixture/git"),
             Path::new("/fixture/repo"),
+            Path::new("/fixture/state"),
             "main",
         )?;
         let temp = tempfile::tempdir()?;
@@ -1435,6 +1614,7 @@ mod tests {
             &InspectGit(Mutex::new(Vec::new())),
             Path::new("/fixture/git"),
             Path::new("/fixture/repo"),
+            Path::new("/fixture/state"),
             "main",
         )?;
         let scratch = tempfile::tempdir()?;
@@ -1506,7 +1686,7 @@ mod tests {
         let range = format!("{base}..HEAD");
         let control = read_git(&executor, &binary, &root, &["diff", &range], 4096)?;
         assert!(String::from_utf8_lossy(&control.bytes).contains("Binary files"));
-        let context = GitContext::capture(&binary, &root, &base)?;
+        let context = GitContext::capture(&binary, &root, &root, &base)?;
         assert!(String::from_utf8_lossy(&context.diff.bytes).contains("+changed line"));
         Ok(())
     }
@@ -1533,7 +1713,7 @@ mod tests {
             4096,
         )?;
         assert!(String::from_utf8_lossy(&control.bytes).contains("Author: Rewritten"));
-        let context = GitContext::capture(&binary, &root, &base)?;
+        let context = GitContext::capture(&binary, &root, &root, &base)?;
         assert!(
             String::from_utf8_lossy(&context.log.bytes)
                 .contains("Author: Fixture <fixture@example.invalid>")
@@ -1646,7 +1826,7 @@ mod tests {
         assert!(run(&["cat-file", "-e", &moved]).is_err());
         let env = repository_environment(&executor, &local.binary, &local.root)?;
         let resolve_base =
-            |base: &str| resolve_fetching(&executor, &local.binary, &local.root, base, &env);
+            |base: &str| resolve_fetching(&executor, &local.binary, &local.root, base, &env, None);
 
         assert_eq!(resolve_base("origin/main")?, moved);
         git(
@@ -1676,7 +1856,7 @@ mod tests {
         };
         let env = repository_environment(&executor, &fixture.binary, &fixture.root)?;
         let resolve_base =
-            |base: &str| resolve(&executor, &fixture.binary, &fixture.root, base, &env);
+            |base: &str| resolve(&executor, &fixture.binary, &fixture.root, base, &env, None);
         let run = |args: &[&str]| git(&fixture.executor, &fixture.binary, &fixture.root, args);
         run(&["branch", "-M", "main"])?;
         run(&[
@@ -1915,8 +2095,13 @@ mod tests {
         std::fs::write(root.join(".gitattributes"), "*.txt diff=fixture\n")?;
         let output = root.join("context");
         std::fs::create_dir(&output)?;
-        let context =
-            GitContext::capture_with(&DrainFixture(executor.clone()), &binary, &root, &base)?;
+        let context = GitContext::capture_with(
+            &DrainFixture(executor.clone()),
+            &binary,
+            &root,
+            scratch.path(),
+            &base,
+        )?;
         context.write_to(&Directory::open_anchor(&output)?, &output)?;
         for name in ["git-log.txt", "git-diff.patch"] {
             assert_eq!(
@@ -1936,7 +2121,7 @@ mod tests {
             resolve_git_base(&binary, &root, "--help"),
             Err(RunError::InvalidBase(_))
         ));
-        assert!(GitContext::capture(&binary, &root, "absent-base").is_err());
+        assert!(GitContext::capture(&binary, &root, &root, "absent-base").is_err());
         Ok(())
     }
 
@@ -2118,7 +2303,12 @@ mod tests {
                 "more files",
             ],
         )?;
-        let context = GitContext::capture(&fixture.binary, &fixture.root, &fixture.base)?;
+        let context = GitContext::capture(
+            &fixture.binary,
+            &fixture.root,
+            fixture._temp.path(),
+            &fixture.base,
+        )?;
         let scratch = tempfile::tempdir()?;
         context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
         let stat = std::fs::read_to_string(scratch.path().join("git-diff.stat"))?;

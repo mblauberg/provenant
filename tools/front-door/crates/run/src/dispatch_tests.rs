@@ -45,10 +45,15 @@ impl Providers for Ready {
         _: &TaskRequest,
         _: &str,
         _: &LaunchPaths,
-        _: Option<&AttemptRecord>,
+        resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ok(PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: resume.and_then(|record| record.session.as_ref()).map(
+                |session| ContinuationExpectation {
+                    session: session.clone(),
+                },
+            ),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -215,6 +220,8 @@ pub(super) struct Fake {
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
     pub(super) terminal_cause: Option<TerminalCause>,
+    /// Provider session the decode reports, for terminal continuation tests.
+    pub(super) session: Option<String>,
     /// The answer a decode reports, instead of the captured stdout.
     pub(super) answer: Option<String>,
     /// Partial-finish signals a decode reports.
@@ -307,7 +314,7 @@ impl Providers for Fake {
             }),
             observed_route: self.observed.clone(),
             usage: self.codex_usage.clone().unwrap_or_default(),
-            session: None,
+            session: self.session.clone(),
             reason: None,
             partial_signals: self.partial.clone(),
             turns: self.turns.clone(),
@@ -1024,10 +1031,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         );
     if matches!(operation, RecoveryOperation::CancelThenReconcile) {
         let before = std::fs::read(&reservation).ok();
-        assert_eq!(
-            store.cancel_with_observer(id, "stop", &call, observer)?,
-            CancelReceipt::Requested
-        );
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         let request: serde_json::Value = serde_json::from_slice(
             &artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
                 .ok_or("cancel request missing")?,
@@ -1297,7 +1301,8 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
     }
 
     if boot == BootRelation::Same {
-        // Held writer exclusion means a guardian may remain: stay uncertain.
+        // Even after writer exclusion becomes available, the last checkpoint
+        // cannot prove a same-boot process tree is quiescent.
         let held = Directory::open_anchor(&custody)?.try_lock(
             std::ffi::OsStr::new("writer.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -1310,42 +1315,34 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         assert!(reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         drop(held);
-        if device_numbers == DeviceNumbers::Changed {
-            return Ok(());
-        }
-        if custody_evidence == CustodyEvidence::Unresolved {
-            assert!(matches!(
-                store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
-                [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
-            ));
-            assert_eq!(store.record(id, &call)?, before);
-            assert!(reservation.exists());
-            return Ok(());
-        }
-        // Free exclusion and an absent guardian and provider leave no holder.
-        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
         if matches!(operation, RecoveryOperation::CancelThenReconcile) {
-            assert_eq!(
-                store.cancel_with_observer(id, "stop", &call, &observer)?,
-                CancelReceipt::Requested
-            );
+            assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         }
+        let census = provenant_supervisor::census::Census::from_observations(
+            [],
+            [],
+            ["guardian", "provider"]
+                .into_iter()
+                .filter_map(|role| value[role]["pid"].as_i64()),
+            true,
+            false,
+            16,
+        )?;
         assert_eq!(
-            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
-            vec![(id, Reconciled::Finished)]
+            store.reap_with_census_and_spawn(&call, &observer, Some(&census), |_, _| panic!(
+                "same-boot absence without a sealed exit is not reapable"
+            ))?,
+            0
         );
-        let AttemptState::Terminal {
-            outcome, reason, ..
-        } = store.record(id, &call)?.state
-        else {
-            return Err("holderless attempt stayed open".into());
-        };
-        assert_eq!(outcome, Outcome::Lost);
-        assert_eq!(
-            reason.as_deref(),
-            Some(crate::controls::LostReason::Holderless.message())
-        );
-        assert!(!reservation.exists());
+        assert!(matches!(
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
+            [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
+        ));
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Running { .. }
+        ));
+        assert!(reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());
     }
@@ -1371,16 +1368,13 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
             std::ffi::OsStr::new("custody.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
-        assert_eq!(
-            store.cancel_with_observer(id, "stop", &call, &observer)?,
-            CancelReceipt::Requested
-        );
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         assert_eq!(store.record(id, &call)?, before);
         assert!(reservation.exists());
         drop(custody_lock);
     }
     if matches!(operation, RecoveryOperation::CancelThenReconcile) {
-        let receipt = store.cancel_with_observer(id, "stop", &call, &observer)?;
+        let receipt = store.cancel(id, "stop", &call)?;
         assert!(matches!(
             receipt,
             CancelReceipt::AlreadyTerminal

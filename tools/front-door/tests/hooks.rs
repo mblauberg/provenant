@@ -37,7 +37,7 @@ fn config_advisories_are_silent_in_pre_tool_hooks() -> Result {
 }
 
 #[test]
-fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> Result {
+fn recorded_claude_lane_events_use_native_protocol_and_stay_quiet() -> Result {
     let mut rig = TestRig::new()?;
     // Exercise the lane's pinned Git and private temporary directory too.
     rig.env
@@ -81,6 +81,69 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
         assert_eq!(code(&output), 0, "{command}: {:?}", output.stderr.bytes);
         match action {
             provenant_records::HookAction::PreToolUse => assert!(output.stdout.bytes.is_empty()),
+            provenant_records::HookAction::PreCompact | provenant_records::HookAction::Compact => {
+                assert!(
+                    output.stdout.bytes.is_empty(),
+                    "{command}: {:?}",
+                    output.stdout.bytes
+                );
+                assert!(
+                    output.stderr.bytes.is_empty(),
+                    "{command}: {:?}",
+                    output.stderr.bytes
+                );
+            }
+            _ => return Err("fixture table contains an unrelated hook action".into()),
+        }
+        assert!(output.stdout.bytes.len() <= 8192);
+    }
+    rig.assert_v1_root_untouched()
+}
+
+#[test]
+fn recorded_claude_chair_compaction_events_emit_guidance_without_legacy_state() -> Result {
+    let mut rig = TestRig::new()?;
+    rig.env
+        .push((provenant_core::consumer_env::LANE_DEPTH.into(), "0".into()));
+    publish_checkpoint(&rig)?;
+    let fixtures = [
+        (
+            provenant_records::HookAction::PreCompact,
+            "pre-compact.json",
+        ),
+        (provenant_records::HookAction::Compact, "compact.json"),
+    ];
+    let claude = provenant_records::Harness::Claude.spec();
+    let install = claude.install.ok_or("Claude install declaration")?;
+    for (action, file) in fixtures {
+        let event = install
+            .hook_events
+            .iter()
+            .find_map(|declared| match declared {
+                provenant_records::HookEvent::Supported {
+                    action: declared_action,
+                    event,
+                    ..
+                } if *declared_action == action => Some(*event),
+                _ => None,
+            })
+            .ok_or("recorded action has no native Claude event")?;
+        let mut input: serde_json::Value = serde_json::from_slice(&recording(file)?)?;
+        assert_eq!(input["hook_event_name"], event);
+        input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
+        let command = action.command();
+        let output = rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "claude", command],
+            Some(&serde_json::to_vec(&input)?),
+        )?;
+        assert_eq!(code(&output), 0, "{command}: {:?}", output.stderr.bytes);
+        match action {
+            provenant_records::HookAction::PreCompact => {
+                // Claude takes plain PreCompact stdout as summary instructions.
+                let text = std::str::from_utf8(&output.stdout.bytes)?;
+                assert!(text.contains("Write an Intent section"));
+            }
             provenant_records::HookAction::Compact => {
                 let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
                 let context = value["hookSpecificOutput"]["additionalContext"]
@@ -89,11 +152,6 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
                 assert!(context.contains("recorded-session"));
                 assert!(context.contains("Checkpoint present"));
                 assert!(context.contains("checkpoint fixture: retain originating authority"));
-            }
-            provenant_records::HookAction::PreCompact => {
-                // Claude takes plain PreCompact stdout as summary instructions.
-                let text = std::str::from_utf8(&output.stdout.bytes)?;
-                assert!(text.contains("Write an Intent section"));
             }
             _ => return Err("fixture table contains an unrelated hook action".into()),
         }

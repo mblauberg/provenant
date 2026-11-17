@@ -14,6 +14,8 @@ use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub(super) type ExecutableLocator<'a> = dyn Fn(&str) -> Result<PathBuf, String> + 'a;
+
 mod command;
 pub(super) mod confinement;
 mod continuation;
@@ -34,7 +36,7 @@ use observation::*;
 use preparation::*;
 
 pub(super) use confinement::declared_credentials;
-pub(crate) use confinement::{find_executable, resolve_executable};
+pub(crate) use confinement::find_executable;
 pub use confinement::{graph_inputs_directory, graph_node_inputs_directory};
 pub(super) use fixtures::start_fabric_relay;
 #[cfg(feature = "fixture")]

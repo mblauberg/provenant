@@ -82,10 +82,15 @@ pub enum CustodyError {
     InvalidRecord,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
     HandoffUnknown,
+    /// This host cannot hold provider custody; nothing was handed off.
+    #[error("process custody is supported only on macOS")]
+    UnsupportedPlatform,
     #[error("sandbox profile transport handoff is unconfirmed; reservation remains fenced")]
     ProfileHandoffUnknown,
     #[error("operation was cancelled; custody is retained")]
     Cancelled,
+    #[error("another stop request already owns this attempt")]
+    StopConflict,
     #[error("wait budget expired; custody is retained")]
     Timeout,
     #[error(transparent)]
@@ -468,6 +473,40 @@ impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    #[cfg(feature = "fixture")]
+    pub(crate) fn record_fixture_spawned_provider(
+        &mut self,
+        attempt: &Directory,
+        guardian: crate::census::ProcessIdentity,
+        provider: crate::census::ProcessIdentity,
+    ) -> Result<()> {
+        if self.launched
+            || self.lease.is_none()
+            || self.reservation.launch_state != LaunchState::Prepared
+        {
+            return Err(CustodyError::Fenced);
+        }
+        let metadata = attempt.metadata()?;
+        let mut reservation = self.reservation.clone();
+        reservation.attempt_device = Some(metadata.device);
+        reservation.attempt_inode = Some(metadata.inode);
+        reservation.launch_state = LaunchState::Spawned;
+        reservation.guardian = Some(guardian);
+        reservation.provider = Some(provider);
+        reservation.unresolved_cleanup = false;
+        reservation.census_incomplete = false;
+        reservation.validate()?;
+        write_record(
+            &self.directory,
+            "reservation.json",
+            &reservation,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
+        self.reservation = reservation;
+        self.launched = true;
+        Ok(())
+    }
     /// A preparation failure before handoff has no child to fence. Explicit
     /// withdrawal keeps crashes conservative: dropping a lease never clears it.
     pub fn withdraw_unlaunched(self) -> Result<()> {
@@ -843,6 +882,28 @@ pub fn reservation_guardian(
     Ok(reservation.guardian)
 }
 
+/// Read the exact provider process retained by one attempt's custody record.
+/// The caller supplies that attempt's evidence directory; this observation
+/// grants no signalling authority.
+pub fn provider_identity(evidence: &Directory, scope: Scope) -> Result<Option<ProcessIdentity>> {
+    let reservation: Reservation = read_record(evidence, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(evidence, &reservation)?;
+    if reservation.scope != scope
+        || !matches!(
+            reservation.launch_state,
+            LaunchState::Spawned | LaunchState::Settling
+        )
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    if let Some(provider) = &reservation.provider {
+        provider
+            .validate()
+            .map_err(|_| CustodyError::InvalidRecord)?;
+    }
+    Ok(reservation.provider)
+}
+
 fn create_attempt_evidence(directory: &Directory, scope: Scope) -> Result<Directory> {
     let name = scope.attempt.to_string();
     match directory.mkdir(OsStr::new(&name), 0o700) {
@@ -1213,6 +1274,14 @@ pub fn launch(
             pending_exit: Some(Box::new(record)),
         });
     }
+    // A host without provider custody refuses before the reservation records
+    // a handoff: the lease stays unlaunched, so the caller withdraws it rather
+    // than fencing an attempt whose launch can never be confirmed. A launch
+    // that never spawns needs no custody and settles above on every host.
+    #[cfg(not(target_os = "macos"))]
+    if crate::process_os::provider::ensure_supported().is_err() {
+        return Err(failure(CustodyError::UnsupportedPlatform, publication));
+    }
     owned.lease.launched = true;
     owned.lease.reservation.launch_state = LaunchState::HandingOff;
     if let Err(error) = write_record(
@@ -1296,6 +1365,12 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
             match read_record::<CancelRequest>(&handle.directory, "cancel.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
+                Ok(previous)
+                    if request.reason == StopReason::Steered
+                        && previous.reason != StopReason::Steered =>
+                {
+                    return Err(CustodyError::StopConflict);
+                }
                 // A stale reattached handle never displaces a later
                 // generation's request. A held scope is the guardian's own,
                 // so a later generation beside it can only be forged.
@@ -1367,8 +1442,22 @@ pub struct ProcessExit {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
-    /// Whether cancellation was delivered before exit; null means ordering was not observed.
+    /// Whether cancellation or a steering interrupt was delivered before exit;
+    /// null means ordering was not observed.
     pub cancel_delivered_before_exit: Option<bool>,
+    /// The live provider stream contradicted its admitted identity, sealed by
+    /// the guardian independently of the bounded retained stdout tail.
+    #[serde(default)]
+    pub provider_identity_conflict: bool,
+    /// Live provider identity evidence was incomplete because a
+    /// delimiter-complete frame was dropped or undecodable, output was
+    /// oversized or unreadable, or capture drain timed out.
+    #[serde(default)]
+    pub provider_identity_evidence_incomplete: bool,
+    /// The live decoder saw an incomplete provider record in the residual
+    /// bytes delivered at actual EOF. This is separate from other loss.
+    #[serde(default)]
+    pub provider_identity_eof_fragment: bool,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1417,6 +1506,9 @@ impl ProcessExit {
             never_spawned: true,
             stop_reason,
             cancel_delivered_before_exit: Some(false),
+            provider_identity_conflict: false,
+            provider_identity_evidence_incomplete: false,
+            provider_identity_eof_fragment: false,
             delivered_signals: vec![],
             reaped: vec![],
             omitted_reaped: 0,
@@ -1447,6 +1539,9 @@ impl ProcessExit {
             never_spawned: self.never_spawned,
             stop_reason: self.stop_reason,
             cancel_delivered_before_exit: self.cancel_delivered_before_exit,
+            provider_identity_conflict: self.provider_identity_conflict,
+            provider_identity_evidence_incomplete: self.provider_identity_evidence_incomplete,
+            provider_identity_eof_fragment: self.provider_identity_eof_fragment,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,
@@ -1521,6 +1616,12 @@ struct StoredExit {
     stop_reason: Option<StopReason>,
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
+    #[serde(default)]
+    provider_identity_conflict: bool,
+    #[serde(default)]
+    provider_identity_evidence_incomplete: bool,
+    #[serde(default)]
+    provider_identity_eof_fragment: bool,
     delivered_signals: Vec<i64>,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
@@ -1550,6 +1651,9 @@ pub struct ExitObservation {
     pub stop_reason: Option<StopReason>,
     /// None means this current observation could not establish delivery ordering.
     pub cancel_delivered_before_exit: Option<bool>,
+    pub provider_identity_conflict: bool,
+    pub provider_identity_evidence_incomplete: bool,
+    pub provider_identity_eof_fragment: bool,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1582,11 +1686,160 @@ struct StoredObservation {
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
     provider: Option<ProcessIdentity>,
+    #[serde(default)]
+    descendants: Vec<ProcessIdentity>,
+    /// Older checkpoints cannot certify a full process-tree snapshot.
+    #[serde(default)]
+    census_complete: bool,
     publication_pending: bool,
     #[serde(default)]
     priority: Option<i32>,
     #[serde(flatten)]
     extra: ExtraFields,
+}
+
+/// Read-only process presence for the exact identities recorded by one
+/// attempt's supervisor. An unknown observation never means the holder died.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolderPresence {
+    Live,
+    Gone,
+    Unknown,
+}
+
+/// Observe the guardian and provider recorded for this exact attempt. Exact
+/// identities can prove a live holder, and a changed boot proves the old tree
+/// is gone. Same-boot absence stays unknown: the last durable descendant
+/// checkpoint can predate a fork into another session or process group.
+/// Permission, malformed evidence, incomplete census and any remaining session
+/// member also stay unknown.
+pub fn observe_holder(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> HolderPresence {
+    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        // Running state without its scoped native checkpoint cannot prove that
+        // no writer survived; a missing file is not a liveness observation.
+        Err(_) => return HolderPresence::Unknown,
+    };
+    observe_holder_record(scope, observer, record, None)
+}
+
+/// The bounded census-taking wrapper for one exact supervisor checkpoint.
+/// Batch status callers can instead share one host census across all rows.
+pub fn observe_holder_with_census(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+    census: &crate::census::Census,
+) -> HolderPresence {
+    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(_) => return HolderPresence::Unknown,
+    };
+    observe_holder_record(scope, observer, record, Some(census))
+}
+
+fn observe_holder_record(
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+    record: StoredObservation,
+    census: Option<&crate::census::Census>,
+) -> HolderPresence {
+    if record.schema_version != 1 || record.scope != scope || record.publication_pending {
+        return HolderPresence::Unknown;
+    }
+    let Some(guardian) = record.guardian.as_ref() else {
+        return HolderPresence::Unknown;
+    };
+    let mut identities = vec![guardian];
+    if let Some(provider) = record.provider.as_ref() {
+        identities.push(provider);
+    }
+    identities.extend(record.descendants.iter());
+    if identities.iter().any(|identity| {
+        identity.validate().is_err() || identity.native_start == 0 || identity.boot != guardian.boot
+    }) {
+        return HolderPresence::Unknown;
+    }
+    let boot = match observer.boot_identity() {
+        Ok(boot) if !boot.is_empty() => boot,
+        _ => return HolderPresence::Unknown,
+    };
+    if boot != guardian.boot {
+        return HolderPresence::Gone;
+    }
+    let mut unknown = false;
+    let root_count = identities.len() - record.descendants.len();
+    for (index, expected) in identities.into_iter().enumerate() {
+        match observer.observe(expected.pid) {
+            ProcessObservation::Present(fact)
+                if fact.validate().is_ok() && fact.identity == *expected && !fact.zombie =>
+            {
+                return if index < root_count {
+                    HolderPresence::Live
+                } else {
+                    HolderPresence::Unknown
+                };
+            }
+            ProcessObservation::Present(_) | ProcessObservation::Absent => {}
+            ProcessObservation::Unknown(_) => unknown = true,
+        }
+    }
+    if unknown {
+        return HolderPresence::Unknown;
+    }
+    if !record.census_complete {
+        return HolderPresence::Unknown;
+    }
+    if let Some(census) = census {
+        classify_holder_census(&record, census)
+    } else {
+        match observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+            Ok(census) => classify_holder_census(&record, &census),
+            Err(_) => HolderPresence::Unknown,
+        }
+    }
+}
+
+fn classify_holder_census(
+    record: &StoredObservation,
+    census: &crate::census::Census,
+) -> HolderPresence {
+    use crate::census::ProcessLookup;
+    let Some(guardian) = record.guardian.as_ref() else {
+        return HolderPresence::Unknown;
+    };
+    if !census.is_complete() {
+        return HolderPresence::Unknown;
+    }
+    let mut owned_sessions = vec![guardian.session_id];
+    let mut owned_groups = vec![guardian.group_id];
+    if let Some(provider) = record.provider.as_ref() {
+        owned_sessions.push(provider.session_id);
+        owned_groups.push(provider.group_id);
+    }
+    if census.processes().values().any(|fact| {
+        !fact.zombie
+            && (owned_sessions.contains(&fact.identity.session_id)
+                || owned_groups.contains(&fact.identity.group_id))
+    }) {
+        return HolderPresence::Unknown;
+    }
+    // A complete current census can confirm that recorded identities and
+    // sessions are absent, but it cannot cover a child forked after the
+    // asynchronously published checkpoint and escaped from those sessions.
+    // Same-boot absence is therefore not quiescence authority.
+    for pid in
+        std::iter::once(guardian.pid).chain(record.provider.as_ref().map(|provider| provider.pid))
+    {
+        if matches!(census.process(pid), ProcessLookup::Unknown) {
+            return HolderPresence::Unknown;
+        }
+    }
+    HolderPresence::Unknown
 }
 
 /// A reboot after both identities were recorded proves the entire old process
@@ -1617,29 +1870,11 @@ pub fn checkpoint_before_reboot(
             .boot_identity()
             .is_ok_and(|boot| !boot.is_empty() && boot != guardian.boot)
 }
-/// Whether the guardian and provider recorded for this attempt are both gone
-/// in this boot. Only an observed absence counts; an unreadable process or
-/// record leaves the attempt open.
+/// Whether a changed boot proves that the guardian and provider recorded for
+/// this attempt are gone. Same-boot absence is unknown; unreadable process or
+/// record evidence also leaves the attempt open.
 pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
-    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
-        Ok(record) => record,
-        // No process was ever recorded, so the reservation alone speaks for it.
-        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return true,
-        Err(_) => return false,
-    };
-    let Some(guardian) = record.guardian else {
-        return false;
-    };
-    let gone = |identity: &ProcessIdentity| match observer.observe(identity.pid) {
-        ProcessObservation::Absent => true,
-        ProcessObservation::Present(fact) => fact.identity != *identity || fact.zombie,
-        ProcessObservation::Unknown(_) => false,
-    };
-    record.schema_version == 1
-        && record.scope == scope
-        && !record.publication_pending
-        && gone(&guardian)
-        && record.provider.as_ref().is_none_or(gone)
+    observe_holder(directory, scope, observer) == HolderPresence::Gone
 }
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {
@@ -1682,6 +1917,10 @@ pub fn observe(
                     never_spawned: record.never_spawned,
                     stop_reason: record.stop_reason,
                     cancel_delivered_before_exit: record.cancel_delivered_before_exit,
+                    provider_identity_conflict: record.provider_identity_conflict,
+                    provider_identity_evidence_incomplete: record
+                        .provider_identity_evidence_incomplete,
+                    provider_identity_eof_fragment: record.provider_identity_eof_fragment,
                     delivered_signals: record.delivered_signals,
                     reaped: record.reaped,
                     omitted_reaped: record.omitted_reaped,
@@ -2111,6 +2350,11 @@ impl Recovery {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    /// The provider process identity retained by this verified custody
+    /// reservation. This observation grants no signalling authority.
+    pub fn provider_identity(&self) -> Option<&crate::census::ProcessIdentity> {
+        self.reservation.provider.as_ref()
+    }
     /// Whether this recovery holds exclusion for the given writer directory.
     pub fn holds_writer_lock(&self, directory: &Directory) -> Result<bool> {
         let held = self.lock_directory.metadata()?;
@@ -2174,7 +2418,8 @@ impl Recovery {
         clear_reservation(&self.directory, self.scope())
     }
     /// Release custody of an attempt the Run owner has committed Lost after
-    /// `holder_gone`. No attempt artefacts or worktree contents are removed.
+    /// `holder_gone`, or an explicit chair abandonment with non-live presence
+    /// and positive worktree non-occupancy. No attempt artefacts or worktree contents are removed.
     pub fn release_lost(mut self) -> Result<()> {
         self.clear_settled_reservation()
     }
@@ -2711,10 +2956,20 @@ mod exit_shape_tests {
             vec![],
         );
         exit.cancel_delivered_before_exit = None;
+        exit.provider_identity_eof_fragment = true;
+        assert!(exit.durable_observation().provider_identity_eof_fragment);
         let mut value = serde_json::to_value(exit).unwrap();
         assert!(value["cancel_delivered_before_exit"].is_null());
         let parsed: StoredExit = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(parsed.cancel_delivered_before_exit, None);
+        assert!(parsed.provider_identity_eof_fragment);
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_identity_eof_fragment");
+        let legacy: StoredExit = serde_json::from_value(value.clone()).unwrap();
+        assert!(!legacy.provider_identity_eof_fragment);
 
         value
             .as_object_mut()

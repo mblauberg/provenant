@@ -476,7 +476,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout()
     std::fs::create_dir(&scratch)?;
     let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;
     let git_path = provenant_os::git::git_executable().ok_or("git")?;
-    provenant_run::GitContext::capture_at(&git_path, &other, &base, &head)?
+    provenant_run::GitContext::capture_at(&git_path, &other, &rig.state, &base, &head)?
         .write_to(&directory, &scratch)?;
     let stat = std::fs::read_to_string(scratch.join("git-diff.stat"))?;
     assert!(stat.contains("source-change"), "{stat}");
@@ -854,6 +854,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     journal.bind(provenant_fabric_runtime::graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -974,7 +975,7 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1001,8 +1002,8 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
         graph_directory: None,
         configuration_root: fixture.rig.state.clone(),
         cwd: fixture.rig.project.clone(),
-        executables: Default::default(),
         executable_search_path: Vec::new(),
+                lane_path: None,
         git: provenant_os::git::git_executable().ok_or("git")?,
         default_account_directories: Default::default(),
         credential_roots: Default::default(),
@@ -1122,7 +1123,7 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1189,8 +1190,8 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         graph_directory: None,
         configuration_root: fixture.rig.state.clone(),
         cwd: fixture.rig.project.clone(),
-        executables: Default::default(),
         executable_search_path: Vec::new(),
+                lane_path: None,
         git: provenant_os::git::git_executable().ok_or("git")?,
         default_account_directories: Default::default(),
         credential_roots: Default::default(),
@@ -1285,7 +1286,7 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -1307,8 +1308,8 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         graph_directory: None,
         configuration_root: fixture.rig.state.clone(),
         cwd: fixture.rig.project.clone(),
-        executables: Default::default(),
         executable_search_path: Vec::new(),
+                lane_path: None,
         git: provenant_os::git::git_executable().ok_or("git")?,
         default_account_directories: Default::default(),
         credential_roots: Default::default(),

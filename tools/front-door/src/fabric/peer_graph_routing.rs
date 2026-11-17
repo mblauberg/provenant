@@ -75,7 +75,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -112,8 +112,8 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         graph_directory: None,
         configuration_root: fixture.rig.state.clone(),
         cwd: fixture.rig.project.clone(),
-        executables: Default::default(),
         executable_search_path: Vec::new(),
+        lane_path: None,
         git: provenant_os::git::git_executable().ok_or("git")?,
         default_account_directories: Default::default(),
         credential_roots: Default::default(),
@@ -176,6 +176,188 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
     )?
     .ok_or("B checkpoint after tick")?;
     assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
+    Ok(())
+}
+
+#[test]
+fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test(
+        "fabric::peer_tests::peer_graph_routing::terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress",
+    )? {
+        return Ok(());
+    }
+    use provenant_fabric_runtime::graph::{
+        self, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphExecution, NodeState,
+    };
+    struct SeedAttempt {
+        reference: String,
+        actor: String,
+    }
+    impl AttemptOwner for SeedAttempt {
+        type Error = std::convert::Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &AttemptKey,
+            _: graph::NodeInput<'_>,
+            _: &graph::GraphRoute,
+            _: graph::AccessMode,
+            _: Option<&str>,
+            _: graph::Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            Ok(AttemptObservation::Pending {
+                attempt_ref: Some(self.reference.clone()),
+            })
+        }
+    }
+
+    let fixture = SettlementFixture::for_node("steer-refusal-fixture", "seed")?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let (record, head) =
+        fixture.dispatch_keyed("steer-refusal-operation", "steer-refusal", "one", &call)?;
+    let route = provenant_run::RouteRecord {
+        provider: Some("fixture".into()),
+        model: Some("fixture/model".into()),
+        ..Default::default()
+    };
+    fixture
+        .store
+        .mark_starting_for_fixture(record.attempt_id, &route, &call)?;
+    let attempt = provenant_os::fs::Directory::open_anchor(
+        &fixture.rig.state.join("attempts").join(record.attempt_id.to_string()),
+    )?;
+    let running = fixture.store.admit(
+        record.attempt_id,
+        &attempt,
+        &crate::worktree_tests::FixtureResources,
+        &clock,
+        &cancel,
+    )?;
+    fixture.store.steer(
+        record.attempt_id,
+        "steer-terminal-refusal".parse()?,
+        "Keep this private instruction.",
+        &call,
+    )?;
+    let terminal_record = fixture.store.record(record.attempt_id, &call)?;
+    publish_success(&fixture.rig, &fixture.store, &terminal_record, head, &call)?;
+
+    let identity = Context::open(
+        fixture.roots.clone(),
+        &fixture.rig.home,
+        &fixture.rig.project,
+    )?
+    .identity;
+    let graph_id = "steer-refusal";
+    let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":graph_id,"nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+    }))?;
+    let mut journal = FileJournal::open(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        graph_id,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: None,
+        directory: fixture.rig.project.clone(),
+        document: document.clone(),
+    })?;
+    let mut seed = SeedAttempt {
+        reference: format!("{}/{}", identity.host, record.attempt_id),
+        actor: identity.inbox.actor.to_string(),
+    };
+    let initial = graph::advance_with_budget(
+        &document,
+        &mut seed,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    drop(journal);
+    assert_eq!(initial.checkpoint.nodes[0].state, NodeState::Running);
+
+    let mut settled = fixture.settled.clone();
+    settled.attempt_id = record.attempt_id;
+    settled.launch = Some(provenant_run::HostLaunchContext {
+        graph_directory: None,
+        configuration_root: fixture.rig.state.clone(),
+        cwd: fixture.rig.project.clone(),
+        executable_search_path: Vec::new(),
+        lane_path: None,
+        git: provenant_os::git::git_executable().ok_or("git")?,
+        default_account_directories: Default::default(),
+        credential_roots: Default::default(),
+        github_roots: Default::default(),
+        provider_path_environment: Default::default(),
+        cargo_build_jobs: None,
+        fixture_state_write: false,
+    });
+    assert!(matches!(
+        running.state,
+        provenant_run::AttemptState::Running { .. }
+    ));
+    advance_graphs_after_settlement(&settled, &FreeWorkers)?;
+
+    let record = fixture.store.record(record.attempt_id, &call)?;
+    let status = record.steering.as_ref().ok_or("steering status")?;
+    assert_eq!(
+        status.state,
+        provenant_records::run::SteeringState::NotContinued
+    );
+    assert_eq!(
+        status.cause,
+        Some(provenant_records::run::SteeringCause::SessionUnavailable)
+    );
+    assert_eq!(status.operations.len(), 1);
+    assert_eq!(
+        status.operations[0].operation_id.as_str(),
+        "steer-terminal-refusal"
+    );
+    assert!(
+        !serde_json::to_string(status)?.contains("Keep this private instruction."),
+        "the public status must not disclose accepted steering text"
+    );
+    assert!(fixture.store.steer_intent(record.attempt_id, &call)?.is_empty());
+    assert!(matches!(
+        fixture.store.steer(
+            record.attempt_id,
+            "steer-terminal-refusal".parse()?,
+            "Keep this private instruction.",
+            &call,
+        )?,
+        provenant_run::SteerReceipt::AlreadyTerminal { .. }
+    ));
+    assert!(matches!(
+        fixture.store.steer(
+            record.attempt_id,
+            "steer-terminal-refusal".parse()?,
+            "Different private instruction.",
+            &call,
+        ),
+        Err(provenant_run::RunError::OperationConflict)
+    ));
+    let checkpoint =
+        FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, graph_id)?
+            .ok_or("graph checkpoint")?;
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded);
     Ok(())
 }
 
@@ -272,7 +454,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -373,7 +555,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -459,7 +641,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -591,7 +773,7 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -842,7 +1024,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),

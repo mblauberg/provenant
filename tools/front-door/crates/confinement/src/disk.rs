@@ -211,7 +211,13 @@ pub fn worktrees(
     let integration = listed
         .iter()
         .find(|entry| !entry.bare)
-        .map(|entry| (entry.path.clone(), entry.head));
+        .map(|entry| {
+            Ok::<_, WorktreeError>((
+                entry.path.clone(),
+                entry.head.ok_or(WorktreeError::InvalidOutput)?,
+            ))
+        })
+        .transpose()?;
     // Attribute nested linked worktrees before their containing primary tree.
     listed.sort_by_key(|entry| std::cmp::Reverse(entry.path.components().count()));
     let roots: Vec<_> = listed
@@ -222,6 +228,7 @@ pub fn worktrees(
     let observed = workers.observe_roots(&roots);
     let mut inventory = Vec::new();
     for listed in listed.into_iter().filter(|entry| !entry.bare) {
+        let head = listed.head.ok_or(WorktreeError::InvalidOutput)?;
         let registered = registration.map_or_else(
             || {
                 crate::worktrees::Occupancy::custody_unknown(
@@ -245,7 +252,7 @@ pub fn worktrees(
             warnings: Vec::new(),
             path: listed.path,
             branch: listed.branch.map(|branch| branch.as_str().to_owned()),
-            head: listed.head,
+            head,
             dirty: WorktreeCondition::Unknown,
             occupancy,
             owner: Err("worktree registration was not observed".into()),

@@ -787,6 +787,9 @@ pub(super) fn publication() -> TerminalPublication<'static> {
 pub(super) fn exit() -> ExitObservation {
     ExitObservation {
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: false,
+        provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         publication: PublicationState::Durable,
         scope: Scope {
             attempt: input().attempt_id,

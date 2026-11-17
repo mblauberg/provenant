@@ -102,7 +102,7 @@ fn prepare(
         input,
         scratch,
         crate::launch::tool_search_path(input.home, true, input.policy)?,
-    );
+    )?;
     if input.sandboxed() {
         env.extend([
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
@@ -138,6 +138,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state: crate::SessionStateLocation::AttemptPrivate,
         profile: ProviderProfile {
             spec: profile,
             observations: Default::default(),

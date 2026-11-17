@@ -1005,6 +1005,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
                     peer_origin_context: None,
                     peer_submission_digest: None,
 
+                    requester_path: None,
                     extra: Default::default(),
                     bases: None,
                     directory: base.clone(),

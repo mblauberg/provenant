@@ -362,6 +362,27 @@ fn fail_with_repair(
     });
     emit(&result, globals, "", false)
 }
+fn fail_with_diagnostic(
+    command: &str,
+    status: Outcome,
+    code: &str,
+    diagnostic: &provenant_records::diagnostic::Diagnostic,
+    globals: &provenant_cli::Globals,
+) -> u8 {
+    let message = diagnostic
+        .detail
+        .clone()
+        .unwrap_or_else(|| diagnostic.code.clone());
+    let mut result = CommandResult::new(command, status, ());
+    result.error = Some(CommandError {
+        diagnostic: Some(diagnostic.into()),
+        code: code.into(),
+        message,
+        cause: diagnostic.detail.clone(),
+        repair: diagnostic.next.clone(),
+    });
+    emit(&result, globals, "", false)
+}
 /// Resolve Run's composition paths, then emit the owner's reply.
 fn run_edge(
     leaf: &str,

@@ -170,13 +170,18 @@ fn command_lookup_is_literal_and_preserves_symlink_invocation()
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let link = root.join("cursor");
     std::os::unix::fs::symlink(&executable, &link)?;
+    let project = root.join("project");
+    let worktree = project.join(".worktrees/selected");
+    std::fs::create_dir_all(&worktree)?;
+    let filtered = run::FilteredLanePath::from_path(root.as_os_str(), &project, &worktree)?;
     assert_eq!(
-        super::find_command_on_path("cursor", std::slice::from_ref(&root))?,
+        filtered.resolve("cursor")?,
         link
     );
     assert_eq!(super::canonical(&link)?, executable);
+    assert_eq!(filtered.resolve("cursor")?, link);
     // Model provider lookup keeps its cursor -> cursor-agent alias.
-    assert!(super::find_executable_on_path("cursor", &[root]).is_err());
+    assert!(super::preparation::preparation_executable(&filtered, "cursor").is_err());
     Ok(())
 }
 
@@ -403,21 +408,27 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
     assert!(std::env::var_os("GH_TOKEN").is_none());
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;
+    let project = home.join("project");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(&bin)?;
     let config = home.join("relocated-gh");
     std::fs::create_dir(&config)?;
     std::fs::write(config.join("fixture-token"), "fixture-secret")?;
-    let gh = home.join("gh");
+    let gh = bin.join("gh");
     std::fs::write(
         &gh,
         "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = token ] || exit 1\n/bin/cat \"$GH_CONFIG_DIR/fixture-token\"\n",
     )?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
-    let mut host = run::HostLaunchContext::from_environment(&home, &home, "/usr/bin/git".into());
-    host.executable_search_path = vec![home.clone()];
+    let mut host =
+        run::HostLaunchContext::from_environment(&home, &project, "/usr/bin/git".into());
+    host.executable_search_path = vec![bin];
     host.provider_path_environment
         .insert("GH_CONFIG_DIR".into(), config.clone().into_os_string());
+    let lane_path = run::FilteredLanePath::for_requester(Some(&host), &project, &project)?;
     let gh = publishing_executable(&|name| {
-        super::preparation::preparation_executable(Some(&host), false, name)
+        super::preparation::preparation_executable(&lane_path, name)
     })?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let mut environment = Vec::new();

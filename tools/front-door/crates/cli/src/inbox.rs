@@ -113,6 +113,37 @@ pub fn resolve_control(
     }
 }
 
+/// Persist a steer with Run's owner. Its live adapter decoder requests an
+/// interrupt after validating the session identity. The message identifier is
+/// stable across replays.
+pub fn deliver_steer(
+    edge: &crate::run::Edge<'_>,
+    identity: &provenant_fabric_runtime::identity::Identity,
+    attempt: provenant_core::AttemptId,
+    operation_id: &OperationId,
+    text: &str,
+    call: &provenant_fabric_store::Request<'_>,
+) -> Result<provenant_core::MessageId, InboxError> {
+    let context = provenant_run::ExecutionContext {
+        state_root: edge.roots.state.clone(),
+        project_id: identity.project,
+        actor_id: identity.inbox.actor,
+        read_prompts: true,
+    };
+    let run_call = provenant_run::Request {
+        clock: call.clock,
+        cancel: call.cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &run_call)
+        .map_err(|error| InboxError::Steer(error.to_string()))?;
+    match store.steer(attempt, operation_id.clone(), text, &run_call) {
+        Ok(provenant_run::SteerReceipt::Queued { message_id })
+        | Ok(provenant_run::SteerReceipt::AlreadyQueued { message_id }) => Ok(message_id),
+        Ok(provenant_run::SteerReceipt::AlreadyTerminal { message_id }) => Ok(message_id),
+        Err(error) => Err(InboxError::Steer(error.to_string())),
+    }
+}
+
 /// Build the shared refusal for a control receipt that cannot be delivered.
 pub fn unsupported_control_error(
     receipt: &provenant_records::control::ControlReceipt,

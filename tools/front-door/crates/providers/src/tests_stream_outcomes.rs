@@ -591,6 +591,38 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
 }
 
 #[test]
+fn expected_continuation_session_is_not_observed_without_a_provider_frame()
+-> Result<(), ProviderError> {
+    let mut matching =
+        codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    codex::Codex.observe(
+        &mut matching,
+        b"{\"type\":\"thread.started\",\"thread_id\":\"retained-thread\"}\n",
+    )?;
+    assert_eq!(
+        codex::Codex.finish(matching, EXIT)?.session(),
+        Some("retained-thread")
+    );
+
+    let fresh = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    assert_eq!(
+        codex::Codex.finish(fresh, EXIT)?.session(),
+        None,
+        "the expectation must not be returned as child evidence"
+    );
+
+    let mut wrong = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    assert!(matches!(
+        codex::Codex.observe(
+            &mut wrong,
+            b"{\"type\":\"thread.started\",\"thread_id\":\"fresh-thread\"}\n"
+        ),
+        Err(ProviderError::IdentityMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
 fn codex_oversized_command_output_is_skipped_but_other_oversize_fails_closed()
 -> Result<(), ProviderError> {
     // Shape of run 358cbf47 (#1514): a 1.17 MB command_execution item.
@@ -639,8 +671,19 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
             OutcomeStatus::Malformed
         );
     }
+    let incomplete = replay(&codex::Codex, "{\"type\":", EXIT)?;
+    assert_eq!(incomplete.1.status(), OutcomeStatus::Malformed);
     assert_eq!(
-        replay(&codex::Codex, "{\"type\":", EXIT)?.1.status(),
+        incomplete.1.protocol_error(),
+        Some("provider protocol frame ended before the record was complete")
+    );
+    let mut complete_partial = codex::Codex.stream(None)?;
+    assert!(matches!(
+        codex::Codex.observe(&mut complete_partial, b"{\n"),
+        Err(ProviderError::Malformed)
+    ));
+    assert_eq!(
+        codex::Codex.finish(complete_partial, EXIT)?.status(),
         OutcomeStatus::Malformed
     );
     let mut state = codex::Codex.stream(None)?;
@@ -662,6 +705,17 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
             &mut state,
             b"{\"type\":\"thread.started\",\"thread_id\":\"b\"}\n"
         ),
+        Err(ProviderError::IdentityMismatch)
+    ));
+
+    let mut state = claude::Claude.stream(None)?;
+    state.expect_model("expected-model");
+    let assistant: &[u8] = br#"{"type":"assistant","message":{"role":"assistant","model":"other-model","content":[{"type":"text","text":"answer"}]},"session_id":"s","parent_tool_use_id":null}"#;
+    claude::Claude.observe(&mut state, &[assistant, b"\n"].concat())?;
+    let result: &[u8] =
+        br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"answer"}"#;
+    assert!(matches!(
+        claude::Claude.observe(&mut state, &[result, b"\n"].concat()),
         Err(ProviderError::IdentityMismatch)
     ));
     Ok(())
@@ -852,6 +906,50 @@ fn claude_answer_is_recorded_once() -> Result<(), ProviderError> {
         })
         .collect();
     assert_eq!(texts, ["FIXTURE_USER_OR_PROVIDER_TEXT_001"]);
+    Ok(())
+}
+
+#[test]
+fn cursor_answer_is_recorded_once() -> Result<(), ProviderError> {
+    let stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"running tools\"}]},\"session_id\":\"s\"}\n",
+        "{\"type\":\"tool_call\",\"subtype\":\"started\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"tool_call\",\"subtype\":\"completed\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}]},\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"final answer\"}\n",
+    );
+    let (events, outcome) = replay(&cursor::Cursor, stream, EXIT)?;
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["final answer"]);
+    assert_eq!(outcome.status(), OutcomeStatus::Success);
+
+    let (fresh_events, _) = replay(&cursor::Cursor, fixture!("cursor/fresh.jsonl"), EXIT)?;
+    let fresh_texts: Vec<_> = fresh_events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fresh_texts, ["FIXTURE_USER_OR_PROVIDER_TEXT_001"]);
+
+    let fallback_stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"fallback answer\"}]},\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"\"}\n",
+    );
+    let (mut fallback_events, fallback_outcome) = replay(&cursor::Cursor, fallback_stream, EXIT)?;
+    fallback_events.extend(fallback_outcome.final_events().iter().cloned());
+    assert!(fallback_events.contains(&ProviderEvent::Text("fallback answer".into())));
+    assert!(fallback_events.contains(&ProviderEvent::ResultFallback));
+
     Ok(())
 }
 
@@ -1196,7 +1294,8 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "{adapter} {access:?}"
         );
         assert!(
-            spec.tool_exec_roots.contains(&crate::launch::subtree(Path::new("/fixture/repo"))),
+            spec.tool_exec_roots
+                .contains(&crate::launch::subtree(Path::new("/fixture/repo"))),
             "{adapter} {access:?}: repository execution grant missing"
         );
     }

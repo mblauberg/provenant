@@ -93,6 +93,8 @@ pub enum StopCause {
     Lost,
     Unsettled,
     Quarantined,
+    /// The host interrupted the attempt to deliver a queued steering turn.
+    Steered,
 }
 
 /// How the next attempt starts.
@@ -291,13 +293,14 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(Unsettled, CHAIR, crate::run::CauseSource::Host),
         rule(Quarantined, CHAIR, crate::run::CauseSource::Host),
         rule(HandoffMalformed, CHAIR, crate::run::CauseSource::Provider),
+        pinned(Steered, crate::run::CauseSource::Host),
     ]
 };
 
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 42] = {
+    pub const ALL: [StopCause; 43] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -342,6 +345,7 @@ impl StopCause {
             Unsettled,
             Quarantined,
             HandoffMalformed,
+            Steered,
         ]
     };
 
@@ -390,6 +394,7 @@ impl StopCause {
             Unsettled => 39,
             Quarantined => 40,
             HandoffMalformed => 41,
+            Steered => 42,
         }
     }
 
@@ -512,6 +517,7 @@ impl StopCause {
             Lost => "lost",
             Unsettled => "unsettled",
             Quarantined => "quarantined",
+            Steered => "steered",
         }
     }
 }
@@ -532,6 +538,7 @@ impl From<crate::run::TerminalCause> for StopCause {
         use crate::run::TerminalCause as T;
         match cause {
             T::SourceViewRefused => Self::SourceViewRefused,
+            T::ProjectBindingDirectoryUnsafe => Self::AccessPolicyRefused,
             T::AccountLoginRequired => Self::AuthRequired,
             T::RouteResolutionRefused => Self::RouteRefused,
             T::AccessPolicyRefused => Self::AccessPolicyRefused,
@@ -561,6 +568,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::ContextHandoff => Self::ContextHandoff,
             T::Blocked => Self::Blocked,
             T::LaneTokenLost => Self::LaneTokenLost,
+            T::Steered => Self::Steered,
         }
     }
 }

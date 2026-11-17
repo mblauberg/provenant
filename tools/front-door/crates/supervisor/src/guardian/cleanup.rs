@@ -728,6 +728,7 @@ impl Driver<'_> {
                 let requested_stop = match reason {
                     machine::StopReason::PostTerminalCleanup => false,
                     machine::StopReason::ExplicitCancellation
+                    | machine::StopReason::Steered
                     | machine::StopReason::WallDeadline
                     | machine::StopReason::ProtocolRejected
                     | machine::StopReason::SupervisorSignal

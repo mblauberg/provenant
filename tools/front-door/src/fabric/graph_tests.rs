@@ -803,7 +803,7 @@ mod graph_writer_admission_tests {
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -1079,7 +1079,9 @@ mod graph_review_tests {
     #[test]
     fn review_identity_requires_read_only_and_recognises_behaviour()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphNode, is_review_node, template::ReviewBehaviour};
+        use provenant_fabric_runtime::graph::{
+            GraphNode, is_review_node, template::ReviewBehaviour,
+        };
         for (role, reviews) in [
             (None, false),
             (Some("lens"), true),
@@ -2458,7 +2460,7 @@ mod result_tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -2600,13 +2602,12 @@ mod result_tests {
             result: PeerResult::Output {
                 extra: Default::default(),
                 data: Box::new(OutputResult::Chunk {
-                    peer: provenant_records::run::PeerOutputFields {
-                        graph: provenant_records::run::PeerGraphFields {
-                            peer_origin_work_key: Some(origin.clone()),
-                            ..Default::default()
-                        },
+                    peer: provenant_records::run::PeerGraphFields {
+                        peer_origin_work_key: Some(origin.clone()),
                         ..Default::default()
                     },
+                    length: Some(text.len() as u64),
+                    planner_fallback: None,
                     extra: Default::default(),
                     target,
                     part: OutputPart::Result,
@@ -2776,7 +2777,7 @@ mod result_tests {
             if let PeerResult::Output { data, .. } = &mut reply.result
                 && let OutputResult::Chunk { peer, .. } = data.as_mut()
             {
-                peer.graph.peer_origin_work_key = Some(provenant_records::WorkKey::new(
+                peer.peer_origin_work_key = Some(provenant_records::WorkKey::new(
                     factory.context.identity.project,
                     document.graph_id.clone(),
                     "producer",
@@ -2803,15 +2804,16 @@ mod result_tests {
         }
         if let PeerResult::Output { data, .. } = &mut reply.result
             && let OutputResult::Chunk {
-                    peer,
-                    next_offset,
-                    eof,
-                    bytes,
-                    ..
-                } = data.as_mut()
+                peer,
+                length,
+                next_offset,
+                eof,
+                bytes,
+                ..
+            } = data.as_mut()
         {
-            peer.length = Some(text.len() as u64);
-            peer.graph.peer_origin_work_key = Some(origin.clone());
+            *length = Some(text.len() as u64);
+            peer.peer_origin_work_key = Some(origin.clone());
             *next_offset = 5;
             *eof = false;
             *bytes = OutputBytes::Utf8(text[..5].into());
@@ -2848,12 +2850,12 @@ mod result_tests {
         let mut second: PeerResponse = serde_json::from_slice(&serde_json::to_vec(&reply)?)?;
         if let PeerResult::Output { data, .. } = &mut second.result
             && let OutputResult::Chunk {
-                    offset,
-                    next_offset,
-                    eof,
-                    bytes,
-                    ..
-                } = data.as_mut()
+                offset,
+                next_offset,
+                eof,
+                bytes,
+                ..
+            } = data.as_mut()
         {
             *offset = 5;
             *next_offset = text.len() as u64;
@@ -2886,7 +2888,7 @@ mod result_tests {
         if let PeerResult::Output { data, .. } = &mut second.result
             && let OutputResult::Chunk { peer, .. } = data.as_mut()
         {
-            peer.graph.peer_origin_work_key = Some(origin.next_attempt().unwrap());
+            peer.peer_origin_work_key = Some(origin.next_attempt().unwrap());
         }
         std::fs::write(&second_response, serde_json::to_vec(&second)?)?;
         let refused = graph_inputs::materialise(
@@ -3847,6 +3849,9 @@ mod provisioned_writer_submission_tests {
             omitted_reaped: 0,
             spared: Vec::new(),
             cancel_delivered_before_exit: None,
+            provider_identity_conflict: false,
+            provider_identity_evidence_incomplete: false,
+            provider_identity_eof_fragment: false,
             omitted_spared: 0,
             warnings: Vec::new(),
             omitted_warnings: 0,

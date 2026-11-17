@@ -4,6 +4,134 @@ use provenant_core::Roots;
 use provenant_os::{exec::SystemExecutor, fs::Directory};
 use provenant_providers::accounts::{Registration, Settings};
 use std::path::{Path, PathBuf};
+
+/// The credential-bearing directories owned by a registration. Account
+/// aliases are additional roots for the same identity, not separate accounts.
+pub(crate) fn credential_directories(
+    entry: &provenant_providers::accounts::Registration,
+) -> impl Iterator<Item = &Path> {
+    std::iter::once(entry.directory.as_path()).chain(entry.directories.iter().map(PathBuf::as_path))
+}
+
+#[derive(Clone)]
+struct AccountDirectories {
+    id: String,
+    adapter: String,
+    paths: Vec<PathBuf>,
+}
+
+struct DirectoryFinding {
+    accounts: Vec<String>,
+    message: String,
+}
+
+fn directory_inventory(settings: &Settings) -> Vec<AccountDirectories> {
+    settings
+        .entries
+        .iter()
+        .map(|(id, entry)| AccountDirectories {
+            id: id.clone(),
+            adapter: entry.adapter.clone(),
+            paths: credential_directories(entry)
+                .map(Path::to_path_buf)
+                .collect(),
+        })
+        .collect()
+}
+
+fn shares_unregistered_local_login(left: &str, right: &str) -> bool {
+    left == right
+        && provenant_records::AdapterSpec::get(left)
+            .is_some_and(provenant_records::AdapterSpec::uses_shared_local_login)
+}
+
+fn resolve_directory(path: &Path) -> PathBuf {
+    provenant_core::PathResolver::resolve_existing_ancestor(
+        &provenant_os::fs::SystemPathResolver,
+        path,
+    )
+    .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn directory_inventory_findings(
+    accounts: &[AccountDirectories],
+    home: &Path,
+) -> Vec<DirectoryFinding> {
+    let home = resolve_directory(home);
+    let resolved: Vec<_> = accounts
+        .iter()
+        .map(|account| {
+            (
+                &account.id,
+                account.adapter.as_str(),
+                account
+                    .paths
+                    .iter()
+                    .map(|path| resolve_directory(path))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let mut findings = Vec::new();
+    for (index, (id, adapter, paths)) in resolved.iter().enumerate() {
+        if paths.iter().any(|path| home.starts_with(path)) {
+            findings.push(DirectoryFinding {
+                accounts: vec![(*id).clone()],
+                message: format!("account {id}: directory is HOME or its ancestor; a login at HOME is the adapter's local account and needs no registration"),
+            });
+        }
+        for (other_id, other_adapter, other_paths) in resolved.iter().skip(index + 1) {
+            // These entries classify quota/menu metadata for the same local
+            // login; they do not claim isolated account trees. Preserve every
+            // HOME and cross-adapter check, and all registered-account checks.
+            if shares_unregistered_local_login(adapter, other_adapter) {
+                continue;
+            }
+            if paths.iter().any(|path| {
+                other_paths.iter().any(|other| {
+                    provenant_providers::identity::account_directories_overlap(path, other)
+                })
+            }) {
+                findings.push(DirectoryFinding {
+                    accounts: vec![(*id).clone(), (*other_id).clone()],
+                    message: format!("accounts {id} and {other_id}: registered directories overlap; a login at HOME is the adapter's local account and needs no registration"),
+                });
+            }
+        }
+    }
+    findings
+}
+
+fn candidate_directory_findings(
+    settings: &Settings,
+    home: &Path,
+    id: &str,
+    adapter: &str,
+    label: &str,
+    directory: &Path,
+    additional: &[PathBuf],
+) -> Vec<DirectoryFinding> {
+    let mut accounts = directory_inventory(settings);
+    let replaced: std::collections::BTreeSet<_> = settings
+        .entries
+        .iter()
+        .filter(|(_, entry)| entry.adapter == adapter && entry.label == label)
+        .map(|(entry_id, _)| entry_id.as_str())
+        .collect();
+    accounts.retain(|account| !replaced.contains(account.id.as_str()));
+    accounts.push(AccountDirectories {
+        id: id.to_owned(),
+        adapter: adapter.to_owned(),
+        paths: std::iter::once(directory.to_path_buf())
+            .chain(additional.iter().cloned())
+            .collect(),
+    });
+    directory_inventory_findings(&accounts, home)
+        .into_iter()
+        .filter(|finding| finding.accounts.iter().any(|account| account == id))
+        .collect()
+}
+
 /// Headline window choice; `default` clears a per-account override.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum HeadlineArg {
@@ -167,6 +295,14 @@ pub fn execute(
     execute_inner(command, roots, home, &mut kind).map_err(|message| (kind, message))
 }
 
+/// Diagnose registrations that would make credential roots overlap.
+pub fn directory_findings(settings: &Settings, home: &Path) -> Vec<String> {
+    directory_inventory_findings(&directory_inventory(settings), home)
+        .into_iter()
+        .map(|finding| finding.message)
+        .collect()
+}
+
 fn execute_inner(
     command: &Accounts,
     roots: &Roots,
@@ -234,6 +370,32 @@ fn execute_inner(
             return Err("invalid account label".into());
         }
         let directory = provenant_os::fs::canonicalize(directory).map_err(|e| e.to_string())?;
+        let resolved_home = provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            home,
+        )
+        .map_err(|error| error.to_string())?;
+        let account_id = format!("{adapter}-{label}");
+        let additional = settings
+            .entries
+            .values()
+            .find(|entry| entry.adapter == *adapter && entry.label == *label)
+            .map(|entry| entry.directories.as_slice())
+            .unwrap_or_default();
+        if let Some(finding) = candidate_directory_findings(
+            &settings,
+            &resolved_home,
+            &account_id,
+            adapter,
+            label,
+            &directory,
+            additional,
+        )
+        .into_iter()
+        .next()
+        {
+            return Err(finding.message);
+        }
         if provenant_records::AdapterSpec::get(adapter)
             .and_then(|spec| spec.account_directory_prefix)
             .is_some_and(|prefix| directory != home.join(format!("{prefix}{label}")))
@@ -324,7 +486,19 @@ fn execute_inner(
             settings
                 .entries
                 .retain(|_, a| a.adapter != *adapter || a.label != *label);
-            settings.entries.insert(format!("{adapter}-{label}"), entry);
+            settings.entries.insert(account_id.clone(), entry);
+            if let Some(finding) =
+                directory_inventory_findings(&directory_inventory(&settings), &resolved_home)
+                    .into_iter()
+                    .find(|finding| {
+                        finding
+                            .accounts
+                            .iter()
+                            .any(|account| account == &account_id)
+                    })
+            {
+                return Err(finding.message);
+            }
             if !provenant_config::DomainConfig::validate(&settings).is_empty() {
                 return Err("conflicting account registration".into());
             }
@@ -334,8 +508,7 @@ fn execute_inner(
     Ok(settings)
 }
 
-/// An agy registration is either the user's own login (`home` itself, on the
-/// shared login keychain) or an isolated account whose directory is its own
+/// An agy registration is an isolated account whose directory is its own
 /// `HOME` and holds its own keychain as a regular file. Any other directory is
 /// refused up front, and detection derives the same mode from the directory, so
 /// a keychain that vanishes between this check and the probe is refused too
@@ -345,7 +518,7 @@ fn check_agy_directory(directory: &Path, home: &Path) -> Result<(), String> {
         .map(|_| ())
         .map_err(|error| {
             format!(
-                "{error}; or register the default login with --directory {}",
+                "{error}; a login at {} is the adapter's local account and needs no registration",
                 home.display()
             )
         })
@@ -613,6 +786,31 @@ mod tests {
             headline: None,
             settings: Default::default(),
         }
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn directory_findings_cover_home_ancestors_and_nested_accounts() {
+        let home = Path::new("/fixture/home");
+        for directory in ["/fixture", "/fixture/home"] {
+            let mut settings = Settings::default();
+            settings
+                .entries
+                .insert("one".into(), registration("codex", "one", directory));
+            assert!(directory_findings(&settings, home)[0].contains("local account"));
+        }
+        let mut settings = Settings::default();
+        settings.entries.insert(
+            "one".into(),
+            registration("codex", "one", "/fixture/home/a"),
+        );
+        settings.entries.insert(
+            "two".into(),
+            registration("codex", "two", "/fixture/home/a/child"),
+        );
+        assert_eq!(directory_findings(&settings, home).len(), 1);
+        settings.entries.get_mut("two").unwrap().directory = "/fixture/home/b".into();
+        assert!(directory_findings(&settings, home).is_empty());
     }
 
     #[test]

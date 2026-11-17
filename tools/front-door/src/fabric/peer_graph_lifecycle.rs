@@ -69,7 +69,7 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -174,7 +174,7 @@ fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -255,7 +255,7 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -383,7 +383,7 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: if id == "a-missing" {
@@ -505,7 +505,7 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -634,7 +634,7 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -1188,7 +1188,10 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
                     .join(".worktrees/controls-writer")
                     .canonicalize()?
             );
-            assert_eq!(writer.project, rig.project.canonicalize()?);
+            // The sealed project is the selected checkout used as the Git
+            // executor. Project config ownership is resolved independently
+            // from the verified primary during writer preparation.
+            assert_eq!(writer.project, writer.worktree);
             let delivery = task.deliver.as_ref().ok_or("sealed delivery missing")?;
             assert_eq!(Some(&delivery.mode), delivery_mode.as_ref());
             assert_eq!(

@@ -1,21 +1,106 @@
 use super::*;
 
-/// Use the launch host's inventory even when preparation runs in a guardian
-/// with no ambient environment. Named commands retain literal-name lookup.
+/// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
-    host: Option<&run::HostLaunchContext>,
-    command: bool,
+    path: &run::FilteredLanePath,
     name: &str,
 ) -> Result<PathBuf, String> {
-    match host {
-        Some(host) if command => find_command_on_path(name, &host.executable_search_path),
-        Some(host) => host_executable(host, name),
-        None if command => {
-            let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
-            find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
-        }
-        None => resolve_executable(name),
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    path.resolve(name)
+}
+
+fn include_local_login(
+    spec: &AdapterSpec,
+    entries: &[provenant_providers::accounts::Registration],
+    selected: Option<&str>,
+    selected_adapter: Option<&str>,
+    retained_identity: Option<RetainedIdentity<'_>>,
+) -> bool {
+    if !spec.local_login
+        || selected_adapter.is_some_and(|adapter| adapter != spec.name)
+        || retained_identity
+            .is_some_and(|identity| identity.account_key != Some(spec.local_account.1))
+    {
+        return false;
     }
+    let has_entry = entries.iter().any(|entry| entry.adapter == spec.name);
+    if !has_entry {
+        return true;
+    }
+
+    // Keep a declared local identity selectable beside registered accounts,
+    // but do not add it to ordinary routing where unobserved HOME credentials
+    // could outrank an available registered account.
+    if !spec.is_unregistered_local(spec.local_account.1) {
+        return false;
+    }
+    selected.is_some_and(|selector| {
+        selector == spec.local_account.1
+            || (selector == spec.local_account.0
+                && !entries.iter().any(|entry| {
+                    entry.adapter == spec.name && (entry.label == selector || entry.key == selector)
+                }))
+    })
+}
+
+fn effective_account_selector<'a>(
+    requested: Option<&'a str>,
+    prior_account: Option<&'a str>,
+    continuing: bool,
+) -> Option<&'a str> {
+    if continuing { prior_account } else { requested }
+}
+
+fn select_account<'a>(
+    entries: &'a [provenant_providers::accounts::Registration],
+    selector: &str,
+    requested_adapter: Option<&str>,
+) -> Result<&'a provenant_providers::accounts::Registration, PrepareError> {
+    // Exact keys identify credentials; only use labels when no exact key
+    // exists. This keeps the synthetic `local` identity distinct from any
+    // registered account that happens to use the same label.
+    let candidates = |by_key: bool| {
+        entries.iter().filter(move |entry| {
+            (if by_key {
+                entry.key == selector
+            } else {
+                entry.label == selector
+            }) && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+        })
+    };
+    let by_key = entries.iter().any(|entry| {
+        entry.key == selector && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+    });
+    let mut matching = candidates(by_key);
+    let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
+        message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
+        cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+        note: None,
+    })?;
+    if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
+        return Err(PrepareError::Other(
+            "account alias is ambiguous; use its exact registered key".into(),
+        ));
+    }
+    Ok(entry)
+}
+
+fn select_retained_account<'a>(
+    entries: &'a [provenant_providers::accounts::Registration],
+    identity: RetainedIdentity<'_>,
+) -> Result<Option<&'a provenant_providers::accounts::Registration>, PrepareError> {
+    let Some(key) = identity.account_key else {
+        return Ok(None);
+    };
+    entries
+        .iter()
+        .find(|entry| entry.adapter == identity.provider && entry.key == key)
+        .map(Some)
+        .ok_or_else(|| PrepareError::Refusal {
+            message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
+            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            note: None,
+        })
 }
 
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
@@ -135,6 +220,18 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
             "warning: adapter {adapter} does not support image_input; attachments remain readable"
         )
     })
+}
+
+fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
+    let warning = warning.into();
+    let warning = if warning.starts_with("warning:") {
+        warning
+    } else {
+        format!("warning: {warning}")
+    };
+    if !route.diagnostics.launch_warnings.contains(&warning) {
+        route.diagnostics.launch_warnings.push(warning);
+    }
 }
 
 /// Warn when an ignore file the routed adapter declares, in the writer's
@@ -511,22 +608,8 @@ pub(crate) fn prepare(
     resume: Option<&run::AttemptRecord>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
-    prepare_with_wait(
-        registry,
-        task,
-        prompt_text,
-        paths,
-        resume,
-        |name| {
-            let command = matches!(&task.route, run::RequestedRoute::Adapter { provider, .. }
-                if AdapterSpec::get(provider).is_some_and(|spec|
-                    spec.named_entry == provenant_records::NamedEntry::Command));
-            preparation_executable(registry.host, command, name)
-        },
-        None,
-        wait,
-    )
-    .map_err(|error| error.into_refusal())
+    prepare_inner(registry, task, prompt_text, paths, resume, None, None, wait)
+        .map_err(|error| error.into_refusal())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -613,6 +696,8 @@ pub(super) enum PrepareError {
     Receipt(#[from] serde_json::Error),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
+    #[error(transparent)]
+    SourceView(super::source_tree::SourceViewError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
     #[error("write grants overlap the host target seed store")]
@@ -702,6 +787,13 @@ fn policy_code_for_resource(
     }
 }
 impl PrepareError {
+    pub(super) fn registered_project_inventory(error: provenant_config::ConfigError) -> Self {
+        match ReadOnlyPlanError::from(error) {
+            error @ ReadOnlyPlanError::ProjectBindingDirectory(_) => Self::ReadOnly(error),
+            error => Self::Other(format!("cannot read registered project inventory: {error}")),
+        }
+    }
+
     pub(super) fn into_refusal(self) -> Box<run::PrepareRefusal> {
         match self {
             Self::RouteResolution { error, checks } => {
@@ -731,6 +823,34 @@ impl PrepareError {
                 )
                 .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
             }),
+            Self::SourceView(error) => {
+                let detail = error.to_string();
+                let binding_refusal = matches!(
+                    &error.cause,
+                    super::source_tree::SourceCause::ProjectBindingDirectory(_)
+                );
+                let cause = if binding_refusal {
+                    provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+                } else {
+                    provenant_records::run::TerminalCause::SourceViewRefused
+                };
+                let mut refusal = run::PrepareRefusal::boxed(cause, detail.clone());
+                refusal.terminal_note = Some(detail);
+                if binding_refusal {
+                    refusal.boundary_class =
+                        provenant_records::diagnostic::BoundaryClass::Authority;
+                    let mut skipped = skip(
+                        "project binding state",
+                        SkipKind::Refused,
+                        "project binding state directory is unsafe",
+                    );
+                    skipped.confinement_guard = Some(
+                        provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe,
+                    );
+                    refusal.skipped_routes.push(skipped);
+                }
+                refusal
+            }
             Self::Candidates {
                 message,
                 skipped_routes,
@@ -993,6 +1113,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     for error in [
         ContinuationRequestError::MissingRoute,
         ContinuationRequestError::MissingModel,
+        ContinuationRequestError::MissingProvider,
         ContinuationRequestError::InvalidModel("invalid".into()),
         ContinuationRequestError::ProviderMismatch,
     ] {
@@ -1124,12 +1245,7 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
 
 impl From<super::source_tree::SourceViewError> for PrepareError {
     fn from(error: super::source_tree::SourceViewError) -> Self {
-        // The step and cause are fixed-form text, never Git output or contents.
-        Self::Refusal {
-            message: error.to_string(),
-            cause: provenant_records::run::TerminalCause::SourceViewRefused,
-            note: Some(error.to_string()),
-        }
+        Self::SourceView(error)
     }
 }
 impl From<String> for PrepareError {
@@ -1314,6 +1430,14 @@ impl PlanCheckError {
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped.guard_resource;
         refusal.skipped_routes.push(skipped);
+        if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
+            refusal.terminal_cause =
+                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe;
+            refusal.message = diagnostic
+                .detail
+                .unwrap_or_else(|| "project binding state directory is unsafe".into());
+            refusal.terminal_note = diagnostic.next;
+        }
         refusal
     }
 
@@ -1401,6 +1525,7 @@ impl PlanCheckError {
                 ReadOnlyPlanError::MissingBinding => G::ProjectBindingMissing,
                 ReadOnlyPlanError::PinnedSourceRequiresGit => G::PinnedSourceRequiresGit,
                 ReadOnlyPlanError::Other(_) => G::ReadOnlyPreparationFailed,
+                ReadOnlyPlanError::ProjectBindingDirectory(_) => G::ProjectBindingDirectoryUnsafe,
             },
         }
     }
@@ -1428,6 +1553,7 @@ pub(super) fn prepare_with(
     )
 }
 
+#[cfg(any(test, feature = "fixture"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_with_wait(
     registry: &Registry<'_>,
@@ -1436,6 +1562,29 @@ pub(super) fn prepare_with_wait(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
     locate: impl Fn(&str) -> Result<PathBuf, String>,
+    fixture_token: Option<&provenant_providers::claude::OauthToken>,
+    wait: Option<u64>,
+) -> Result<run::PreparedLaunch, PrepareError> {
+    prepare_inner(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        Some(&locate),
+        fixture_token,
+        wait,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_inner(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
@@ -1492,8 +1641,8 @@ pub(super) fn prepare_with_wait(
             &delegated,
             prompt_text,
             paths,
-            None,
-            &locate,
+            resume,
+            locate_override,
             fixture_token,
             wait,
         )?;
@@ -1518,7 +1667,7 @@ pub(super) fn prepare_with_wait(
         prompt_text,
         paths,
         resume,
-        &locate,
+        locate_override,
         fixture_token,
         wait,
     )
@@ -2277,12 +2426,20 @@ pub(super) fn prepare_candidates(
     prompt_text: &str,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
-        return prepare_command(registry, task, paths, resume, locate, provider, name);
+        return prepare_command(
+            registry,
+            task,
+            paths,
+            resume,
+            locate_override,
+            provider,
+            name,
+        );
     }
     let policy_project = task
         .profile
@@ -2396,6 +2553,36 @@ pub(super) fn prepare_candidates(
     } else {
         source.clone()
     };
+    let fallback_cancel = provenant_core::CancelToken::new();
+    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
+    let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    let project_binding = super::confinement::registered_project_binding(roots, project_id)?;
+    let requester_cwd = registry.cwd.unwrap_or(&source);
+    let lane_path = match writer.as_ref() {
+        Some(writer) => {
+            let excluded_roots = writer
+                .lane_path_roots()
+                .into_iter()
+                .chain(std::iter::once(writer.worktree.path()))
+                .collect::<Vec<_>>();
+            run::FilteredLanePath::for_requester_excluding_roots(registry.host, &excluded_roots)
+                .map_err(|error| error.to_string())?
+        }
+        None => crate::run::filtered_requester_lane_path(
+            registry.host,
+            requester_cwd,
+            &source,
+            &provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())
+                .map_err(|error| error.to_string())?,
+            &git_executor,
+            cancel,
+            project_binding.as_ref(),
+        )?,
+    };
+    let locate = |name: &str| match locate_override {
+        Some(locate) => locate(name),
+        None => preparation_executable(&lane_path, name),
+    };
     let writer_context = writer
         .as_ref()
         .map(|writer| writer_source_context(writer, task, &git, &launch_policy))
@@ -2425,8 +2612,10 @@ pub(super) fn prepare_candidates(
         .base
         .as_deref()
         .map(|base| match task.head.as_deref() {
-            Some(head) => run::GitContext::capture_at(&git, &source, base, head),
-            None => run::GitContext::capture(&git, &source, base),
+            Some(head) => {
+                run::GitContext::capture_at(&git, &source, roots.state.as_path(), base, head)
+            }
+            None => run::GitContext::capture(&git, &source, roots.state.as_path(), base),
         })
         .transpose()?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
@@ -2434,26 +2623,46 @@ pub(super) fn prepare_candidates(
         .ok_or("current user identity is unavailable")?
         .name;
 
-    let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     // Nested attempts live in a lane-writable child store. Unconfined provider
     // commands, including status, version and token refresh, get a fresh cwd
     // under the host configuration root retained in the launch context.
     let executor =
-        provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
-            .map_err(|e| e.to_string())?;
+        provenant_providers::host::HostProbeExecutor::new(&git_executor, roots.state.as_path())
+            .map_err(|e| e.to_string())?
+            .with_search_path(lane_path.path());
     let mut config = loaded_config
         .ok_or("routing context is unavailable")?
         .map_err(|error| error.to_string())?;
     config.domains.routing.launch_policy = launch_policy.clone();
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
-    let mut request = match resume {
-        Some(prior) => continuation_request(prior, &launch_policy)?,
-        None => route_request(task)?,
+    let (mut request, retained_identity) = match resume {
+        Some(prior) => {
+            let (request, identity) = continuation_request(prior, &launch_policy)?;
+            (request, Some(identity))
+        }
+        None => (route_request(task)?, None),
     };
     let task_request = route_request(task)?;
     request.intent = task_request.intent;
     request.confidential = task_request.confidential;
+    let requested_adapter = match &task.route {
+        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
+        run::RequestedRoute::Model { model, .. } => {
+            model.split_once('/').map(|(adapter, _)| adapter)
+        }
+        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
+    };
+    let selection_adapter = retained_identity
+        .map(|identity| identity.provider)
+        .or(requested_adapter);
+    // Continue with the applied identity as a provider/key pair. In particular,
+    // a local key such as `local` is not unique across adapters.
+    let effective_account_selector = effective_account_selector(
+        task.account.as_deref(),
+        retained_identity.and_then(|identity| identity.account_key),
+        resume.is_some(),
+    );
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut eligible = provenant_routing::probe_adapters(
         &request,
@@ -2462,6 +2671,9 @@ pub(super) fn prepare_candidates(
         provider_registry,
     )
     .map_err(|e| e.to_string())?;
+    if let Some(identity) = retained_identity {
+        eligible.retain(|adapter| *adapter == identity.provider);
+    }
     if resume.is_none()
         && let Some(context) = task.context.as_ref()
         && let (Some(risk), Some(kind)) =
@@ -2481,8 +2693,6 @@ pub(super) fn prepare_candidates(
     // Hold shared fences throughout preparation. An exhausted wait never grants access.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
-    let fallback_cancel = provenant_core::CancelToken::new();
-    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let provider_leases =
         available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
             .map_err(|error| error.to_string())?;
@@ -2501,10 +2711,18 @@ pub(super) fn prepare_candidates(
         if entries.iter().any(|entry| entry.adapter == spec.name) {
             continue;
         }
-        let directory = registry
+        let host_directory = registry
             .host
-            .and_then(|host| host.default_account_directories.get(spec.name).cloned())
-            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
+            .and_then(|host| host.default_account_directories.get(spec.name).cloned());
+        let environment_directory = host_provider_var(registry, environment);
+        let configured_by = match (host_directory.as_ref(), environment_directory.as_ref()) {
+            (Some(directory), Some(value)) if directory.as_os_str() == value => Some(environment),
+            (Some(_), _) => Some("host account-directory configuration"),
+            (None, Some(_)) => Some(environment),
+            (None, None) => None,
+        };
+        let directory = host_directory
+            .or_else(|| environment_directory.map(PathBuf::from))
             .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
             adapter: spec.name.into(),
@@ -2527,8 +2745,9 @@ pub(super) fn prepare_candidates(
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
                 locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
-            entry.directory = canonical(&directory)
-                .map_err(|detail| default_directory_error(spec, &directory, detail))?;
+            entry.directory = canonical(&directory).map_err(|detail| {
+                default_directory_error(spec, &directory, detail, configured_by)
+            })?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
                 spec.name,
@@ -2544,8 +2763,12 @@ pub(super) fn prepare_candidates(
         match discovered {
             Ok(()) => entries.push(entry),
             Err(error) => {
-                default_failures
-                    .insert(spec.name.to_owned(), (error.skip_kind(), error.to_string()));
+                let configured_directory =
+                    matches!(&error, AccountObservationError::ConfiguredDirectory(_));
+                default_failures.insert(
+                    spec.name.to_owned(),
+                    (error.skip_kind(), error.to_string(), configured_directory),
+                );
             }
         }
     }
@@ -2555,7 +2778,17 @@ pub(super) fn prepare_candidates(
         .filter(|spec| spec.local_login && eligible(spec.name))
     {
         let adapter = spec.name;
-        if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
+        if include_local_login(
+            spec,
+            &entries,
+            effective_account_selector,
+            selection_adapter,
+            retained_identity,
+        ) && locate(adapter).is_ok()
+            && !entries
+                .iter()
+                .any(|entry| entry.adapter == adapter && entry.key == spec.local_account.1)
+        {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
                 label: spec.local_account.0.into(),
@@ -2587,9 +2820,31 @@ pub(super) fn prepare_candidates(
     }
     .unique_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
+    // Resolve the exact continuation identity before observing account state.
+    let selected_entry = match retained_identity {
+        Some(identity) => select_retained_account(&entries, identity)?,
+        None => effective_account_selector
+            .map(|selector| select_account(&entries, selector, requested_adapter))
+            .transpose()?,
+    };
+    let selected = selected_entry.map(|entry| entry.key.as_str());
+    let selected_adapter = retained_identity
+        .map(|identity| identity.provider)
+        .or_else(|| {
+            selected.and_then(|key| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.key == key
+                            && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+                    })
+                    .map(|entry| entry.adapter.as_str())
+            })
+        });
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
+    let mut login_unverified = std::collections::BTreeSet::<(String, String)>::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut reason_boundaries = std::collections::BTreeMap::new();
     let mut reason_resources = std::collections::BTreeMap::new();
@@ -2623,6 +2878,35 @@ pub(super) fn prepare_candidates(
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
+                    // Staleness removes an old auth failure from admission,
+                    // but the executable-only OpenCode probe still cannot
+                    // establish login health. Keep that distinction visible
+                    // as a launch warning instead of silently losing the
+                    // reason when `read_readiness` projects it to `Stale`.
+                    let persisted_auth_failure = crate::quota::recorded_readiness_file(
+                        roots.state.as_path(),
+                        &entry.adapter,
+                        &entry.key,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some_and(|file| {
+                        file.records.iter().any(|record| {
+                            record.scope.host == provenant_quota::LOCAL_HOST
+                                && record.scope.route == provenant_quota::ACCOUNT_ROUTE
+                                && recorded.reason == Some(provenant_quota::ReadinessReason::Stale)
+                                && recorded.observed_scope.as_ref() == Some(&record.scope)
+                                && recorded.observed_unix_seconds
+                                    == Some(record.observed_unix_seconds)
+                                && matches!(
+                                    record.reason,
+                                    Some(
+                                        provenant_quota::ReadinessReason::SignedOut
+                                            | provenant_quota::ReadinessReason::LoginExpired
+                                    )
+                                )
+                        })
+                    });
                     let mismatch = recorded.reason
                         == Some(provenant_quota::ReadinessReason::AccountMismatch)
                         || diagnostic_records.iter().any(|r| {
@@ -2649,14 +2933,14 @@ pub(super) fn prepare_candidates(
                                 provenant_quota::ReadinessReason::SignedOut
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
-                        );
+                        )
+                        || persisted_auth_failure;
                     if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
                         let executable = Path::new(&record.executable);
                         if strategy == provenant_records::LoginReprobe::ExecutableOnly {
                             // The version probe established executable availability,
                             // not login health. Let the selected launch check auth.
-                            record.fixture_ref =
-                                format!("installed/{}/login-unverified", entry.adapter);
+                            login_unverified.insert((entry.adapter.clone(), entry.key.clone()));
                         } else {
                             let healthy = match strategy {
                                 provenant_records::LoginReprobe::Codex => {
@@ -2766,54 +3050,6 @@ pub(super) fn prepare_candidates(
             }
         }
     }
-    let requested_adapter = match &task.route {
-        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
-        run::RequestedRoute::Model { model, .. } => {
-            model.split_once('/').map(|(adapter, _)| adapter)
-        }
-        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
-    };
-    // A continuation keeps the prior attempt's account, never a fresh pick.
-    let prior_account = resume
-        .and_then(|prior| prior.applied_route.as_ref())
-        .and_then(|route| route.account_key.as_deref());
-    let selected = task
-        .account
-        .as_deref()
-        .filter(|_| resume.is_none())
-        .map(|label| {
-            let mut matching = entries.iter().filter(|e| {
-                (e.label == label || e.key == label)
-                    && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
-            });
-            let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
-                message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
-                note: None,
-            })?;
-            if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
-                return Err(PrepareError::Other(
-                    "account alias is ambiguous; use its exact registered key".into(),
-                ));
-            }
-            Ok(entry.key.as_str())
-        })
-        .transpose()?
-        .or(prior_account);
-    let selected_adapter = resume
-        .and_then(|prior| prior.applied_route.as_ref())
-        .and_then(|route| route.provider.as_deref())
-        .or_else(|| {
-            selected.and_then(|key| {
-                entries
-                    .iter()
-                    .find(|entry| {
-                        entry.key == key
-                            && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
-                    })
-                    .map(|entry| entry.adapter.as_str())
-            })
-        });
     let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -3147,7 +3383,9 @@ pub(super) fn prepare_candidates(
                 reason,
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
-                if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                if let Some((kind, detail, configured_directory)) =
+                    default_failures.get(&route.adapter)
+                {
                     previous_outcome = if *kind == SkipKind::AuthRequired {
                         provenant_routing::FallbackOutcome::AuthRequired
                     } else {
@@ -3159,7 +3397,7 @@ pub(super) fn prepare_candidates(
                     } else {
                         reason.clone()
                     });
-                    if *kind == SkipKind::AuthRequired {
+                    if *kind == SkipKind::AuthRequired || *configured_directory {
                         skipped.detail = provenant_records::diagnostic::safe_text(detail);
                     }
                     reasons.push(name_skipped_accounts(skipped, &route, &entries));
@@ -3390,9 +3628,11 @@ pub(super) fn prepare_candidates(
                 prior,
                 &route,
                 &task.authority_digest.to_string(),
-                state_root,
-                roots.state.as_path(),
-                &private_state,
+                ContinuationState {
+                    state_root,
+                    config_root: roots.state.as_path(),
+                    private_state: &private_state,
+                },
                 &launch_policy,
             ) {
                 Ok(continuation) => Some(continuation),
@@ -3640,6 +3880,10 @@ pub(super) fn prepare_candidates(
             None
         };
         let mut provider_route = adapter_route(&route);
+        let model_id =
+            provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
+        let launch_model = catalogue.launch_model(&model_id, route.effort.as_deref());
+        let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
         let project_key = format!("domains.lanes.projects.{project_id_str}.user_skills");
         let project_override = config
@@ -3685,6 +3929,7 @@ pub(super) fn prepare_candidates(
                 policy: &launch_policy,
                 command: None,
                 route: provider_route,
+                provider_model: provider_model.as_deref(),
                 confined: &plan,
                 prompt: &prompt,
                 continuation: continuation.as_ref(),
@@ -3695,6 +3940,8 @@ pub(super) fn prepare_candidates(
                 host_var: &|key| {
                     if key == provenant_core::consumer_env::SANDBOX {
                         Some(sandbox.env_value().into())
+                    } else if key == "PATH" {
+                        Some(lane_path.path().to_os_string())
                     } else {
                         host_provider_var(registry, key)
                     }
@@ -3765,6 +4012,54 @@ pub(super) fn prepare_candidates(
                 }
             };
             spec.user_skills = skills;
+        }
+        let native_root = match &spec.session_state {
+            provenant_providers::SessionStateLocation::AttemptPrivate => None,
+            provenant_providers::SessionStateLocation::Native { root }
+                if !sandbox.effective && root.is_absolute() =>
+            {
+                Some(root.clone())
+            }
+            _ => {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::Refused,
+                    "provider session-state location does not match the prepared sandbox or is not an absolute native root",
+                ));
+                reason_boundaries.insert(
+                    reasons.len() - 1,
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                continue;
+            }
+        };
+        if let Some(prior) = resume {
+            let prior_native = prior
+                .applied_route
+                .as_ref()
+                .is_some_and(|applied| prior_uses_native_session_state(applied, &route.adapter));
+            if prior_native != native_root.is_some() {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::Refused,
+                    "the prior and prepared continuation use different native or private session-state locations",
+                ));
+                reason_boundaries.insert(
+                    reasons.len() - 1,
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                continue;
+            }
+            if let Some(root) = native_root.as_deref()
+                && let Err(error) = verify_native_continuation(prior, &route, root, state_root)
+            {
+                let class = error.boundary_class();
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len() - 1, class);
+                }
+                continue;
+            }
         }
         if let Some(alias) = &paths.temporary_alias {
             alias_temporary_env(&mut spec.env, scratch, &alias.join(&scratch_name));
@@ -3845,9 +4140,7 @@ pub(super) fn prepare_candidates(
                     .push((provenant_core::consumer_env::LANE_BASE.into(), base.into()));
             }
         }
-        if sandbox.effective {
-            set_cargo_profile(&mut spec.env, &build_settings);
-        }
+        set_cargo_profile(&mut spec.env, &build_settings, !sandbox.effective);
         spec.env.extend(
             model_policy
                 .launch_env(adapter.id())
@@ -4040,75 +4333,47 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
-        if !sandbox.effective
-            && let Some((environment, fallback)) = adapter_spec
-                .filter(|spec| {
-                    spec.model_observation == provenant_records::ModelObservation::Rollout
-                })
-                .and_then(|spec| spec.default_account_directory)
-        {
-            // Native Codex writes its rollout beside the selected login rather
-            // than in this candidate's private state. Retain the launch-time
-            // selector outside the lane-writable candidate subtree so settlement
-            // observes the same trusted home after recovery.
-            let codex_home = spec
-                .env
-                .iter()
-                .find(|(key, _)| key == environment)
-                .map(|(_, value)| PathBuf::from(value))
-                .unwrap_or_else(|| home.join(fallback));
-            let selector = paths
-                .provider_state
-                .join(format!("codex-observation-{scratch_name}.json"));
-            let bytes = serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1,
-                "home": provenant_records::StructuredPathWire::from_path(&codex_home)
-                    .map_err(|error| error.to_string())?,
-            }))
-            .map_err(|error| error.to_string())?;
-            // This is host settlement metadata, outside the adapter's writable
-            // candidate subtree. Keep it out of the adapter setup steps, whose
-            // file writes are deliberately restricted to scratch.
-            if let Err(error) = write_setup_file(&[&paths.provider_state], &selector, &bytes, false)
-            {
-                reasons.push(setup_skip(&label, error));
-                continue;
-            }
-        }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
             spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
-        }) && availability.iter().any(|record| {
-            record.adapter == route.adapter
-                && record.account_key == route.account_key
-                && record.fixture_ref == format!("installed/{}/login-unverified", route.adapter)
+        }) && route.account_key.as_ref().is_some_and(|account_key| {
+            login_unverified.contains(&(route.adapter.clone(), account_key.clone()))
         }) {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: OpenCode login status is unverified; the selected launch will check authentication"
+            push_launch_warning(
+                &mut route,
+                "OpenCode login status is unverified; the selected launch will check authentication",
             );
         }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
+        }
+        if matches!(
+            &task_request.choice,
+            provenant_routing::RouteChoice::Model(_)
+        ) && let Some(scope) = config.providers.get(&route.adapter)
+            && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)
+        {
+            push_launch_warning(&mut route, warning);
         }
         if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: model {}/{} is not in the catalogue; the provider will check it",
-                route.adapter,
-                route.model
+            let warning = format!(
+                "model {}/{} is not in the catalogue; the provider will check it",
+                route.adapter, route.model
             );
+            push_launch_warning(&mut route, warning);
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
         }
         if let Some((fallback, reason)) = &fallback_dropped {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: {label}: model policy fallback {} ({reason}); dropped",
-                fallback.as_str()
+            push_launch_warning(
+                &mut route,
+                format!(
+                    "{label}: model policy fallback {} ({reason}); dropped",
+                    fallback.as_str()
+                ),
             );
         }
         if writer.is_some()
@@ -4117,9 +4382,7 @@ pub(super) fn prepare_candidates(
                 .routing
                 .opus_writer_advisory(&catalogue, &route)
         {
-            // Advice must never refuse an otherwise valid dispatch, even if
-            // the caller has closed its diagnostic stream.
-            let _ = writeln!(std::io::stderr().lock(), "{advisory}");
+            push_launch_warning(&mut route, advisory);
         }
         // Install on the host only once the head, route and lane setup are
         // known to be usable, and before the sandbox is entered.
@@ -4157,9 +4420,6 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             current_candidate > 0,
         );
-        if let Some(warning) = provider.availability_warning.as_deref() {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-        }
         provider.account_source = Some(if resume.is_some() {
             provenant_records::run::AccountSource::Continuation
         } else if task.account.is_some() {
@@ -4178,7 +4438,7 @@ pub(super) fn prepare_candidates(
         provider.argv_prompt_limit = Some(provenant_records::run::ArgvPromptLimitReceipt {
             value: argv_limit as u64,
             key: ARGV_LIMIT_KEY.into(),
-            origin: argv_origin_record,
+            origin: argv_origin_record.clone(),
             extra: Default::default(),
         });
         if let Some(event) = &dependency_event {
@@ -4279,9 +4539,36 @@ pub(super) fn prepare_candidates(
                 }
             }
         }
+        // Carry the exact continuation expectation already bound into the
+        // provider's shared stream decoder. Admission seals it with this
+        // candidate route so the live and terminal host decoders can prove
+        // that a resumed child stayed in its predecessor session.
+        let continuation_expectation = match (resume.is_some(), spec.stream.expected_session()) {
+            (true, Some(session)) => Some(run::ContinuationExpectation {
+                session: session.to_owned(),
+            }),
+            (true, None) => {
+                return Err(PrepareError::Refusal {
+                    message: "provider prepared a resumed invocation without its retained session binding".into(),
+                    cause: provenant_records::run::TerminalCause::HandoffRefused,
+                    note: None,
+                });
+            }
+            (false, _) => None,
+        };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
+        // Publish the route/root binding only when this candidate is ready to
+        // return as the applied launch. A refused fallback candidate must not
+        // leave terminal settlement observing a different native account.
+        if let Some(root) = native_root.as_deref()
+            && let Err(error) = write_native_session_location(&paths.provider_state, root, &route)
+        {
+            reasons.push(setup_skip(&label, error));
+            continue;
+        }
         return Ok(run::PreparedLaunch {
             limits,
+            continuation_expectation,
             skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,
@@ -4459,7 +4746,11 @@ mod receipt_tests {
             confidential: false,
             fallback: Fallback::None,
         };
-        let resolved = provenant_routing::resolve(&request, &context)?;
+        let mut resolved = provenant_routing::resolve(&request, &context)?;
+        resolved
+            .diagnostics
+            .launch_warnings
+            .push("warning: fixture launch diagnostic".into());
         let requested = run::RequestedRoute::Named {
             extra: Default::default(),
             required_family: None,
@@ -4472,6 +4763,10 @@ mod receipt_tests {
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["account_label"], "work");
         assert_eq!(wire["source"], "named_route");
+        assert_eq!(
+            wire["launch_warnings"][0],
+            "warning: fixture launch diagnostic"
+        );
         let mut uncertain = resolved.clone();
         uncertain.readiness = provenant_records::RouteReadiness::Ready {
             availability_warning: Some("Stale".into()),
@@ -4737,6 +5032,7 @@ mod user_skills_tests {
                     let input = PrepareInput {
                         credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
+                        provider_model: None,
                         policy: &launch_policy,
                         confined: &plan,
                         prompt: &prompt,
@@ -5164,4 +5460,305 @@ mod candidate_walk_regressions {
         );
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod route_launch_boundary_regressions {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn agy_entry(
+        label: &str,
+        key: &str,
+        directory: &Path,
+    ) -> provenant_providers::accounts::Registration {
+        provenant_providers::accounts::Registration {
+            adapter: "agy".into(),
+            label: label.into(),
+            key: key.into(),
+            org_fingerprint: None,
+            directory: directory.into(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            plans: Vec::new(),
+            directories: Vec::new(),
+            limits: None,
+            display_name: None,
+            hidden: false,
+            order: None,
+            headline: None,
+            settings: Default::default(),
+        }
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn agy_local_login_is_explicit_beside_registered_accounts_and_not_a_root() -> Result<(), String>
+    {
+        let spec = AdapterSpec::get("agy").ok_or("agy adapter missing")?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let home = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
+        let registered = agy_entry("work", "agy-registered", &home.join(".agy-work"));
+        assert!(!include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            None,
+            Some("agy"),
+            None
+        ));
+        assert!(include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            Some(spec.local_account.1),
+            Some("agy"),
+            None
+        ));
+        assert!(include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            Some(spec.local_account.0),
+            Some("agy"),
+            None
+        ));
+        assert!(!include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            Some(spec.local_account.1),
+            Some("cursor"),
+            None
+        ));
+        let cursor = AdapterSpec::get("cursor").ok_or("cursor adapter missing")?;
+        assert!(include_local_login(
+            cursor,
+            &[],
+            Some(cursor.local_account.1),
+            Some("cursor"),
+            None
+        ));
+        assert!(!include_local_login(
+            cursor,
+            &[],
+            Some(cursor.local_account.1),
+            Some("agy"),
+            None
+        ));
+        let resumed_local =
+            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), true);
+        assert_eq!(resumed_local, Some(spec.local_account.1));
+        assert!(include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            resumed_local,
+            Some("agy"),
+            Some(RetainedIdentity {
+                provider: "agy",
+                account_key: Some(spec.local_account.1),
+            })
+        ));
+        assert!(!include_local_login(
+            spec,
+            &[],
+            None,
+            Some("agy"),
+            Some(RetainedIdentity {
+                provider: "agy",
+                account_key: None,
+            })
+        ));
+        assert_eq!(
+            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), false),
+            Some("agy-registered")
+        );
+        assert_eq!(
+            effective_account_selector(Some("agy-registered"), None, true),
+            None
+        );
+
+        let mut settings = provenant_providers::accounts::Settings::default();
+        settings.entries.insert("work".into(), registered.clone());
+        let roots = credential_roots(&Registry::default(), &home, &settings)?;
+        assert!(roots.entries().iter().any(|root| {
+            root.source == "account registry: agy/work" && root.path == registered.directory
+        }));
+        assert!(
+            !roots
+                .entries()
+                .iter()
+                .any(|root| root.source.starts_with("account registry: agy/default"))
+        );
+
+        let mut candidates = vec![registered.clone()];
+        candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        assert_eq!(
+            select_account(&candidates, spec.local_account.1, Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            spec.local_account.1
+        );
+        assert_eq!(
+            select_account(&candidates, spec.local_account.0, Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            spec.local_account.1
+        );
+        assert_eq!(
+            select_account(&candidates, "agy-registered", Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            "agy-registered"
+        );
+
+        let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
+        let mut colliding_candidates = vec![labelled_collision];
+        colliding_candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        assert_eq!(
+            select_account(&colliding_candidates, spec.local_account.1, Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            spec.local_account.1
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn continuation_account_selection_uses_the_retained_provider_key_pair() {
+        let home = PathBuf::from("/fixture/home");
+        let agy_local = agy_entry("default", "local", &home);
+        let mut cursor_local = agy_entry("default", "local", &home);
+        cursor_local.adapter = "cursor".into();
+        let entries = [cursor_local, agy_local.clone()];
+        let selected = select_retained_account(
+            &entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: Some("local"),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.adapter, "agy");
+
+        let no_account = select_retained_account(
+            &entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: None,
+            },
+        )
+        .unwrap();
+        assert!(no_account.is_none());
+
+        let mut cursor_only = agy_entry("local", "cursor-only", &home);
+        cursor_only.adapter = "cursor".into();
+        let mismatch_entries = [agy_local.clone(), cursor_only];
+        let mismatch = select_retained_account(
+            &mismatch_entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: Some("cursor-only"),
+            },
+        );
+        assert!(matches!(
+            mismatch,
+            Err(PrepareError::Refusal {
+                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                ..
+            })
+        ));
+
+        let mut same_provider_label = agy_entry("cursor-only", "agy-other-key", &home);
+        same_provider_label.label = "cursor-only".into();
+        let mismatch_entries = [agy_local, same_provider_label];
+        let mismatch = select_retained_account(
+            &mismatch_entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: Some("cursor-only"),
+            },
+        );
+        assert!(matches!(
+            mismatch,
+            Err(PrepareError::Refusal {
+                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                ..
+            })
+        ));
+    }
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
+    fn requester_path_filter_and_named_lookup_share_one_owner() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
+        let project = root.join("project");
+        let worktree = project.join(".worktrees/selected");
+        let bin = root.join("requester-bin");
+        std::fs::create_dir_all(&worktree).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&bin).map_err(|error| error.to_string())?;
+        let executable = bin.join("fixture-command");
+        std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").map_err(|error| error.to_string())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        let mut host = run::HostLaunchContext::from_environment(
+            &root.join("state"),
+            &project,
+            "/usr/bin/git".into(),
+        );
+        let supplied =
+            std::env::join_paths([bin.as_os_str(), project.as_os_str(), worktree.as_os_str()])
+                .map_err(|error| error.to_string())?;
+        host.lane_path = Some(supplied.as_os_str().as_bytes().to_vec());
+
+        let filtered = run::FilteredLanePath::for_requester(Some(&host), &project, &worktree)
+            .map_err(|error| error.to_string())?;
+        let directories = std::env::split_paths(filtered.path()).collect::<Vec<_>>();
+        assert_eq!(directories, [bin]);
+        assert_eq!(filtered.resolve("fixture-command")?, executable);
+        Ok(())
+    }
+}
+
+#[test]
+// Spec: docs/specs/state.md#roots-and-identities
+fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
+    let error = ReadOnlyPlanError::from(
+        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: std::path::PathBuf::from("/private/test-binding-state"),
+            mode: 0o755,
+            owner_matches: true,
+        },
+    );
+    let refusal = PlanCheckError::ReadOnly(error).into_refusal();
+    assert!(refusal.message.contains("/private/test-binding-state"));
+    assert!(
+        refusal
+            .terminal_note
+            .as_deref()
+            .is_some_and(|note| note.contains("chmod 700"))
+    );
+    assert_eq!(
+        refusal.boundary_class,
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
+    assert_eq!(
+        refusal.policy_code.as_deref(),
+        Some("CONFINEMENT_READ_ONLY_PLAN_AUTHORITY")
+    );
+    assert_eq!(refusal.skipped_routes.len(), 1);
+    assert!(
+        !refusal.skipped_routes[0]
+            .detail
+            .contains("/private/test-binding-state")
+    );
+    assert_eq!(
+        refusal.skipped_routes[0].confinement_guard,
+        Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
+    );
+    assert_eq!(
+        refusal.terminal_cause,
+        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+    );
 }

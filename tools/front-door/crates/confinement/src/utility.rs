@@ -404,6 +404,7 @@ pub struct UtilityRuntime {
     lane_roots: LaneRoots,
     /// Explicit host config root for effective project and host port declarations.
     host_state: PathBuf,
+    host_state_available: bool,
 }
 
 /// Where a run's lane scratch and provider state live below the state
@@ -434,7 +435,15 @@ impl UtilityRuntime {
             },
             lane_roots: LaneRoots::default(),
             host_state: host_state.as_ref().to_owned(),
+            host_state_available: true,
         })
+    }
+
+    /// Closed Git reads for callers that have no host state directory.
+    pub fn read_only_without_host_state(git: impl AsRef<Path>) -> Result<Self, UtilityError> {
+        let mut runtime = Self::read_only(git, "/dev/null")?;
+        runtime.host_state_available = false;
+        Ok(runtime)
     }
     /// Open a Git utility using the supplied host state for port declarations.
     pub fn new(
@@ -447,6 +456,7 @@ impl UtilityRuntime {
             home: PrivateHome::new(home.as_ref())?,
             lane_roots: LaneRoots::default(),
             host_state: host_state.as_ref().to_owned(),
+            host_state_available: true,
         })
     }
 
@@ -463,16 +473,337 @@ impl UtilityRuntime {
         self
     }
 
+    /// Resolve the project layout with local bare provenance classified against
+    /// the same bootstrap roots used to enforce lane configuration ownership.
+    pub fn project_layout_for_repository(
+        &self,
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        self.project_layout_for_repository_with_binding(executor, repo, None, budget, cancel)
+    }
+
+    /// Resolve a repository layout using a binding already established by the
+    /// caller. Lane contexts may have an isolated state root that cannot
+    /// re-enumerate the host's project registry.
+    pub fn project_layout_for_bound_repository(
+        &self,
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        binding: &provenant_config::ProjectBinding,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        if binding.common_dir() != repo.common_git_dir() {
+            return Err(UtilityError::UnreadableGitConfiguration);
+        }
+        self.project_layout_for_repository_with_binding(
+            executor,
+            repo,
+            Some(binding),
+            budget,
+            cancel,
+        )
+    }
+
+    fn project_layout_for_repository_with_binding(
+        &self,
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        bound: Option<&provenant_config::ProjectBinding>,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        if repo.private_git_dir() == repo.common_git_dir() {
+            return crate::worktrees::ProjectLayout::from_repo(repo, true)
+                .map_err(|_| UtilityError::UnreadableGitConfiguration);
+        }
+
+        let environment = crate::worktrees::project_layout_git_environment();
+        let git = self.git.program()?;
+        let location = provenant_config::ProjectLocation::new(repo.common_git_dir().to_path_buf())
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        let binding = if let Some(binding) = bound {
+            Some(binding.clone())
+        } else if self.host_state_available {
+            provenant_config::lookup_project_at_state(&self.host_state, &location)
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        } else {
+            None
+        };
+        let layout = match binding {
+            Some(binding) => {
+                let primary = crate::worktrees::project_layout_for_binding_primary(
+                    executor,
+                    &binding,
+                    &git,
+                    &environment,
+                    budget.timeout,
+                    cancel,
+                )
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                if let Some(primary) = primary {
+                    Ok(primary)
+                } else {
+                    let bootstrap = self.bootstrap_lane_roots(repo)?;
+                    let trusted_bare = crate::worktrees::RepoFacts::default()
+                        .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
+                        .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                    crate::worktrees::project_layout_for_binding_with_bare_setting(
+                        executor,
+                        &binding,
+                        trusted_bare,
+                        &git,
+                        &environment,
+                        budget.timeout,
+                        cancel,
+                    )
+                }
+            }
+            None => {
+                let bootstrap = self.bootstrap_lane_roots(repo)?;
+                let trusted_bare = crate::worktrees::RepoFacts::default()
+                    .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
+                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                crate::worktrees::project_layout_for_common_with_bare_setting(
+                    executor,
+                    repo.common_git_dir(),
+                    trusted_bare,
+                    &git,
+                    &environment,
+                    budget.timeout,
+                    cancel,
+                )
+            }
+        }
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        Ok(layout)
+    }
+
+    /// Resolve a registered layout when the caller has only its host binding.
+    /// A linked checkout may supply the verified Git context needed to
+    /// classify bare provenance after the non-bare inventory finds no primary.
+    pub fn project_layout_for_binding(
+        &self,
+        executor: &dyn Executor,
+        binding: &provenant_config::ProjectBinding,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        let environment = crate::worktrees::project_layout_git_environment();
+        let git = self.git.program()?;
+        if let Some(primary) = crate::worktrees::project_layout_for_binding_primary(
+            executor,
+            binding,
+            &git,
+            &environment,
+            budget.timeout,
+            cancel,
+        )
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        {
+            return Ok(primary);
+        }
+
+        let common = provenant_os::fs::canonicalize(binding.common_dir())
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        let identity = Directory::open_anchor(&common)?.metadata()?;
+        let inventory = crate::worktrees::RepoFacts::default()
+            .discover_worktree_inventory(
+                crate::worktrees::WorktreeInventoryQuery::new(
+                    &common,
+                    &git,
+                    &environment,
+                    executor,
+                    budget.timeout,
+                    cancel,
+                )
+                .with_bare_setting(false),
+            )
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        for entry in crate::worktrees::parse_worktree_list(&inventory)
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        {
+            if entry.bare {
+                continue;
+            }
+            let root = provenant_os::fs::canonicalize(&entry.path).ok();
+            let Some(root) = root else {
+                continue;
+            };
+            let Ok(candidate) = VerifiedRepo::open_structure_only(&root) else {
+                continue;
+            };
+            if candidate.common_git_dir() != common
+                || candidate.private_git_dir() == common
+                || !candidate.common_identity().same_identity(&identity)
+            {
+                continue;
+            }
+            let candidate = self.open_repo(executor, root, budget, cancel)?;
+            return self.project_layout_for_repository(executor, &candidate, budget, cancel);
+        }
+
+        let bootstrap = self.bootstrap_roots(&common, &common, &common)?;
+        let trusted_bare =
+            self.bare_setting_for_common(executor, &common, budget, cancel, &bootstrap)?;
+        crate::worktrees::project_layout_for_binding_with_bare_setting(
+            executor,
+            binding,
+            trusted_bare,
+            &git,
+            &environment,
+            budget.timeout,
+            cancel,
+        )
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+    }
+
+    /// Resolve a common Git directory when the caller has no checkout. A
+    /// registered directory resolves through its binding; an unbound one is
+    /// common-only only with trusted local bare provenance.
+    pub fn project_layout_for_common(
+        &self,
+        executor: &dyn Executor,
+        common: &Path,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        let common = provenant_os::fs::canonicalize(common)
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        if self.host_state_available {
+            let location = provenant_config::ProjectLocation::new(common.clone())
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            if let Some(binding) =
+                provenant_config::lookup_project_at_state(&self.host_state, &location)
+                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+            {
+                return self.project_layout_for_binding(executor, &binding, budget, cancel);
+            }
+        }
+        let environment = crate::worktrees::project_layout_git_environment();
+        let git = self.git.program()?;
+        let bootstrap = self.bootstrap_roots(&common, &common, &common)?;
+        let trusted_bare =
+            self.bare_setting_for_common(executor, &common, budget, cancel, &bootstrap)?;
+        crate::worktrees::project_layout_for_common_with_bare_setting(
+            executor,
+            &common,
+            trusted_bare,
+            &git,
+            &environment,
+            budget.timeout,
+            cancel,
+        )
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+    }
+
+    fn bare_setting_for_common(
+        &self,
+        executor: &dyn Executor,
+        common: &Path,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+        roots: &LaneRoots,
+    ) -> Result<Option<bool>, UtilityError> {
+        let git = self.git.program()?;
+        let mut argv = vec![
+            git.into_os_string(),
+            "--git-dir".into(),
+            common.as_os_str().to_owned(),
+        ];
+        argv.extend(GIT_COMMON.iter().map(OsString::from));
+        argv.extend(
+            [
+                "config",
+                "--local",
+                "--includes",
+                "--show-origin",
+                "-z",
+                "--bool",
+                "--get-all",
+                "core.bare",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        let environment = crate::worktrees::project_layout_git_environment();
+        let outcome = validate_outcome(self.git.execute(executor, || {
+            exec_options(&argv, common, budget, &environment, None, Some(cancel))
+        })?)?;
+        match outcome.termination {
+            Termination::Exit(0) => crate::worktrees::classify_bare_origins_at_root(
+                common,
+                &outcome.stdout.bytes,
+                roots,
+                &BTreeSet::new(),
+            )
+            .map_err(|_| UtilityError::UnreadableGitConfiguration),
+            Termination::Exit(1) => Ok(None),
+            Termination::Exit(_) | Termination::Signal(_) => {
+                Err(UtilityError::UnreadableGitConfiguration)
+            }
+        }
+    }
+
     /// Everything a lane can write that matters to `repo`: its own linked
     /// worktree, the project's worktree and scratch areas, and any extra roots.
-    pub(crate) fn lane_roots(&self, repo: &VerifiedRepo) -> Result<LaneRoots, UtilityError> {
+    pub(crate) fn lane_roots(
+        &self,
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<LaneRoots, UtilityError> {
+        // A verified checkout whose private directory is the common directory
+        // is the primary itself. Linked worktrees need the shared resolver so
+        // their own root never becomes the project-configuration owner.
+        let project_root = if repo.private_git_dir() == repo.common_git_dir() {
+            Some(repo.root_path().to_path_buf())
+        } else {
+            let layout = self.project_layout_for_repository(executor, repo, budget, cancel)?;
+            layout.project().map(Path::to_path_buf)
+        };
         Ok(LaneRoots::for_repository(
             repo.root_path(),
             repo.private_git_dir(),
             repo.common_git_dir(),
+            project_root.as_deref(),
             &self.lane_roots,
-            &self.host_state,
+            self.host_state_available.then_some(&self.host_state),
         )?)
+    }
+
+    fn bootstrap_lane_roots(&self, repo: &VerifiedRepo) -> Result<LaneRoots, UtilityError> {
+        self.bootstrap_roots(
+            repo.root_path(),
+            repo.private_git_dir(),
+            repo.common_git_dir(),
+        )
+    }
+
+    fn bootstrap_roots(
+        &self,
+        root: &Path,
+        private: &Path,
+        common: &Path,
+    ) -> Result<LaneRoots, UtilityError> {
+        if self.host_state_available {
+            return Ok(LaneRoots::bootstrap_for_repository(
+                root,
+                private,
+                common,
+                &self.lane_roots,
+                &self.host_state,
+            )?);
+        }
+        let mut roots = self.lane_roots.clone().into_paths();
+        if private != common {
+            roots.push(root.to_path_buf());
+        }
+        Ok(LaneRoots::new(roots))
     }
 
     pub fn open_repo(
@@ -533,6 +864,21 @@ impl UtilityRuntime {
         .map(ReadOnlyRepo)
     }
 
+    /// Read local `core.bare` values with their actual include origins during
+    /// layout bootstrap. This read deliberately skips `HostGit`, whose roots
+    /// are what the bootstrap is establishing; it executes only `git config`
+    /// through the bounded repository probe environment.
+    pub(crate) fn local_bare_origins(
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        runtime: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<ExecOutcome, UtilityError> {
+        let args = git_args(GitRead::LocalBareOrigins, repo, EMPTY_TREE_SHA1)?;
+        run_git_probe(executor, repo, runtime, budget, cancel, &[], &args)
+    }
+
     /// One project-discovery owner for CLI/runtime callers. A Git marker is
     /// verified by open_repo; malformed metadata never falls back to non-Git.
     /// Non-Git workspaces bind their canonical directory, without a Git parser.
@@ -549,8 +895,15 @@ impl UtilityRuntime {
             match directory.metadata_at(OsStr::new(".git"), false) {
                 Ok(_) => {
                     let repo = self.open_repo(executor, ancestor, budget, cancel)?;
-                    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
-                        .map_err(|_| UtilityError::InvalidOperationValue)?;
+                    let location = if repo.private_git_dir() == repo.common_git_dir() {
+                        provenant_config::ProjectLocation::from_verified_primary_checkout(
+                            repo.common_git_dir(),
+                            repo.root_path(),
+                        )
+                    } else {
+                        provenant_config::ProjectLocation::new(repo.common_git_dir())
+                    }
+                    .map_err(|_| UtilityError::InvalidOperationValue)?;
                     return Ok(DiscoveredProject {
                         location,
                         repository: Some(repo),
@@ -755,6 +1108,7 @@ pub fn run_utility(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
+    let stdin = git_stdin(&operation);
     execute_git(
         executor,
         repo,
@@ -762,17 +1116,7 @@ pub fn run_utility(
         budget,
         cancel,
         false,
-        |attribute_source| {
-            let stdin = match &operation {
-                GitRead::BlobBatch { oids } => Some(
-                    oids.iter()
-                        .flat_map(|oid| format!("{oid}\n").into_bytes())
-                        .collect(),
-                ),
-                _ => None,
-            };
-            Ok((git_args(operation, repo, attribute_source)?, stdin))
-        },
+        |attribute_source| Ok((git_args(operation, repo, attribute_source)?, stdin)),
     )
 }
 
@@ -818,7 +1162,7 @@ impl<'a> HostGit<'a> {
             budget,
             cancel,
         };
-        let roots = runtime.lane_roots(repo)?;
+        let roots = runtime.lane_roots(executor, repo, budget, cancel)?;
         transport::check_environment(&host.env, repo.root_path(), &roots)?;
         let listing = host.run(
             &transport::LISTING_ARGS
@@ -1056,6 +1400,7 @@ pub fn run_release_read_utility(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
+    let stdin = git_stdin(&operation);
     execute_git(
         executor,
         &repo.0,
@@ -1063,8 +1408,19 @@ pub fn run_release_read_utility(
         budget,
         cancel,
         true,
-        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, None)),
+        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, stdin)),
     )
+}
+
+fn git_stdin(operation: &GitRead) -> Option<Vec<u8>> {
+    match operation {
+        GitRead::BlobBatch { oids } => Some(
+            oids.iter()
+                .flat_map(|oid| format!("{oid}\n").into_bytes())
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 /// Query the remote's advertised HEAD using host transport credentials.
@@ -1897,6 +2253,41 @@ fn scan_configuration(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ConfigScan, UtilityError> {
+    let roots = runtime.lane_roots(executor, repo, budget, cancel)?;
+    scan_configuration_with_roots(executor, repo, runtime, budget, cancel, &roots)
+}
+
+fn scan_configuration_with_roots(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+) -> Result<ConfigScan, UtilityError> {
+    scan_configuration_with_policy(executor, repo, runtime, budget, cancel, roots, true)
+}
+
+fn scan_configuration_origins_with_roots(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+) -> Result<ConfigScan, UtilityError> {
+    scan_configuration_with_policy(executor, repo, runtime, budget, cancel, roots, false)
+}
+
+fn scan_configuration_with_policy(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+    enforce_lane_settings: bool,
+) -> Result<ConfigScan, UtilityError> {
     let listing_args = transport::LISTING_ARGS.map(OsString::from);
     let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)?;
     if outcome.termination != Termination::Exit(0) {
@@ -1906,7 +2297,6 @@ fn scan_configuration(
         .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
     let base = repo.root_path();
     let home = runtime.home.path.as_path();
-    let roots = runtime.lane_roots(repo)?;
     let own: Vec<PathBuf> = [repo.private_git_dir(), repo.common_git_dir()]
         .iter()
         .flat_map(|dir| ["config", "config.worktree"].map(|name| dir.join(name)))
@@ -2027,6 +2417,7 @@ fn scan_configuration(
             }
             // Not active for this HEAD: the matching worktree's probe decides.
             (_, None) => {}
+            (_, Some(_)) if !enforce_lane_settings => {}
             (_, Some(file)) => {
                 return Err(UtilityError::LaneConfiguration {
                     file: file.display().to_string(),
@@ -2070,9 +2461,42 @@ pub(crate) fn lane_configuration_files(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
-    let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
+    let roots = runtime.lane_roots(executor, repo, budget, cancel)?;
+    lane_configuration_files_with_roots(executor, repo, runtime, budget, cancel, &roots)
+}
+
+pub(crate) fn lane_configuration_files_with_roots(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
+    let scan = scan_configuration_with_roots(executor, repo, runtime, budget, cancel, roots)?;
+    lane_configuration_files_from_scan(repo, runtime, roots, scan)
+}
+
+pub(crate) fn bootstrap_lane_configuration_files_with_roots(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
+    let scan =
+        scan_configuration_origins_with_roots(executor, repo, runtime, budget, cancel, roots)?;
+    lane_configuration_files_from_scan(repo, runtime, roots, scan)
+}
+
+fn lane_configuration_files_from_scan(
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    roots: &LaneRoots,
+    scan: ConfigScan,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
     let mut files = scan.lane_files;
-    let roots = runtime.lane_roots(repo)?;
     // An include may be named inside a lane even when Git reports the
     // resolved target as its origin. Seed the graph with the declared path.
     for entry in &scan.entries {
@@ -2460,6 +2884,135 @@ pub(crate) mod tests {
         let staged = link.with_extension("new");
         std::os::unix::fs::symlink(target, &staged)?;
         fs::rename(staged, link)?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    #[test]
+    fn linked_external_common_git_uses_registered_primary_lane_roots() -> Result<(), Box<dyn Error>>
+    {
+        use crate::test_support::{fixture_env, run_fixture_git};
+        use provenant_core::RootInputs;
+
+        let fixture = Fixture::new()?;
+        let temp = fixture._temp.path();
+        let root = temp.join("external-primary");
+        let common = temp.join("external-gitdir");
+        let linked = temp.join("linked-checkout");
+        let lane_root = root.join(".agent-worktrees");
+        let included = lane_root.join("linked-config.inc");
+        fs::create_dir(&root)?;
+        fs::create_dir(&lane_root)?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".agent-worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".agent-worktrees/<branch>");
+        fs::create_dir_all(root.join(".provenant"))?;
+        fs::write(
+            root.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+        fs::write(
+            &included,
+            "[core]\n\tbare = true\n[credential]\n\thelper = /bin/true\n[user]\n\tname = lane-config\n",
+        )?;
+
+        let env = fixture_env(&fixture.home, temp);
+        let root_text = root.to_str().ok_or("non-UTF8 primary path")?;
+        let common_text = common.to_str().ok_or("non-UTF8 common path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &[
+                "init",
+                "--quiet",
+                "--separate-git-dir",
+                common_text,
+                root_text,
+            ],
+        )?;
+        for args in [
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["config", "extensions.worktreeConfig", "true"],
+            vec!["commit", "--allow-empty", "-m", "fixture"],
+        ] {
+            run_fixture_git(&fixture.executor, &fixture.git, &root, &env, &args)?;
+        }
+        let linked_text = linked.to_str().ok_or("non-UTF8 linked path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &root,
+            &env,
+            &["worktree", "add", "-b", "linked", linked_text],
+        )?;
+        let included_text = included.to_str().ok_or("non-UTF8 include path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &common,
+            &env,
+            &["config", "--file", "config", "include.path", included_text],
+        )?;
+
+        let state = temp.join("state");
+        let mut inputs = RootInputs::new(fixture.home.clone(), root.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let common = common.canonicalize()?;
+        let root = root.canonicalize()?;
+        let configured = provenant_config::PortTable::read_for(Some(&root), &state)?;
+        assert!(
+            configured
+                .worktree_roots_under(&root)
+                .contains(&root.join(".agent-worktrees")),
+            "fixture must configure the primary-owned lane root"
+        );
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
+        let primary = runtime.open_repo(
+            &fixture.executor,
+            &root,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(primary.private_git_dir(), common);
+        let discovered = runtime.project_location(
+            &fixture.executor,
+            &root,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        let binding = provenant_config::bind_project(&roots, discovered.location)?;
+        assert_eq!(binding.primary_checkout_hint(), Some(root.as_path()));
+        let linked_repo = runtime.open_repo(
+            &fixture.executor,
+            &linked,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        // Opening a repo captures the configuration view so later commands
+        // can be tied to it. The host transport boundary runs when a host-only
+        // remote operation is requested.
+        let result = fetch_missing_remote_branch(
+            &fixture.executor,
+            &linked_repo,
+            &runtime,
+            &fixture.home,
+            "origin/linked",
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        );
+        match result {
+            Err(UtilityError::Transport(TransportError::LaneConfig { .. })) => {}
+            Err(error) => return Err(format!("unexpected refusal: {error}").into()),
+            Ok(_) => {
+                return Err(
+                    "host transport operation accepted config in a primary-owned lane root".into(),
+                );
+            }
+        }
         Ok(())
     }
 

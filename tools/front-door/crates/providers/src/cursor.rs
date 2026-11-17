@@ -187,8 +187,9 @@ fn prepare(
         })?;
         argv.extend(["--resume".into(), continuation.session().into()]);
     }
-    if !input.route.model.is_empty() {
-        argv.extend(["--model".into(), input.route.model.as_str().into()]);
+    let model = input.provider_model.unwrap_or(input.route.model.as_str());
+    if !model.is_empty() {
+        argv.extend(["--model".into(), model.into()]);
     }
     argv.extend(["--".into(), input.prompt.text().into()]);
     let mut package_omissions = Vec::new();
@@ -215,7 +216,7 @@ fn prepare(
         &mut omitted_discovery,
     )?;
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
-    let mut env = base_env(input, &plan.scratch.path, path);
+    let mut env = base_env(input, &plan.scratch.path, path)?;
     if input.sandboxed() {
         env.extend([
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
@@ -256,6 +257,13 @@ fn prepare(
             *value = private.into();
         }
     }
+    let session_state = if input.sandboxed() {
+        crate::SessionStateLocation::AttemptPrivate
+    } else {
+        crate::SessionStateLocation::Native {
+            root: input.home.to_owned(),
+        }
+    };
     Ok(LaunchSpec {
         argv,
         env,
@@ -269,6 +277,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
+        session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -315,6 +324,8 @@ enum Event {
         message: Message,
         session_id: String,
     },
+    #[serde(rename = "tool_call")]
+    ToolCall,
     #[serde(rename = "result")]
     Result {
         session_id: String,
@@ -371,13 +382,20 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             session_id,
         } if message.role == "assistant" => {
             let mut events = vec![E::Session(session_id)];
-            for content in message.content {
-                if let Content::Text { text } = content {
-                    events.push(E::Text(text));
-                }
+            let text: String = message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if !text.trim().is_empty() {
+                events.push(E::AssistantText(text));
             }
             events
         }
+        Event::ToolCall => vec![E::ToolActivity],
         Event::Result {
             session_id,
             subtype,

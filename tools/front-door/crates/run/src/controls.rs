@@ -1,15 +1,124 @@
 //! Explicit controls: cancel, resume and reconcile. None of them guesses at
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
-use provenant_core::{AttemptId, OperationId, WallTime};
+use provenant_core::{AttemptId, MessageId, OperationId, WallTime};
 use provenant_records::custody::Scope;
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, StopReceipt},
     machine::StopReason,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
+
+pub(crate) const STEER_PROMPT_PREFIX: &str =
+    "Continue the existing task and provider session, then apply these steering instructions:\n\n";
+pub(crate) const STEER_TEXT_SEPARATOR: &str = "\n\n";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SteerSessionReady {
+    pub generation: u64,
+    pub route_digest: String,
+    pub session: Option<String>,
+    pub provider_boot: String,
+    pub provider_pid: i64,
+    pub provider_start: u64,
+    pub conflict: bool,
+    pub terminal_confirmed: bool,
+}
+
+struct ProviderSessionReadyRow {
+    generation: i64,
+    route_digest: String,
+    session: Option<String>,
+    provider_boot: String,
+    provider_pid: i64,
+    provider_start: i64,
+    identity_conflict: i64,
+    terminal_confirmed: i64,
+}
+
+fn provider_session_ready_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProviderSessionReadyRow> {
+    Ok(ProviderSessionReadyRow {
+        generation: row.get(0)?,
+        route_digest: row.get(1)?,
+        session: row.get(2)?,
+        provider_boot: row.get(3)?,
+        provider_pid: row.get(4)?,
+        provider_start: row.get(5)?,
+        identity_conflict: row.get(6)?,
+        terminal_confirmed: row.get(7)?,
+    })
+}
+
+pub(crate) struct SteerSuccessorProof<'a> {
+    pub session: Option<&'a str>,
+    pub route_digest: Option<&'a str>,
+    pub identity_conflict: bool,
+    pub evidence_incomplete: bool,
+}
+
+#[derive(PartialEq, Eq)]
+struct SteerContinuationOutcome {
+    state: String,
+    cause: Option<String>,
+    successor: Option<String>,
+    live_ack: bool,
+    terminal_final: bool,
+}
+
+pub(crate) struct SteerContinuationDisposition {
+    pub parent: AttemptId,
+    pub successor: AttemptId,
+    pub state: &'static str,
+    pub cause: Option<provenant_records::run::SteeringCause>,
+}
+
+#[derive(Default)]
+struct ResumeOptions<'a> {
+    fresh: Option<&'a str>,
+    writer: Option<(&'a WriterRequest, &'a str)>,
+    providers: Option<&'a dyn Providers>,
+    budget_remaining: Option<u64>,
+    graph_context: Option<&'a provenant_records::run::WorkContext>,
+    parent_publication_locked: bool,
+}
+
+pub(crate) fn steer_route_digest(route: &RouteRecord) -> Result<String> {
+    let pool = route
+        .pool_selection
+        .as_ref()
+        .map(|selection| (&selection.pool, &selection.pick));
+    Ok(provenant_records::CanonicalV1::record_digest(
+        "steer-provider-route",
+        1,
+        &(
+            route.provider.as_deref(),
+            route.model.as_deref(),
+            route.effort.as_deref(),
+            route.account_key.as_deref(),
+            route.account_source,
+            route.source.as_deref(),
+            route.host_native.as_deref(),
+            pool,
+        ),
+    )?
+    .to_string())
+}
+
+fn source_is_live(source: &provenant_os::capture::CaptureSourceIdentity) -> bool {
+    use provenant_supervisor::census::ProcessObservation;
+    matches!(
+        SystemProcessObserver.observe(source.pid),
+        ProcessObservation::Present(fact)
+            if !fact.zombie
+                && fact.identity.boot == source.boot
+                && fact.identity.pid == source.pid
+                && fact.identity.native_start == source.native_start
+    )
+}
 
 #[cfg(test)]
 thread_local! {
@@ -30,6 +139,28 @@ pub enum CancelReceipt {
     Unobservable {
         reason: String,
     },
+}
+
+/// Durable steering input accepted for an exact running attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SteerIntent {
+    pub schema_version: u64,
+    pub attempt: AttemptId,
+    pub operation_id: OperationId,
+    pub message_id: MessageId,
+    pub text: String,
+    pub created_at: WallTime,
+}
+
+/// Persisted steering intent. A queued receipt confirms durable text only; the
+/// provider is interrupted after live session readiness and settlement owns
+/// the continuation outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SteerReceipt {
+    Queued { message_id: MessageId },
+    AlreadyQueued { message_id: MessageId },
+    AlreadyTerminal { message_id: MessageId },
 }
 /// Merge this retry's limit raises over the task's typed extensions.
 fn extensions(
@@ -62,6 +193,346 @@ fn past_runtime_deadline(record: &AttemptRecord, call: &Request<'_>) -> bool {
         .is_ok_and(|now| overdue_at(record, now))
 }
 
+pub(crate) fn record_steer_outcome(
+    tx: &rusqlite::Connection,
+    id: AttemptId,
+    state: &str,
+    cause: Option<provenant_records::run::SteeringCause>,
+    successor: Option<AttemptId>,
+) -> Result<()> {
+    if !matches!(state, "resumed" | "not_continued") || (state == "resumed") != cause.is_none() {
+        return Err(RunError::Validation("steer final outcome shape"));
+    }
+    let has_intent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !has_intent {
+        return Err(RunError::NotFound);
+    }
+    let cause = cause.map(provenant_records::run::SteeringCause::as_str);
+    let successor = successor.map(|successor| successor.to_string());
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [id.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    let expected = SteerContinuationOutcome {
+        state: state.to_owned(),
+        cause: cause.map(str::to_owned),
+        successor: successor.clone(),
+        live_ack: false,
+        terminal_final: true,
+    };
+    match existing {
+        Some(existing)
+            if existing.terminal_final
+                && existing.state == expected.state
+                && existing.cause == expected.cause
+                && existing.successor == expected.successor => {}
+        Some(existing)
+            if !existing.terminal_final
+                && existing.successor.as_deref() == successor.as_deref() =>
+        {
+            tx.execute(
+                "UPDATE steer_continuations SET state=?1,cause=?2,terminal_final=1 WHERE attempt=?3 AND terminal_final=0",
+                params![state, cause, id.to_string()],
+            )?;
+        }
+        Some(_) => return Err(RunError::Conflict),
+        None => {
+            tx.execute(
+                "INSERT INTO steer_continuations(attempt,state,cause,successor,live_ack,terminal_final) VALUES (?1,?2,?3,?4,0,1)",
+                params![id.to_string(), state, cause, successor],
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE steer_intents SET resolved=1 WHERE attempt=?1 AND resolved=0",
+        [id.to_string()],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn record_steer_disposition(
+    tx: &rusqlite::Connection,
+    disposition: &SteerContinuationDisposition,
+) -> Result<()> {
+    let successor = disposition.successor.to_string();
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [disposition.parent.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing.terminal_final {
+            let cause = disposition
+                .cause
+                .map(provenant_records::run::SteeringCause::as_str);
+            if existing.state == disposition.state
+                && existing.cause.as_deref() == cause
+                && existing.successor.as_deref() == Some(successor.as_str())
+            {
+                return Ok(());
+            }
+            return Err(RunError::Conflict);
+        }
+        if existing.successor.as_deref() != Some(successor.as_str()) {
+            return Err(RunError::Conflict);
+        }
+    }
+    record_steer_outcome(
+        tx,
+        disposition.parent,
+        disposition.state,
+        disposition.cause,
+        Some(disposition.successor),
+    )
+}
+
+/// Publish the live acknowledgement promptly without treating it as the
+/// immutable terminal disposition. A later final record may revise the state.
+fn record_steer_live_disposition(
+    tx: &rusqlite::Connection,
+    disposition: &SteerContinuationDisposition,
+) -> Result<()> {
+    if !matches!(disposition.state, "resumed" | "not_continued")
+        || (disposition.state == "resumed") != disposition.cause.is_none()
+    {
+        return Err(RunError::Validation("live steer evidence shape"));
+    }
+    let has_intent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+        [disposition.parent.to_string()],
+        |row| row.get(0),
+    )?;
+    if !has_intent {
+        return Err(RunError::NotFound);
+    }
+    let successor = disposition.successor.to_string();
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [disposition.parent.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing.successor.as_deref() != Some(successor.as_str()) {
+            return Err(RunError::Conflict);
+        }
+        if existing.terminal_final {
+            return Ok(());
+        }
+        if existing.state == "not_continued" {
+            return Ok(());
+        }
+        let live_ack = existing.live_ack || disposition.state == "resumed";
+        tx.execute(
+            "UPDATE steer_continuations SET state=?1,cause=?2,live_ack=?3 WHERE attempt=?4 AND terminal_final=0",
+            params![
+                disposition.state,
+                disposition.cause.map(provenant_records::run::SteeringCause::as_str),
+                if live_ack { 1_i64 } else { 0_i64 },
+                disposition.parent.to_string()
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO steer_continuations(attempt,state,cause,successor,live_ack,terminal_final) VALUES (?1,?2,?3,?4,?5,0)",
+            params![
+                disposition.parent.to_string(),
+                disposition.state,
+                disposition.cause.map(provenant_records::run::SteeringCause::as_str),
+                successor,
+                if disposition.state == "resumed" {
+                    1_i64
+                } else {
+                    0_i64
+                }
+            ],
+        )?;
+    }
+    tx.execute(
+        "UPDATE steer_intents SET resolved=1 WHERE attempt=?1 AND resolved=0",
+        [disposition.parent.to_string()],
+    )?;
+    Ok(())
+}
+
+fn record_steer_admission(
+    tx: &rusqlite::Connection,
+    id: AttemptId,
+    successor: AttemptId,
+) -> Result<()> {
+    let has_intent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !has_intent {
+        return Err(RunError::NotFound);
+    }
+    let successor = successor.to_string();
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [id.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    match existing {
+        Some(existing) if existing.successor.as_deref() == Some(successor.as_str()) => {
+            if existing.state == "admitted"
+                || matches!(existing.state.as_str(), "resumed" | "not_continued")
+            {
+                Ok(())
+            } else {
+                Err(RunError::Validation("steer admission state"))
+            }
+        }
+        Some(_) => Err(RunError::Conflict),
+        None => {
+            tx.execute(
+                "INSERT INTO steer_continuations(attempt,state,cause,successor,live_ack,terminal_final) VALUES (?1,'admitted',NULL,?2,0,0)",
+                params![id.to_string(), successor],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Read-only presence projection for one durable Running attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptPresence {
+    Live,
+    Unattended,
+    Unknown,
+    Settling,
+}
+
+/// Observe process presence from the attempt's scoped supervisor checkpoint.
+/// A published exit means settlement is pending; missing or unreadable proof
+/// never fabricates a live process.
+pub fn attempt_presence(root: &std::path::Path, record: &AttemptRecord) -> Option<AttemptPresence> {
+    attempt_presence_with_observer(root, record, &SystemProcessObserver)
+}
+
+/// Share one bounded host census across a status page containing multiple
+/// attempts. The caller supplies a read-only native snapshot from this host.
+pub fn attempt_presence_with_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    census: &provenant_supervisor::census::Census,
+) -> Option<AttemptPresence> {
+    attempt_presence_with_observer_and_census(root, record, &SystemProcessObserver, census)
+}
+
+/// Preserve attempt-scoped exit evidence when a command's shared host census
+/// failed. This path checks the sealed exit without starting another census;
+/// every remaining Running attempt stays unknown.
+pub fn attempt_presence_with_unavailable_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, &SystemProcessObserver, None, true)
+}
+
+pub(crate) fn attempt_presence_with_observer(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, observer, None, false)
+}
+
+pub(crate) fn attempt_presence_with_observer_and_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+    census: &provenant_supervisor::census::Census,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, observer, Some(census), false)
+}
+
+fn attempt_presence_without_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, observer, None, true)
+}
+
+fn attempt_presence_inner(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+    census: Option<&provenant_supervisor::census::Census>,
+    census_unavailable: bool,
+) -> Option<AttemptPresence> {
+    if !matches!(record.state, AttemptState::Running { .. }) {
+        return None;
+    }
+    let path = root.join(format!("attempts/{}", record.attempt_id));
+    let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
+        return Some(AttemptPresence::Unknown);
+    };
+    match read_sealed(&attempt, "process-exit.json", RECORD_LIMIT) {
+        Ok(Some(_)) => return Some(AttemptPresence::Settling),
+        Ok(None) => {}
+        Err(_) => return Some(AttemptPresence::Unknown),
+    }
+    let holder = if let Some(census) = census {
+        custody::observe_holder_with_census(&attempt, RunStore::scope(record), observer, census)
+    } else if census_unavailable {
+        custody::HolderPresence::Unknown
+    } else {
+        custody::observe_holder(&attempt, RunStore::scope(record), observer)
+    };
+    Some(match holder {
+        custody::HolderPresence::Live => AttemptPresence::Live,
+        custody::HolderPresence::Gone => AttemptPresence::Unattended,
+        custody::HolderPresence::Unknown => AttemptPresence::Unknown,
+    })
+}
+
 /// Whether a running attempt is past its runtime deadline plus the grace.
 pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
     let (AttemptState::Running { .. }, Some(deadline)) = (&record.state, record.runtime_deadline)
@@ -73,21 +544,19 @@ pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
         .is_ok_and(|limit| now >= limit)
 }
 
-/// Whether a running attempt's guardian and provider are both gone with no
-/// exit recorded, so nothing is left to settle it. Read-only; unreadable
-/// state counts as not stale. `root` is the execution state root.
+/// Whether a running attempt has reboot-confirmed guardian/provider absence
+/// with no exit recorded. Same-boot absence remains unknown because its last
+/// checkpoint may miss an escaped child. Read-only; `root` is the execution
+/// state root.
 pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
-    if !matches!(record.state, AttemptState::Running { .. }) {
-        return false;
-    }
-    let path = root.join(format!("attempts/{}", record.attempt_id));
-    let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
-        return false;
-    };
+    attempt_presence(root, record) == Some(AttemptPresence::Unattended)
+}
+
+fn running_attempt_reapable(presence: Option<AttemptPresence>) -> bool {
     matches!(
-        read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
-        Ok(None)
-    ) && custody::holder_gone(&attempt, RunStore::scope(record), &SystemProcessObserver)
+        presence,
+        Some(AttemptPresence::Unattended | AttemptPresence::Settling)
+    )
 }
 
 /// What reconcile found for one attempt.
@@ -566,9 +1035,18 @@ mod reboot_tests {
             0,
             "an uncancelled start waits"
         );
-        let scope = RunStore::scope(&store.record(id, &call)?);
-        let request = serde_json::to_vec(&serde_json::json!({"scope": scope}))?;
-        crate::artifacts::seal(&attempt, "cancel.json", &request, RECORD_LIMIT)?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let owner = record.verified_owner.unwrap_or(context.actor_id);
+        assert_eq!(
+            custody::request_stop(
+                attempt.try_clone()?,
+                scope,
+                owner,
+                StopReason::ExplicitCancellation,
+            )?,
+            StopReceipt::Requested
+        );
         assert_eq!(
             store.reap_with(&call, spawn)?,
             1,
@@ -860,8 +1338,9 @@ mod reboot_tests {
     }
 
     #[test]
-    fn a_running_attempt_with_no_guardian_is_stale_and_reaped()
+    fn a_running_attempt_without_process_checkpoint_stays_unknown()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/supervisor.md#read-only-writer-presence
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
@@ -881,13 +1360,156 @@ mod reboot_tests {
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let record = store.record(id, &call)?;
-        assert!(holder_absent(context.state_root.as_path(), &record));
+        assert_eq!(
+            attempt_presence(context.state_root.as_path(), &record),
+            Some(AttemptPresence::Unknown),
+            "a missing process checkpoint cannot prove that the whole writer tree is gone"
+        );
+        assert!(!holder_absent(context.state_root.as_path(), &record));
         let spawned = std::cell::Cell::new(0);
         let reaped = store.reap_with(&call, |_, _| {
             spawned.set(spawned.get() + 1);
             Ok(())
         })?;
-        assert_eq!((reaped, spawned.get()), (1, 1));
+        assert_eq!((reaped, spawned.get()), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn a_sealed_exit_stays_settling_when_the_shared_census_is_unavailable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/supervisor.md#read-only-writer-presence
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        let attempt = provenant_os::fs::Directory::open_anchor(
+            &context.state_root.as_path().join(format!("attempts/{id}")),
+        )?;
+        crate::artifacts::seal(&attempt, "process-exit.json", b"settled exit", RECORD_LIMIT)?;
+
+        assert_eq!(
+            attempt_presence_with_unavailable_census(context.state_root.as_path(), &record),
+            Some(AttemptPresence::Settling),
+            "a failed shared census must not mask durable exit proof"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tick_reaping_queues_settling_and_unattended_but_never_live_attempts() -> TestResult {
+        // Spec: docs/specs/supervisor.md#tick-driven-settlement
+        use provenant_supervisor::census::{
+            Census, CensusError, ProcessFact, ProcessIdentity, ProcessObservation,
+        };
+        struct Observer(ProcessFact, Census);
+        impl ProcessObserver for Observer {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                Ok(self.0.identity.boot.clone())
+            }
+            fn observe(&self, _: i64) -> ProcessObservation {
+                ProcessObservation::Present(self.0.clone())
+            }
+            fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+                panic!("tick must reuse its shared census")
+            }
+        }
+        let fact = ProcessFact {
+            identity: ProcessIdentity {
+                boot: "fixture-current-boot".into(),
+                pid: 123,
+                native_start: 1,
+                group_id: 123,
+                session_id: 123,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let census = Census::from_observations([fact.clone()], [], [], true, false, 64)?;
+        let observer = Observer(fact.clone(), census);
+        for (presence, expected_spawns) in [
+            (AttemptPresence::Settling, 1),
+            (AttemptPresence::Unattended, 1),
+            (AttemptPresence::Live, 0),
+            (AttemptPresence::Unknown, 0),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            store.create(&run, &call)?;
+            let id = run.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let record = store.record(id, &call)?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(id, false)?;
+            if presence == AttemptPresence::Settling {
+                crate::artifacts::seal(&attempt, "process-exit.json", b"{}", RECORD_LIMIT)?;
+            } else if presence != AttemptPresence::Unknown {
+                let mut identity = fact.identity.clone();
+                if presence == AttemptPresence::Unattended {
+                    identity.boot = "fixture-previous-boot".into();
+                }
+                crate::artifacts::seal(
+                    &attempt,
+                    "process.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1, "scope": scope, "guardian": identity,
+                        "publication_pending": false, "census_complete": true,
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+            }
+            assert_eq!(
+                attempt_presence_with_observer_and_census(
+                    context.state_root.as_path(),
+                    &record,
+                    &observer,
+                    &observer.1
+                ),
+                Some(presence)
+            );
+            let spawned = std::cell::Cell::new(0);
+            for _ in 0..2 {
+                store.reap_with_census_and_spawn(&call, &observer, Some(&observer.1), |_, _| {
+                    spawned.set(spawned.get() + 1);
+                    Ok(())
+                })?;
+            }
+            assert_eq!(
+                spawned.get(),
+                expected_spawns,
+                "{presence:?}: repeated ticks coalesce workers"
+            );
+        }
         Ok(())
     }
 
@@ -1022,6 +1644,207 @@ mod lineage_tests {
     fn init_base_repository(project: &Path) -> std::io::Result<()> {
         run_git(project, &["init", "-q"])?;
         run_git(project, &["commit", "--allow-empty", "-qm", "Base"])?;
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut execution = crate::tests::context(temp.path())?;
+        let project = temp.path().join("checkout");
+        let home = temp.path().join("home");
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(execution.state_root.as_path().into());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        init_base_repository(&project)?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let (project_id, info) =
+            worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                let info = worktrees::create(
+                    context,
+                    WorktreeCreate {
+                        branch: "steer-writer".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )?;
+                Ok((context.binding.project_id(), info))
+            })?;
+        execution.project_id = project_id;
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = RunStore::open(&execution, &call)?;
+        let writer = WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(project_id),
+            project: project.clone(),
+            worktree: info.path.clone(),
+        };
+        let mut original = crate::tests::input();
+        original.attempt_id = AttemptId::from_bytes([212; 16]);
+        original.operation_id = "steer-committed-writer".parse()?;
+        crate::tests::rekey(&mut original);
+        let prior = original.attempt_id;
+        let source = info.head;
+        let source_text = source.to_string();
+        original.request.task.writer = Some(writer.clone());
+        original.request.task.base = Some(source_text.clone());
+        original.request.task.head = Some(source_text.clone());
+        original.request.task.source_head = None;
+        original.request.task.context = Some(provenant_records::run::WorkContext {
+            graph_id: Some("steer-writer-resume".into()),
+            node_id: Some("writer".into()),
+            attempt: Some(1),
+            ..Default::default()
+        });
+        let route = crate::tests::route();
+        store.create(&original, &call)?;
+        let initial = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+        worktrees::save_owner(
+            &initial.worktree,
+            &WorktreeOwner {
+                attempt_id: Some(prior),
+                operation_id: Some(original.operation_id.clone()),
+                branch: info.branch.clone().ok_or("writer branch missing")?,
+                base: source_text.clone(),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: original.created_at,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+                reference: None,
+            },
+        )?;
+        let parent_record = store.record(prior, &call)?;
+        initial.snapshot(
+            store.context.state_root.as_path(),
+            &store.attempt_dir(prior, false)?,
+            RunStore::scope(&parent_record),
+        )?;
+
+        run_git(&info.path, &["config", "user.name", "Fixture"])?;
+        run_git(
+            &info.path,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        std::fs::write(info.path.join("before.txt"), "committed predecessor work")?;
+        run_git(&info.path, &["add", "before.txt"])?;
+        run_git(&info.path, &["commit", "-qm", "predecessor work"])?;
+        let committed_head = String::from_utf8(run_git(&info.path, &["rev-parse", "HEAD"])?)?
+            .trim()
+            .to_owned();
+        let predecessor = provenant_core::GitOid::parse(&committed_head)?;
+        std::fs::write(info.path.join("pending.txt"), "retained uncommitted work")?;
+
+        let starting = store.mark_starting(
+            &store.record(prior, &call)?,
+            &route,
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let starting = store.record_starting_launch(
+            &starting,
+            &route,
+            None,
+            &[],
+            &Default::default(),
+            Some(predecessor),
+            0,
+            &Default::default(),
+            &call,
+        )?;
+        store.withdraw(
+            prior,
+            starting.state,
+            Outcome::Cancelled,
+            "fixture predecessor settled",
+            clock.wall_now()?,
+            &call,
+        )?;
+        let terminal = store.record(prior, &call)?;
+        assert_eq!(terminal.head, Some(predecessor));
+
+        let mut context = terminal
+            .context
+            .clone()
+            .ok_or("writer graph context missing")?;
+        context.attempt = Some(2);
+        context.writer_predecessor = Some(prior);
+        let finished_at = match terminal.state {
+            AttemptState::Terminal { finished_at, .. } => finished_at,
+            _ => return Err("writer predecessor was not terminal".into()),
+        };
+        let resume = Resume {
+            extend: Vec::new(),
+            prior,
+            expected_generation: 0,
+            operation_id: "steer-committed-writer-successor".parse()?,
+            attempt_id: AttemptId::from_bytes([213; 16]),
+            prompt: "Continue the same writer task".into(),
+            created_at: finished_at,
+        };
+        let child = store.resume_graph(&resume, &context, &call)?;
+        let child_task = store.request(child.attempt_id, &call)?.task;
+        assert_eq!(
+            child_task.source_head.as_deref(),
+            Some(source_text.as_str())
+        );
+        assert_eq!(child_task.head.as_deref(), Some(committed_head.as_str()));
+        assert_eq!(child_task.writer.as_ref(), Some(&writer));
+        assert_eq!(child_task.route, original.request.task.route);
+        assert_eq!(child_task.account, original.request.task.account);
+        assert_eq!(
+            std::fs::read_to_string(info.path.join("pending.txt"))?,
+            "retained uncommitted work"
+        );
+
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let resumed = crate::prepare_writer(
+            child_task
+                .writer
+                .as_ref()
+                .ok_or("successor writer missing")?,
+            &store.writer_registry,
+            project_id,
+        )?;
+        resumed.require_continuation_source(&git, source, predecessor)?;
+        store.check_launch_writer_lineage(
+            &store.record(child.attempt_id, &call)?,
+            &child_task,
+            &resumed.worktree,
+            &call,
+        )?;
+
+        std::fs::write(
+            info.path.join("foreign-drift.txt"),
+            "newer after settlement",
+        )?;
+        run_git(&info.path, &["add", "foreign-drift.txt"])?;
+        run_git(&info.path, &["commit", "-qm", "post-settlement drift"])?;
+        let drifted = crate::prepare_writer(
+            child_task
+                .writer
+                .as_ref()
+                .ok_or("successor writer missing")?,
+            &store.writer_registry,
+            project_id,
+        )?;
+        assert!(matches!(
+            drifted.require_continuation_source(&git, source, predecessor),
+            Err(RunError::WriterSourceMismatch { expected, .. }) if expected == predecessor
+        ));
         Ok(())
     }
 
@@ -1712,6 +2535,988 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
 }
 
 impl RunStore {
+    /// Persist one idempotent steer for an exact running attempt. A live
+    /// interrupt is requested only after the shared adapter stream has
+    /// validated a session identity for this exact route and provider process.
+    pub fn steer(
+        &self,
+        id: AttemptId,
+        operation_id: OperationId,
+        text: &str,
+        call: &Request<'_>,
+    ) -> Result<SteerReceipt> {
+        if text.trim().is_empty() || text.len() > provenant_records::control::CONTROL_TEXT_BYTES {
+            return Err(RunError::Validation("steering text"));
+        }
+        let at = call
+            .clock
+            .wall_now()
+            .map_err(|_| RunError::Validation("wall clock"))?;
+        let digest = provenant_records::CanonicalV1::record_digest(
+            "steer_intent",
+            1,
+            &(id, &operation_id, text),
+        )?;
+        let message_digest = provenant_records::CanonicalV1::record_digest(
+            "steer_message",
+            1,
+            &(id, &operation_id),
+        )?;
+        let mut message_bytes = [0; 16];
+        message_bytes.copy_from_slice(&message_digest.as_bytes()[..16]);
+        let expected = SteerIntent {
+            schema_version: 1,
+            attempt: id,
+            operation_id: operation_id.clone(),
+            message_id: MessageId::from_bytes(message_bytes),
+            text: text.to_owned(),
+            created_at: at,
+        };
+        let encoded = crate::db::bytes(&expected)?;
+        let (intent, terminal, already_queued, inserted) = self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![id.to_string(), self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let record = crate::db::decode_attempt(&raw)?;
+            let saved: Option<(String, String, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT attempt,digest,record FROM steer_intents WHERE operation=?1",
+                    [operation_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if let Some((saved_attempt, saved_digest, saved_record)) = saved {
+                let saved: SteerIntent = crate::db::decode_column(&saved_record)?;
+                if saved_attempt != id.to_string()
+                    || saved.attempt != id
+                    || saved.operation_id != operation_id
+                    || saved_digest != digest.to_string()
+                    || saved.text != text
+                    || saved.message_id != expected.message_id
+                {
+                    return Err(RunError::OperationConflict);
+                }
+                return Ok((
+                    saved,
+                    matches!(record.state, AttemptState::Terminal { .. }),
+                    true,
+                    false,
+                ));
+            }
+            if matches!(record.state, AttemptState::Terminal { .. }) {
+                return Err(RunError::Nonterminal);
+            }
+            if !matches!(record.state, AttemptState::Running { .. }) {
+                return Err(RunError::Nonterminal);
+            }
+            let mut total_bytes = 0usize;
+            let mut ledger_bytes = 0usize;
+            let mut count = 0usize;
+            let mut query =
+                tx.prepare("SELECT record FROM steer_intents WHERE attempt=?1 ORDER BY sequence")?;
+            let rows = query.query_map([id.to_string()], |row| row.get::<_, Vec<u8>>(0))?;
+            for row in rows {
+                let raw = row?;
+                ledger_bytes = ledger_bytes.saturating_add(raw.len());
+                let existing: SteerIntent = crate::db::decode_column(&raw)?;
+                total_bytes = total_bytes.saturating_add(existing.text.len());
+                count = count.saturating_add(1);
+            }
+            let prompt_bytes = STEER_PROMPT_PREFIX
+                .len()
+                .saturating_add(total_bytes)
+                .saturating_add(text.len())
+                .saturating_add(count.saturating_mul(STEER_TEXT_SEPARATOR.len()));
+            let ledger_limit = usize::try_from(RECORD_LIMIT).unwrap_or(usize::MAX);
+            if prompt_bytes > ledger_limit
+                || ledger_bytes.saturating_add(encoded.len()) > ledger_limit
+            {
+                return Err(RunError::Validation(
+                    "steering queue reached the run prompt limit; retry after the successor starts",
+                ));
+            }
+            tx.execute(
+                "INSERT INTO steer_intents(attempt,operation,digest,record) VALUES (?1,?2,?3,?4)",
+                params![
+                    id.to_string(),
+                    operation_id.to_string(),
+                    digest.to_string(),
+                    encoded
+                ],
+            )?;
+            Ok((expected.clone(), false, false, true))
+        })?;
+        if terminal {
+            return Ok(SteerReceipt::AlreadyTerminal {
+                message_id: intent.message_id,
+            });
+        }
+
+        let record = self.record(id, call)?;
+        if matches!(record.state, AttemptState::Terminal { .. }) {
+            return Ok(if inserted {
+                SteerReceipt::Queued {
+                    message_id: intent.message_id,
+                }
+            } else {
+                SteerReceipt::AlreadyTerminal {
+                    message_id: intent.message_id,
+                }
+            });
+        }
+        // The accepted text is durable before this best-effort wake. If the
+        // session is not ready yet, its decoder will perform the same check
+        // when it publishes readiness. If another stop already won, keep the
+        // earlier accepted text and let terminal settlement report that outcome.
+        let _ = self.request_steer_stop_if_ready(id, call);
+        Ok(if already_queued {
+            SteerReceipt::AlreadyQueued {
+                message_id: intent.message_id,
+            }
+        } else {
+            SteerReceipt::Queued {
+                message_id: intent.message_id,
+            }
+        })
+    }
+
+    /// Persist the first session identity emitted by the admitted adapter's
+    /// validated stream. The source identity is passed by the supervisor from
+    /// the spawned child before it reads stdout, so reservation-file timing
+    /// cannot lose the first session frame.
+    pub fn record_provider_session_ready(
+        &self,
+        id: AttemptId,
+        route: &RouteRecord,
+        session: &str,
+        source: &provenant_os::capture::CaptureSourceIdentity,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        if session.is_empty()
+            || session.len() > 4096
+            || session.chars().any(char::is_control)
+            || source.boot.is_empty()
+            || source.boot.len() > 256
+            || source.pid <= 0
+            || source.native_start == 0
+        {
+            return Err(RunError::Validation("provider session readiness"));
+        }
+        let route_digest = steer_route_digest(route)?;
+        if route.provider.is_none() {
+            return Err(RunError::Validation("provider session route"));
+        }
+        let admitted = self.record(id, call)?;
+        if !matches!(admitted.state, AttemptState::Running { .. })
+            || source.attempt != id.to_string()
+            || source.generation != Self::scope(&admitted).generation
+            || admitted.applied_route.as_ref().is_none_or(|applied| {
+                steer_route_digest(applied).ok().as_deref() != Some(route_digest.as_str())
+            })
+        {
+            return Ok(false);
+        }
+        let previous_ready = self.steer_session_ready(id, call)?;
+        let same_bound_process = previous_ready.as_ref().is_some_and(|ready| {
+            ready.provider_boot == source.boot
+                && ready.provider_pid == source.pid
+                && ready.provider_start == source.native_start
+        });
+        if !same_bound_process && !source_is_live(source) {
+            return Ok(false);
+        }
+        let (ready, pending) = self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![id.to_string(), self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let record = crate::db::decode_attempt(&raw)?;
+            if !matches!(record.state, AttemptState::Running { .. })
+                || Self::scope(&record).generation != source.generation
+                || record
+                    .applied_route
+                    .as_ref()
+                    .is_none_or(|applied| {
+                        steer_route_digest(applied).ok().as_deref() != Some(route_digest.as_str())
+                    })
+            {
+                return Ok((false, false));
+            }
+            let scope = Self::scope(&record);
+            let saved: Option<ProviderSessionReadyRow> = tx
+                .query_row(
+                    "SELECT generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed FROM provider_session_ready WHERE attempt=?1",
+                    [id.to_string()],
+                    provider_session_ready_row,
+                )
+                .optional()?;
+            if let Some(saved) = saved {
+                let conflict = saved.generation != i64::try_from(scope.generation).unwrap_or(i64::MAX)
+                    || saved.route_digest != route_digest
+                    || saved.session.as_deref() != Some(session)
+                    || saved.provider_boot != source.boot
+                    || saved.provider_pid != source.pid
+                    || saved.provider_start != i64::try_from(source.native_start).unwrap_or(i64::MAX);
+                if conflict && saved.identity_conflict == 0 {
+                    tx.execute(
+                        "UPDATE provider_session_ready SET identity_conflict=1 WHERE attempt=?1",
+                        [id.to_string()],
+                    )?;
+                }
+            } else {
+                tx.execute(
+                    "INSERT INTO provider_session_ready(attempt,generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0)",
+                    params![
+                        id.to_string(),
+                        i64::try_from(scope.generation).map_err(|_| RunError::Conflict)?,
+                        route_digest,
+                        session,
+                        source.boot,
+                        source.pid,
+                        i64::try_from(source.native_start).map_err(|_| RunError::Conflict)?
+                    ],
+                )?;
+            }
+            let pending: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1 AND resolved=0)",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            Ok((true, pending))
+        })?;
+        if ready {
+            self.persist_live_steer_successor_evidence(id, call)?;
+        }
+        if ready && pending {
+            self.request_steer_stop_if_ready(id, call)?;
+        }
+        Ok(ready)
+    }
+
+    /// Permanently fence continuation when the validated adapter stream
+    /// contradicts the model or session bound to this live provider process.
+    /// The route and process identity must still match the admitted candidate.
+    pub fn record_provider_identity_conflict(
+        &self,
+        id: AttemptId,
+        route: &RouteRecord,
+        source: &provenant_os::capture::CaptureSourceIdentity,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        if source.boot.is_empty()
+            || source.boot.len() > 256
+            || source.pid <= 0
+            || source.native_start == 0
+        {
+            return Err(RunError::Validation("provider identity conflict source"));
+        }
+        let route_digest = steer_route_digest(route)?;
+        if route.provider.is_none() {
+            return Err(RunError::Validation("provider identity conflict route"));
+        }
+        let admitted = self.record(id, call)?;
+        if !matches!(admitted.state, AttemptState::Running { .. })
+            || source.attempt != id.to_string()
+            || source.generation != Self::scope(&admitted).generation
+            || admitted.applied_route.as_ref().is_none_or(|applied| {
+                steer_route_digest(applied).ok().as_deref() != Some(route_digest.as_str())
+            })
+        {
+            return Ok(false);
+        }
+        let recorded = self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![id.to_string(), self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let record = crate::db::decode_attempt(&raw)?;
+            if !matches!(record.state, AttemptState::Running { .. })
+                || Self::scope(&record).generation != source.generation
+                || record
+                    .applied_route
+                    .as_ref()
+                    .is_none_or(|applied| {
+                        steer_route_digest(applied).ok().as_deref()
+                            != Some(route_digest.as_str())
+                    })
+            {
+                return Ok(false);
+            }
+            let changed = tx.execute(
+                "UPDATE provider_session_ready SET identity_conflict=1 WHERE attempt=?1",
+                [id.to_string()],
+            )?;
+            if changed == 1 {
+                return Ok(true);
+            }
+            // The adapter can reject the first frame before it returns the
+            // session event in that same frame. Retain a conflict-only row
+            // anyway so natural settlement cannot adopt a contradictory stream.
+            tx.execute(
+                "INSERT INTO provider_session_ready(attempt,generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed) VALUES (?1,?2,?3,NULL,?4,?5,?6,1,0)",
+                params![
+                    id.to_string(),
+                    i64::try_from(source.generation).map_err(|_| RunError::Conflict)?,
+                    route_digest,
+                    source.boot,
+                    source.pid,
+                    i64::try_from(source.native_start).map_err(|_| RunError::Conflict)?,
+                ],
+            )?;
+            Ok(true)
+        })?;
+        if recorded {
+            self.persist_live_steer_successor_evidence(id, call)?;
+        }
+        Ok(recorded)
+    }
+
+    pub(crate) fn steer_session_ready(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<SteerSessionReady>> {
+        call.check()?;
+        let saved: Option<ProviderSessionReadyRow> = self
+            .db
+            .query_row(
+                "SELECT generation,route_digest,session,provider_boot,provider_pid,provider_start,identity_conflict,terminal_confirmed FROM provider_session_ready WHERE attempt=?1",
+                [id.to_string()],
+                provider_session_ready_row,
+            )
+            .optional()?;
+        let Some(saved) = saved else {
+            return Ok(None);
+        };
+        Ok(Some(SteerSessionReady {
+            generation: u64::try_from(saved.generation)
+                .map_err(|_| RunError::Validation("provider session generation"))?,
+            route_digest: saved.route_digest,
+            session: saved.session,
+            provider_boot: saved.provider_boot,
+            provider_pid: saved.provider_pid,
+            provider_start: u64::try_from(saved.provider_start)
+                .map_err(|_| RunError::Validation("provider session process start"))?,
+            conflict: saved.identity_conflict != 0,
+            terminal_confirmed: saved.terminal_confirmed != 0,
+        }))
+    }
+
+    /// Read the sealed session expectation for a resumed provider invocation.
+    /// The expected identity is private Run state and is valid only when it
+    /// still matches both the child's applied route and its predecessor.
+    pub fn continuation_expectation(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<crate::ContinuationExpectation>> {
+        let record = self.record(id, call)?;
+        let saved: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT session,route_digest FROM continuation_expectations WHERE attempt=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((session, digest)) = saved else {
+            if record.retry_of.is_some() && record.continuation.as_deref() != Some("fresh") {
+                return Err(RunError::Validation(
+                    "same-session continuation expectation missing",
+                ));
+            }
+            return Ok(None);
+        };
+        if record.retry_of.is_none() || record.continuation.is_some() {
+            return Err(RunError::Validation(
+                "unexpected continuation session expectation",
+            ));
+        }
+        let applied = record.applied_route.as_ref().ok_or(RunError::Validation(
+            "continuation expectation route missing",
+        ))?;
+        if crate::controls::steer_route_digest(applied)? != digest {
+            return Err(RunError::Validation(
+                "continuation expectation route mismatch",
+            ));
+        }
+        let parent_id = record.retry_of.ok_or(RunError::Validation(
+            "continuation expectation parent missing",
+        ))?;
+        let parent = self.record(parent_id, call)?;
+        let parent_session = parent.session.as_deref().ok_or(RunError::Validation(
+            "continuation expectation session missing",
+        ))?;
+        let parent_route = parent.applied_route.as_ref().ok_or(RunError::Validation(
+            "continuation expectation parent route missing",
+        ))?;
+        if parent_session != session || crate::controls::steer_route_digest(parent_route)? != digest
+        {
+            return Err(RunError::Validation(
+                "continuation expectation lineage mismatch",
+            ));
+        }
+        Ok(Some(crate::ContinuationExpectation { session }))
+    }
+
+    pub(crate) fn steer_parent_for_successor(
+        &self,
+        successor: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptId>> {
+        call.check()?;
+        let link: Option<(Option<String>, String)> = self
+            .db
+            .query_row(
+                "SELECT continues,operation FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                params![successor.to_string(), self.context.project_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(parent), operation)) = link else {
+            return Ok(None);
+        };
+        let parent = AttemptId::parse(&parent)
+            .map_err(|_| RunError::Validation("steer parent attempt ID"))?;
+        if operation != format!("graph-steer-{parent}") {
+            return Ok(None);
+        }
+        let has_intent: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+            [parent.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(has_intent.then_some(parent))
+    }
+
+    fn persist_live_steer_successor_evidence(
+        &self,
+        successor: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let Some(ready) = self.steer_session_ready(successor, call)? else {
+            return Ok(());
+        };
+        let child = self.record(successor, call)?;
+        let child_route_digest = child
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let identity_conflict = ready.conflict
+            || ready.generation != child.generation
+            || child_route_digest.as_deref() != Some(ready.route_digest.as_str());
+        let disposition = self.steer_successor_disposition(
+            successor,
+            &child,
+            SteerSuccessorProof {
+                session: ready.session.as_deref(),
+                route_digest: Some(&ready.route_digest),
+                identity_conflict,
+                evidence_incomplete: false,
+            },
+            call,
+        )?;
+        if let Some(disposition) = disposition {
+            self.persist_live_steer_successor_disposition(&disposition, call)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn steer_successor_disposition(
+        &self,
+        successor: AttemptId,
+        child: &AttemptRecord,
+        proof: SteerSuccessorProof<'_>,
+        call: &Request<'_>,
+    ) -> Result<Option<SteerContinuationDisposition>> {
+        let SteerSuccessorProof {
+            session,
+            route_digest,
+            identity_conflict,
+            evidence_incomplete,
+        } = proof;
+        let Some(parent_id) = self.steer_parent_for_successor(successor, call)? else {
+            return Ok(None);
+        };
+        if child.attempt_id != successor || child.retry_of != Some(parent_id) {
+            return Err(RunError::Validation("steer successor lineage"));
+        }
+        let parent = self.record(parent_id, call)?;
+        let expected: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT session,route_digest FROM continuation_expectations WHERE attempt=?1",
+                [successor.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let parent_route_digest = parent
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let child_route_digest = child
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let route_is_missing =
+            parent_route_digest.is_none() || child_route_digest.is_none() || route_digest.is_none();
+
+        let (state, cause) = if identity_conflict {
+            (
+                "not_continued",
+                Some(provenant_records::run::SteeringCause::SessionMismatch),
+            )
+        } else if let Some((expected_session, expected_route)) = expected {
+            let Some(parent_session) = parent.session.as_deref() else {
+                return Ok(Some(SteerContinuationDisposition {
+                    parent: parent_id,
+                    successor,
+                    state: "not_continued",
+                    cause: Some(provenant_records::run::SteeringCause::SessionUnavailable),
+                }));
+            };
+            if route_is_missing {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                )
+            } else if expected_session != parent_session
+                || parent_route_digest.as_deref() != Some(expected_route.as_str())
+                || child_route_digest.as_deref() != Some(expected_route.as_str())
+                || route_digest != Some(expected_route.as_str())
+                || session.is_some_and(|session| session != expected_session)
+            {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionMismatch),
+                )
+            } else if evidence_incomplete {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                )
+            } else if session.is_none() {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionUnavailable),
+                )
+            } else {
+                ("resumed", None)
+            }
+        } else {
+            (
+                "not_continued",
+                Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+            )
+        };
+        Ok(Some(SteerContinuationDisposition {
+            parent: parent_id,
+            successor,
+            state,
+            cause,
+        }))
+    }
+
+    fn persist_live_steer_successor_disposition(
+        &self,
+        disposition: &SteerContinuationDisposition,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| record_steer_live_disposition(tx, disposition))
+    }
+
+    pub(crate) fn confirm_steer_terminal_process(
+        &self,
+        id: AttemptId,
+        scope: Scope,
+        provider: Option<&provenant_supervisor::census::ProcessIdentity>,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let Some(ready) = self.steer_session_ready(id, call)? else {
+            return Ok(());
+        };
+        let matches = ready.generation == scope.generation
+            && provider.is_some_and(|provider| {
+                ready.provider_boot == provider.boot
+                    && ready.provider_pid == provider.pid
+                    && ready.provider_start == provider.native_start
+            });
+        self.write(call, |tx| {
+            tx.execute(
+                "UPDATE provider_session_ready SET identity_conflict=CASE WHEN ?1=1 THEN identity_conflict ELSE 1 END, terminal_confirmed=1 WHERE attempt=?2",
+                params![if matches { 1_i64 } else { 0_i64 }, id.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        let record = self.record(id, call)?;
+        if !matches!(record.state, AttemptState::Running { .. }) {
+            return Ok(false);
+        }
+        let Some(route) = record.applied_route.as_ref() else {
+            return Ok(false);
+        };
+        let Some(ready) = self.steer_session_ready(id, call)? else {
+            return Ok(false);
+        };
+        let route_digest = steer_route_digest(route)?;
+        let source = provenant_os::capture::CaptureSourceIdentity {
+            attempt: id.to_string(),
+            generation: ready.generation,
+            boot: ready.provider_boot,
+            pid: ready.provider_pid,
+            native_start: ready.provider_start,
+        };
+        if ready.conflict
+            || ready.generation != Self::scope(&record).generation
+            || ready.route_digest != route_digest
+            || !source_is_live(&source)
+        {
+            return Ok(false);
+        }
+        let directory = self.attempt_dir(id, false)?;
+        let stopped = match custody::reattach(directory.try_clone()?, Self::scope(&record)) {
+            Ok(handle) => custody::stop(&handle, StopReason::Steered),
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => custody::request_stop(
+                directory,
+                Self::scope(&record),
+                record.verified_owner.unwrap_or(self.context.actor_id),
+                StopReason::Steered,
+            ),
+            Err(error) => Err(error),
+        };
+        match stopped {
+            Ok(StopReceipt::Requested | StopReceipt::AlreadyRequested)
+            | Err(CustodyError::StopConflict) => Ok(true),
+            Err(error) => Err(RunError::Io(std::io::Error::other(error.to_string()))),
+        }
+    }
+
+    /// Read and verify the complete private steering ledger. The caller may
+    /// consume text for a continuation or project only its safe identifiers.
+    fn steer_ledger(&self, id: AttemptId, call: &Request<'_>) -> Result<Vec<(SteerIntent, bool)>> {
+        call.check()?;
+        let mut query = self.db.prepare(
+            "SELECT operation,digest,record,resolved FROM steer_intents WHERE attempt=?1 ORDER BY sequence",
+        )?;
+        let rows = query.query_map([id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut intents = Vec::new();
+        for row in rows {
+            let (operation, digest, raw, resolved) = row?;
+            let intent: SteerIntent = crate::db::decode_column(&raw)?;
+            let expected = provenant_records::CanonicalV1::record_digest(
+                "steer_intent",
+                1,
+                &(id, &intent.operation_id, &intent.text),
+            )?;
+            let message_digest = provenant_records::CanonicalV1::record_digest(
+                "steer_message",
+                1,
+                &(id, &intent.operation_id),
+            )?;
+            let mut message_bytes = [0; 16];
+            message_bytes.copy_from_slice(&message_digest.as_bytes()[..16]);
+            if intent.schema_version != 1
+                || intent.attempt != id
+                || operation != intent.operation_id.as_str()
+                || digest != expected.to_string()
+                || intent.message_id != MessageId::from_bytes(message_bytes)
+                || !matches!(resolved, 0 | 1)
+            {
+                return Err(RunError::Validation("steering intent identity"));
+            }
+            intents.push((intent, resolved == 1));
+        }
+        call.check()?;
+        Ok(intents)
+    }
+
+    /// Read the accepted steering input for a run. The row digest and both
+    /// identity keys are checked before returning provider-authored text.
+    pub fn steer_intent(&self, id: AttemptId, call: &Request<'_>) -> Result<Vec<SteerIntent>> {
+        Ok(self
+            .steer_ledger(id, call)?
+            .into_iter()
+            .filter_map(|(intent, resolved)| (!resolved).then_some(intent))
+            .collect())
+    }
+
+    /// Project the ledger without exposing its steering text. A launcher
+    /// receipt records a queued successor; only validated session evidence or
+    /// a terminal disposition resolves it.
+    pub(crate) fn steering_status(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<provenant_records::run::SteeringStatus>> {
+        let ledger = self.steer_ledger(id, call)?;
+        if ledger.is_empty() {
+            return Ok(None);
+        }
+        let pending = ledger.iter().any(|(_, resolved)| !resolved);
+        let pending_successor = if pending {
+            let operation = format!("graph-steer-{id}");
+            self.db
+                .query_row(
+                    "SELECT id FROM attempts WHERE continues=?1 AND operation=?2 AND refused=0",
+                    params![id.to_string(), operation],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|successor| {
+                    AttemptId::parse(&successor)
+                        .map_err(|_| RunError::Validation("steer successor ID"))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let outcome: Option<SteerContinuationOutcome> = self
+            .db
+            .query_row(
+                "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+                [id.to_string()],
+                |row| {
+                    Ok(SteerContinuationOutcome {
+                        state: row.get(0)?,
+                        cause: row.get(1)?,
+                        successor: row.get(2)?,
+                        live_ack: row.get::<_, i64>(3)? != 0,
+                        terminal_final: row.get::<_, i64>(4)? != 0,
+                    })
+                },
+            )
+            .optional()?;
+        let (state, cause, successor) = match (pending, outcome) {
+            (true, None) => (
+                provenant_records::run::SteeringState::Queued,
+                None,
+                pending_successor,
+            ),
+            (true, Some(outcome)) if outcome.state == "admitted" => {
+                let Some(successor) = outcome.successor else {
+                    return Err(RunError::Validation("admitted steer successor"));
+                };
+                if outcome.cause.is_some() || outcome.live_ack || outcome.terminal_final {
+                    return Err(RunError::Validation("admitted steer cause"));
+                }
+                (
+                    provenant_records::run::SteeringState::Queued,
+                    None,
+                    Some(
+                        AttemptId::parse(&successor)
+                            .map_err(|_| RunError::Validation("steer successor ID"))?,
+                    ),
+                )
+            }
+            (true, Some(_)) => return Err(RunError::Validation("pending steer outcome")),
+            (false, Some(outcome)) if outcome.state == "resumed" => {
+                let Some(successor) = outcome.successor else {
+                    return Err(RunError::Validation("resumed steer successor"));
+                };
+                if outcome.cause.is_some() || (!outcome.live_ack && !outcome.terminal_final) {
+                    return Err(RunError::Validation("resumed steer cause"));
+                }
+                (
+                    provenant_records::run::SteeringState::Resumed,
+                    None,
+                    Some(
+                        AttemptId::parse(&successor)
+                            .map_err(|_| RunError::Validation("steer successor ID"))?,
+                    ),
+                )
+            }
+            (false, Some(outcome)) if outcome.state == "not_continued" => {
+                let cause = outcome
+                    .cause
+                    .as_deref()
+                    .and_then(provenant_records::run::SteeringCause::from_code)
+                    .ok_or(RunError::Validation("steer refusal cause"))?;
+                (
+                    provenant_records::run::SteeringState::NotContinued,
+                    Some(cause),
+                    outcome
+                        .successor
+                        .map(|successor| {
+                            AttemptId::parse(&successor)
+                                .map_err(|_| RunError::Validation("steer successor ID"))
+                        })
+                        .transpose()?,
+                )
+            }
+            (false, Some(_)) => return Err(RunError::Validation("steer outcome state")),
+            (false, None) => return Err(RunError::Validation("steer outcome missing")),
+        };
+        Ok(Some(provenant_records::run::SteeringStatus {
+            state,
+            operations: ledger
+                .into_iter()
+                .map(|(intent, _)| provenant_records::run::SteeringOperation {
+                    operation_id: intent.operation_id,
+                    message_id: intent.message_id,
+                })
+                .collect(),
+            successor,
+            cause,
+        }))
+    }
+
+    /// Record launcher admission separately from a validated session
+    /// acknowledgement. Admission alone leaves the intent queued.
+    fn record_steer_admitted(
+        &self,
+        id: AttemptId,
+        successor: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            let operation = format!("graph-steer-{id}");
+            let admitted: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND continues=?2 AND operation=?3 AND refused=0)",
+                params![successor.to_string(), id.to_string(), operation],
+                |row| row.get(0),
+            )?;
+            if !admitted {
+                return Err(RunError::Validation("steer successor admission"));
+            }
+            record_steer_admission(tx, id, successor)
+        })
+    }
+
+    /// Apply exactly one launch receipt for the prepared continuation. A
+    /// missing, skipped, blocked or uncertain receipt leaves the intent queued.
+    pub fn record_steer_launch_result(
+        &self,
+        id: AttemptId,
+        successor: AttemptId,
+        started: &[Started],
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let mut matching = started
+            .iter()
+            .filter(|receipt| started_attempt(receipt) == successor);
+        let Some(receipt) = matching.next() else {
+            return Ok(());
+        };
+        if matching.next().is_some() {
+            return Ok(());
+        }
+        match receipt {
+            Started::Launched(_) => {
+                self.record_steer_admitted(id, successor, call)?;
+                self.persist_live_steer_successor_evidence(successor, call)
+            }
+            Started::Refused { .. } => self.record_steer_refused(id, successor, call),
+            Started::Skipped { .. } | Started::Unknown { .. } | Started::Blocked { .. } => Ok(()),
+        }
+    }
+
+    /// Retain the private accepted text while recording a safe final cause.
+    /// The outcome and resolution commit together for replay safety.
+    pub fn record_steer_not_continued(
+        &self,
+        id: AttemptId,
+        cause: provenant_records::run::SteeringCause,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![id.to_string(), self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let parent = crate::db::decode_attempt(&raw)?;
+            if !matches!(parent.state, AttemptState::Terminal { .. }) {
+                return Err(RunError::Nonterminal);
+            }
+            let operation = format!("graph-steer-{id}");
+            let successor: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM attempts WHERE continues=?1 AND operation=?2 AND refused=0",
+                    params![id.to_string(), operation],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(successor) = successor.as_deref() {
+                let raw: Vec<u8> = tx.query_row(
+                    "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![successor, self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let successor = crate::db::decode_attempt(&raw)?;
+                if !matches!(successor.state, AttemptState::Terminal { .. })
+                    || successor.provider_launched != Some(false)
+                {
+                    return Err(RunError::Conflict);
+                }
+            }
+            let successor = successor
+                .map(|successor| {
+                    AttemptId::parse(&successor)
+                        .map_err(|_| RunError::Validation("steer successor ID"))
+                })
+                .transpose()?;
+            record_steer_outcome(tx, id, "not_continued", Some(cause), successor)
+        })
+    }
+
+    fn record_steer_refused(
+        &self,
+        id: AttemptId,
+        successor: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        call.check()?;
+        let operation = format!("graph-steer-{id}");
+        let belongs: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND continues=?2 AND operation=?3 AND refused=0)",
+            params![successor.to_string(), id.to_string(), operation],
+            |row| row.get(0),
+        )?;
+        if !belongs {
+            return Err(RunError::Validation("steer refusal receipt"));
+        }
+        let record = self.record(successor, call)?;
+        if !matches!(record.state, AttemptState::Terminal { .. })
+            || record.provider_launched != Some(false)
+        {
+            return Err(RunError::Validation("steer refusal outcome"));
+        }
+        self.record_steer_not_continued(
+            id,
+            provenant_records::run::SteeringCause::ContinuationRefused,
+            call,
+        )
+    }
+
     /// A previous boot ended every member of this attempt's process tree.
     /// Keep both exclusions until the canonical commit precedes fence release.
     fn settle_rebooted(
@@ -1936,11 +3741,11 @@ impl RunStore {
         )
         .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
-    /// Settle an attempt whose guardian and provider are both gone in this
-    /// boot and left no durable exit: nothing remains to import or publish, so
-    /// it ends Lost with a reason instead of waiting for a holder that is not
-    /// coming. Writer exclusion is taken without waiting, so a live guardian,
-    /// or an inheritor of its lease, keeps the attempt open.
+    /// Settle an attempt with no durable exit only when a changed boot proves
+    /// its prior process tree cannot remain alive. Same-boot absence is not
+    /// quiescence proof because the last checkpoint may miss an escaped child.
+    /// Writer exclusion is taken without waiting, so an inheritor of the
+    /// lease still keeps the attempt open.
     fn settle_holderless(
         &self,
         record: &AttemptRecord,
@@ -2109,100 +3914,156 @@ impl RunStore {
     /// retried within the call budget.
     // Cancellation coordinates with a real guardian handoff under a hard cap.
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
-        self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
+        self.cancel_inner(id, reason, call, false)
+            .map(|(_, receipt)| receipt)
     }
-    pub(crate) fn cancel_with_observer(
+    /// Cancel the current host-owned continuation of a graph target. The
+    /// returned attempt is the exact validated leaf whose stop was accepted.
+    pub fn cancel_graph(
         &self,
         id: AttemptId,
         reason: &str,
         call: &Request<'_>,
-        _observer: &dyn ProcessObserver,
-    ) -> Result<CancelReceipt> {
+    ) -> Result<(AttemptId, CancelReceipt)> {
+        self.cancel_inner(id, reason, call, true)
+    }
+    fn cancel_inner(
+        &self,
+        mut id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+        follow_graph_successors: bool,
+    ) -> Result<(AttemptId, CancelReceipt)> {
+        let mut pending_steer_parent = None;
         loop {
             let record = self.record(id, call)?;
-            match record.state {
-                AttemptState::Terminal { .. } => {
-                    self.record_cancellation(
-                        id,
-                        record.generation,
-                        CancellationDisposition::AcknowledgedIneffective,
-                        call,
-                    )?;
-                    return Ok(CancelReceipt::AlreadyTerminal);
-                }
-                AttemptState::Queued { .. } => {
-                    let now = call
-                        .clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?;
-                    match self.withdraw(
-                        id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
-                        },
-                        Outcome::Cancelled,
-                        reason,
-                        now,
-                        call,
-                    ) {
-                        Ok(Some(_)) => return Ok(CancelReceipt::Cancelled),
-                        Ok(None) => {
-                            let terminal = self.record(id, call)?;
-                            self.record_cancellation(
-                                id,
-                                terminal.generation,
-                                CancellationDisposition::AcknowledgedIneffective,
-                                call,
-                            )?;
-                            return Ok(CancelReceipt::AlreadyTerminal);
-                        }
-                        // A concurrent start took it; it is no longer queued.
-                        Err(RunError::Conflict) => continue,
-                        Err(error) => return Err(error),
+            if let AttemptState::Queued { .. } = record.state {
+                let now = call
+                    .clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?;
+                match self.withdraw(
+                    id,
+                    AttemptState::Queued {
+                        extra: Default::default(),
+                    },
+                    Outcome::Cancelled,
+                    reason,
+                    now,
+                    call,
+                ) {
+                    Ok(Some(_)) => {
+                        return self.finish_graph_cancel(
+                            id,
+                            pending_steer_parent,
+                            CancelReceipt::Cancelled,
+                            call,
+                        );
                     }
+                    // The expected queued state lost. Re-read under the
+                    // publication fence so a terminal steer cannot accept
+                    // this cancel without preserving its continuation veto.
+                    Ok(None) => continue,
+                    // A concurrent start took it; it is no longer queued.
+                    Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
                 }
-                _ => {}
             }
             let dir = self.attempt_dir(id, false)?;
-            let mut starting_request = None;
-            let unlaunched = if matches!(record.state, AttemptState::Starting { .. }) {
-                // Serialize cancellation publication with the launch owner's
-                // Starting -> Queued admission-skip transition. A stale read of
-                // Starting must not leave a queued attempt with an orphaned stop.
-                let publication = dir.lock(
-                    std::ffi::OsStr::new("publication.lock"),
-                    provenant_os::fs::LockMode::Exclusive,
-                    call.lock_budget(),
-                    call.cancel,
-                    call.clock,
-                )?;
-                let current = self.record(id, call)?;
-                if current.state != record.state {
+            // Terminal publication, continuation admission, and every started
+            // cancellation use this same fence. Re-read after acquiring it:
+            // a stale Running snapshot must not publish a stop behind an
+            // already admitted continuation.
+            let publication = dir.lock(
+                std::ffi::OsStr::new("publication.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )?;
+            let current = self.record(id, call)?;
+            if current.state != record.state
+                || matches!(&current.state, AttemptState::Queued { .. })
+            {
+                drop(publication);
+                continue;
+            }
+            if follow_graph_successors && let Some(successor) = current.superseded_by {
+                pending_steer_parent = self
+                    .validate_graph_cancel_successor(&current, successor, call)?
+                    .then_some(id);
+                drop(publication);
+                id = successor;
+                continue;
+            }
+            if matches!(&current.state, AttemptState::Terminal { .. }) {
+                // This is an owner intent only. It remains distinct from the
+                // guardian's stop reason and signal-delivery evidence; the
+                // locked continuation gate will observe it and refuse a child.
+                if current.superseded_by.is_none()
+                    && current.steering.as_ref().is_some_and(|steering| {
+                        steering.state == provenant_records::run::SteeringState::Queued
+                    })
+                    && let Err(error) = custody::request_stop(
+                        dir.try_clone()?,
+                        Self::scope(&current),
+                        current.verified_owner.unwrap_or(self.context.actor_id),
+                        StopReason::ExplicitCancellation,
+                    )
+                {
                     drop(publication);
-                    continue;
+                    return Ok((
+                        id,
+                        CancelReceipt::Unobservable {
+                            reason: error.to_string(),
+                        },
+                    ));
                 }
-                let scope = Self::scope(&current);
-                let unlaunched = matches!(
+                self.record_cancellation(
+                    id,
+                    current.generation,
+                    CancellationDisposition::AcknowledgedIneffective,
+                    call,
+                )?;
+                drop(publication);
+                return self.finish_graph_cancel(
+                    id,
+                    pending_steer_parent,
+                    CancelReceipt::AlreadyTerminal,
+                    call,
+                );
+            }
+            let scope = Self::scope(&current);
+            let starting = matches!(&current.state, AttemptState::Starting { .. });
+            let mut starting_request = None;
+            let unlaunched = if starting {
+                matches!(
                     custody::reattach(dir.try_clone()?, scope),
                     Err(CustodyError::Filesystem(ref error)) if error.is_not_found()
-                );
+                )
+            } else {
+                false
+            };
+            if starting {
+                // Serialize the Starting handoff request with the launch
+                // owner's admission-skip transition.
                 starting_request = Some(custody::request_stop(
                     dir.try_clone()?,
                     scope,
                     current.verified_owner.unwrap_or(self.context.actor_id),
                     StopReason::ExplicitCancellation,
                 ));
-                drop(publication);
-                unlaunched
-            } else {
-                false
-            };
-            if let Some(Err(error)) = starting_request.as_ref() {
-                return Ok(CancelReceipt::Unobservable {
-                    reason: error.to_string(),
-                });
             }
-            let stopped = match custody::reattach(dir.try_clone()?, Self::scope(&record)) {
+            if let Some(Err(error)) = starting_request.as_ref() {
+                drop(publication);
+                return Ok((
+                    id,
+                    CancelReceipt::Unobservable {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+            let stopped = match custody::reattach(dir.try_clone()?, scope) {
                 Ok(handle) => custody::stop(&handle, StopReason::ExplicitCancellation),
                 Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
                     if let Some(request) = starting_request {
@@ -2210,29 +4071,85 @@ impl RunStore {
                     } else {
                         custody::request_stop(
                             dir,
-                            Self::scope(&record),
-                            record.verified_owner.unwrap_or(self.context.actor_id),
+                            scope,
+                            current.verified_owner.unwrap_or(self.context.actor_id),
                             StopReason::ExplicitCancellation,
                         )
                     }
                 }
                 Err(error) => Err(error),
             };
+            drop(publication);
             if unlaunched && stopped.is_ok() {
                 // No guardian exists to act on the request. Settle it here so
                 // the queue place and the writer are free before we return.
                 if self.settle_cancelled_unlaunched(id, call)? {
-                    return Ok(CancelReceipt::Cancelled);
+                    return self.finish_graph_cancel(
+                        id,
+                        pending_steer_parent,
+                        CancelReceipt::Cancelled,
+                        call,
+                    );
                 }
             }
-            return Ok(match stopped {
+            let receipt = match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
                 Err(error) => CancelReceipt::Unobservable {
                     reason: error.to_string(),
                 },
-            });
+            };
+            return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
         }
+    }
+    fn validate_graph_cancel_successor(
+        &self,
+        parent: &AttemptRecord,
+        successor_id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        let successor = self.record(successor_id, call)?;
+        let operation = self.attempt_operation(successor_id, call)?;
+        let graph_steer = format!("graph-steer-{}", parent.attempt_id);
+        let budget_wrap_up = format!("budget-wrap-up-{}", parent.attempt_id);
+        let operation_id = operation.operation_id.as_str();
+        if successor.project_id != parent.project_id
+            || successor.retry_of != Some(parent.attempt_id)
+            || successor.key.graph() != parent.key.graph()
+            || successor.key.node() != parent.key.node()
+            || successor.key.attempt() != parent.key.attempt().saturating_add(1)
+            || operation.kind != provenant_records::run::OperationKind::Resume
+            || operation.project_id != parent.project_id
+            || (operation_id != graph_steer && operation_id != budget_wrap_up)
+        {
+            return Err(RunError::Conflict);
+        }
+        Ok(operation_id == graph_steer)
+    }
+    fn finish_graph_cancel(
+        &self,
+        cancelled: AttemptId,
+        pending_steer_parent: Option<AttemptId>,
+        receipt: CancelReceipt,
+        call: &Request<'_>,
+    ) -> Result<(AttemptId, CancelReceipt)> {
+        if let Some(parent) = pending_steer_parent {
+            let child = self.record(cancelled, call)?;
+            let parent_record = self.record(parent, call)?;
+            if matches!(&child.state, AttemptState::Terminal { .. })
+                && child.provider_launched == Some(false)
+                && parent_record.steering.as_ref().is_some_and(|steering| {
+                    steering.state == provenant_records::run::SteeringState::Queued
+                })
+            {
+                self.record_steer_not_continued(
+                    parent,
+                    provenant_records::run::SteeringCause::TerminalStop,
+                    call,
+                )?;
+            }
+        }
+        Ok((cancelled, receipt))
     }
     /// Settle a cancelled attempt whose provider never launched. A launcher
     /// that is still alive watches for the request and unwinds its own
@@ -2276,8 +4193,45 @@ impl RunStore {
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<AttemptRecord> {
-        self.resume_mode(input, call, None, None, None, None)
+        self.resume_mode(input, call, ResumeOptions::default())
             .map(|(run, _)| run)
+    }
+    /// Same-session graph continuation whose work key advances exactly once.
+    pub fn resume_graph(
+        &self,
+        input: &Resume,
+        context: &provenant_records::run::WorkContext,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                graph_context: Some(context),
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
+    }
+    /// Same-session graph continuation when the caller already holds the
+    /// predecessor's exclusive publication fence. That fence itself protects
+    /// provider state from retention, so this path must not reacquire it.
+    pub(crate) fn resume_graph_with_parent_publication_lock(
+        &self,
+        input: &Resume,
+        context: &provenant_records::run::WorkContext,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                graph_context: Some(context),
+                parent_publication_locked: true,
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
     }
     /// Same lineage, route, authority and writer, without provider continuation.
     pub fn resume_fresh(
@@ -2286,8 +4240,15 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        self.resume_mode(input, call, Some(reason), None, None, None)
-            .map(|(run, _)| run)
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                fresh: Some(reason),
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
     }
     /// A fresh fallback may replace a vanished or reassigned writer only with
     /// a new worktree owned by this continuation.
@@ -2302,10 +4263,11 @@ impl RunStore {
         self.resume_mode(
             input,
             call,
-            Some(reason),
-            Some((writer, &branch)),
-            None,
-            None,
+            ResumeOptions {
+                fresh: Some(reason),
+                writer: Some((writer, &branch)),
+                ..Default::default()
+            },
         )
         .map(|(run, _)| run)
     }
@@ -2325,10 +4287,12 @@ impl RunStore {
         self.resume_mode(
             input,
             call,
-            Some(reason),
-            writer.zip(branch.as_deref()),
-            Some(providers),
-            None,
+            ResumeOptions {
+                fresh: Some(reason),
+                writer: writer.zip(branch.as_deref()),
+                providers: Some(providers),
+                ..Default::default()
+            },
         )
     }
     /// Budget wrap-up is a same-session continuation with a single remaining
@@ -2339,8 +4303,15 @@ impl RunStore {
         remaining: u64,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        self.resume_mode(input, call, None, None, None, Some(remaining))
-            .map(|(run, _)| run)
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                budget_remaining: Some(remaining),
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
     }
     fn fresh_writer_branch(&self, input: &Resume, writer: &WriterRequest) -> Result<String> {
         let launch = crate::prepare_writer_with_facts(
@@ -2534,11 +4505,16 @@ impl RunStore {
         &self,
         input: &Resume,
         call: &Request<'_>,
-        fresh: Option<&str>,
-        writer: Option<(&WriterRequest, &str)>,
-        providers: Option<&dyn Providers>,
-        budget_remaining: Option<u64>,
+        options: ResumeOptions<'_>,
     ) -> Result<(AttemptRecord, Option<PreparedStart>)> {
+        let ResumeOptions {
+            fresh,
+            writer,
+            providers,
+            budget_remaining,
+            graph_context,
+            parent_publication_locked,
+        } = options;
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
@@ -2549,11 +4525,36 @@ impl RunStore {
         }
         let _retention = if replay || fresh.is_some() {
             None
+        } else if parent_publication_locked {
+            self.ensure_provider_state_not_expired(input.prior)?;
+            None
         } else {
             Some(self.retain_provider_state(input.prior, call)?)
         };
         let request = self.request(prior.attempt_id, call)?;
         let task = &request.task;
+        let context = match (graph_context, task.context.as_ref()) {
+            (Some(next), Some(previous)) => {
+                let next_attempt = previous.attempt.and_then(|attempt| attempt.checked_add(1));
+                if next.graph_id != previous.graph_id
+                    || next.node_id != previous.node_id
+                    || next.attempt != next_attempt
+                {
+                    return Err(RunError::Validation("graph continuation work key"));
+                }
+                Some(next.clone())
+            }
+            (Some(_), None) => {
+                return Err(RunError::Validation("graph continuation context missing"));
+            }
+            (None, _) => budget_remaining
+                .and(task.context.clone())
+                .map(|mut context| {
+                    // A run-internal resume is not a new graph launch ordinal.
+                    context.attempt = None;
+                    context
+                }),
+        };
         let mut deliver = task.deliver.clone();
         if let Some((_, branch)) = writer
             && let Some(prior) = &deliver
@@ -2565,6 +4566,23 @@ impl RunStore {
             destination.open_pr |= prior.open_pr;
             deliver = Some(destination);
         }
+        // A retained writer continues from the predecessor's sealed terminal
+        // head, which may include commits made while it was running. Preserve
+        // the original source pin separately so launch preparation can prove
+        // that this exact head descends from the authorised source. A fresh
+        // replacement worktree keeps the caller's source/head fields.
+        let (head, source_head) = if writer.is_none() && task.writer.is_some() {
+            (
+                prior
+                    .head
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| task.head.clone()),
+                task.source_head.clone().or_else(|| task.head.clone()),
+            )
+        } else {
+            (task.head.clone(), task.source_head.clone())
+        };
         let prepared = PreparedRun {
             attempt_id: input.attempt_id,
             operation_id: input.operation_id.clone(),
@@ -2574,20 +4592,14 @@ impl RunStore {
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 task: TaskRequest {
-                    context: budget_remaining
-                        .and(task.context.clone())
-                        .map(|mut context| {
-                            // A run-internal resume is not a new graph launch ordinal.
-                            context.attempt = None;
-                            context
-                        }),
+                    context,
                     extra: Default::default(),
                     limit_extensions: extensions(task, &input.extend),
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
-                    head: task.head.clone(),
-                    source_head: task.source_head.clone(),
+                    head,
+                    source_head,
                     base_ref: task.base_ref.clone(),
                     profile: {
                         let mut profile = task.profile.clone();
@@ -2817,11 +4829,63 @@ impl RunStore {
     /// and rejected writers with deferred cleanup. Recovery rechecks custody;
     /// queuing is best effort and leaves live holders alone.
     pub fn reap(&self, call: &Request<'_>) -> Result<usize> {
-        self.reap_with(call, provenant_os::exec::spawn_detached)
+        let observer = SystemProcessObserver;
+        let census = observer
+            .census(provenant_supervisor::census::MAX_CENSUS_ENTRIES)
+            .ok();
+        self.reap_with_census_and_spawn(
+            call,
+            &observer,
+            census.as_ref(),
+            provenant_os::exec::spawn_detached,
+        )
     }
+    /// Queue recovery using one bounded host census shared by every attempt.
+    /// A failed or incomplete census cannot prove a writer unattended;
+    /// durable exit evidence still permits settlement recovery.
+    pub fn reap_with_census(
+        &self,
+        call: &Request<'_>,
+        census: &provenant_supervisor::census::Census,
+    ) -> Result<usize> {
+        self.reap_with_census_and_spawn(
+            call,
+            &SystemProcessObserver,
+            Some(census),
+            provenant_os::exec::spawn_detached,
+        )
+    }
+    /// Continue independent launcher/temporary recovery when host census is
+    /// unavailable. Without durable exit evidence, Running attempts remain
+    /// Unknown and are not queued.
+    pub fn reap_without_census(&self, call: &Request<'_>) -> Result<usize> {
+        self.reap_with_census_and_spawn(
+            call,
+            &SystemProcessObserver,
+            None,
+            provenant_os::exec::spawn_detached,
+        )
+    }
+    #[cfg(test)]
     pub(crate) fn reap_with(
         &self,
         call: &Request<'_>,
+        spawn: impl Fn(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+    ) -> Result<usize> {
+        let observer = SystemProcessObserver;
+        let census = observer
+            .census(provenant_supervisor::census::MAX_CENSUS_ENTRIES)
+            .ok();
+        self.reap_with_census_and_spawn(call, &observer, census.as_ref(), spawn)
+    }
+    pub(crate) fn reap_with_census_and_spawn(
+        &self,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+        census: Option<&provenant_supervisor::census::Census>,
         spawn: impl Fn(
             &[std::ffi::OsString],
             &std::path::Path,
@@ -2858,7 +4922,23 @@ impl RunStore {
                         .and_then(|id| self.record(id, call).ok())
                 })
                 .any(|attempt| match attempt.state {
-                    AttemptState::Running { .. } => true,
+                    AttemptState::Running { .. } => running_attempt_reapable(census.map_or_else(
+                        || {
+                            attempt_presence_without_census(
+                                self.context.state_root.as_path(),
+                                &attempt,
+                                observer,
+                            )
+                        },
+                        |census| {
+                            attempt_presence_with_observer_and_census(
+                                self.context.state_root.as_path(),
+                                &attempt,
+                                observer,
+                                census,
+                            )
+                        },
+                    )),
                     AttemptState::Starting { .. } => self
                         .attempt_dir(attempt.attempt_id, false)
                         .is_ok_and(|dir| {
@@ -3661,6 +5741,16 @@ impl RunStore {
         }
     }
 }
+
+fn started_attempt(started: &Started) -> AttemptId {
+    match started {
+        Started::Launched(attempt)
+        | Started::Refused { attempt, .. }
+        | Started::Skipped { attempt, .. }
+        | Started::Unknown { attempt, .. }
+        | Started::Blocked { attempt, .. } => *attempt,
+    }
+}
 /// Writer exclusion held across a withdrawal.
 #[expect(dead_code, reason = "held only for its lock")]
 enum Held {
@@ -3671,6 +5761,8 @@ enum Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
     fn interrupted_writer_preparation_projects_typed_rejection()
@@ -3973,5 +6065,1527 @@ mod tests {
                 }
             }
         );
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let mut clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let mut running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+
+        // Deliberately reverse lexical operation-ID order: accepted sequence,
+        // not the idempotency key, owns the continuation prompt order.
+        let first_operation = OperationId::parse("steer-z-first")?;
+        let second_operation = OperationId::parse("steer-a-second")?;
+        let first = store.steer(
+            id,
+            first_operation.clone(),
+            "Inspect the failing path.",
+            &call,
+        )?;
+        let second = store.steer(
+            id,
+            second_operation,
+            "Prioritise the smallest repair.",
+            &call,
+        )?;
+        assert!(matches!(
+            store.steer(
+                id,
+                first_operation.clone(),
+                "Replace the original intent.",
+                &call
+            ),
+            Err(RunError::OperationConflict)
+        ));
+        let replay = store.steer(id, first_operation, "Inspect the failing path.", &call)?;
+        let message_id = match first {
+            SteerReceipt::Queued { message_id } => message_id,
+            receipt => return Err(format!("expected initial queue, got {receipt:?}").into()),
+        };
+        let second_message = match second {
+            SteerReceipt::Queued { message_id } => message_id,
+            receipt => return Err(format!("expected queued receipt, got {receipt:?}").into()),
+        };
+        assert_ne!(message_id, second_message);
+        assert_eq!(
+            replay,
+            SteerReceipt::AlreadyQueued { message_id },
+            "replaying one operation returns its original message ID"
+        );
+        let intents = store.steer_intent(id, &call)?;
+        assert_eq!(
+            intents
+                .iter()
+                .map(|intent| intent.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Inspect the failing path.",
+                "Prioritise the smallest repair."
+            ]
+        );
+        let queued_record = store.record(id, &call)?;
+        let queued_status = queued_record.steering.as_ref().ok_or("steering status")?;
+        assert_eq!(
+            queued_status.state,
+            provenant_records::run::SteeringState::Queued
+        );
+        assert_eq!(queued_status.operations.len(), 2);
+        assert!(queued_status.successor.is_none());
+        assert!(
+            serde_json::to_value(&queued_record)?
+                .get("steering")
+                .is_none()
+        );
+
+        // The provider exits cleanly after intent persistence but before its
+        // cancellation request takes effect. Settlement must still adopt it.
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let mut publication = crate::tests::publication();
+        publication.session = Some("fixture-session".into());
+        running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+        assert!(matches!(
+            running.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                terminal_cause: None,
+                ..
+            }
+        ));
+
+        // The successor is timestamped from the terminal predecessor. Move
+        // the fixture clock to that settlement time before admitting it.
+        clock.advance(provenant_core::DurationMicros::from_micros(100))?;
+        let call = crate::tests::call(&clock, &cancel);
+
+        let child = store
+            .prepare_steer_continuation(id, &call)?
+            .ok_or("natural settlement did not adopt durable steer")?;
+        let replayed_child = store
+            .prepare_steer_continuation(id, &call)?
+            .ok_or("continuation replay lost its child")?;
+        assert_eq!(child, replayed_child);
+        assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
+        let child_prompt = crate::artifacts::read_sealed(
+            &store.attempt_dir(child, false)?,
+            provenant_records::AttemptFile::Prompt.name(),
+            RECORD_LIMIT,
+        )?
+        .ok_or("continuation prompt")?;
+        let expected_prompt = format!(
+            "{}Inspect the failing path.\n\nPrioritise the smallest repair.",
+            STEER_PROMPT_PREFIX
+        );
+        assert_eq!(child_prompt, expected_prompt.as_bytes());
+        let child_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM attempts WHERE continues=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            child_count, 1,
+            "settlement replay must not create a second child"
+        );
+        store.record_steer_launch_result(
+            id,
+            child,
+            &[Started::Skipped {
+                attempt: child,
+                reason: "fixture skip".into(),
+            }],
+            &call,
+        )?;
+        let queued_status = store
+            .record(id, &call)?
+            .steering
+            .ok_or("queued steering status")?;
+        assert_eq!(
+            queued_status.state,
+            provenant_records::run::SteeringState::Queued
+        );
+        assert_eq!(queued_status.successor, Some(child));
+        assert_eq!(store.steer_intent(id, &call)?.len(), 2);
+        store.record_steer_launch_result(id, child, &[], &call)?;
+        store.record_steer_launch_result(
+            id,
+            child,
+            &[Started::Unknown {
+                attempt: child,
+                error: "fixture uncertain handoff".into(),
+            }],
+            &call,
+        )?;
+        assert_eq!(
+            store.record(id, &call)?.steering.as_ref().unwrap().state,
+            provenant_records::run::SteeringState::Queued
+        );
+        assert_eq!(store.prepare_steer_continuation(id, &call)?, Some(child));
+        let child_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM attempts WHERE continues=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(child_count, 1, "transient launch receipts reuse one child");
+        store.record_steer_launch_result(id, child, &[Started::Launched(child)], &call)?;
+        let admitted_status = store
+            .record(id, &call)?
+            .steering
+            .ok_or("admitted steering status")?;
+        assert_eq!(
+            admitted_status.state,
+            provenant_records::run::SteeringState::Queued,
+            "launch admission does not prove that the provider resumed its session"
+        );
+        assert_eq!(admitted_status.successor, Some(child));
+        assert_eq!(admitted_status.cause, None);
+
+        let route = crate::tests::route();
+        let expected_route_digest = steer_route_digest(&route)?;
+        assert_eq!(expected_route_digest.len(), 71);
+        assert!(expected_route_digest.starts_with("sha256:"));
+        let queued_child = store.record(child, &call)?;
+        let starting =
+            store.mark_starting(&queued_child, &route, &[], &Default::default(), None, &call)?;
+        let expectation = crate::ContinuationExpectation {
+            session: "fixture-session".into(),
+        };
+        let starting = store.record_starting_launch(
+            &starting,
+            &route,
+            Some(&expectation),
+            &[],
+            &Default::default(),
+            None,
+            0,
+            &Default::default(),
+            &call,
+        )?;
+        assert_eq!(starting.applied_route.as_ref(), Some(&route));
+        let saved_expectation = store
+            .continuation_expectation(child, &call)?
+            .ok_or("continuation expectation missing")?;
+        assert_eq!(saved_expectation.session, "fixture-session");
+        let stored_expectation_digest: String = store.db.query_row(
+            "SELECT route_digest FROM continuation_expectations WHERE attempt=?1",
+            [child.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored_expectation_digest, expected_route_digest);
+        let child_running = store
+            .claim(child, &clock, &call)?
+            .ok_or("child not admitted")?;
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: child.to_string(),
+                    generation: RunStore::scope(&child_running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let applied = child_running
+            .applied_route
+            .as_ref()
+            .ok_or("child applied route")?;
+        assert!(store.record_provider_session_ready(
+            child,
+            applied,
+            "fixture-session",
+            &source,
+            &call,
+        )?);
+        let stored_ready_digest: String = store.db.query_row(
+            "SELECT route_digest FROM provider_session_ready WHERE attempt=?1",
+            [child.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored_ready_digest, expected_route_digest);
+        let resumed_status = store
+            .record(id, &call)?
+            .steering
+            .ok_or("resumed steering status")?;
+        assert_eq!(
+            resumed_status.state,
+            provenant_records::run::SteeringState::Resumed
+        );
+        assert_eq!(resumed_status.successor, Some(child));
+        assert_eq!(resumed_status.cause, None);
+        let retained = store.steer_ledger(id, &call)?;
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|(_, resolved)| *resolved));
+
+        let mut child_exit = crate::tests::exit();
+        child_exit.scope = RunStore::scope(&child_running);
+        crate::dispatch_tests::seal_exit(&store, &child_exit)?;
+        let mut child_publication = crate::tests::publication();
+        child_publication.started_at = child_running.started_at;
+        child_publication.session = Some("fixture-session".into());
+        store.publish_terminal(
+            child,
+            child_running.revision,
+            &child_publication,
+            &child_exit,
+            &call,
+        )?;
+        let final_status = store
+            .record(id, &call)?
+            .steering
+            .ok_or("final resumed steering status")?;
+        assert_eq!(
+            final_status.state,
+            provenant_records::run::SteeringState::Resumed
+        );
+        let (live_ack, terminal_final): (i64, i64) = store.db.query_row(
+            "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((live_ack, terminal_final), (1, 1));
+
+        store.db.execute(
+            "DELETE FROM provider_session_ready WHERE attempt=?1",
+            [child.to_string()],
+        )?;
+        store.db.execute(
+            "DELETE FROM continuation_expectations WHERE attempt=?1",
+            [child.to_string()],
+        )?;
+        assert!(
+            store.continuation_expectation(child, &call).is_err(),
+            "a resumed child cannot be decoded as fresh after its expectation is lost"
+        );
+        assert_eq!(
+            store.record(id, &call)?.steering.unwrap().state,
+            provenant_records::run::SteeringState::Resumed,
+            "the saved disposition does not depend on retained child proof rows"
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        #[derive(Clone, Copy)]
+        enum Case {
+            Refused,
+            MissingSession,
+            MismatchedSession,
+            LiveThenTerminalMismatch,
+            LiveThenTerminalIncomplete,
+            LiveThenTerminalSteeredEof,
+            LiveThenTerminalExplicitCancelEof,
+            LiveThenTerminalEofIncomplete,
+            LiveThenTerminalEofConflict,
+            AccountMismatch,
+        }
+        for case in [
+            Case::Refused,
+            Case::MissingSession,
+            Case::MismatchedSession,
+            Case::LiveThenTerminalMismatch,
+            Case::LiveThenTerminalIncomplete,
+            Case::LiveThenTerminalSteeredEof,
+            Case::LiveThenTerminalExplicitCancelEof,
+            Case::LiveThenTerminalEofIncomplete,
+            Case::LiveThenTerminalEofConflict,
+            Case::AccountMismatch,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let mut clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let parent = run.attempt_id;
+            let mut route = crate::tests::route();
+            route.account_key = Some("fixture-account".into());
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(parent, &call)?,
+                &route,
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let parent_running = store
+                .claim(parent, &clock, &call)?
+                .ok_or("parent not admitted")?;
+            store.steer(
+                parent,
+                OperationId::parse("steer-proof-boundary")?,
+                "Continue from the bound provider session.",
+                &call,
+            )?;
+            let mut parent_exit = crate::tests::exit();
+            parent_exit.scope = RunStore::scope(&parent_running);
+            crate::dispatch_tests::seal_exit(&store, &parent_exit)?;
+            let mut parent_publication = crate::tests::publication();
+            parent_publication.session = Some("fixture-session".into());
+            parent_publication.resolved_route = Some(route.clone());
+            parent_publication.applied_route = Some(route.clone());
+            parent_publication.observed_route = Some(route.clone());
+            store.publish_terminal(
+                parent,
+                parent_running.revision,
+                &parent_publication,
+                &parent_exit,
+                &call,
+            )?;
+            clock.advance(provenant_core::DurationMicros::from_micros(100))?;
+            let call = crate::tests::call(&clock, &cancel);
+            let child = store
+                .prepare_steer_continuation(parent, &call)?
+                .ok_or("steer successor missing")?;
+
+            if matches!(case, Case::Refused) {
+                let queued = store.record(child, &call)?;
+                store.withdraw(
+                    child,
+                    queued.state.clone(),
+                    Outcome::Rejected,
+                    "fixture preparation refusal",
+                    WallTime::from_micros(300).unwrap(),
+                    &call,
+                )?;
+                store.record_steer_launch_result(
+                    parent,
+                    child,
+                    &[Started::Refused {
+                        attempt: child,
+                        reason: "fixture preparation refusal".into(),
+                        kind: RefusalKind::Preparation,
+                    }],
+                    &call,
+                )?;
+                let status = store
+                    .record(parent, &call)?
+                    .steering
+                    .ok_or("refused steering status")?;
+                assert_eq!(
+                    status.state,
+                    provenant_records::run::SteeringState::NotContinued
+                );
+                assert_eq!(status.successor, Some(child));
+                assert_eq!(
+                    status.cause,
+                    Some(provenant_records::run::SteeringCause::ContinuationRefused)
+                );
+            } else {
+                let child_route = if matches!(case, Case::AccountMismatch) {
+                    let mut changed = route.clone();
+                    changed.account_key = Some("other-account".into());
+                    changed
+                } else {
+                    route.clone()
+                };
+                let starting = store.mark_starting(
+                    &store.record(child, &call)?,
+                    &child_route,
+                    &[],
+                    &Default::default(),
+                    None,
+                    &call,
+                )?;
+                let expectation = crate::ContinuationExpectation {
+                    session: "fixture-session".into(),
+                };
+                let launch = store.record_starting_launch(
+                    &starting,
+                    &child_route,
+                    Some(&expectation),
+                    &[],
+                    &Default::default(),
+                    None,
+                    0,
+                    &Default::default(),
+                    &call,
+                );
+                if matches!(case, Case::AccountMismatch) {
+                    assert!(matches!(launch, Err(RunError::SteerSessionMismatch)));
+                    let status = store
+                        .record(parent, &call)?
+                        .steering
+                        .ok_or("account-mismatch steering status")?;
+                    assert_eq!(status.state, provenant_records::run::SteeringState::Queued);
+                    assert_eq!(status.successor, Some(child));
+                    assert_eq!(status.cause, None);
+                    assert!(store.continuation_expectation(child, &call).is_err());
+                    continue;
+                }
+                let starting = launch?;
+                let child_running = store
+                    .claim(child, &clock, &call)?
+                    .ok_or("child not admitted")?;
+                store.record_steer_launch_result(
+                    parent,
+                    child,
+                    &[Started::Launched(child)],
+                    &call,
+                )?;
+                assert_eq!(
+                    store.record(parent, &call)?.steering.unwrap().state,
+                    provenant_records::run::SteeringState::Queued
+                );
+                let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                    ProcessObservation::Present(fact) if !fact.zombie => {
+                        provenant_os::capture::CaptureSourceIdentity {
+                            attempt: child.to_string(),
+                            generation: RunStore::scope(&child_running).generation,
+                            boot: fact.identity.boot,
+                            pid: fact.identity.pid,
+                            native_start: fact.identity.native_start,
+                        }
+                    }
+                    observation => {
+                        return Err(
+                            format!("test process identity unavailable: {observation:?}").into(),
+                        );
+                    }
+                };
+                let applied = child_running
+                    .applied_route
+                    .as_ref()
+                    .ok_or("child applied route")?;
+                let live_ack = matches!(
+                    case,
+                    Case::LiveThenTerminalMismatch
+                        | Case::LiveThenTerminalIncomplete
+                        | Case::LiveThenTerminalSteeredEof
+                        | Case::LiveThenTerminalExplicitCancelEof
+                        | Case::LiveThenTerminalEofIncomplete
+                        | Case::LiveThenTerminalEofConflict
+                );
+                if live_ack {
+                    assert!(store.record_provider_session_ready(
+                        child,
+                        applied,
+                        "fixture-session",
+                        &source,
+                        &call,
+                    )?);
+                    assert_eq!(
+                        store.record(parent, &call)?.steering.unwrap().state,
+                        provenant_records::run::SteeringState::Resumed,
+                        "a verified live session acknowledgement is reported promptly"
+                    );
+                    let (saved_live_ack, saved_terminal_final): (i64, i64) = store.db.query_row(
+                        "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+                        [parent.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    assert_eq!((saved_live_ack, saved_terminal_final), (1, 0));
+                }
+                let mut exit = crate::tests::exit();
+                exit.scope = RunStore::scope(&child_running);
+                let mut publication = crate::tests::publication();
+                publication.started_at = child_running.started_at;
+                publication.resolved_route = Some(child_route.clone());
+                publication.applied_route = Some(child_route.clone());
+                publication.observed_route = Some(child_route.clone());
+                let (expected_state, expected_cause) = match case {
+                    Case::MissingSession => {
+                        exit.stop_reason = Some(StopReason::Steered);
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        publication.outcome = Outcome::Cancelled;
+                        publication.terminal_cause = Some(TerminalCause::Steered);
+                        publication.result = "continued attempt stopped before session proof";
+                        publication.session = None;
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionUnavailable),
+                        )
+                    }
+                    Case::MismatchedSession => {
+                        exit.provider_identity_conflict = true;
+                        publication.outcome = Outcome::Failed;
+                        publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                        publication.result = "provider session did not match its continuation";
+                        publication.complete = false;
+                        publication.session = Some("different-session".into());
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionMismatch),
+                        )
+                    }
+                    Case::LiveThenTerminalMismatch => {
+                        exit.provider_identity_conflict = true;
+                        publication.outcome = Outcome::Failed;
+                        publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                        publication.result = "terminal session contradicted live acknowledgement";
+                        publication.complete = false;
+                        publication.session = Some("different-session".into());
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionMismatch),
+                        )
+                    }
+                    Case::LiveThenTerminalIncomplete => {
+                        exit.provider_identity_evidence_incomplete = true;
+                        publication.outcome = Outcome::Unsettled;
+                        publication.reason =
+                            Some("terminal provider evidence was incomplete".into());
+                        publication.result = "terminal provider evidence was incomplete";
+                        publication.complete = false;
+                        publication.session = None;
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                        )
+                    }
+                    Case::LiveThenTerminalSteeredEof | Case::LiveThenTerminalExplicitCancelEof => {
+                        exit.stop_reason =
+                            Some(if matches!(case, Case::LiveThenTerminalSteeredEof) {
+                                StopReason::Steered
+                            } else {
+                                StopReason::ExplicitCancellation
+                            });
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        publication.outcome = Outcome::Cancelled;
+                        publication.terminal_cause =
+                            matches!(case, Case::LiveThenTerminalSteeredEof)
+                                .then_some(TerminalCause::Steered);
+                        publication.reason = Some(
+                            "confirmed intentional stop ended at an incomplete final frame".into(),
+                        );
+                        publication.result =
+                            "provider session identity remained valid before the final fragment";
+                        publication.complete = false;
+                        publication.session = Some("fixture-session".into());
+                        (provenant_records::run::SteeringState::Resumed, None)
+                    }
+                    Case::LiveThenTerminalEofIncomplete => {
+                        exit.stop_reason = Some(StopReason::Steered);
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        exit.provider_identity_evidence_incomplete = true;
+                        publication.outcome = Outcome::Unsettled;
+                        publication.reason =
+                            Some("provider identity evidence was incomplete".into());
+                        publication.result = "provider identity evidence was incomplete";
+                        publication.complete = false;
+                        publication.session = None;
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                        )
+                    }
+                    Case::LiveThenTerminalEofConflict => {
+                        exit.stop_reason = Some(StopReason::Steered);
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        exit.provider_identity_conflict = true;
+                        publication.outcome = Outcome::Failed;
+                        publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                        publication.result =
+                            "provider identity conflicted before the final fragment";
+                        publication.complete = false;
+                        publication.session = Some("fixture-session".into());
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionMismatch),
+                        )
+                    }
+                    Case::AccountMismatch => unreachable!(),
+                    Case::Refused => unreachable!(),
+                };
+                crate::dispatch_tests::seal_exit(&store, &exit)?;
+                store.publish_terminal(
+                    child,
+                    child_running.revision,
+                    &publication,
+                    &exit,
+                    &call,
+                )?;
+                let status = store
+                    .record(parent, &call)?
+                    .steering
+                    .ok_or("terminal steering status")?;
+                assert_eq!(status.state, expected_state);
+                assert_eq!(status.successor, Some(child));
+                assert_eq!(status.cause, expected_cause);
+                let (saved_live_ack, saved_terminal_final): (i64, i64) = store.db.query_row(
+                    "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+                    [parent.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(saved_live_ack, if live_ack { 1_i64 } else { 0_i64 });
+                assert_eq!(saved_terminal_final, 1);
+                assert_eq!(store.prepare_steer_continuation(parent, &call)?, None);
+                assert!(
+                    store
+                        .steer_ledger(parent, &call)?
+                        .iter()
+                        .any(|(intent, resolved)| intent.text
+                            == "Continue from the bound provider session."
+                            && *resolved)
+                );
+                assert!(starting.applied_route.is_some());
+            }
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
+        for (conflict, incomplete, outcome, cause) in [
+            (
+                true,
+                false,
+                Outcome::Failed,
+                Some(TerminalCause::IdentityMismatch),
+            ),
+            (false, true, Outcome::Unsettled, None),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let operation = OperationId::parse("steer-identity-conflict")?;
+            store.steer(id, operation, "Keep the existing session.", &call)?;
+
+            let attempt = store.attempt_dir(id, false)?;
+            crate::artifacts::seal(
+                &attempt,
+                "stdout.log",
+                b"apparently successful",
+                CAPTURE_LIMIT,
+            )?;
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            exit.provider_identity_conflict = conflict;
+            exit.provider_identity_evidence_incomplete = incomplete;
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let fake = crate::dispatch_tests::Fake::with_observed(
+                Some(crate::tests::route()),
+                Some(Outcome::Succeeded),
+            );
+            let finished = store.finish(id, &attempt, &exit, &fake, &call)?;
+            assert!(matches!(
+                finished.state,
+                AttemptState::Terminal {
+                    outcome: actual_outcome,
+                    terminal_cause: actual_cause,
+                    ..
+                } if actual_outcome == outcome && actual_cause == cause
+            ));
+            assert_eq!(store.prepare_steer_continuation(id, &call)?, None);
+            assert_eq!(store.record(id, &call)?.superseded_by, None);
+            let ledger = store.steer_ledger(id, &call)?;
+            assert_eq!(ledger.len(), 1);
+            assert_eq!(ledger[0].0.text.as_str(), "Keep the existing session.");
+            assert!(ledger[0].1, "a non-continuable stop resolves the intent");
+            assert_eq!(
+                store
+                    .steering_status(id, &call)?
+                    .ok_or("steering status missing")?
+                    .state,
+                provenant_records::run::SteeringState::NotContinued
+            );
+            assert_eq!(
+                store
+                    .steering_status(id, &call)?
+                    .ok_or("steering status missing")?
+                    .cause,
+                Some(provenant_records::run::SteeringCause::TerminalStop)
+            );
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let cases = [
+            (
+                Some(StopReason::Steered),
+                Some(true),
+                false,
+                false,
+                Outcome::Cancelled,
+                Some(TerminalCause::Steered),
+                true,
+            ),
+            (
+                Some(StopReason::ExplicitCancellation),
+                Some(true),
+                false,
+                false,
+                Outcome::Cancelled,
+                None,
+                false,
+            ),
+            (
+                None,
+                Some(false),
+                false,
+                false,
+                Outcome::Unsettled,
+                None,
+                false,
+            ),
+            (
+                Some(StopReason::Steered),
+                Some(false),
+                false,
+                false,
+                Outcome::Unsettled,
+                None,
+                false,
+            ),
+            (
+                Some(StopReason::Steered),
+                Some(true),
+                false,
+                true,
+                Outcome::Unsettled,
+                None,
+                false,
+            ),
+            (
+                Some(StopReason::Steered),
+                Some(true),
+                true,
+                false,
+                Outcome::Failed,
+                Some(TerminalCause::IdentityMismatch),
+                false,
+            ),
+        ];
+        for (index, (reason, delivered, conflict, incomplete, outcome, cause, resumes)) in
+            cases.into_iter().enumerate()
+        {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let operation = OperationId::parse(&format!("steer-eof-{index}"))?;
+            assert!(matches!(
+                store.steer(id, operation, "Continue from the validated session.", &call)?,
+                SteerReceipt::Queued { .. }
+            ));
+            let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                ProcessObservation::Present(fact) if !fact.zombie => {
+                    provenant_os::capture::CaptureSourceIdentity {
+                        attempt: id.to_string(),
+                        generation: RunStore::scope(&running).generation,
+                        boot: fact.identity.boot,
+                        pid: fact.identity.pid,
+                        native_start: fact.identity.native_start,
+                    }
+                }
+                observation => {
+                    return Err(
+                        format!("test process identity unavailable: {observation:?}").into(),
+                    );
+                }
+            };
+            let route = running
+                .applied_route
+                .as_ref()
+                .ok_or("applied route")?
+                .clone();
+            assert!(store.record_provider_session_ready(
+                id,
+                &route,
+                "live-session",
+                &source,
+                &call,
+            )?);
+            if conflict {
+                assert!(store.record_provider_identity_conflict(id, &route, &source, &call)?);
+            }
+
+            let attempt = store.attempt_dir(id, false)?;
+            let scope = RunStore::scope(&running);
+            let mut lease = custody::acquire_reader(
+                attempt.try_clone()?,
+                scope,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            let provider = provenant_supervisor::census::ProcessIdentity {
+                boot: source.boot.clone(),
+                pid: source.pid,
+                native_start: source.native_start,
+                group_id: source.pid,
+                session_id: source.pid,
+            };
+            provenant_supervisor::fixture::record_spawned_provider(
+                &mut lease,
+                &attempt,
+                provider.clone(),
+                provider,
+            )?;
+            let recovery = lease.into_recovery()?;
+            crate::artifacts::seal(
+                &attempt,
+                "stdout.log",
+                b"{\"event\":\"init\",\"conversation_id\":\"live-session\",\"init\":{\"model\":\"expected-model\"}}\n{\"event\":",
+                CAPTURE_LIMIT,
+            )?;
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            exit.stop_reason = reason;
+            exit.cancel_delivered_before_exit = delivered;
+            exit.provider_identity_conflict = conflict;
+            exit.provider_identity_evidence_incomplete = incomplete;
+            exit.provider_identity_eof_fragment = true;
+            exit.terminal_observed = true;
+            exit.settlement_evidence = custody::SettlementEvidence::DarwinCensusAndCustodyLease;
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let mut fake =
+                crate::dispatch_tests::Fake::with_observed(Some(route), Some(Outcome::Succeeded));
+            fake.session = Some("live-session".into());
+            let finished = store
+                .finish_with_recovery_for_fixture(id, &attempt, &exit, &recovery, &fake, &call)?;
+            assert!(matches!(
+                finished.state,
+                AttemptState::Terminal {
+                    outcome: actual_outcome,
+                    terminal_cause: actual_cause,
+                    ..
+                } if actual_outcome == outcome && actual_cause == cause
+            ));
+
+            let child = store.prepare_steer_continuation(id, &call)?;
+            assert_eq!(child.is_some(), resumes);
+            if let Some(child) = child {
+                assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
+                let status = store.steering_status(id, &call)?.ok_or("steering status")?;
+                assert_eq!(status.state, provenant_records::run::SteeringState::Queued);
+                assert_eq!(status.successor, Some(child));
+            } else {
+                assert_eq!(store.record(id, &call)?.superseded_by, None);
+            }
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_session_readiness_binds_scope_process_and_immutable_route_identity() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: RunStore::scope(&running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+        assert!(store.record_provider_session_ready(
+            id,
+            &route,
+            "fixture-live-session",
+            &source,
+            &call,
+        )?);
+        let mut warning_only_change = route.clone();
+        warning_only_change.availability_warning = Some("later warning".into());
+        assert!(store.record_provider_session_ready(
+            id,
+            &warning_only_change,
+            "fixture-live-session",
+            &source,
+            &call,
+        )?);
+        let ready = store
+            .steer_session_ready(id, &call)?
+            .ok_or("ready session missing")?;
+        assert_eq!(ready.session.as_deref(), Some("fixture-live-session"));
+        assert_eq!(ready.generation, source.generation);
+        assert!(!ready.conflict);
+        assert!(!ready.terminal_confirmed);
+        assert!(store.record_provider_session_ready(
+            id,
+            &route,
+            "different-live-session",
+            &source,
+            &call,
+        )?);
+        assert!(
+            store
+                .steer_session_ready(id, &call)?
+                .is_some_and(|ready| ready.conflict)
+        );
+
+        let mut other_account = route.clone();
+        other_account.account_key = Some("different-account".into());
+        assert!(!store.record_provider_session_ready(
+            id,
+            &other_account,
+            "fixture-live-session",
+            &source,
+            &call,
+        )?);
+        let mut other_process = source.clone();
+        other_process.native_start = other_process.native_start.saturating_add(1);
+        assert!(!store.record_provider_session_ready(
+            id,
+            &route,
+            "fixture-live-session",
+            &other_process,
+            &call,
+        )?);
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn explicit_cancel_after_delivered_steer_keeps_the_stop_and_blocks_successor() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let text = "Keep the existing session and finish the scoped check.";
+        assert!(matches!(
+            store.steer(
+                id,
+                OperationId::parse("steer-before-explicit-cancel")?,
+                text,
+                &call,
+            )?,
+            SteerReceipt::Queued { .. }
+        ));
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: RunStore::scope(&running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+        assert!(store.record_provider_session_ready(
+            id,
+            &route,
+            "fixture-session",
+            &source,
+            &call,
+        )?);
+
+        let attempt = store.attempt_dir(id, false)?;
+        let steered: crate::store::CancellationEvidence = crate::db::decode(
+            &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                .ok_or("session readiness did not request the steer stop")?,
+        )?;
+        assert_eq!(steered.reason, StopReason::Steered);
+        assert!(matches!(
+            store.cancel(id, "owner cancellation after steer", &call)?,
+            CancelReceipt::Requested
+        ));
+        let explicit: crate::store::CancellationEvidence = crate::db::decode(
+            &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                .ok_or("explicit cancel request missing")?,
+        )?;
+        assert_eq!(explicit.reason, StopReason::ExplicitCancellation);
+        assert_eq!(explicit.scope, RunStore::scope(&running));
+        assert_eq!(explicit.requester, context.actor_id);
+
+        // The provider was already interrupted by the first Steered signal.
+        // Its sealed reason and delivery fact remain unchanged after the later
+        // explicit cancellation request replaced cancel.json.
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        exit.stop_reason = Some(StopReason::Steered);
+        exit.cancel_delivered_before_exit = Some(true);
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let mut publication = crate::tests::publication();
+        publication.outcome = Outcome::Cancelled;
+        publication.terminal_cause = Some(TerminalCause::Steered);
+        publication.resolved_route = Some(route.clone());
+        publication.applied_route = Some(route.clone());
+        publication.observed_route = Some(route);
+        publication.session = Some("fixture-session".into());
+        let terminal = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+        assert_eq!(
+            terminal.cancellation_disposition,
+            Some(provenant_records::run::CancellationDisposition::Unknown),
+            "the Steered delivery fact does not prove delivery of the later cancel"
+        );
+        assert!(matches!(
+            terminal.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                terminal_cause: Some(TerminalCause::Steered),
+                ..
+            }
+        ));
+        assert_eq!(
+            store.prepare_steer_continuation(id, &call)?,
+            None,
+            "the accepted explicit stop must not launch a same-session successor"
+        );
+        assert_eq!(store.record(id, &call)?.superseded_by, None);
+        let status = store
+            .steering_status(id, &call)?
+            .ok_or("steering status missing")?;
+        assert_eq!(
+            status.state,
+            provenant_records::run::SteeringState::NotContinued
+        );
+        assert_eq!(
+            status.cause,
+            Some(provenant_records::run::SteeringCause::TerminalStop)
+        );
+        let ledger = store.steer_ledger(id, &call)?;
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].0.text, text,
+            "accepted text stays private and durable"
+        );
+        assert!(ledger[0].1, "a non-continuable stop resolves the intent");
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn graph_cancel_and_steer_admission_have_one_ordered_winner() -> TestResult {
+        for admission_first in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let parent = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(parent, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store
+                .claim(parent, &clock, &call)?
+                .ok_or("parent not admitted")?;
+            assert!(matches!(
+                store.steer(
+                    parent,
+                    OperationId::parse("steer-cancel-admission-order")?,
+                    "Continue this task in its existing session.",
+                    &call,
+                )?,
+                SteerReceipt::Queued { .. }
+            ));
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let mut publication = crate::tests::publication();
+            publication.started_at = running.started_at;
+            publication.finished_at = call.clock.wall_now()?;
+            publication.session = Some("fixture-session".into());
+            store.publish_terminal(parent, running.revision, &publication, &exit, &call)?;
+
+            if admission_first {
+                let child = store
+                    .prepare_steer_continuation(parent, &call)?
+                    .ok_or("continuation was not admitted")?;
+                let (cancelled, receipt) =
+                    store.cancel_graph(parent, "cancel current graph continuation", &call)?;
+                assert_eq!(cancelled, child);
+                assert_eq!(receipt, CancelReceipt::Cancelled);
+                assert!(matches!(
+                    store.record(child, &call)?.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Cancelled,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    store.record(parent, &call)?.steering.unwrap().state,
+                    provenant_records::run::SteeringState::NotContinued,
+                    "a cancelled, never-launched child closes the pending intent"
+                );
+            } else {
+                let (cancelled, receipt) =
+                    store.cancel_graph(parent, "cancel pending continuation", &call)?;
+                assert_eq!(cancelled, parent);
+                assert_eq!(receipt, CancelReceipt::AlreadyTerminal);
+                let attempt = store.attempt_dir(parent, false)?;
+                let request: crate::store::CancellationEvidence = crate::db::decode(
+                    &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                        .ok_or("terminal graph cancel intent was not persisted")?,
+                )?;
+                assert_eq!(request.scope, RunStore::scope(&running));
+                assert_eq!(request.requester, context.actor_id);
+                assert_eq!(request.reason, StopReason::ExplicitCancellation);
+                assert_eq!(
+                    store.prepare_steer_continuation(parent, &call)?,
+                    None,
+                    "the serialized gate observes a terminal graph cancel"
+                );
+                assert_eq!(store.record(parent, &call)?.superseded_by, None);
+                let status = store.record(parent, &call)?.steering.unwrap();
+                assert_eq!(
+                    status.state,
+                    provenant_records::run::SteeringState::NotContinued
+                );
+                assert_eq!(
+                    status.cause,
+                    Some(provenant_records::run::SteeringCause::TerminalStop)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_session_disagreement_keeps_accepted_text_and_refuses_fresh_fallback() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let mut running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let operation = OperationId::parse("steer-session-disagreement")?;
+        let accepted = store.steer(id, operation, "Keep this input.", &call)?;
+        assert!(matches!(accepted, SteerReceipt::Queued { .. }));
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: RunStore::scope(&running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+        assert!(store.record_provider_session_ready(id, &route, "live-session", &source, &call,)?);
+        assert!(store.record_provider_identity_conflict(id, &route, &source, &call)?);
+        let terminal_provider = provenant_supervisor::census::ProcessIdentity {
+            boot: source.boot.clone(),
+            pid: source.pid,
+            native_start: source.native_start,
+            group_id: source.pid,
+            session_id: source.pid,
+        };
+        store.confirm_steer_terminal_process(
+            id,
+            RunStore::scope(&running),
+            Some(&terminal_provider),
+            &call,
+        )?;
+        assert!(
+            store
+                .steer_session_ready(id, &call)?
+                .is_some_and(|ready| { ready.conflict && ready.terminal_confirmed })
+        );
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let mut publication = crate::tests::publication();
+        publication.session = Some("live-session".into());
+        running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+        assert!(matches!(running.state, AttemptState::Terminal { .. }));
+        assert!(matches!(
+            store.prepare_steer_continuation(id, &call),
+            Err(RunError::SteerSessionMismatch)
+        ));
+        store.record_steer_not_continued(
+            id,
+            provenant_records::run::SteeringCause::SessionMismatch,
+            &call,
+        )?;
+        let ledger = store.steer_ledger(id, &call)?;
+        assert_eq!(ledger[0].0.text, "Keep this input.");
+        assert!(
+            ledger[0].1,
+            "the original private text remains durably stored"
+        );
+        let status = store.record(id, &call)?.steering.ok_or("steering status")?;
+        assert_eq!(
+            status.state,
+            provenant_records::run::SteeringState::NotContinued
+        );
+        assert_eq!(
+            status.cause,
+            Some(provenant_records::run::SteeringCause::SessionMismatch)
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn first_frame_identity_mismatch_without_session_event_fences_natural_steer() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let mut running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let accepted = store.steer(
+            id,
+            OperationId::parse("steer-first-frame-mismatch")?,
+            "Keep the accepted work, then verify its provider identity.",
+            &call,
+        )?;
+        assert!(matches!(accepted, SteerReceipt::Queued { .. }));
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: RunStore::scope(&running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let route = running
+            .applied_route
+            .as_ref()
+            .ok_or("applied route")?
+            .clone();
+        // Agy may reject its first init frame on Model after decoding Session;
+        // the adapter then returns neither event. The host still records a
+        // route/process-bound fence for that exact admitted candidate.
+        assert!(store.record_provider_identity_conflict(id, &route, &source, &call)?);
+        let ready = store
+            .steer_session_ready(id, &call)?
+            .ok_or("identity conflict row missing")?;
+        assert!(ready.conflict);
+        assert!(ready.session.is_none());
+        assert!(!ready.terminal_confirmed);
+
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let mut publication = crate::tests::publication();
+        publication.session = Some("session-from-final-decoder".into());
+        running = store.publish_terminal(id, running.revision, &publication, &exit, &call)?;
+        assert!(matches!(running.state, AttemptState::Terminal { .. }));
+        assert!(matches!(
+            store.prepare_steer_continuation(id, &call),
+            Err(RunError::SteerSessionMismatch)
+        ));
+        assert_eq!(
+            store.steer_intent(id, &call)?[0].text,
+            "Keep the accepted work, then verify its provider identity."
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_stop_conflict_preserves_each_durable_intent_and_receipt() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+
+        let accepted_operation = OperationId::parse("steer-accepted")?;
+        let accepted = store.steer(
+            id,
+            accepted_operation.clone(),
+            "Keep this instruction.",
+            &call,
+        )?;
+        let accepted_message = match accepted {
+            SteerReceipt::Queued { message_id } => message_id,
+            receipt => return Err(format!("expected accepted receipt, got {receipt:?}").into()),
+        };
+        assert!(matches!(
+            store.cancel(id, "owner cancellation", &call)?,
+            CancelReceipt::Requested
+        ));
+        assert_eq!(
+            store.steer(id, accepted_operation, "Keep this instruction.", &call,)?,
+            SteerReceipt::AlreadyQueued {
+                message_id: accepted_message
+            }
+        );
+        let later_message = match store.steer(
+            id,
+            OperationId::parse("steer-after-stop")?,
+            "Keep this second instruction too.",
+            &call,
+        )? {
+            SteerReceipt::Queued { message_id } => message_id,
+            receipt => return Err(format!("expected durable queue, got {receipt:?}").into()),
+        };
+        assert_ne!(later_message, accepted_message);
+        let intents = store.steer_intent(id, &call)?;
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[0].text, "Keep this instruction.");
+        assert_eq!(intents[1].text, "Keep this second instruction too.");
+        Ok(())
     }
 }

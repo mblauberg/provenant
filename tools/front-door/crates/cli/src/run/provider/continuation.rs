@@ -12,6 +12,10 @@ pub(super) enum ContinuationRequestError {
         "the prior attempt recorded no applied model; run provenant run with its result as context"
     )]
     MissingModel,
+    #[error(
+        "the prior attempt recorded no applied provider; run provenant run with its result as context"
+    )]
+    MissingProvider,
     #[error("{0}; run provenant run with the prior result as context")]
     InvalidModel(String),
     #[error(
@@ -20,12 +24,35 @@ pub(super) enum ContinuationRequestError {
     ProviderMismatch,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RetainedIdentity<'a> {
+    pub(super) provider: &'a str,
+    pub(super) account_key: Option<&'a str>,
+}
+
+fn retained_identity<'a>(
+    applied: &'a run::RouteRecord,
+    enforcement: &provenant_records::policy::Policy,
+) -> Result<RetainedIdentity<'a>, ContinuationRequestError> {
+    let provider = applied.provider.as_deref().ok_or_else(|| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt has no applied provider"),
+            ContinuationRequestError::MissingProvider,
+        )
+    })?;
+    Ok(RetainedIdentity {
+        provider,
+        account_key: applied.account_key.as_deref(),
+    })
+}
+
 /// Recheck current readiness for the exact route the provider session used.
 /// Resolving an exact model bypasses named-pool selection and quota redraws.
-pub(super) fn continuation_request(
-    prior: &run::AttemptRecord,
+pub(super) fn continuation_request<'a>(
+    prior: &'a run::AttemptRecord,
     enforcement: &provenant_records::policy::Policy,
-) -> Result<provenant_routing::RouteRequest, ContinuationRequestError> {
+) -> Result<(provenant_routing::RouteRequest, RetainedIdentity<'a>), ContinuationRequestError> {
     use provenant_routing::{Fallback, ModelId, RouteChoice};
 
     let applied = prior.applied_route.as_ref().ok_or_else(|| {
@@ -35,6 +62,7 @@ pub(super) fn continuation_request(
             ContinuationRequestError::MissingRoute,
         )
     })?;
+    let identity = retained_identity(applied, enforcement)?;
     let model = applied.model.as_deref().ok_or_else(|| {
         enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
@@ -49,7 +77,7 @@ pub(super) fn continuation_request(
             ContinuationRequestError::InvalidModel(error.to_string()),
         )
     })?;
-    if applied.provider.as_deref() != Some(model.adapter()) {
+    if identity.provider != model.adapter() {
         return Err(enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
             provenant_records::policy::Facts::violation(
@@ -58,13 +86,54 @@ pub(super) fn continuation_request(
             ContinuationRequestError::ProviderMismatch,
         ));
     }
-    Ok(provenant_routing::RouteRequest {
-        intent: Default::default(),
-        choice: RouteChoice::Model(model),
-        effort: applied.effort.clone(),
-        fallback: Fallback::None,
-        confidential: false,
-    })
+    Ok((
+        provenant_routing::RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::Model(model),
+            effort: applied.effort.clone(),
+            fallback: Fallback::None,
+            confidential: false,
+        },
+        identity,
+    ))
+}
+
+// Spec: docs/specs/routing.md#accounts-and-credentials
+#[test]
+fn retained_identity_keeps_provider_and_optional_account_key_together() {
+    let applied = run::RouteRecord {
+        provider: Some("agy".into()),
+        account_key: Some("local".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        retained_identity(&applied, &Default::default()).unwrap(),
+        RetainedIdentity {
+            provider: "agy",
+            account_key: Some("local")
+        }
+    );
+
+    let no_account = run::RouteRecord {
+        provider: Some("cursor".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        retained_identity(&no_account, &Default::default()).unwrap(),
+        RetainedIdentity {
+            provider: "cursor",
+            account_key: None
+        }
+    );
+
+    let missing_provider = run::RouteRecord {
+        account_key: Some("local".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        retained_identity(&missing_provider, &Default::default()),
+        Err(ContinuationRequestError::MissingProvider)
+    ));
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,12 +144,25 @@ pub(crate) enum ContinuationError {
     MissingSession,
     #[error("the prior attempt recorded no applied route")]
     MissingRoute,
+    #[error(
+        "the retained Codex session could not be verified in the launch-selected native account; keep that account available and retry, or start a new lane"
+    )]
+    NativeSessionUnavailable,
+    #[error(transparent)]
+    NativeSessionLocation(#[from] super::observation::NativeSessionLocationError),
     #[error(transparent)]
     Provider(#[from] provenant_providers::ProviderError),
     #[error(transparent)]
     StateCopy(#[from] StateCopyError),
     #[error("{0}")]
     Other(String),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ContinuationState<'a> {
+    pub(super) state_root: &'a Path,
+    pub(super) config_root: &'a Path,
+    pub(super) private_state: &'a Path,
 }
 
 impl ContinuationError {
@@ -94,9 +176,11 @@ impl ContinuationError {
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
-            Self::RouteMismatch | Self::MissingSession | Self::MissingRoute => {
-                BoundaryClass::Authority
-            }
+            Self::RouteMismatch
+            | Self::MissingSession
+            | Self::MissingRoute
+            | Self::NativeSessionUnavailable
+            | Self::NativeSessionLocation(_) => BoundaryClass::Authority,
             Self::Provider(error) => error.boundary_class(),
             Self::StateCopy(error) => error.class,
             Self::Other(_) => BoundaryClass::None,
@@ -114,6 +198,10 @@ fn continuation_route_mismatch_is_a_typed_authority_boundary() {
     for error in [
         ContinuationError::MissingSession,
         ContinuationError::MissingRoute,
+        ContinuationError::NativeSessionUnavailable,
+        ContinuationError::NativeSessionLocation(
+            super::observation::NativeSessionLocationError::Missing,
+        ),
         ContinuationError::Provider(provenant_providers::ProviderError::IdentityMismatch),
         ContinuationError::Provider(provenant_providers::ProviderError::UnknownIdentity),
     ] {
@@ -138,9 +226,9 @@ impl From<&str> for ContinuationError {
 }
 
 /// The continuation of `prior` on this candidate route. It must be the very
-/// provider, model and account the prior attempt ran with. The prior attempt's
-/// retained private state is copied into the new attempt's own, so the new
-/// attempt never writes into settled history.
+/// provider, model and account the prior attempt ran with. Sandboxed providers
+/// copy their retained state into the new attempt's private state. Native
+/// Codex is bound to its host-selected HOME and reuses that same session there.
 #[cfg(test)]
 pub(super) fn continuation_for(
     prior: &run::AttemptRecord,
@@ -159,9 +247,11 @@ pub(super) fn continuation_for(
         prior,
         route,
         grant_digest,
-        state_root,
-        config_root,
-        private_state,
+        ContinuationState {
+            state_root,
+            config_root,
+            private_state,
+        },
         &policy,
     )
 }
@@ -170,11 +260,14 @@ pub(super) fn continuation_for_policy(
     prior: &run::AttemptRecord,
     route: &ResolvedRoute,
     grant_digest: &str,
-    state_root: &Path,
-    config_root: &Path,
-    private_state: &Path,
+    state: ContinuationState<'_>,
     enforcement: &provenant_records::policy::Policy,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
+    let ContinuationState {
+        state_root,
+        config_root,
+        private_state,
+    } = state;
     let session = prior.session.as_deref().ok_or_else(|| {
         enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
@@ -203,6 +296,12 @@ pub(super) fn continuation_for_policy(
     }
     let continuation =
         provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)?;
+    // Native state is selected by the provider during launch preparation.
+    // Validate its recorded root after the `LaunchSpec` exists; never search a
+    // native account tree or copy it into the child's private state.
+    if prior_uses_native_session_state(applied, &route.adapter) {
+        return Ok(continuation);
+    }
     let prior_state = state_root
         .join("attempts")
         .join(prior.attempt_id.to_string())
@@ -211,7 +310,10 @@ pub(super) fn continuation_for_policy(
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
     {
-        super::observation::find_opencode_session(&prior_state, session).ok()
+        Some(super::observation::find_opencode_session(
+            &prior_state,
+            session,
+        )?)
     } else {
         loop {
             match find_session_state_within(&prior_state, session, policy.limits) {
@@ -254,6 +356,78 @@ pub(super) fn continuation_for_policy(
         None => return Err(missing_continuation(&route.adapter)),
     }
     Ok(continuation)
+}
+
+pub(super) fn prior_uses_native_session_state(applied: &run::RouteRecord, provider: &str) -> bool {
+    applied
+        .sandbox
+        .as_ref()
+        .is_some_and(|sandbox| !sandbox.effective)
+        && !AdapterSpec::get(provider)
+            .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+}
+
+pub(super) fn verify_native_continuation(
+    prior: &run::AttemptRecord,
+    route: &ResolvedRoute,
+    current_root: &Path,
+    state_root: &Path,
+) -> Result<(), ContinuationError> {
+    let session = prior
+        .session
+        .as_deref()
+        .ok_or(ContinuationError::MissingSession)?;
+    let applied = prior
+        .applied_route
+        .as_ref()
+        .ok_or(ContinuationError::MissingRoute)?;
+    if applied.provider.as_deref() != Some(route.adapter.as_str())
+        || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
+        || applied.account_key != route.account_key
+    {
+        return Err(ContinuationError::RouteMismatch);
+    }
+    if applied
+        .sandbox
+        .as_ref()
+        .is_some_and(|sandbox| sandbox.effective)
+    {
+        return Err(ContinuationError::RouteMismatch);
+    }
+    let prior_state = state_root
+        .join("attempts")
+        .join(prior.attempt_id.to_string())
+        .join("provider-state");
+    if AdapterSpec::get(&route.adapter)
+        .is_some_and(|spec| spec.model_observation == ModelObservation::Rollout)
+    {
+        match super::observation::find_native_codex_rollout(
+            &prior_state,
+            session,
+            &route.model,
+            route.account_key.as_deref(),
+            Some(current_root),
+        ) {
+            Ok(Some(_)) => {}
+            Ok(None)
+            | Err(provenant_providers::ProviderError::UnknownIdentity)
+            | Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                return Err(ContinuationError::NativeSessionUnavailable);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        let prior_root = super::observation::native_session_location_for_route(
+            &prior_state,
+            &route.adapter,
+            &route.model,
+            route.account_key.as_deref(),
+        )?;
+        if prior_root != current_root {
+            return Err(super::observation::NativeSessionLocationError::Mismatch.into());
+        }
+    }
+    Ok(())
 }
 
 fn missing_continuation(provider: &str) -> ContinuationError {

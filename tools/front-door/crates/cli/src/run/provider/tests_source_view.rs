@@ -1,4 +1,3 @@
-
 struct SourceViewFixture {
     _temp: tempfile::TempDir,
     base: std::path::PathBuf,
@@ -33,11 +32,8 @@ impl SourceViewFixture {
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-        let utility = provenant_confinement::UtilityRuntime::new(
-            &git,
-            &git_home,
-            roots.state.as_path(),
-        )?;
+        let utility =
+            provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
         let cancel = provenant_core::CancelToken::new();
         let repo = utility.open_repo(
             &executor,
@@ -63,7 +59,12 @@ impl SourceViewFixture {
         })
     }
 
-    fn commit(&self, cwd: &Path, name: &str, body: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn commit(
+        &self,
+        cwd: &Path,
+        name: &str,
+        body: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         std::fs::write(cwd.join(name), body)?;
         provenant_os::fixture::run_git(cwd, &["add", name])?;
         provenant_os::fixture::run_git(cwd, &["commit", "-qm", name])?;
@@ -126,7 +127,14 @@ fn source_view_builds_from_a_linked_worktree_behind_the_subject()
     let linked = fixture.base.join("linked");
     provenant_os::fixture::run_git(
         &fixture.project,
-        &["worktree", "add", "--detach", "-q", linked.to_str().ok_or("path")?, &first],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            "-q",
+            linked.to_str().ok_or("path")?,
+            &first,
+        ],
     )?;
     // The subject exists only in the shared object store, and as a branch
     // another worktree owns; the worktree's HEAD stays behind. Remote-tracking
@@ -174,6 +182,43 @@ fn source_view_names_the_failing_step_and_cause() -> Result<(), Box<dyn std::err
             .contains("route and account configuration")
     );
     Ok(())
+}
+
+// Spec: docs/specs/state.md#config-never-widens-authority
+#[test]
+fn unsafe_project_binding_source_refusal_keeps_typed_peer_guard() {
+    use super::source_tree::{SourceCause, SourceStep, SourceViewError};
+    let diagnostic = provenant_records::diagnostic::Diagnostic::new("invalid_input")
+        .detail("/private/peer-state/projects/project has mode 0755")
+        .next("run chmod 700 '/private/peer-state/projects/project' and retry");
+    let error = SourceViewError {
+        step: SourceStep::Repository,
+        cause: SourceCause::ProjectBindingDirectory(Box::new(diagnostic)),
+    };
+    let refusal = PrepareError::from(error).into_refusal();
+    assert!(
+        refusal
+            .message
+            .contains("/private/peer-state/projects/project")
+    );
+    assert!(
+        refusal
+            .terminal_note
+            .as_deref()
+            .is_some_and(|note| note.contains("chmod 700"))
+    );
+    assert_eq!(
+        refusal.skipped_routes[0].confinement_guard,
+        Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
+    );
+    assert_eq!(
+        refusal.terminal_cause,
+        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+    );
+    assert_eq!(
+        refusal.boundary_class,
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
 }
 
 #[test]

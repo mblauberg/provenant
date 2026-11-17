@@ -69,8 +69,28 @@ ordinary lane work can continue without publishing credentials.
 
 ## Cargo seeding
 
-Keep the lane's Cargo bindings. The [run spec](../specs/run.md#cargo-target-seed)
-owns the seed lifecycle; [GC](gc.md) owns retention.
+Keep the lane's Cargo bindings. A host can build a seed for a registered
+repository with `provenant worktree seed-build`. It builds the configured verify
+base, so uncommitted work is not the seed source. Later writers copy a compatible
+target and Cargo decides which artifacts it can reuse. A `seeded` report proves
+the copy; Cargo's verbose `Fresh` lines prove dependency reuse.
+
+Each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
+limits history per repository; `max_bytes` limits the whole host and can evict a
+repository's only generation. Compiler, host platform and the effective lane
+profile must match. Unsupported compiler, target or build-flag overrides make
+shared seeding unavailable; native commands retain those settings and can build
+normally. The warning identifies the unsupported setting class without its value.
+The [run spec](../specs/run.md#cargo-target-seed) owns the lifecycle;
+[GC](gc.md) owns retention.
+
+Native npm, pnpm and Corepack launches keep host cache selectors when a provider changes
+HOME or XDG state. Explicit settings win. npm config lookup follows the first
+npm and Node installation in PATH, including ordinary NVM installations; it does
+not borrow a later Homebrew installation's settings. An unresolved shim or
+configuration warns and preserves the existing selector. Corepack keeps its own
+package-manager downloads shared through `COREPACK_HOME`; it does not use
+pnpm's package-store directory.
 
 ## Recovery
 

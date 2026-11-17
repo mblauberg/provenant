@@ -58,7 +58,7 @@ pub enum ProviderEvent {
     Error,
     TransientError,
     Terminal,
-    /// Claude assistant text, held by the stream state as a fallback answer.
+    /// Claude or Cursor assistant text, held by the stream state as a fallback answer.
     /// It never leaves the stream state.
     AssistantText(String),
     /// A tool call or tool result. It invalidates earlier assistant text as the
@@ -179,6 +179,7 @@ pub struct StreamState {
     discarding: bool,
     retained_events: Vec<ProviderEvent>,
     session: Option<String>,
+    expected_session: Option<String>,
     model: Option<String>,
     model_conflict: bool,
     expected_model: Option<String>,
@@ -204,6 +205,7 @@ impl StreamState {
             discarding: false,
             retained_events: Vec::new(),
             session: None,
+            expected_session: None,
             model: None,
             model_conflict: false,
             expected_model: None,
@@ -222,7 +224,22 @@ impl StreamState {
         }
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
-        self.session = Some(session.into());
+        self.expect_session(session);
+        self.expected_model = Some(model.into());
+    }
+    /// Bind session reports to the retained provider session before a resumed
+    /// turn begins. The expected value stays separate from observed evidence,
+    /// so a child that emits no session report cannot inherit a false match.
+    pub fn expect_session(&mut self, session: &str) {
+        self.expected_session = Some(session.into());
+    }
+    /// The retained session this stream must report, when it is a continuation.
+    pub fn expected_session(&self) -> Option<&str> {
+        self.expected_session.as_deref()
+    }
+    /// Bind streamed model reports to the admitted route before a live turn
+    /// begins. A mismatch is an identity conflict, not a replacement model.
+    pub fn expect_model(&mut self, model: &str) {
         self.expected_model = Some(model.into());
     }
     pub(crate) fn check_adapter(&self, adapter: &str) -> Result<(), ProviderError> {
@@ -269,7 +286,11 @@ impl StreamState {
                     Err(error) => {
                         self.malformed = true;
                         self.retained_events = events;
-                        return Err(error);
+                        return Err(if matches!(&error, ProviderError::IncompleteFrame) {
+                            ProviderError::Malformed
+                        } else {
+                            error
+                        });
                     }
                 }
             } else if self.discarding {
@@ -292,13 +313,39 @@ impl StreamState {
         }
         Ok(events)
     }
+    pub(crate) fn observe_eof_fragment(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let mut events = self.observe(bytes)?;
+        if self.adapter == "command" || self.pending.is_empty() {
+            return Ok(events);
+        }
+        let line = std::mem::take(&mut self.pending);
+        match self.line(&line) {
+            Ok(mut final_events) => {
+                events.append(&mut final_events);
+                Ok(events)
+            }
+            Err(error) => {
+                self.malformed = true;
+                self.retained_events = events;
+                Err(error)
+            }
+        }
+    }
     fn line(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         let mut events = (self.decoder)(bytes)?;
         let mut answer_model = None;
         for event in &events {
             match event {
                 ProviderEvent::Session(session) => {
-                    if session.is_empty() || self.session.as_ref().is_some_and(|old| old != session)
+                    if session.is_empty()
+                        || self
+                            .expected_session
+                            .as_ref()
+                            .is_some_and(|expected| expected != session)
+                        || self.session.as_ref().is_some_and(|old| old != session)
                     {
                         return Err(ProviderError::IdentityMismatch);
                     }
@@ -333,9 +380,11 @@ impl StreamState {
                     self.last_assistant_text = Some(text.clone());
                 }
                 ProviderEvent::ToolActivity => self.last_assistant_text = None,
-                ProviderEvent::Text(text) if self.adapter == "claude" => {
+                ProviderEvent::Text(text) if matches!(self.adapter, "claude" | "cursor") => {
                     self.result_text_seen |= !text.trim().is_empty();
-                    if let Some(model) = self.resolve_answer_model(text)? {
+                    if self.adapter == "claude"
+                        && let Some(model) = self.resolve_answer_model(text)?
+                    {
                         answer_model = Some(model);
                     }
                 }
@@ -472,13 +521,15 @@ impl StreamState {
         }
         // Recover only a clean, complete terminal stream, using the same
         // answer identity checks as an ordinary result event.
-        if self.adapter == "claude"
+        if matches!(self.adapter, "claude" | "cursor")
             && status == OutcomeStatus::Success
             && !self.early_stop
             && !self.result_text_seen
             && let Some(text) = self.last_assistant_text.take()
         {
-            if let Some(model) = self.resolve_answer_model(&text)? {
+            if self.adapter == "claude"
+                && let Some(model) = self.resolve_answer_model(&text)?
+            {
                 final_events.push(ProviderEvent::Model(model));
             }
             final_events.push(ProviderEvent::Text(text));
@@ -508,5 +559,11 @@ pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Pr
     // (`MAX_LINE_BYTES`, enforced in `observe` before a line reaches here);
     // `serde_json` adds its own recursion limit. Typed fields still refuse values
     // they cannot hold.
-    serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed)
+    serde_json::from_slice(bytes).map_err(|error| {
+        if error.classify() == serde_json::error::Category::Eof {
+            ProviderError::IncompleteFrame
+        } else {
+            ProviderError::Malformed
+        }
+    })
 }

@@ -32,6 +32,8 @@ pub struct Context {
     pub local_observation: provenant_fabric_runtime::coordination::ObservationSettings,
     /// Project ports resolved once from the discovered project root.
     pub port_table: provenant_config::PortTable,
+    /// Verified owner for project-scoped worktree allocation.
+    pub project_root: PathBuf,
     /// Origin captured with the effective graph configuration.
     pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
     pub graph_decide_timeout_source: provenant_fabric_runtime::graph::DecideTimeoutSource,
@@ -44,6 +46,58 @@ pub struct Context {
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_os::fs::canonicalize(path)?)
 }
+
+fn has_git_common_layout(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new(".git"))
+        || (path.join("HEAD").is_file() && path.join("objects").is_dir())
+}
+
+fn registered_project_roots_for_repository(
+    binding: &provenant_config::ProjectBinding,
+    repo: &provenant_confinement::repo::VerifiedRepo,
+    executor: &dyn Executor,
+    utility: &provenant_confinement::UtilityRuntime,
+    cancel: &CancelToken,
+) -> Result<(PathBuf, Option<PathBuf>), EdgeError> {
+    if !has_git_common_layout(binding.common_dir()) {
+        let root = canonical(binding.common_dir())?;
+        return Ok((root.clone(), Some(root)));
+    }
+    let layout = utility.project_layout_for_bound_repository(
+        executor,
+        repo,
+        binding,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        cancel,
+    )?;
+    Ok((
+        layout.root().to_path_buf(),
+        layout.project().map(Path::to_path_buf),
+    ))
+}
+
+fn registered_project_roots_from_binding(
+    binding: &provenant_config::ProjectBinding,
+    executor: &dyn Executor,
+    utility: &provenant_confinement::UtilityRuntime,
+    cancel: &CancelToken,
+) -> Result<(PathBuf, Option<PathBuf>), EdgeError> {
+    if !has_git_common_layout(binding.common_dir()) {
+        let root = canonical(binding.common_dir())?;
+        return Ok((root.clone(), Some(root)));
+    }
+    let layout = utility.project_layout_for_binding(
+        executor,
+        binding,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        cancel,
+    )?;
+    Ok((
+        layout.root().to_path_buf(),
+        layout.project().map(Path::to_path_buf),
+    ))
+}
+
 /// The provider launch binds TMPDIR to this attempt's private scratch. Require
 /// it explicitly: a lane must never fall back to the host's shared temp area.
 fn lane_temporary() -> Result<PathBuf, EdgeError> {
@@ -151,21 +205,23 @@ pub fn chair_process() -> Option<provenant_records::custody::HolderProcess> {
         native_start: parent.identity.native_start,
     })
 }
-pub fn current_chair(context: &Context) -> provenant_records::custody::Chair {
-    provenant_records::custody::Chair {
+pub fn current_chair(context: &Context) -> Result<provenant_records::custody::Chair, EdgeError> {
+    let inbox = &context.identity.inbox;
+    let actor = inbox.actor;
+    Ok(provenant_records::custody::Chair {
         extra: Default::default(),
-        host: context.identity.inbox.host,
-        actor: context.identity.inbox.actor,
+        host: inbox.host,
+        actor,
         session: current_session().or_else(|| {
             provenant_workflow::session::chair_session_for(
                 &context.roots.state,
                 context.identity.project,
-                context.identity.inbox.actor,
+                actor,
             )
             .map(|s| s.as_str().to_owned())
         }),
         process: chair_process(),
-    }
+    })
 }
 
 /// Record a lifecycle acquisition without turning advisory custody into admission.
@@ -318,18 +374,30 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let project_root = discovered
-            .repository
-            .as_ref()
-            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table =
-            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
+        let is_git = discovered.repository.is_some();
+        let common_dir = discovered.location.common_dir().to_path_buf();
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
         } else {
-            provenant_config::bind_project(&roots, discovered.location)?
+            provenant_config::bind_project(&roots, discovered.location.clone())?
         };
+        let (project_root, project_config_root) = if is_git {
+            let repository = discovered.repository.as_ref().ok_or(EdgeError::Invalid)?;
+            registered_project_roots_for_repository(
+                &binding,
+                repository,
+                &executor,
+                &runtime,
+                &CancelToken::new(),
+            )?
+        } else {
+            (common_dir.clone(), Some(common_dir.clone()))
+        };
+        let port_table = provenant_config::PortTable::read_for(
+            project_config_root.as_deref(),
+            roots.state.as_path(),
+        )?;
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
                 Ok(key) => Some(key),
@@ -347,7 +415,7 @@ impl Context {
             cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            None,
+            active_harness_client(),
             key,
         )?;
         Ok(Self {
@@ -357,6 +425,7 @@ impl Context {
             config,
             local_observation,
             port_table,
+            project_root,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: lane,
@@ -377,14 +446,26 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let project_root = discovered
-            .repository
-            .as_ref()
-            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table =
-            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
+        let is_git = discovered.repository.is_some();
+        let common_dir = discovered.location.common_dir().to_path_buf();
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
+        let (project_root, project_config_root) = if is_git {
+            let repository = discovered.repository.as_ref().ok_or(EdgeError::Invalid)?;
+            registered_project_roots_for_repository(
+                &binding,
+                repository,
+                &executor,
+                &runtime,
+                &CancelToken::new(),
+            )?
+        } else {
+            (common_dir.clone(), Some(common_dir.clone()))
+        };
+        let port_table = provenant_config::PortTable::read_for(
+            project_config_root.as_deref(),
+            roots.state.as_path(),
+        )?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -401,7 +482,7 @@ impl Context {
             cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            None,
+            active_harness_client(),
             key,
         )?;
         Ok(Self {
@@ -411,6 +492,7 @@ impl Context {
             config,
             local_observation,
             port_table,
+            project_root,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),
@@ -432,18 +514,60 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let project_root = discovered
-            .repository
-            .as_ref()
-            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table =
-            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
         } else {
             None
         };
+        let (project_root, project_config_root) = match (&binding, &discovered.repository) {
+            (Some(binding), Some(repo)) => registered_project_roots_for_repository(
+                binding,
+                repo,
+                &executor,
+                &runtime,
+                &CancelToken::new(),
+            )?,
+            (None, Some(repo)) => {
+                let read_repo = runtime.open_read_repo(
+                    &executor,
+                    repo.root_path(),
+                    budget,
+                    &CancelToken::new(),
+                )?;
+                let layout = provenant_confinement::worktrees::project_layout_for_checkout(
+                    &executor,
+                    &read_repo,
+                    &runtime,
+                    budget,
+                    &CancelToken::new(),
+                )?;
+                (
+                    layout.root().to_path_buf(),
+                    layout.project().map(Path::to_path_buf),
+                )
+            }
+            (Some(binding), None) if has_git_common_layout(binding.common_dir()) => {
+                registered_project_roots_from_binding(
+                    binding,
+                    &executor,
+                    &runtime,
+                    &CancelToken::new(),
+                )?
+            }
+            (Some(binding), None) => {
+                let root = binding.common_dir().to_path_buf();
+                (root.clone(), Some(root))
+            }
+            (None, None) => {
+                let root = discovered.location.common_dir().to_path_buf();
+                (root.clone(), Some(root))
+            }
+        };
+        let port_table = provenant_config::PortTable::read_for(
+            project_config_root.as_deref(),
+            roots.state.as_path(),
+        )?;
         let host = if state_present {
             provenant_config::lookup_host(&roots)?
         } else {
@@ -459,6 +583,7 @@ impl Context {
             || provenant_core::ProjectId::from_bytes(bytes),
             |binding| binding.project_id(),
         );
+        let client = active_harness_client();
         let identity = Identity {
             project,
             host,
@@ -466,9 +591,9 @@ impl Context {
                 host,
                 &config,
                 std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-                None,
+                client,
             )?,
-            client: config.client_label.clone(),
+            client: client.unwrap_or(&config.client_label).to_owned(),
             cwd: AbsolutePath::new(cwd).map_err(|_| EdgeError::Invalid)?,
             common_dir: AbsolutePath::new(common_dir).map_err(|_| EdgeError::Invalid)?,
             federation: None,
@@ -480,6 +605,7 @@ impl Context {
             config,
             local_observation,
             port_table,
+            project_root,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),
@@ -495,9 +621,26 @@ impl Context {
         home: &Path,
         binding: &provenant_config::ProjectBinding,
     ) -> Result<Self, EdgeError> {
-        // Its working directory is the project's, as if started there.
-        let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let port_table = provenant_config::PortTable::read_for(Some(cwd), roots.state.as_path())?;
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let executor = SystemExecutor::new(1)?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
+        let (project_root, project_config_root) = registered_project_roots_from_binding(
+            binding,
+            &executor,
+            &runtime,
+            &CancelToken::new(),
+        )?;
+        // Git metadata has no checkout when inventory proves a bare repository.
+        // Keep its context host-only instead of inventing one from the path.
+        let cwd = project_root.clone();
+        let port_table = provenant_config::PortTable::read_for(
+            project_config_root.as_deref(),
+            roots.state.as_path(),
+        )?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
@@ -512,10 +655,10 @@ impl Context {
         let identity = Identity::bind(
             binding,
             host,
-            cwd,
+            &cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            None,
+            active_harness_client(),
             key,
         )?;
         Ok(Self {
@@ -525,13 +668,86 @@ impl Context {
             config,
             local_observation,
             port_table,
+            project_root,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),
-            executor: SystemExecutor::new(1)?,
+            executor,
             home: home.to_path_buf(),
-            cwd: cwd.to_path_buf(),
+            cwd,
         })
+    }
+
+    /// Resolve the stable allocation owner for an existing project binding.
+    /// A linked checkout is never promoted to project owner by selection.
+    pub fn project_root_for_registered_project(
+        roots: &Roots,
+        binding: &provenant_config::ProjectBinding,
+    ) -> Result<PathBuf, EdgeError> {
+        let location = provenant_config::ProjectLocation::new(binding.common_dir().to_path_buf())?;
+        let registered =
+            provenant_config::lookup_project(roots, &location)?.ok_or(EdgeError::Invalid)?;
+        if registered.project_id() != binding.project_id() {
+            return Err(EdgeError::Invalid);
+        }
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let executor = SystemExecutor::new(1)?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
+        Ok(registered_project_roots_from_binding(
+            binding,
+            &executor,
+            &runtime,
+            &CancelToken::new(),
+        )?
+        .0)
+    }
+
+    /// Resolve the allocation root and verified metadata boundary for a
+    /// peer locator before a missing project binding can be written.
+    pub fn workspace_for_common_location(
+        roots: &Roots,
+        common: &Path,
+        binding: Option<&provenant_config::ProjectBinding>,
+    ) -> Result<(PathBuf, Option<PathBuf>), EdgeError> {
+        let canonical_common = canonical(common)?;
+        if canonical_common != common {
+            return Err(EdgeError::Invalid);
+        }
+        if let Some(binding) = binding {
+            if binding.common_dir() != common {
+                return Err(EdgeError::Invalid);
+            }
+            let location = provenant_config::ProjectLocation::new(common.to_path_buf())?;
+            let registered =
+                provenant_config::lookup_project(roots, &location)?.ok_or(EdgeError::Invalid)?;
+            if registered.project_id() != binding.project_id() {
+                return Err(EdgeError::Invalid);
+            }
+            let root = Self::project_root_for_registered_project(roots, binding)?;
+            let metadata = has_git_common_layout(common).then(|| common.to_path_buf());
+            return Ok((root, metadata));
+        }
+        if !has_git_common_layout(common) {
+            return Ok((canonical_common, None));
+        }
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let executor = SystemExecutor::new(1)?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
+        let layout = runtime.project_layout_for_common(
+            &executor,
+            common,
+            provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+            &CancelToken::new(),
+        )?;
+        Ok((layout.root().to_path_buf(), Some(common.to_path_buf())))
     }
     /// A configured remote home is the sole coordination owner.
     pub fn remote_home(&self) -> bool {
@@ -820,6 +1036,10 @@ fn harness_client(
         }
     })
 }
+fn active_harness_client() -> Option<&'static str> {
+    harness_client(None).map(|harness| harness.spec().name)
+}
+
 /// A peer call failure: the stable error plus, for transport failures, the
 /// peer and cause. The detail is message text only; the wire codes are unchanged.
 #[derive(Debug)]
@@ -945,6 +1165,245 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "An isolated child process supplies the harness markers to project context."
+    )]
+    // Spec: docs/specs/fabric.md#identity-and-store
+    fn project_context_uses_the_active_harness_actor() -> Result<(), Box<dyn std::error::Error>> {
+        use std::path::PathBuf;
+
+        const FIXTURE: &str = "PROVENANT_TEST_PROJECT_CONTEXT_IDENTITY";
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            use provenant_core::RootInputs;
+            use std::fs;
+
+            let root = PathBuf::from(root);
+            let home = root.join("home");
+            let project = root.join("project");
+            let state = root.join("state");
+            let config = root.join("config");
+            for directory in [&home, &project, &state, &config] {
+                fs::create_dir_all(directory)?;
+            }
+            fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            fs::write(
+                state.join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
+            )?;
+            let mut inputs = RootInputs::new(home.clone(), project.clone());
+            inputs.state_dir = Some(state);
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let location = provenant_config::ProjectLocation::new(fs::canonicalize(&project)?)?;
+            let binding = provenant_config::bind_project(&roots, location)?;
+            provenant_config::bind_host(&roots)?;
+
+            let context = super::Context::open_for_project(roots, &home, &binding)?;
+            let expected = context.inbox_address(None)?;
+            assert_eq!(context.identity.inbox.actor, expected.actor);
+            let expected_label = std::env::var("PROVENANT_TEST_EXPECTED_LABEL")?;
+            assert_eq!(context.identity.inbox.agent, expected_label);
+            let chair = super::current_chair(&context)?;
+            assert_eq!(chair.actor, context.identity.inbox.actor);
+            assert_eq!(chair.host, context.identity.host);
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        for (client, label) in [
+            ("codex", "codex"),
+            ("claude", "claude"),
+            ("labelled", "reviewer"),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args([
+                    "--exact",
+                    "fabric::context::tests::project_context_uses_the_active_harness_actor",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, root.join(client))
+                .env("HOME", root.join(client).join("home"))
+                .env("XDG_CONFIG_HOME", root.join(client).join("config"))
+                .env("XDG_CACHE_HOME", root.join(client).join("cache"))
+                .env("PROVENANT_ROOT", root.join(client).join("project"))
+                .env("PROVENANT_STATE_DIR", root.join(client).join("state"))
+                .env("PROVENANT_TEST_EXPECTED_LABEL", label)
+                .env_remove("PROVENANT_AGENT_LABEL")
+                .env_remove("PROVENANT_SESSION_ID")
+                .env_remove("CODEX_THREAD_ID")
+                .env_remove("CLAUDECODE")
+                .env_remove("CLAUDE_CODE_SESSION_ID")
+                .env_remove("CLAUDE_SESSION_ID");
+            if client == "codex" {
+                command.env("CODEX_THREAD_ID", "fixture");
+            } else {
+                command.env("CLAUDECODE", "1");
+                if client == "labelled" {
+                    command.env("PROVENANT_AGENT_LABEL", "reviewer");
+                }
+            }
+            let output = command.output()?;
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registered_project_root_uses_external_common_hint_and_keeps_bare_projects_host_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{
+            registered_project_roots_for_repository, registered_project_roots_from_binding,
+        };
+        use provenant_core::{CancelToken, RootInputs};
+        use std::path::Path;
+        use std::time::Duration;
+
+        fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(format!(
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(())
+        }
+
+        // Spec: docs/specs/run-git.md#project-layout-ownership
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let assets = base.join("assets");
+        let state = base.join("state");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&assets)?;
+        std::fs::create_dir_all(&state)?;
+        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let mut inputs = RootInputs::new(home, assets);
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+
+        let checkout = base.join("project");
+        let common = base.join("metadata").join("common-store");
+        std::fs::create_dir_all(&checkout)?;
+        std::fs::create_dir_all(common.parent().ok_or("metadata parent")?)?;
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                common.to_str().ok_or("common path")?,
+                checkout.to_str().ok_or("checkout path")?,
+            ],
+        )?;
+        let location =
+            provenant_config::ProjectLocation::from_verified_primary_checkout(&common, &checkout)?;
+        let binding = provenant_config::bind_project(&roots, location)?;
+        assert_eq!(binding.primary_checkout_hint(), Some(checkout.as_path()));
+        let git_program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        std::fs::create_dir(base.join("utility-home"))?;
+        std::fs::set_permissions(
+            base.join("utility-home"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+        let utility = provenant_confinement::UtilityRuntime::new(
+            &git_program,
+            base.join("utility-home"),
+            roots.state.as_path(),
+        )?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let primary_repo = utility.open_repo(&executor, &checkout, budget, &CancelToken::new())?;
+        let (root, project) = registered_project_roots_for_repository(
+            &binding,
+            &primary_repo,
+            &executor,
+            &utility,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(root, checkout);
+        assert_eq!(project.as_deref(), Some(checkout.as_path()));
+
+        // A hint is evidence only while Git re-proves the checkout/common pair.
+        std::fs::remove_dir_all(&checkout)?;
+        assert!(
+            provenant_confinement::worktrees::project_layout_for_binding(
+                &executor,
+                &binding,
+                &git_program,
+                &provenant_confinement::worktrees::project_layout_git_environment(),
+                Duration::from_secs(5),
+                &CancelToken::new(),
+            )
+            .is_err()
+        );
+
+        let source = base.join("source");
+        std::fs::create_dir(&source)?;
+        git(&source, &["init", "-q", "--initial-branch=main"])?;
+        git(&source, &["config", "user.name", "Fixture"])?;
+        git(
+            &source,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        std::fs::write(source.join("README.md"), "bare owner fixture\n")?;
+        git(&source, &["add", "README.md"])?;
+        git(&source, &["commit", "-qm", "initial"])?;
+        let bare = base.join("metadata").join("bare-store");
+        git(
+            &base,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                source.to_str().ok_or("source path")?,
+                bare.to_str().ok_or("bare path")?,
+            ],
+        )?;
+        let linked = base.join("linked");
+        git(
+            &base,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("bare path")?,
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                linked.to_str().ok_or("linked path")?,
+                "HEAD",
+            ],
+        )?;
+        let bare_binding =
+            provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
+        assert_eq!(bare_binding.primary_checkout_hint(), None);
+        let (bare_root, bare_project) = registered_project_roots_from_binding(
+            &bare_binding,
+            &executor,
+            &utility,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(bare_root, bare);
+        assert_eq!(bare_project, None);
+        assert_ne!(bare_root, linked);
+        Ok(())
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods)] // Dedicated fixture subprocess isolates lane-only environment variables.
     fn lane_publication_uses_private_scratch() -> Result<(), Box<dyn std::error::Error>> {

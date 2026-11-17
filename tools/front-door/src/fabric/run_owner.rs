@@ -1,6 +1,24 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
 
+/// Restore the requester's lane environment when a supervisor advances a graph.
+pub(super) fn restore_graph_lane_path(
+    factory: &Factory,
+    graph_id: &str,
+    host_launch: &mut provenant_run::HostLaunchContext,
+) -> Result<(), FacadeError> {
+    let execution = provenant_fabric_runtime::graph::FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph_id,
+    )
+    .map_err(graph_journal_error)?;
+    if let Some(path) = execution.and_then(|execution| execution.requester_path) {
+        host_launch.lane_path = Some(path);
+    }
+    Ok(())
+}
+
 struct SubmissionPolicy<'a> {
     facts: &'a provenant_confinement::worktrees::RepoFacts,
     access: provenant_records::run::LaneAccess,
@@ -19,6 +37,346 @@ pub(crate) struct BinaryRunOwner<'a> {
     /// Only the direct chair entry point supplies a verified origin.
     pub(crate) chair: Option<provenant_records::custody::Chair>,
 }
+
+fn output_lane_row(
+    record: &provenant_run::AttemptRecord,
+    root: &Path,
+    now: Option<provenant_core::WallTime>,
+    peer_output: bool,
+) -> provenant_records::wire::LaneRow {
+    // Output is a read-only point query that may answer a peer. Presence
+    // reads scoped sealed-exit evidence without a census or reaper; host-local
+    // artefact paths never enter the row.
+    if peer_output {
+        let mut record = record.clone();
+        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(&mut record);
+        provenant_cli::run::project_lane_presence_only(&record, root, now)
+    } else {
+        provenant_cli::run::project_lane_presence_only(record, root, now)
+    }
+}
+
+fn project_output_events_for_peer(
+    events: &mut [provenant_records::run::RunEvent],
+    peer_output: bool,
+) {
+    if peer_output {
+        for event in events {
+            provenant_fabric_runtime::runs::project_peer_run_event_diagnostics(event);
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_projection_tests {
+    #[test]
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    fn peer_output_redacts_only_the_typed_binding_refusal() {
+        use super::*;
+        use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+        use provenant_records::{CanonicalV1, run::TerminalCause};
+
+        fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]),
+                "key": provenant_records::WorkKey::new(
+                    ProjectId::from_bytes([3; 16]),
+                    "graph",
+                    "node",
+                    1
+                ).unwrap(),
+                "attempt_number": 1,
+                "revision": 1,
+                "generation": 0,
+                "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+                "authority_digest": Digest::from_bytes([5; 32]),
+                "queued_at": WallTime::from_micros(1).unwrap(),
+                "state": state,
+                "usage": {},
+                "read_only_writable": [],
+                "protected_paths": [],
+                "trace": {},
+                "prompt": {
+                    "path":{"encoding":"utf8","path":"prompt.txt"},
+                    "digest":CanonicalV1::file_digest(b""),
+                    "bytes":0,
+                    "complete":true,
+                    "redacted":false
+                }
+            }))
+            .unwrap()
+        }
+
+        let private_path = "/private/host-state/projects/fixture";
+        let private_repair = "chmod 700 /private/host-state/projects/fixture";
+        let unsafe_binding = attempt(serde_json::json!({
+            "state":"terminal",
+            "outcome":"permission_denied",
+            "exit_code":null,
+            "finished_at":WallTime::from_micros(2).unwrap(),
+            "terminal_cause":"project_binding_directory_unsafe",
+            "terminal_note":private_repair,
+            "reason":format!("{private_path} has unsafe ownership or permissions")
+        }));
+        let local = output_lane_row(&unsafe_binding, Path::new("/"), None, false);
+        let peer = output_lane_row(&unsafe_binding, Path::new("/"), None, true);
+        assert!(local.reason.as_deref().is_some_and(|reason| {
+            reason.contains(private_path) && reason.contains(private_repair)
+        }));
+        let remote_reason = peer.reason.expect("peer diagnostic");
+        assert!(remote_reason.starts_with(TerminalCause::ProjectBindingDirectoryUnsafe.detail()));
+        assert!(remote_reason.contains("ask the host owner"));
+        assert!(!remote_reason.contains(private_path));
+        assert!(!remote_reason.contains(private_repair));
+
+        // Text that merely looks like a private path is not classified by its
+        // contents and remains untouched when the sealed cause is unrelated.
+        let user_text = format!("user prompt contains {private_path}");
+        let unrelated = attempt(serde_json::json!({
+            "state":"terminal",
+            "outcome":"permission_denied",
+            "exit_code":null,
+            "finished_at":WallTime::from_micros(3).unwrap(),
+            "terminal_cause":"access_policy_refused",
+            "terminal_note":user_text.clone(),
+            "reason":user_text
+        }));
+        let remote_unrelated = output_lane_row(&unrelated, Path::new("/"), None, true);
+        assert!(
+            remote_unrelated
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(&user_text))
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    fn peer_event_output_projects_typed_diagnostics_before_paging_without_text_scrubbing() {
+        use super::*;
+        use provenant_core::{AttemptId, ProjectId, WallTime};
+        use provenant_records::run::{AttemptState, Outcome, RunEvent, TerminalCause};
+
+        fn event(sequence: u64, cause: TerminalCause, reason: String, note: String) -> RunEvent {
+            RunEvent {
+                extra: Default::default(),
+                schema_version: 1,
+                sequence,
+                project_id: ProjectId::from_bytes([3; 16]),
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                revision: sequence,
+                change: AttemptState::Terminal {
+                    extra: Default::default(),
+                    terminal_cause: Some(cause),
+                    terminal_note: Some(note),
+                    stop: None,
+                    outcome: Outcome::PermissionDenied,
+                    exit_code: None,
+                    finished_at: WallTime::from_micros(i64::try_from(sequence).unwrap()).unwrap(),
+                    reason: Some(reason),
+                },
+                trace: Default::default(),
+            }
+        }
+
+        let private_path = "/private/host-state/projects/fixture";
+        let private_repair = "chmod 700 /private/host-state/projects/fixture";
+        let user_prompt = "retain prompt text mentioning /private/prompt-data".to_owned();
+        let original = vec![
+            event(
+                1,
+                TerminalCause::ProjectBindingDirectoryUnsafe,
+                format!("{private_path} has unsafe ownership or permissions"),
+                private_repair.into(),
+            ),
+            event(
+                2,
+                TerminalCause::AccessPolicyRefused,
+                user_prompt.clone(),
+                user_prompt.clone(),
+            ),
+        ];
+        let mut local = original.clone();
+        project_output_events_for_peer(&mut local, false);
+        assert_eq!(local, original);
+
+        let mut remote = original;
+        project_output_events_for_peer(&mut remote, true);
+        let bytes = serde_json::to_vec(&remote).unwrap();
+        let projected = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!projected.contains(private_path));
+        assert!(!projected.contains(private_repair));
+        assert!(projected.contains("project binding state directory is unsafe on the host"));
+        assert!(projected.contains("ask the host owner"));
+        assert!(projected.contains(&user_prompt));
+        assert!(matches!(
+            &remote[0].change,
+            AttemptState::Terminal {
+                terminal_cause: Some(TerminalCause::ProjectBindingDirectoryUnsafe),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &remote[1].change,
+            AttemptState::Terminal {
+                reason: Some(reason),
+                terminal_note: Some(note),
+                terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                ..
+            } if reason == &user_prompt && note == &user_prompt
+        ));
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    fn peer_output_reports_unknown_without_proof_and_settling_on_a_sealed_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+        use provenant_records::CanonicalV1;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]),
+                "key": provenant_records::WorkKey::new(
+                    ProjectId::from_bytes([3; 16]),
+                    "graph",
+                    "node",
+                    1
+                ).unwrap(),
+                "attempt_number": 1,
+                "revision": 1,
+                "generation": 0,
+                "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+                "authority_digest": Digest::from_bytes([5; 32]),
+                "queued_at": WallTime::from_micros(1).unwrap(),
+                "state": state,
+                "usage": {},
+                "read_only_writable": [],
+                "protected_paths": [],
+                "trace": {},
+                "prompt": {
+                    "path":{"encoding":"utf8","path":"prompt.txt"},
+                    "digest":CanonicalV1::file_digest(b""),
+                    "bytes":0,
+                    "complete":true,
+                    "redacted":false
+                }
+            }))
+            .unwrap()
+        }
+
+        let record = attempt(serde_json::json!({"state":"running"}));
+        let temp = tempfile::tempdir()?;
+        let missing = output_lane_row(&record, temp.path(), None, true);
+        assert_eq!(missing.state, "unknown");
+        assert_eq!(
+            missing.presence,
+            Some(provenant_records::wire::LanePresence::Unknown)
+        );
+
+        let attempts = temp.path().join("attempts");
+        let attempt_dir = attempts.join(record.attempt_id.to_string());
+        std::fs::create_dir(&attempts)?;
+        std::fs::set_permissions(&attempts, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir(&attempt_dir)?;
+        std::fs::set_permissions(&attempt_dir, std::fs::Permissions::from_mode(0o700))?;
+        let exit = attempt_dir.join("process-exit.json");
+        std::fs::write(&exit, b"sealed exit evidence")?;
+        std::fs::set_permissions(&exit, std::fs::Permissions::from_mode(0o600))?;
+        let settling = output_lane_row(&record, temp.path(), None, true);
+        assert_eq!(settling.state, "settling");
+        assert_eq!(
+            settling.presence,
+            Some(provenant_records::wire::LanePresence::Settling)
+        );
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    fn serialised_peer_output_keeps_sealed_exit_presence_and_withholds_host_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+        use provenant_records::CanonicalV1;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = provenant_os::fs::canonicalize(temp.path())?;
+        let artifact = serde_json::json!({
+            "path":{"encoding":"utf8","path":"result.md"},
+            "digest":CanonicalV1::file_digest(b""),
+            "bytes":0,
+            "complete":true,
+            "redacted":false
+        });
+        let record: provenant_run::AttemptRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "project_id": ProjectId::from_bytes([3; 16]),
+            "key": provenant_records::WorkKey::new(
+                ProjectId::from_bytes([3; 16]),
+                "graph",
+                "node",
+                1
+            )?,
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(1)?,
+            "state": {"state":"running"},
+            "usage": {},
+            "read_only_writable": [],
+            "protected_paths": [],
+            "trace": {},
+            "prompt": artifact.clone(),
+            "result": artifact,
+        }))?;
+        let attempt_dir = root.join("attempts").join(record.attempt_id.to_string());
+        std::fs::create_dir_all(&attempt_dir)?;
+        for directory in [root.join("attempts"), attempt_dir.clone()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let exit = attempt_dir.join("process-exit.json");
+        std::fs::write(&exit, b"sealed exit evidence")?;
+        std::fs::set_permissions(&exit, std::fs::Permissions::from_mode(0o600))?;
+        // Structured path wire stores the absolute path without its leading slash.
+        let host_root = root.to_str().ok_or("utf8 root")?.trim_start_matches('/');
+
+        // A caller on this host sees the artefact path, so the record does
+        // carry host-local paths for the peer projection to withhold.
+        let local = serde_json::to_string(&provenant_cli::run::project_lane_with_census(
+            &record,
+            &[],
+            &root,
+            None,
+            true,
+            Err(()),
+        ))?;
+        assert!(local.contains(host_root), "{local}");
+
+        for peer_output in [true, false] {
+            let row = output_lane_row(&record, &root, None, peer_output);
+            assert_eq!(row.state, "settling");
+            assert_eq!(
+                row.presence,
+                Some(provenant_records::wire::LanePresence::Settling)
+            );
+            let wire = serde_json::to_string(&row)?;
+            assert!(!wire.contains(host_root), "{wire}");
+        }
+        Ok(())
+    }
+}
+
 /// Retain admitted preparation records when the CLI projects a launch refusal.
 /// Callers still classify the durable records with `BinaryRunOwner::receipt`.
 pub(crate) fn recover_accepted_launch(
@@ -89,6 +447,25 @@ pub(crate) fn events_within<T: serde::Serialize>(
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     // Preserve resource contention through the public error boundary; an
     // immediate repository probe must schedule a retry, not fail the writer.
+    if matches!(
+        &error,
+        provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::ManagedPathMismatch { .. }
+        )
+    ) {
+        let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        return FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!(
+                "{}; use `--branch` to create a writer in the configured layout, or select an existing checkout with `--worktree`",
+                diagnostic.detail.unwrap_or_else(|| {
+                    "requested writer path does not match the configured project worktree layout"
+                        .into()
+                })
+            ),
+        };
+    }
     if matches!(
         &error,
         provenant_run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
@@ -500,7 +877,13 @@ impl BinaryRunOwner<'_> {
         let store = provenant_run::RunStore::open(&context, &self.call(cancel))
             .map_err(run_error)?
             .with_host(ctx.identity.host);
-        Ok(provenant_cli::run::Session { store, context })
+        let chair = (context.actor_id == ctx.identity.inbox.actor)
+            .then(|| provenant_cli::fabric::current_chair(ctx).map_err(|error| error.to_string()));
+        Ok(provenant_cli::run::Session {
+            store,
+            context,
+            chair,
+        })
     }
     pub(crate) fn session_with_facts(
         &self,
@@ -577,7 +960,11 @@ impl BinaryRunOwner<'_> {
             .map_err(run_error)?
             .ok_or(FacadeError::NotFound)?
             .with_host(ctx.identity.host);
-        Ok(provenant_cli::run::Session { store, context })
+        Ok(provenant_cli::run::Session {
+            store,
+            context,
+            chair: None,
+        })
     }
     fn require_graph_control(
         &self,
@@ -1038,6 +1425,14 @@ impl BinaryRunOwner<'_> {
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             attempt.parent_sandboxed |= floored;
+            // Local admission stamps graph provenance from this host's work
+            // key. That stamp is not evidence on the wire: the peer refuses a
+            // caller-supplied flag and restamps after authenticating the
+            // graph envelope.
+            let mut task = task;
+            if let Some(context) = task.context.as_mut() {
+                context.graph_template_launch = false;
+            }
             let graph_context = provenant_fabric_runtime::hosts::GraphSubmitContext {
                 launch_actor: self
                     .actor
@@ -1142,6 +1537,13 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(|_| FacadeError::io("resolve host graph launch context"))?,
         };
+        if let Some(graph_id) = submitted
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref())
+        {
+            restore_graph_lane_path(self.factory, graph_id, &mut host_launch)?;
+        }
         host_launch.graph_directory = Some(self.factory.cwd.clone());
         host_launch.cwd = launch_directory.clone();
         let submission = self.with_edge(|edge| {
@@ -1196,6 +1598,27 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<OutputResult, FacadeError> {
+        self.output_with_projection(input, budget, cancel, false)
+    }
+
+    /// Read output for peer serialization. The same typed owner that projects
+    /// status rows removes local repair details before they reach the peer.
+    pub(crate) fn output_for_peer(
+        &mut self,
+        input: OutputInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<OutputResult, FacadeError> {
+        self.output_with_projection(input, budget, cancel, true)
+    }
+
+    fn output_with_projection(
+        &mut self,
+        input: OutputInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        peer_output: bool,
+    ) -> Result<OutputResult, FacadeError> {
         let target = match &input {
             OutputInput::Read { target, .. } | OutputInput::Fetch { target, .. } => target.clone(),
         };
@@ -1219,12 +1642,11 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
-        let mut row = provenant_cli::run::project_lane(
+        let mut row = output_lane_row(
             &record,
-            &[],
             session.context.state_root.as_path(),
             self.factory.clock.wall_now().ok(),
-            false,
+            peer_output,
         );
         row.host = target.host.map(|host| host.to_string());
         row.provider_seconds = provenant_records::wire::provider_seconds(record.provider_ms);
@@ -1252,6 +1674,7 @@ impl BinaryRunOwner<'_> {
                         .service()
                         .events(offset, 64, Some(record.attempt_id), &call)
                         .map_err(run_error)?;
+                    project_output_events_for_peer(&mut events, peer_output);
                     let eof = events.len() < 64;
                     // Trim the page, never an event, so a caller can page on.
                     let kept = events_within(&events, max_bytes)?;
@@ -1268,6 +1691,8 @@ impl BinaryRunOwner<'_> {
                     }
                     return Ok(OutputResult::Chunk {
                         peer: Default::default(),
+                        length: None,
+                        planner_fallback: None,
                         extra: chunk_fields,
                         target,
                         part,
@@ -1311,11 +1736,9 @@ impl BinaryRunOwner<'_> {
                     None
                 };
                 Ok(OutputResult::Chunk {
-                    peer: provenant_records::run::PeerOutputFields {
-                        length: Some(output_length),
-                        planner_fallback,
-                        ..Default::default()
-                    },
+                    peer: Default::default(),
+                    length: Some(output_length),
+                    planner_fallback,
                     extra: chunk_fields,
                     target,
                     part,
@@ -1361,10 +1784,9 @@ impl BinaryRunOwner<'_> {
                     bytes.extend_from_slice(&chunk.bytes);
                     if chunk.eof {
                         return Ok(OutputResult::Artifact {
-                            peer: provenant_records::run::PeerOutputFields {
-                                length: Some(chunk.len),
-                                ..Default::default()
-                            },
+                            peer: Default::default(),
+                            length: Some(chunk.len),
+                            planner_fallback: None,
                             extra: fields,
                             target,
                             artifact,
@@ -1696,8 +2118,8 @@ impl BinaryRunOwner<'_> {
                 let call = self.call(cancel);
                 let reason = format!("cancelled by Fabric operation {operation_id}");
                 let service = provenant_run::Service::new(&store);
-                let receipt = service
-                    .cancel(target.attempt, &reason, &call)
+                let (_cancelled_attempt, receipt) = store
+                    .cancel_graph(target.attempt, &reason, &call)
                     .map_err(run_error)?;
                 // Without a launch summary nothing was asked to stop.
                 if let provenant_run::CancelReceipt::Unobservable { .. } = receipt {
@@ -1707,6 +2129,9 @@ impl BinaryRunOwner<'_> {
                 }
                 Ok(RunResult::Cancel {
                     extra: Default::default(),
+                    // Keep the graph operation's target identity stable for
+                    // peer replay; cancel_graph routes the stop to the
+                    // validated current leaf when admission already won.
                     attempt: service.status(target.attempt, &call).map_err(run_error)?,
                 })
             }

@@ -491,6 +491,7 @@ impl RunStore {
         &self,
         expected: &AttemptRecord,
         route: &RouteRecord,
+        continuation_expectation: Option<&crate::ContinuationExpectation>,
         writable: &[String],
         write_grants: &AppliedWriteGrants,
         head: Option<GitOid>,
@@ -504,7 +505,17 @@ impl RunStore {
         if !crate::reader::valid_write_grants(&write_grants.grants) {
             return Err(RunError::Validation("invalid write grants"));
         }
+        if continuation_expectation.is_some_and(|expectation| {
+            expectation.session.is_empty()
+                || expectation.session.len() > 4096
+                || expectation.session.chars().any(char::is_control)
+        }) {
+            return Err(RunError::Validation("continuation session expectation"));
+        }
         let id = expected.attempt_id;
+        let route_digest = continuation_expectation
+            .map(|_| crate::controls::steer_route_digest(route))
+            .transpose()?;
         let runtime_seconds = limits
             .deadline_seconds
             .as_ref()
@@ -517,6 +528,55 @@ impl RunStore {
                 || old.key != expected.key
             {
                 return Err(RunError::Conflict);
+            }
+            let operation: String = tx.query_row(
+                "SELECT operation FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let parent = if let Some(parent_id) = old.retry_of {
+                let raw: Vec<u8> = tx
+                    .query_row(
+                        "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                        params![parent_id.to_string(), self.context.project_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or(RunError::NotFound)?;
+                Some(crate::db::decode_attempt(&raw)?)
+            } else {
+                None
+            };
+            let graph_steer = old.retry_of.is_some_and(|parent| {
+                operation == format!("graph-steer-{parent}")
+            });
+            let same_session_continuation =
+                old.retry_of.is_some() && old.continuation.is_none();
+            let fresh_continuation =
+                old.retry_of.is_some() && old.continuation.as_deref() == Some("fresh");
+            if (old.retry_of.is_some() && !same_session_continuation && !fresh_continuation)
+                || (same_session_continuation != continuation_expectation.is_some())
+                || (graph_steer && !same_session_continuation)
+            {
+                return Err(RunError::Validation("continuation session expectation"));
+            }
+            if let (Some(expectation), Some(parent)) = (continuation_expectation, parent.as_ref()) {
+                let parent_session = parent
+                    .session
+                    .as_deref()
+                    .ok_or(RunError::SteerSessionUnavailable)?;
+                let parent_route = parent
+                    .applied_route
+                    .as_ref()
+                    .ok_or(RunError::SteerSessionUnavailable)?;
+                let parent_route_digest = crate::controls::steer_route_digest(parent_route)?;
+                if expectation.session != parent_session
+                    || route_digest.as_deref() != Some(parent_route_digest.as_str())
+                {
+                    return Err(RunError::SteerSessionMismatch);
+                }
+            } else if continuation_expectation.is_some() {
+                return Err(RunError::Validation("continuation expectation has no parent"));
             }
             let mut ticket = self.ticket(tx, id)?;
             let class = Service::lane_class(
@@ -552,6 +612,28 @@ impl RunStore {
                 "UPDATE admission SET record=?1 WHERE attempt=?2",
                 params![bytes(&ticket)?, id.to_string()],
             )?;
+            if let (Some(expectation), Some(route_digest)) =
+                (continuation_expectation, route_digest.as_deref())
+            {
+                let existing: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT session,route_digest FROM continuation_expectations WHERE attempt=?1",
+                        [id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                match existing {
+                    Some((session, digest))
+                        if session == expectation.session && digest == route_digest => {}
+                    Some(_) => return Err(RunError::Conflict),
+                    None => {
+                        tx.execute(
+                            "INSERT INTO continuation_expectations(attempt,session,route_digest) VALUES (?1,?2,?3)",
+                            params![id.to_string(), expectation.session, route_digest],
+                        )?;
+                    }
+                }
+            }
             Ok(next)
         })
     }
@@ -735,7 +817,10 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let call = Request { clock, cancel };
         call.check()?;
-        if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+        let record = self.record(id, &call)?;
+        // A steer interrupt uses the same marker as an owner stop. Only this
+        // scope's Steered request admits; any other marker vetoes admission.
+        if crate::store::CancelMarker::read(attempt, Self::scope(&record))?.stops() {
             return Err(RunError::Cancelled);
         }
         let ticket = self.ticket(&self.db, id)?;

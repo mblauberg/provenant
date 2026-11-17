@@ -718,30 +718,112 @@ fn delivery_stage_wire<S: serde::Serializer>(
     wire.end()
 }
 
+fn state_directory_security_detail(
+    label: &str,
+    path: Option<&str>,
+    mode: u32,
+    owner_matches: bool,
+    exposed: bool,
+) -> String {
+    let directory = path.map_or_else(|| label.to_owned(), |path| format!("{label} {path}"));
+    if owner_matches && exposed {
+        format!("{directory} has mode {mode:04o}; other users can read or access it")
+    } else if exposed {
+        format!(
+            "{directory} is not owned by the current user and has mode {mode:04o}; other users can read or access it"
+        )
+    } else if owner_matches {
+        format!("{directory} failed its private permission check (mode {mode:04o})")
+    } else {
+        format!(
+            "{directory} is not owned by the current user; ownership must be restored before use"
+        )
+    }
+}
+
+fn directory_security_diagnostic(
+    path: &std::path::Path,
+    mode: u32,
+    owner_matches: bool,
+    destination: provenant_records::diagnostic::Destination<'_>,
+    label: &str,
+) -> provenant_records::diagnostic::Diagnostic {
+    use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
+    let exposed = mode & 0o077 != 0;
+    let detail = safe_path(path, destination).map_or_else(
+        || state_directory_security_detail(label, None, mode, owner_matches, exposed),
+        |path| state_directory_security_detail(label, Some(&path), mode, owner_matches, exposed),
+    );
+    let action = shell_path(path, destination).map_or_else(
+        || {
+            if owner_matches {
+                "restrict the state directory to its owner, then retry".into()
+            } else {
+                "restore state-directory ownership to the current user, restrict it to the owner, then retry".into()
+            }
+        },
+        |path| {
+            if owner_matches {
+                format!("run chmod 700 {path} and retry")
+            } else {
+                format!("run sudo chown \"$(id -u)\" {path} && chmod 700 {path} and retry")
+            }
+        },
+    );
+    Diagnostic::new("invalid_input")
+        .category("invalid")
+        .detail(detail)
+        .next(action)
+}
+
 impl FacadeError {
+    /// Project only the typed unsafe project-binding failure with a safe
+    /// location and local repair action. Other configuration failures retain
+    /// their owning error path and are not reclassified here.
+    pub fn project_binding_directory_diagnostic(
+        error: &provenant_config::ConfigError,
+        destination: provenant_records::diagnostic::Destination<'_>,
+    ) -> Option<provenant_records::diagnostic::Diagnostic> {
+        let provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path,
+            mode,
+            owner_matches,
+        } = error
+        else {
+            return None;
+        };
+        Some(directory_security_diagnostic(
+            path,
+            *mode,
+            *owner_matches,
+            destination,
+            "project binding state directory",
+        ))
+    }
+
     /// Project a state directory permission refusal for the selected edge.
     pub fn state_directory_permissions(
         path: &std::path::Path,
         mode: u32,
         destination: provenant_records::diagnostic::Destination<'_>,
     ) -> provenant_records::diagnostic::Diagnostic {
-        use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
-        let detail = safe_path(path, destination).map_or_else(
-            || format!("Fabric state directory has mode {mode:04o}; other users can access it"),
-            |path| {
-                format!(
-                    "Fabric state directory {path} has mode {mode:04o}; other users can access it"
-                )
-            },
-        );
-        let action = shell_path(path, destination).map_or_else(
-            || "restrict the state directory to its owner, then retry".into(),
-            |path| format!("run chmod 700 {path} and retry"),
-        );
-        Diagnostic::new("invalid_input")
-            .category("invalid")
-            .detail(detail)
-            .next(action)
+        Self::state_directory_security(path, mode, true, destination)
+    }
+
+    /// Project a state-directory owner and permission refusal for its edge.
+    pub fn state_directory_security(
+        path: &std::path::Path,
+        mode: u32,
+        owner_matches: bool,
+        destination: provenant_records::diagnostic::Destination<'_>,
+    ) -> provenant_records::diagnostic::Diagnostic {
+        directory_security_diagnostic(
+            path,
+            mode,
+            owner_matches,
+            destination,
+            "Fabric state directory",
+        )
     }
 
     /// Retain the typed admission stage while keeping its original refusal text.
@@ -1575,6 +1657,59 @@ mod diagnostic_tests {
         assert!(remote.next.is_some());
     }
 
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    #[test]
+    fn unsafe_project_binding_projection_is_typed_and_destination_safe() {
+        use std::path::PathBuf;
+
+        let error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: PathBuf::from("/private/state with 'quote"),
+            mode: 0o755,
+            owner_matches: true,
+        };
+        let local = FacadeError::project_binding_directory_diagnostic(
+            &error,
+            provenant_records::diagnostic::Destination::Local,
+        )
+        .unwrap();
+        assert!(local.detail.as_deref().is_some_and(|detail| {
+            detail.contains("project binding state directory /private/state with 'quote")
+                && detail.contains("mode 0755")
+        }));
+        assert!(
+            local.next.as_deref().is_some_and(|next| {
+                next.contains("chmod 700 '/private/state with '\\''quote'")
+            })
+        );
+
+        let remote = FacadeError::project_binding_directory_diagnostic(
+            &error,
+            provenant_records::diagnostic::Destination::Remote {
+                repository: None,
+                home: Some(std::path::Path::new("/private")),
+            },
+        )
+        .unwrap();
+        let remote_wire = serde_json::to_string(&remote).unwrap();
+        assert!(remote_wire.contains("~/state with"));
+        assert!(!remote_wire.contains("/private"));
+        assert!(
+            remote
+                .next
+                .as_deref()
+                .is_some_and(|next| next.contains("restrict"))
+        );
+
+        let unrelated = provenant_config::ConfigError::InvalidProjectBinding;
+        assert!(
+            FacadeError::project_binding_directory_diagnostic(
+                &unrelated,
+                provenant_records::diagnostic::Destination::Local,
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn generic_io_has_safe_action_without_source_detail() {
         let error = FacadeError::Io {
@@ -2072,7 +2207,11 @@ impl OutputBytes {
 pub enum OutputResult {
     Chunk {
         #[serde(flatten)]
-        peer: provenant_records::run::PeerOutputFields,
+        peer: provenant_records::run::PeerGraphFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planner_fallback: Option<String>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,
@@ -2090,7 +2229,11 @@ pub enum OutputResult {
     },
     Artifact {
         #[serde(flatten)]
-        peer: provenant_records::run::PeerOutputFields,
+        peer: provenant_records::run::PeerGraphFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planner_fallback: Option<String>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,

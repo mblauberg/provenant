@@ -5,6 +5,25 @@ const HEAD_BYTES: usize = 4096;
 const TAIL_BYTES: usize = 16384;
 const VERDICT_BYTES: usize = 1024;
 
+/// Canonical verdicts that satisfy a review result contract.
+pub fn is_review_verdict(verdict: &str) -> bool {
+    matches!(
+        verdict,
+        "VERDICT: PASS" | "VERDICT: FAIL" | "VERDICT: INCONCLUSIVE"
+    )
+}
+
+/// Whether one line is, alone, a review verdict in any form the result's
+/// verdict scan accepts, such as `**VERDICT: FAIL**`. The handoff parser uses
+/// this so the line it tolerates after a handoff is the line the result
+/// counts as the verdict.
+pub(crate) fn is_standalone_verdict(line: &str) -> bool {
+    let mut capture = VerdictCapture::default();
+    capture.push(line.as_bytes());
+    let (verdict, invalid, declarations, _) = capture.finish();
+    declarations == 1 && !invalid && verdict.as_deref().is_some_and(is_review_verdict)
+}
+
 /// A streaming accumulator. Display windows and verdict proof are bounded;
 /// structured findings are transient parsing input from the sealed artifact.
 pub struct ResultCapture {
@@ -404,7 +423,7 @@ impl DispositionCapture {
 /// count, and position does not matter. Two declarations, or one malformed
 /// declaration, are rejected with a cause that names what was seen.
 #[derive(Default)]
-struct VerdictCapture {
+pub(crate) struct VerdictCapture {
     line: Vec<u8>,
     overflow: bool,
     lines: usize,
@@ -429,7 +448,7 @@ struct VerdictCapture {
 const DECLARATION: &[u8] = b"VERDICT:";
 
 impl VerdictCapture {
-    fn push(&mut self, chunk: &[u8]) {
+    pub(crate) fn push(&mut self, chunk: &[u8]) {
         for &byte in chunk {
             if byte == b'\n' {
                 self.end_line();
@@ -537,7 +556,7 @@ impl VerdictCapture {
         }
     }
 
-    fn finish(mut self) -> (Option<Box<str>>, bool, u8, Option<String>) {
+    pub(crate) fn finish(mut self) -> (Option<Box<str>>, bool, u8, Option<String>) {
         if !self.line.is_empty() {
             self.end_line();
         }

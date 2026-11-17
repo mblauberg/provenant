@@ -113,6 +113,21 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+For graph nodes with a typed review result, the digest shows execution state
+separately from verdict, findings count and findings availability.
+
+For a durable `running` attempt, host status reports native writer presence as
+`live`, `unattended`, `settling` or `unknown`. `running` is shown only while the
+recorded guardian or provider identity is present. A changed boot proves the
+old process tree is gone. Same-boot absence remains `unknown`, even when the
+last process checkpoint and current bounded census are complete: a child may
+have forked into another session or group after the checkpoint and then been
+reparented. A sealed process exit reports `settling`. A PID or its reuse alone,
+a host that cannot observe the writer, missing checkpoints, permission errors,
+incomplete evidence and unreachable peers remain `unknown`; status does not
+mutate or schedule recovery.
+Unattended and settling rows name the scoped `provenant reconcile` action,
+which rechecks custody before settlement.
 
 `adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
 explicit release. `fabric claim acquire|renew|verify|release` takes the same
@@ -127,8 +142,21 @@ Transfer to a named session is deferred.
 
 ### Output references and bounded tails
 
-Output and steering resolve the same numbered attempt. Output reads are bounded
-and a clamped tail reports its effective bound.
+For a graph with one non-composite top-level node, `output GRAPH` reads that
+node's newest settled attempt. For a composite root it reads the declared bounded result and
+returns its typed exports, without inventing an attempt identity. A bare graph
+with multiple top-level nodes remains ambiguous and lists only those nodes;
+`output GRAPH/NODE` selects a composite explicitly. Prompt, stderr, transcript,
+events, receipt and artifact-path reads require an attempt and are unavailable
+for a composite. If a composite has typed exports but no result text, output
+returns those exports with an empty byte chunk. Offsets and limits count bytes;
+a page that splits a UTF-8 character uses lossless base64 bytes and advances by
+exactly the returned byte count. A bounded composite excerpt reports
+`complete: false` when the checkpoint says its source result was truncated,
+with an unknown source length.
+
+For attempt targets, output and steering resolve the same numbered attempt.
+Output reads are bounded and a clamped tail reports its effective bound.
 By default, `output` shows result text whole up to 12 KiB, then marked head and tail; `--full` shows complete text.
 
 - Why: a reader must be able to inspect the intended attempt safely.
@@ -227,3 +255,16 @@ Checks report findings and unavailable evidence without repairing the subject.
 Release checks inspect the artifact to be distributed as well as Git evidence.
 
 - Why: an inspection must not change its subject or certify an uninspected artifact.
+
+### Release symlinks
+
+A release symlink is portable only when its relative target stays inside the
+repository and names a tracked regular file in that same tree. Absolute,
+escaping, malformed, missing or untracked targets and links to another
+symlink remain findings.
+The check resolves Git targets from each tree's entries and reads current
+worktree links without following them through the host filesystem.
+
+- Why: every published link must have one inspectable target in the tree being
+  checked, independent of host files or link-chain behaviour.
+- Owner: `crates/cli/src/check/release.rs`

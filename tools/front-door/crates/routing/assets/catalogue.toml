@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261030-free-flash"
+revision = "route-pools-20261115-owner-overrides"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -22,9 +22,19 @@ evidence_ref = "providers/claude/model-mismatch.jsonl"
 trains_on_prompts = false
 
 [[models]]
+model = "cursor/auto"
+efforts = []
+evidence_ref = "Cursor CLI model listing, user observed 2026-11-15"
+
+[[models]]
+model = "cursor/composer-2.5"
+efforts = []
+evidence_ref = "Cursor CLI model listing and one-line probe, user observed 2026-11-15"
+
+[[models]]
 model = "cursor/gpt-5.3-codex-low"
 efforts = []
-evidence_ref = "model-listings/cursor-models.txt"
+evidence_ref = "tests/fixtures/model-listings/cursor-models.txt@82daaf40aaae5c17a9ccb74815e64f4d76c2dbcc; captured 2026-10-23"
 trains_on_prompts = false
 
 # Go plan limits: https://opencode.ai/v2/docs/console/go/ accessed 2026-10-28.
@@ -125,8 +135,9 @@ trains_on_prompts = false
 [[models]]
 model = "cursor/grok-4.7"
 capability = "strong"
-efforts = []
-evidence_ref = "legacy config/model-routing.json@114e3331"
+efforts = ["low", "medium", "high", "xhigh"]
+effort_suffix = true
+evidence_ref = "legacy config/model-routing.json@114e3331; Cursor CLI listing and probe, user observed 2026-11-15"
 trains_on_prompts = false
 
 [[models]]
@@ -153,10 +164,14 @@ codex = "spend"
 
 [pools]
 utility = [
+    # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
+    { model = "cursor/composer-2.5", weight = 1, efforts = [] },
     { model = "claude/claude-haiku-5-5", weight = 4, effort = "low", efforts = ["low"] },
     { model = "codex/gpt-6-luna", weight = 2, effort = "low", efforts = ["low"] },
 ]
 junior = [
+    # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
+    { model = "cursor/composer-2.5", weight = 1, efforts = [] },
     # Prefer free capacity while it is eligible and available.
     { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 50, efforts = [] },
     { model = "opencode/opencode/glm-5.3-flash-free", weight = 50, efforts = [] },
@@ -184,13 +199,16 @@ senior = [
     { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
     { model = "agy/gemini-3.8-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
     { model = "agy/claude-opus-4-6-thinking", weight = 1, efforts = [] },
-    { model = "cursor/grok-4.7", weight = 1, efforts = [] },
+    # Lowest weight for the same reason as Composer above.
+    { model = "cursor/grok-4.7", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
 ]
 principal = [
     { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
     { model = "codex/gpt-6.1-sol", weight = 1, effort = "high", efforts = ["medium", "high", "xhigh"] },
 ]
 writing = [
+    # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
+    { model = "cursor/composer-2.5", weight = 1, efforts = [] },
     { model = "agy/gemini-3.8-flash", weight = 4, efforts = ["low", "medium", "high"] },
     { model = "claude/claude-haiku-5-5", weight = 4, efforts = ["low", "medium", "high", "xhigh"] },
     { model = "agy/claude-sonnet-4-6", weight = 2, efforts = [] },

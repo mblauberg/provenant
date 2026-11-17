@@ -10,7 +10,9 @@ comments citing Spec: sections always resolve strictly. Runtime absolute paths
 and templates are excluded. Commands
 scope flags to their own help; flags are checked only after a provenant command.
 Lines that say removed, replaced or retired are skipped. Documentation snippets
-are never executed.
+are never executed. Full mode builds the CLI command catalogue unless
+--binary or --help-json supplies it; --inventory-only checks source inventory
+without building.
 """
 
 import argparse
@@ -20,6 +22,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import unicodedata
 from urllib.parse import unquote
 
@@ -34,6 +37,12 @@ def catalogue(args, root):
         if args.help_json:
             payload = json.loads(Path(args.help_json).read_text())
         else:
+            if not args.binary:
+                print(
+                    "check-doc-truth: building CLI help with cargo run; use --binary, "
+                    "--help-json or --inventory-only to avoid a build",
+                    file=sys.stderr, flush=True,
+                )
             command = (
                 [str(Path(args.binary).resolve()), "help", "--all", "--json"]
                 if args.binary

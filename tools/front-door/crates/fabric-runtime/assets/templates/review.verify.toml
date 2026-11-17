@@ -1,6 +1,11 @@
 doc = "Check every finding against reachable code, its trigger, practical consequence and shared cause before any writer starts. Confirm or reject with evidence, decide worth fixing, and name the invariant under repair."
 review = "verify"
-brief = "Check every finding against reachable code, its trigger, practical consequence and shared cause before any writer starts. Confirm or reject with evidence, decide worth fixing, and name the invariant under repair."
+brief = "Caller brief: ${brief}\n\nCheck every finding against reachable code, its trigger, practical consequence and shared cause before any writer starts. Preserve its exact qualified id and evidence. Each findings entry needs a non-empty top-level reason explaining verification, separate from triage.reason. Confirm or reject with evidence, decide worth fixing, and name the invariant under repair."
 tier = "senior"
 access = "read_only"
 outputs = ["result", "findings", "verdict"]
+
+[parameters.brief]
+type = "string"
+default = "Review the pinned subject against its acceptance criteria."
+doc = "The caller's review brief, passed through the full review panel."

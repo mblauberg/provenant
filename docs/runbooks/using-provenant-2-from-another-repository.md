@@ -156,14 +156,17 @@ Your scripts can tell when they run inside a lane and adapt:
 | Am I sandboxed? | `PROVENANT_SANDBOX` is `on` |
 | A lint run that does not queue behind builds | point `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` at `PROVENANT_LANE_CARGO_LINT_TARGET` |
 | Ports for a dev server | the block from `PROVENANT_LANE_PORT_BASE`, `PROVENANT_LANE_PORT_COUNT` long |
-| Memory of my own process tree | `provenant process-tree --json` when `PROVENANT_PROCESS_TREE` is set |
+| Memory of my own process tree | `provenant process-tree --json` when `PROVENANT_PROCESS_TREE` is set; omit `--root` for the supervised command's full subtree, or pass a sampled descendant PID to select a smaller subtree |
 
 Keep these rules when your tooling and Provenant share a checkout:
 
 - Do not read or write Provenant's state root or run directories; use the
   commands above.
-- In a lane, `HOME` is the attempt's private home, not yours. Do not assume
-  your dotfiles or credentials are there.
+- A lane's `HOME` is selected during provider launch preparation. Unsandboxed
+  lanes use the caller's home by default; a provider or selected account may
+  use an account-specific or private home in either mode. Provider caches and
+  credentials may live elsewhere, so check the provider's runbook before
+  relying on a particular path.
 - Use `PROVENANT_GIT` for Git in a lane when it is set.
 - Treat an unset variable as "not in a lane", never as an error. Lanes started
   outside a project, or read-only lanes, set fewer variables; the contract's

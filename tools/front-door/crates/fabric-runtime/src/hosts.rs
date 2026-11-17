@@ -1105,6 +1105,90 @@ mod tests {
     }
 
     #[test]
+    fn typed_output_frame_round_trips_graph_and_extension_fields() {
+        let host = HostId::from_bytes([3; 16]);
+        let origin = provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([4; 16]),
+            "graph",
+            "review",
+            2,
+        )
+        .unwrap();
+        let output = facade::OutputResult::Chunk {
+            peer: provenant_records::run::PeerGraphFields {
+                peer_graph: Some(provenant_records::run::PeerGraph {
+                    host,
+                    graph_id: "graph".into(),
+                }),
+                peer_graph_collected: Some(true),
+                peer_origin_work_key: Some(origin.clone()),
+                ..Default::default()
+            },
+            length: Some(42),
+            planner_fallback: Some("bounded planner failure".into()),
+            extra: [(
+                "future_output_field".into(),
+                serde_json::json!({"kept":true}),
+            )]
+            .into(),
+            target: facade::AttemptTarget {
+                extra: Default::default(),
+                attempt: provenant_core::AttemptId::from_bytes([5; 16]),
+                host: Some(host),
+            },
+            part: facade::OutputPart::Result,
+            state: "succeeded".into(),
+            reason: None,
+            offset: 0,
+            next_offset: 2,
+            eof: true,
+            digest: provenant_core::Digest::from_bytes([6; 32]),
+            bytes: facade::OutputBytes::Utf8("ok".into()),
+        };
+        let response = PeerResponse {
+            extra: [("future_response_field".into(), serde_json::json!("kept"))].into(),
+            version: 1,
+            protocol: PROTOCOL,
+            host,
+            project: project_key(Path::new("/home/a")),
+            result: PeerResult::Output {
+                data: Box::new(output),
+                extra: [("future_result_field".into(), serde_json::json!(true))].into(),
+            },
+        };
+
+        // Production writes this typed response directly; the strict frame
+        // decoder must see every field once and retain each layer's owner.
+        let frame = serde_json::to_vec(&response).unwrap();
+        let decoded: PeerResponse =
+            provenant_records::decode(frame.as_slice(), Limits::CONFIG).unwrap();
+        assert_eq!(decoded.extra["future_response_field"], "kept");
+        let PeerResult::Output { data, extra } = decoded.result else {
+            panic!("output response expected");
+        };
+        assert_eq!(extra["future_result_field"], true);
+        let facade::OutputResult::Chunk {
+            peer,
+            length,
+            planner_fallback,
+            extra,
+            ..
+        } = *data
+        else {
+            panic!("output chunk expected");
+        };
+        assert_eq!(peer.peer_origin_work_key, Some(origin));
+        assert_eq!(peer.peer_graph.unwrap().graph_id, "graph");
+        assert_eq!(peer.peer_graph_collected, Some(true));
+        assert_eq!(length, Some(42));
+        assert_eq!(planner_fallback.as_deref(), Some("bounded planner failure"));
+        assert_eq!(
+            extra["future_output_field"],
+            serde_json::json!({"kept":true})
+        );
+    }
+
+    #[test]
     fn peer_run_subtree_cursor_round_trips_and_rejects_wrong_types() {
         let action = PeerAction::Run {
             extra: [("future_action_fact".into(), serde_json::json!(true))].into(),

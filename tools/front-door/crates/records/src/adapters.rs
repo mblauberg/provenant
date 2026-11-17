@@ -724,6 +724,12 @@ impl std::fmt::Display for UnsupportedLaunch {
 impl std::error::Error for UnsupportedLaunch {}
 
 impl AdapterSpec {
+    /// Whether account entries describe metadata for one shared local login
+    /// instead of separate registered credential trees.
+    pub fn uses_shared_local_login(&self) -> bool {
+        !self.registered_account && self.local_login
+    }
+
     /// Whether `key` names the synthetic entry of an unregistered local login.
     /// Only an adapter that has both registered accounts and a local login (agy)
     /// has one: it runs on the user's own login, so nothing is registered, probed
@@ -1096,12 +1102,12 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
-        drop_unsupported_effort: false,
+        drop_unsupported_effort: true,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
             default_network: NetworkAccess::Open,
-            effort: false,
+            effort: true,
             resume: true,
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
@@ -1828,7 +1834,7 @@ mod launch_tests {
             ("codex", effort, None),
             ("agy", effort, None),
             ("opencode", effort, None),
-            ("cursor", effort, Some(LaunchField::Effort)),
+            ("cursor", effort, None),
             ("cursor", None, None),
         ];
         for (name, effort, refused) in cases {
@@ -1851,14 +1857,14 @@ mod launch_tests {
 
     #[test]
     fn refusal_names_the_adapter_and_field() {
-        let error = AdapterSpec::get("cursor")
+        let error = AdapterSpec::get("command")
             .unwrap()
             .check_launch(&LaunchRequest {
                 effort: Some("low"),
                 ..Default::default()
             })
             .unwrap_err();
-        assert_eq!(error.adapter, "cursor");
+        assert_eq!(error.adapter, "command");
         assert_eq!(error.field, LaunchField::Effort);
     }
 

@@ -660,9 +660,10 @@ impl<'a> Service<'a> {
         &self,
         id: AttemptId,
         reason: &str,
+        workers: &dyn provenant_confinement::worktrees::WorkerObserver,
         call: &Request<'_>,
     ) -> Result<Reconciled> {
-        self.store.abandon_settlement(id, reason, call)
+        self.store.abandon_settlement(id, reason, workers, call)
     }
     pub fn reconcile(
         &self,
@@ -711,6 +712,7 @@ error_kinds! {
     OperationConflict => "OPERATION_CONFLICT", "The operation ID was already used for a different request.";
     NotFound => "NOT_FOUND", "No run record matches in this scope.";
     AmbiguousTarget => "AMBIGUOUS_TARGET", "The target names more than one node; name one of the listed nodes.";
+    AbandonBlocked => "ABANDON_BLOCKED", "Abandonment requires non-live presence, free writer exclusion and a free worktree census.";
     Nonterminal => "NONTERMINAL", "The attempt has not finished.";
     ProviderStateExpired => "PROVIDER_STATE_EXPIRED", "Retention removed the provider state this attempt needs to resume.";
     Conflict => "CONFLICT", "The run record changed concurrently or is immutable.";
@@ -822,6 +824,7 @@ impl ErrorKind {
             | Self::BuildSettings
             | Self::GuardianIdentity
             | Self::Nonterminal
+            | Self::AbandonBlocked
             | Self::ProviderStateExpired
             | Self::Conflict
             | Self::LaneDepth
@@ -911,6 +914,7 @@ impl From<&RunError> for ErrorKind {
             RunError::OperationConflict => Self::OperationConflict,
             RunError::NotFound => Self::NotFound,
             RunError::Nonterminal => Self::Nonterminal,
+            RunError::AbandonBlocked(_) => Self::AbandonBlocked,
             RunError::ProviderStateExpired => Self::ProviderStateExpired,
             RunError::Conflict | RunError::GenerationConflict { .. } => Self::Conflict,
             RunError::Cancelled => Self::Cancelled,

@@ -5,6 +5,156 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+fn set_account_directories(
+    rig: &TestRig,
+    account: &str,
+    directories: &[&std::path::Path],
+) -> Result {
+    let config_path = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
+    let mut paths = toml_edit::Array::new();
+    for directory in directories {
+        paths.push(directory.to_str().ok_or("account directory path")?);
+    }
+    doc["domains"]["accounts"]["entries"][account]["directories"] = toml_edit::value(paths);
+    fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn check_config_covers_additional_account_directories() -> Result {
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    // The public check reads only the non-secret configuration; these fixtures
+    // do not invoke provider probes or access account credentials.
+    let rig = TestRig::new()?;
+    support::register_account(
+        &rig,
+        "codex",
+        "home-alias",
+        "key-one",
+        &rig.home.join(".codex-one"),
+    )?;
+    set_account_directories(&rig, "codex-home-alias", &[&rig.home])?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 1);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 1);
+    let finding = &report["data"]["findings"][0];
+    assert_eq!(finding["rule"], "config.accounts.directory");
+    assert!(
+        finding["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HOME or its ancestor")
+    );
+
+    let rig = TestRig::new()?;
+    support::register_account(
+        &rig,
+        "codex",
+        "one",
+        "key-one",
+        &rig.home.join(".codex-one"),
+    )?;
+    support::register_account(
+        &rig,
+        "codex",
+        "two",
+        "key-two",
+        &rig.home.join("shared/child"),
+    )?;
+    set_account_directories(&rig, "codex-one", &[&rig.home.join("shared")])?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 1);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 1);
+    assert!(
+        report["data"]["findings"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("accounts codex-one and codex-two")
+    );
+
+    let rig = TestRig::new()?;
+    let primary = rig.home.join(".codex-one");
+    support::register_account(&rig, "codex", "one", "key-one", &primary)?;
+    set_account_directories(&rig, "codex-one", &[&primary.join("alias")])?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 0);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 0);
+    Ok(())
+}
+
+#[test]
+fn check_config_shares_local_login_metadata_and_keeps_other_overlaps() -> Result {
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    let rig = TestRig::new()?;
+    let shared = rig.home.join(".local/share/opencode");
+    support::register_account(&rig, "opencode", "go", "key-go", &shared)?;
+    support::register_account(&rig, "opencode", "zen", "key-zen", &shared)?;
+    set_account_directories(&rig, "opencode-go", &[&shared.join("aliases")])?;
+    set_account_directories(&rig, "opencode-zen", &[&shared.join("aliases")])?;
+    let config_path = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
+    doc["domains"]["accounts"]["entries"]["opencode-go"]["plan"] = toml_edit::value("go-plan");
+    doc["domains"]["accounts"]["entries"]["opencode-zen"]["plan"] = toml_edit::value("zen-plan");
+    fs::write(&config_path, doc.to_string())?;
+
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 0);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 0);
+    let saved: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
+    assert_eq!(
+        saved["domains"]["accounts"]["entries"]["opencode-go"]["key"].as_str(),
+        Some("key-go")
+    );
+    assert_eq!(
+        saved["domains"]["accounts"]["entries"]["opencode-go"]["plan"].as_str(),
+        Some("go-plan")
+    );
+    assert_eq!(
+        saved["domains"]["accounts"]["entries"]["opencode-zen"]["key"].as_str(),
+        Some("key-zen")
+    );
+    assert_eq!(
+        saved["domains"]["accounts"]["entries"]["opencode-zen"]["plan"].as_str(),
+        Some("zen-plan")
+    );
+
+    let rig = TestRig::new()?;
+    let shared = rig.home.join(".local/share/opencode");
+    support::register_account(&rig, "opencode", "go", "key-go", &shared)?;
+    support::register_account(&rig, "cursor", "one", "key-cursor", &shared)?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 1);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 1);
+    assert!(
+        report["data"]["findings"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("registered directories overlap")
+    );
+
+    let rig = TestRig::new()?;
+    let shared = rig.home.join(".codex-isolated");
+    support::register_account(&rig, "codex", "one", "key-one", &shared)?;
+    support::register_account(&rig, "codex", "two", "key-two", &shared.join("nested"))?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 1);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 1);
+    assert!(
+        report["data"]["findings"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("accounts codex-one and codex-two")
+    );
+    Ok(())
+}
+
 #[test]
 fn register_creates_a_missing_state_root_before_probing() -> Result {
     let mut rig = TestRig::new()?;
