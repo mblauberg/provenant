@@ -84,6 +84,7 @@ impl RunStore {
         &self,
         id: AttemptId,
         call: &Request<'_>,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<LockGuard> {
         self.record(id, call)?;
         let run = self.attempt_dir(id, false)?;
@@ -94,14 +95,18 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        self.ensure_provider_state_not_expired(id)?;
+        self.ensure_provider_state_not_expired(id, policy)?;
         Ok(lease)
     }
 
     /// Check the retention marker while the caller holds the attempt's
     /// publication fence. The caller's exclusive lock also excludes GC, so it
     /// can preserve the usual retention guarantee without reacquiring a lock.
-    pub(crate) fn ensure_provider_state_not_expired(&self, id: AttemptId) -> Result<()> {
+    pub(crate) fn ensure_provider_state_not_expired(
+        &self,
+        id: AttemptId,
+        _policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         let attempt = self.attempt_dir(id, false)?;
         match attempt.metadata_at(OsStr::new(EXPIRED), false) {
             Ok(_) => return Err(RunError::ProviderStateExpired),
@@ -2389,7 +2394,11 @@ mod tests {
         assert_eq!(fs::read_to_string(attempt.join("stdout.log"))?, "capture");
         assert_eq!(store.record(terminal.attempt_id, &call)?, terminal);
         assert!(matches!(
-            store.retain_provider_state(terminal.attempt_id, &call),
+            store.retain_provider_state(
+                terminal.attempt_id,
+                &call,
+                &provenant_records::policy::Policy::default()
+            ),
             Err(RunError::ProviderStateExpired)
         ));
         assert!(
@@ -2994,8 +3003,11 @@ mod tests {
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         assert!(matches!(
-            pair.store
-                .retain_provider_state(AttemptId::from_bytes([6; 16]), &call),
+            pair.store.retain_provider_state(
+                AttemptId::from_bytes([6; 16]),
+                &call,
+                &provenant_records::policy::Policy::default()
+            ),
             Err(RunError::ProviderStateExpired)
         ));
         assert!(

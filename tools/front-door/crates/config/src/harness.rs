@@ -180,13 +180,14 @@ pub fn legacy_harness_selectors(
     roots: &provenant_core::Roots,
     home: &Path,
     accounts: &[crate::AccountHome],
+    policy: std::sync::Arc<provenant_records::policy::Policy>,
 ) -> Result<Vec<(PathBuf, &'static str)>, InstallError> {
     let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
         .iter()
         .map(|spec| spec.id)
         .filter(|harness| harness.spec().install.is_some())
         .collect();
-    let mut targets = Targets::new(roots.clone(), home, &harnesses);
+    let mut targets = Targets::new(roots.clone(), home, &harnesses, policy);
     targets.accounts = accounts.to_vec();
     let mut seen = BTreeSet::new();
     let mut found = Vec::new();
@@ -849,7 +850,12 @@ impl Targets {
             .iter_mut()
             .filter(|target| target.harness == harness)
         {
-            let default = Targets::new(self.roots.clone(), &self.home, &[target.harness]);
+            let default = Targets::new(
+                self.roots.clone(),
+                &self.home,
+                &[target.harness],
+                self.policy.clone(),
+            );
             if !default.harnesses.is_empty() {
                 if !self.configured_homes.contains(&target.harness) {
                     self.environment_homes.insert(target.harness);

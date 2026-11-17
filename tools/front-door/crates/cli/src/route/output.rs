@@ -71,6 +71,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                 }
                 let pools = context.catalogue.admission_pools(&model);
                 let admission = provenant_quota::Admission {
+                    policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds: now,
                     records,

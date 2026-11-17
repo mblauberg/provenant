@@ -74,12 +74,25 @@ impl Settings {
 /// Resolve one immutable launch snapshot. Invalid optional policy settings warn
 /// and retain compiled defaults, without changing the four boundaries.
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
-    use std::io::Write;
-    let settings = crate::read_domain::<Settings>(state, "policy").unwrap_or_else(|error| {
+    read_reporting(state, project, dispatch, |error| {
+        use std::io::Write;
         let _ = writeln!(
             std::io::stderr().lock(),
             "policy settings unavailable ({error}); using compiled defaults"
         );
+    })
+}
+
+/// As [`read`], but hands an unreadable-settings error to `report` so a caller
+/// with its own output contract decides how to surface it.
+pub fn read_reporting(
+    state: &Path,
+    project: &str,
+    dispatch: &BTreeMap<String, Strength>,
+    report: impl FnOnce(&dyn std::fmt::Display),
+) -> Policy {
+    let settings = crate::read_domain::<Settings>(state, "policy").unwrap_or_else(|error| {
+        report(&error);
         Settings::default()
     });
     let mut policy = Policy::default();

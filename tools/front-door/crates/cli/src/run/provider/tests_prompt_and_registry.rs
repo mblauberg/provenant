@@ -429,8 +429,9 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         fn stream(
             &self,
             continuation: Option<&Continuation>,
+            policy: &provenant_records::policy::Policy,
         ) -> Result<StreamState, ProviderError> {
-            provenant_providers::command::Command.stream(continuation)
+            provenant_providers::command::Command.stream(continuation, policy)
         }
         fn observe(
             &self,

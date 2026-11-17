@@ -1064,6 +1064,8 @@ impl Repo for GitRepo<'_> {
             "land",
             &self.project,
             &self.host_state,
+            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )
         .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
         let execution = forge

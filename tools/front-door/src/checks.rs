@@ -440,7 +440,17 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"))
                 })
                 .transpose()?;
-            let mut targets = Targets::new(roots.clone(), &home, &[]);
+            let mut targets = Targets::new(
+                roots.clone(),
+                &home,
+                &[],
+                // Install inspection has no project binding.
+                std::sync::Arc::new(provenant_config::policy::read(
+                    roots.state.as_path(),
+                    "",
+                    &Default::default(),
+                )),
+            );
             // A configuration defect is `check config`'s finding. It must not
             // stop this check, which then has no registered accounts to compare.
             if let Ok(config) = provenant_cli::config_reads::read_for(&roots, "check install") {
