@@ -4429,7 +4429,9 @@ mod writer_recovery_tests {
             (true, false, false, true, false, Marker::None),
             (true, true, false, true, false, ExplicitCancel),
             (true, true, false, true, false, Marker::Deadline),
-            (true, false, false, true, false, Marker::LateDirty),
+            // Unchanged and unshared: the worktree is still at the base, so the late
+            // edit is uncommitted work (a writer that already committed is not).
+            (false, false, false, false, false, Marker::LateDirty),
             (true, false, false, true, false, DeliveredSteer),
             (true, false, false, true, false, DeliveredSteerUnavailable),
             (true, false, false, true, false, ExplicitCancel),
@@ -4723,7 +4725,7 @@ mod writer_recovery_tests {
                 observed.stop_reason = Some(StopReason::ExplicitCancellation);
                 observed.cancel_delivered_before_exit = Some(true);
             }
-            let deferred_outcome = changed && shared && !dirty && !budget && plain;
+            let deferred_outcome = (changed && shared || late) && !dirty && !budget && plain;
             let mut first_exit = observed.clone();
             first_exit.unresolved_cleanup = deferred_outcome;
             crate::dispatch_tests::seal_exit(&store, &first_exit)?;
