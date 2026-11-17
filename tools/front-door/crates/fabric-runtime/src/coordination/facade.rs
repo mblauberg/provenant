@@ -442,6 +442,22 @@ fn safe_template_name_error(reason: &str) -> Option<String> {
     Some(message.to_owned())
 }
 
+/// Trusted in-process I/O detail; raw paths and source messages are never kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IoCause {
+    Fixed(&'static str),
+    Filesystem(String),
+}
+
+impl IoCause {
+    fn detail(&self) -> &str {
+        match self {
+            Self::Fixed(detail) => detail,
+            Self::Filesystem(detail) => detail,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
@@ -617,9 +633,9 @@ pub enum FacadeError {
         resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_failure: Option<provenant_records::diagnostic::IoFact>,
-        /// The source error's fixed text, kept in-process for local edges.
+        /// Safe typed metadata kept in-process; peers cannot supply diagnostic text.
         #[serde(skip)]
-        cause: Option<&'static str>,
+        cause: Option<Box<IoCause>>,
     },
 }
 
@@ -1005,9 +1021,9 @@ impl FacadeError {
             Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
                 projected = projected.detail("repository fact output exceeded its capture limit");
             }
-            // Only the in-process fixed cause is disclosed: operation text can
-            // arrive from a peer and the path is unanchored.
-            Self::Io { cause: Some(cause), .. } => projected = projected.detail(*cause),
+            // Only in-process metadata or a fixed cause is disclosed: operation
+            // text can arrive from a peer and the path is unanchored.
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(cause.detail()),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
@@ -1370,7 +1386,7 @@ impl FacadeError {
     pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
         let mut error = Self::io(operation);
         if let Self::Io { cause: slot, .. } = &mut error {
-            *slot = cause;
+            *slot = cause.map(|cause| Box::new(IoCause::Fixed(cause)));
         }
         error
     }
@@ -1378,8 +1394,61 @@ impl FacadeError {
     /// The source error's fixed text, when this failure kept one.
     pub fn cause(&self) -> Option<&'static str> {
         match self {
-            Self::Io { cause, .. } => *cause,
+            Self::Io { cause, .. } => match cause.as_deref() {
+                Some(IoCause::Fixed(cause)) => Some(*cause),
+                _ => None,
+            },
             _ => None,
+        }
+    }
+
+    fn safe_io_detail(operation: &'static str, role: &str, source: &std::io::Error) -> String {
+        let mut detail = format!(
+            "{operation} ({role}): {:?}; errno {:?}",
+            source.kind(),
+            source.raw_os_error()
+        );
+        while detail.len() > 256 {
+            detail.pop();
+        }
+        detail
+    }
+
+    /// Only fixed operation/role labels and OS metadata may enter this detail.
+    pub fn io_failure(
+        operation: &'static str,
+        role: &'static str,
+        source: &std::io::Error,
+    ) -> Self {
+        let mut error = Self::io(operation);
+        if let Self::Io { cause, .. } = &mut error {
+            *cause = Some(Box::new(IoCause::Filesystem(Self::safe_io_detail(
+                operation, role, source,
+            ))));
+        }
+        error
+    }
+
+    fn filesystem_role(path: &std::path::Path) -> &'static str {
+        match path.file_name().and_then(std::ffi::OsStr::to_str) {
+            Some("worktrees") => return "worktree registry directory",
+            Some("refs") => return "Git refs directory",
+            Some("index.lock" | "packed-refs.lock" | "config.lock" | "HEAD.lock") => {
+                return "Git lock file";
+            }
+            _ => {}
+        }
+        if path
+            .components()
+            .any(|part| part.as_os_str() == "worktrees")
+        {
+            "worktree registry entry"
+        } else if path.components().any(|part| part.as_os_str() == "refs") {
+            "Git ref entry"
+        } else if path.components().any(|part| part.as_os_str() == ".git") {
+            "Git metadata entry"
+        } else {
+            "filesystem entry"
         }
     }
 
@@ -1392,6 +1461,15 @@ impl FacadeError {
         anchor: Option<&std::path::Path>,
     ) -> Self {
         use provenant_os::fs::FsError;
+        let io = match error {
+            FsError::Io {
+                operation, source, ..
+            } => Some((*operation, source)),
+            FsError::ReadIo { source, .. } => Some(("read file", source)),
+            FsError::Rename { source, .. } => Some(("rename filesystem entry", source)),
+            FsError::Symlink { source, .. } => Some(("resolve filesystem entry", source)),
+            _ => None,
+        };
         let (operation, path) = match error {
             FsError::Io {
                 operation, path, ..
@@ -1411,7 +1489,25 @@ impl FacadeError {
             delivery_stage: None,
             resource: None,
             input_failure: None,
-            cause: None,
+            cause: io.map(|(operation, source)| {
+                let role = match error {
+                    FsError::Rename {
+                        from_path, to_path, ..
+                    } => format!(
+                        "{} into {}",
+                        Self::filesystem_role(from_path),
+                        Self::filesystem_role(to_path)
+                    ),
+                    _ => path
+                        .as_deref()
+                        .map(Self::filesystem_role)
+                        .unwrap_or("filesystem entry")
+                        .to_owned(),
+                };
+                Box::new(IoCause::Filesystem(Self::safe_io_detail(
+                    operation, &role, source,
+                )))
+            }),
             operation: operation.into(),
             path: path
                 .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))

@@ -32,6 +32,11 @@ A missing observation reference never erases a previously saved reference.
 - Why: one sibling's short repository mutation must not fail another writer or
   monopolise custody while waiting for it.
 
+Writer-binding I/O failures retain bounded operation, path-role and OS error
+metadata in the facade diagnostic and graph advance error. Raw paths, error
+messages and Git output are not diagnostic detail. Only classified contention
+is retried; unrelated I/O failures remain terminal binding failures.
+
 Graph retry holds the graph journal before it acquires run-store launcher
 exclusion, then publication and custody locks. It withdraws a queued attempt
 under launcher exclusion before saving the graph reset. A started attempt or

@@ -507,6 +507,44 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
     }
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn writer_io_keeps_bounded_operation_metadata_without_private_values() {
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_os::fs::FsError;
+    for (failure, operation, role, kind) in [
+        (FsError::Io {
+            operation: "mkdirat",
+            path: "/private/TOKEN_SENTINEL/worktrees".into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "TOKEN_SENTINEL"),
+        }, "mkdirat", "worktree registry directory", "PermissionDenied"),
+        (FsError::Rename {
+            from_path: "/private/TOKEN_SENTINEL/worktrees/stage".into(),
+            to_path: "/private/TOKEN_SENTINEL/worktrees".into(),
+            source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "TOKEN_SENTINEL"),
+        }, "rename filesystem entry", "worktree registry entry into worktree registry directory", "AlreadyExists"),
+    ] {
+        let error = run_error(provenant_run::RunError::Writer(WorktreeError::CreateFailed {
+            cause: Box::new(WorktreeError::Filesystem(failure)),
+            rolled_back: true,
+        }));
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "io");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains(operation));
+        assert!(detail.contains(role));
+        assert!(detail.contains(kind));
+        assert!(detail.len() <= 256);
+        assert!(!detail.contains("TOKEN_SENTINEL"));
+        assert!(!detail.contains("/private"));
+        // In-process metadata cannot be supplied by an untrusted peer.
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        let decoded: FacadeError = serde_json::from_str(&wire).unwrap();
+        assert!(decoded.diagnostic().detail.is_none());
+    }
+}
+
 #[test]
 fn process_limit_retains_io_code_and_safe_resource_facts() {
     let failure = || {

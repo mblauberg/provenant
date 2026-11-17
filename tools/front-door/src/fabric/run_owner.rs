@@ -544,6 +544,56 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     {
         return FacadeError::WriterBusy { holder: *holder };
     }
+    fn writer_filesystem(
+        error: &provenant_confinement::worktrees::WorktreeError,
+    ) -> Option<&provenant_os::fs::FsError> {
+        use provenant_confinement::{repo::RepoError, worktrees::WorktreeError};
+        match error {
+            WorktreeError::Filesystem(fs)
+            | WorktreeError::Repository(RepoError::Fs(fs))
+            | WorktreeError::Utility(provenant_confinement::utility::UtilityError::Filesystem(
+                fs,
+            )) => Some(fs),
+            WorktreeError::CreateFailed { cause, .. } => writer_filesystem(cause),
+            _ => None,
+        }
+    }
+    if let provenant_run::RunError::OperationIo {
+        operation, source, ..
+    } = &error
+    {
+        return FacadeError::io_failure(operation, "run state", source);
+    }
+    let filesystem = match &error {
+        provenant_run::RunError::Filesystem(fs) => Some(fs),
+        provenant_run::RunError::Writer(writer) => writer_filesystem(writer),
+        _ => None,
+    };
+    if let Some(
+        fs @ (provenant_os::fs::FsError::Io { .. }
+        | provenant_os::fs::FsError::ReadIo { .. }
+        | provenant_os::fs::FsError::Rename { .. }),
+    ) = filesystem
+    {
+        return FacadeError::filesystem(fs);
+    }
+    // A nested OS error must not reclassify an authority, integrity or input
+    // refusal as transport. Only existing I/O outcomes follow the source chain.
+    if error.code() != "io" {
+        return fail_error(error.into());
+    }
+    // Walk typed sources, including nested CreateFailed and repository errors.
+    // Never format an error's Display: it can contain paths, Git output or secrets.
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(current) = source {
+        if let Some(fs) = current.downcast_ref::<provenant_os::fs::FsError>() {
+            return FacadeError::filesystem(fs);
+        }
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            return FacadeError::io_failure("run I/O", "run state", io);
+        }
+        source = current.source();
+    }
     fail_error(error.into())
 }
 pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {

@@ -85,7 +85,9 @@ pub(crate) fn scratch_prepare_error(
         delivery_stage: None,
         resource: None,
         input_failure: None,
-        cause,
+        cause: cause.map(|cause| {
+            Box::new(provenant_fabric_runtime::coordination::facade::IoCause::Fixed(cause))
+        }),
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
