@@ -3,7 +3,8 @@
 //! Storage only moves these bytes; it must never rewrite digested content.
 use super::*;
 
-pub(super) fn text(text: &str) -> Result<String, &'static str> {
+/// Redact known credential shapes before graph text is planned or persisted.
+pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
     let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
         .map_err(|_| "graph text redaction failed")?;
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
@@ -16,7 +17,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
 ) -> Result<T, &'static str> {
     fn visit(value: &mut serde_json::Value, content: bool) -> Result<(), &'static str> {
         match value {
-            serde_json::Value::String(value) if content => *value = text(value)?,
+            serde_json::Value::String(value) if content => *value = normalise_prompt_text(value)?,
             serde_json::Value::Array(values) => {
                 for value in values {
                     visit(value, content)?;
@@ -72,6 +73,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
                                 | "reason"
                                 | "question"
                                 | "expected"
+                                | "required_verdict"
                                 | "verdict_error"
                                 | "note"
                                 | "remaining"
@@ -101,16 +103,24 @@ pub(super) fn capture(
     input: &crate::result_capture::CapturedResult,
 ) -> Result<crate::result_capture::CapturedResult, &'static str> {
     let mut capture = input.clone();
-    capture.excerpt = text(&capture.excerpt)?;
-    capture.tail = text(&capture.tail)?;
-    capture.findings = capture.findings.as_deref().map(text).transpose()?;
+    capture.excerpt = normalise_prompt_text(&capture.excerpt)?;
+    capture.tail = normalise_prompt_text(&capture.tail)?;
+    capture.findings = capture
+        .findings
+        .as_deref()
+        .map(normalise_prompt_text)
+        .transpose()?;
     capture.verdict = capture
         .verdict
         .as_deref()
-        .map(text)
+        .map(normalise_prompt_text)
         .transpose()?
         .map(String::into_boxed_str);
-    capture.verdict_cause = capture.verdict_cause.as_deref().map(text).transpose()?;
+    capture.verdict_cause = capture
+        .verdict_cause
+        .as_deref()
+        .map(normalise_prompt_text)
+        .transpose()?;
     capture.handoff = match &capture.handoff {
         Ok(handoff) => Ok(normalise(handoff)?),
         Err(error) => {

@@ -529,7 +529,7 @@ fn retry_node_scope(
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     let normalised_brief = brief
-        .map(prompt_text::text)
+        .map(prompt_text::normalise_prompt_text)
         .transpose()
         .map_err(PatchError::invalid)?;
     let brief = normalised_brief.as_deref();

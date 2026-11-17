@@ -1400,6 +1400,8 @@ pub(crate) fn unified_graph_steer(
             source,
             provenant_records::control::CONTROL_TEXT_BYTES,
         )?;
+        let text = provenant_fabric_runtime::graph::normalise_prompt_text(&text)
+            .map_err(std::io::Error::other)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(
             factory.clock.mono_now(),
