@@ -962,6 +962,21 @@ mod tests {
     use super::*;
     use crate::Adapter;
 
+    // Spec: docs/specs/routing.md#capacity-is-not-quota
+    #[test]
+    fn unknown_error_without_http_status_preserves_unclassified_message() {
+        let mut stream = OpenCode.stream(None).unwrap();
+        let events = OpenCode.observe(&mut stream, b"{\"type\":\"error\",\"error\":{\"type\":\"unknown\",\"message\":\"fixture failure\"}}\n").unwrap();
+        assert!(events.contains(&E::Unclassified {
+            message: "fixture failure".into()
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::QuotaLimited { .. }))
+        );
+    }
+
     #[test]
     fn structured_errors_classify_auth_and_quota() {
         for (error, auth) in [

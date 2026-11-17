@@ -6934,6 +6934,15 @@ mod tests {
                     continue;
                 }
                 let starting = launch?;
+                if matches!(case, Case::PoolParentResumes) {
+                    assert_eq!(
+                        store
+                            .continuation_expectation(child, &call)?
+                            .ok_or("pool continuation expectation missing")?
+                            .session,
+                        "fixture-session"
+                    );
+                }
                 let child_running = store
                     .claim(child, &clock, &call)?
                     .ok_or("child not admitted")?;

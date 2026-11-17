@@ -145,6 +145,32 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     assert!(!nested.roots.state_root.join("quota").exists());
     Ok(())
 }
+// Spec: docs/specs/routing.md#capacity-is-not-quota
+#[test]
+fn unknown_opencode_error_settles_unclassified() {
+    use run::Providers;
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/anthropic/test".into()),
+        ..Default::default()
+    };
+    let decoded = Registry::default().decode(
+        &route,
+        b"{\"type\":\"error\",\"error\":{\"type\":\"unknown\",\"message\":\"fixture failure\"}}\n",
+        &exit,
+        Path::new("/nonexistent"),
+    ).unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Unclassified);
+    assert!(
+        decoded
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("fixture failure"))
+    );
+}
+
 #[test]
 fn claude_and_opencode_overload_reach_the_decoded_outcome() {
     let mut exit = clean_exit();

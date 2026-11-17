@@ -1,5 +1,40 @@
 use super::*;
 
+// Spec: docs/specs/routing.md#one-resolution-bounded-alternatives
+#[test]
+fn unclassified_alias_failure_reroutes_once() {
+    let mut alias = route("first");
+    alias.adapter = None;
+    alias.model = None;
+    alias.alias = Some("junior".into());
+    let document = graph(vec![node("lane", alias.clone())]);
+    let mut first = terminal(AttemptOutcome::Unclassified);
+    if let AttemptObservation::Terminal {
+        attempt_ref,
+        launched,
+        ..
+    } = &mut first
+    {
+        *attempt_ref = Some("host/first".into());
+        *launched = true;
+    }
+    let mut owner = FakeOwner {
+        quota_redraw: true,
+        retry_limit: Some(1),
+        observations: [first, terminal(AttemptOutcome::Succeeded)].into(),
+        models: [("host/first".into(), "codex/one".into())].into(),
+        ..Default::default()
+    };
+    let status = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(status.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 2);
+    assert!(owner.calls.iter().all(|(_, route)| route == &alias));
+    assert_eq!(
+        owner.prior_attempts,
+        vec![vec![], vec!["codex/one".to_owned()]]
+    );
+}
+
 #[test]
 fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
     let mut alias = route("first");
