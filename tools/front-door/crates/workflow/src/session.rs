@@ -1255,6 +1255,7 @@ mod tests {
                     digest: "",
                     commands: &CommandPrefix::default(),
                     client: Some(harness),
+                    in_lane: false,
                 },
             );
             let text = context(&response);
@@ -2810,6 +2811,7 @@ mod tests {
                 digest: "",
                 commands,
                 client: None,
+                in_lane: false,
             },
         )
     }
@@ -2819,6 +2821,71 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned()
+    }
+    // Spec: docs/specs/workflow.md#sessions
+    #[test]
+    fn lane_hook_context_withholds_chair_checkpoint_and_outside_context_is_preserved() {
+        let (_temp, root, project) = setup();
+        let session = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37";
+        let selected = store(&root, project, session);
+        save(
+            &selected,
+            b"# Goal\nChair-only checkpoint text.\n\n## Standing\n- Save notes",
+        )
+        .unwrap();
+        let mtime = set_checkpoint_time(&root, project, session);
+        let fixture = FIXTURES[0].0;
+        let response = |in_lane| {
+            hook_context_with(
+                &root,
+                project,
+                HookEvent::SessionStart,
+                fixture.as_bytes(),
+                &clock(mtime),
+                DurationMicros::ZERO,
+                Advice {
+                    digest: "",
+                    commands: &CommandPrefix::default(),
+                    client: None,
+                    in_lane,
+                },
+            )
+        };
+
+        let lane = context(&response(true));
+        assert_eq!(
+            lane,
+            "The chair owns session checkpoints; record progress in the lane handoff."
+        );
+        assert!(!lane.contains("Save:"));
+        assert!(!lane.contains("Chair-only checkpoint text"));
+        assert!(!lane.contains("Standing"));
+
+        let compact = hook_context_with(
+            &root,
+            project,
+            HookEvent::PreCompact,
+            FIXTURES[1].0.as_bytes(),
+            &clock(mtime),
+            DurationMicros::ZERO,
+            Advice {
+                digest: "",
+                commands: &CommandPrefix::default(),
+                client: None,
+                in_lane: true,
+            },
+        );
+        assert_eq!(
+            String::from_utf8(compact.stdout).unwrap().trim(),
+            "The chair owns session checkpoints; record progress in the lane handoff."
+        );
+
+        let chair = context(&response(false));
+        assert!(chair.contains("Chair-only checkpoint text."), "{chair}");
+        assert!(
+            chair.contains("Save: provenant workflow session save"),
+            "{chair}"
+        );
     }
     const FIXTURE_ID: &str = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37";
 

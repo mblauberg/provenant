@@ -633,6 +633,7 @@ mod tests {
                 digest: &digest,
                 commands: &commands,
                 client: None,
+                in_lane: false,
             },
         );
         let output = String::from_utf8(context.stdout).unwrap();

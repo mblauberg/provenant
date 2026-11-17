@@ -47,6 +47,7 @@ they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
 `checkpoint.md`.
 Hook state carries custody-ledger, lane and worktree rows; it has no checkpoint-derived PR rows or PR scan.
+Inside a lane, session hook context is one line directing progress to the lane handoff; chair checkpoint text, standing grants and save commands are withheld. Outside a lane, hook context retains the chair checkpoint guidance.
 - Why: restoring the wrong or a lost checkpoint misdirects an agent, and absent
   evidence must not read as an empty queue.
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/state.rs`
