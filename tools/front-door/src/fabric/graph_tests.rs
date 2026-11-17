@@ -919,6 +919,7 @@ mod graph_writer_admission_tests {
                 guard_boundary: None,
                 guard_resource: None,
                 confinement_guard: None,
+                continuation_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
                 detail: "pacing reserve".into(),
             });

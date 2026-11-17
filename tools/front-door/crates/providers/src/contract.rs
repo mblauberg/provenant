@@ -302,7 +302,7 @@ impl Continuation {
         };
         provenant_records::policy::Policy::default().boundary_error(
             guard.rule.code(),
-            provenant_records::policy::Facts::violation(&guard.to_string()),
+            provenant_records::policy::Facts::violation(guard.to_string()),
             ProviderError::ContinuationRefused(guard),
         )
     }

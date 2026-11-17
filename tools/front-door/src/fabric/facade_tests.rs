@@ -1562,6 +1562,7 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         guard_boundary: None,
         guard_resource: None,
         confinement_guard: None,
+        continuation_guard: None,
         cause,
         detail: "prompt token \u{1b} /private/secret".into(),
     };

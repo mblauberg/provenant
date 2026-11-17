@@ -320,7 +320,7 @@ pub(super) fn continuation_for_policy(
     if let Some(field) = route_mismatch(applied, route) {
         return Err(enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
-            provenant_records::policy::Facts::violation(&format!(
+            provenant_records::policy::Facts::violation(format!(
                 "selected continuation route field `{}` differs from the prior attempt",
                 field.name()
             )),
