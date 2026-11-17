@@ -971,7 +971,10 @@ mod tests {
         }
     }
     fn at(record: &crate::AccountRecord, now: i64) -> crate::Admission<'_> {
+        static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
+            std::sync::OnceLock::new();
         crate::Admission {
+            policy: POLICY.get_or_init(Default::default),
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: now,
             records: std::slice::from_ref(record),

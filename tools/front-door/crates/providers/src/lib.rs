@@ -150,7 +150,7 @@ macro_rules! adapter {
                 input: crate::PrepareInput<'_>,
             ) -> Result<crate::LaunchSpec, crate::ProviderError> {
                 let (access, session) = crate::launch::admit($id, &input)?;
-                let mut stream = crate::StreamState::new($id, decode);
+                let mut stream = crate::StreamState::new($id, decode, input.policy);
                 if let Some(continuation) = input.continuation {
                     continuation.bind_stream($id, &mut stream)?;
                 }
@@ -164,8 +164,9 @@ macro_rules! adapter {
             fn stream(
                 &self,
                 continuation: Option<&crate::Continuation>,
+                policy: &provenant_records::policy::Policy,
             ) -> Result<crate::StreamState, crate::ProviderError> {
-                let mut state = crate::StreamState::new($id, decode);
+                let mut state = crate::StreamState::new($id, decode, policy);
                 if let Some(continuation) = continuation {
                     continuation.bind_stream($id, &mut state)?;
                 }

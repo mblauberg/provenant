@@ -3986,6 +3986,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     assert!(matches!(
         provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: now,
             records: std::slice::from_ref(&quota_record),
@@ -4048,6 +4049,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     let admit = |route: &ResolvedRoute, at| {
         provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: at,
             records: std::slice::from_ref(&quota_record),
@@ -4165,6 +4167,7 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     };
     let admit = |route: &ResolvedRoute, now_unix_seconds| {
         provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds,
             records: std::slice::from_ref(&quota_record),

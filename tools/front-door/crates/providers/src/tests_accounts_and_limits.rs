@@ -1034,7 +1034,7 @@ fn registration_org_fingerprint_pins_on_first_available_probe() {
 }
 #[test]
 fn codex_ignores_web_search_items_with_repeated_members() -> Result<(), ProviderError> {
-    let mut stream = codex::Codex.stream(None)?;
+    let mut stream = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     let raw = b"{\"type\":\"item.started\",\"item\":{\"id\":\"item_1\",\"type\":\"web_search\",\"id\":\"exec-1\",\"query\":\"\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"web_search\",\"id\":\"exec-1\",\"query\":\"q\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n";
     codex::Codex.observe(&mut stream, raw)?;
     assert_eq!(

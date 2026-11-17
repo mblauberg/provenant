@@ -747,6 +747,8 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         // only moves when a fresh reading stops counting as fresh.
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let admission = Admission {
+            // TODO(#3371 seam): CLI owner slice supplies the operation policy.
+            policy: &provenant_records::policy::Policy::default(),
             policies: &policies,
             now_unix_seconds: now,
             records: std::slice::from_ref(record),
@@ -900,7 +902,11 @@ fn detections(
         .iter()
         .filter(|r| r.quota_source.is_some())
         .map(|r| {
-            let status = r.adapter.stream(None).and_then(|s| r.adapter.account(&s));
+            // TODO(#3371 seam): quota CLI slice must pass the host-resolved policy.
+            let status = r
+                .adapter
+                .stream(None, &provenant_records::policy::Policy::default())
+                .and_then(|s| r.adapter.account(&s));
             Detection {
                 adapter: r.adapter.id().into(),
                 accounts: {
@@ -1400,12 +1406,14 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     let policies =
         provenant_providers::scheduling_policies(&domains.quota, provenant_providers::REGISTRY);
     let mut report = schedule::report(
+        // TODO(#3371 seam): quota CLI slice supplies the host policy.
         &policies,
         &records,
         &[],
         &QuotaQuery { adapter: None },
         now,
         String::new(),
+        &provenant_records::policy::Policy::default(),
     )?;
     decorate(&mut report, &accounts, &domains.quota.display);
     decorate_login(
@@ -1554,8 +1562,16 @@ pub(crate) fn execute(
         let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
         settings.apply_calibration(&mut records, now);
-        let mut report =
-            schedule::report(&policies, &records, &detected, &query, now, report_path)?;
+        let mut report = schedule::report(
+            // TODO(#3371 seam): quota CLI slice supplies the host policy.
+            &policies,
+            &records,
+            &detected,
+            &query,
+            now,
+            report_path,
+            &provenant_records::policy::Policy::default(),
+        )?;
         decorate(&mut report, &entries, &settings.display);
         decorate_login(
             &mut report,
@@ -1797,12 +1813,14 @@ pub(crate) fn execute(
         .as_second();
     settings.apply_calibration(&mut records, now);
     let mut report = schedule::report(
+        // TODO(#3371 seam): quota CLI slice supplies the host policy.
         &policies,
         &records,
         &detected,
         &QuotaQuery { adapter: None },
         now,
         report_path,
+        &provenant_records::policy::Policy::default(),
     )?;
     decorate(&mut report, &entries, &settings.display);
     decorate_login(
@@ -1827,12 +1845,14 @@ pub(crate) fn execute(
     signal_quota(roots.state.as_path());
     // Publish all accounts even when the caller requests a filtered projection.
     let mut shown = schedule::report(
+        // TODO(#3371 seam): quota CLI slice supplies the host policy.
         &policies,
         &records,
         &detected,
         &query,
         now,
         report.report_path.clone(),
+        &provenant_records::policy::Policy::default(),
     )?;
     decorate(&mut shown, &entries, &settings.display);
     decorate_login(
@@ -3559,6 +3579,7 @@ mod tests {
                 .join("quota/report.json")
                 .to_string_lossy()
                 .into_owned(),
+            &provenant_records::policy::Policy::default(),
         )?;
         let bytes = serde_json::to_vec(&report)?;
         durable(provenant_os::fs::Directory::atomic_write_with_permissions(
@@ -3810,6 +3831,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             0,
             "/report.json".into(),
+            &provenant_records::policy::Policy::default(),
         )?;
         for (icon, expected) in [
             ("codex-removed", MOST_CONSTRAINED),
@@ -4466,6 +4488,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             100,
             "/report.json".into(),
+            &provenant_records::policy::Policy::default(),
         )?;
         let human = quota_human(&report);
         let snapshot = report.accounts[0].snapshot.as_ref().unwrap();
@@ -4579,6 +4602,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             100,
             "/report.json".into(),
+            &provenant_records::policy::Policy::default(),
         )
         .unwrap();
         assert_eq!(rep.coverage.known, 3);
@@ -4618,10 +4642,11 @@ mod tests {
         fn stream(
             &self,
             continuation: Option<&provenant_providers::Continuation>,
+            policy: &provenant_records::policy::Policy,
         ) -> Result<provenant_providers::StreamState, provenant_providers::ProviderError> {
             provenant_providers::claude::REGISTRATION
                 .adapter
-                .stream(continuation)
+                .stream(continuation, policy)
         }
         fn observe(
             &self,

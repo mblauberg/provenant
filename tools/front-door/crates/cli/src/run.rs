@@ -879,6 +879,8 @@ impl Registry<'_> {
             .map(|spec| spec.model_observation)
             .unwrap_or(provenant_records::ModelObservation::Stream);
         let model = stream_model(route);
+        // TODO(#3371 seam): settlement slice must pass the sealed attempt policy here.
+        let policy = provenant_records::policy::Policy::default();
         let mut state = match expected_session {
             Some(session) => {
                 let Some(model) = model.as_deref() else {
@@ -886,13 +888,13 @@ impl Registry<'_> {
                         "resumed provider route has no model identity for session validation",
                     ));
                 };
-                match adapter.stream_for_continuation(session, model) {
+                match adapter.stream_for_continuation(session, model, &policy) {
                     Ok(state) => state,
                     Err(_) => return Ok(failed("provider stream is unavailable")),
                 }
             }
             None => {
-                let Ok(mut state) = adapter.stream(None) else {
+                let Ok(mut state) = adapter.stream(None, &policy) else {
                     return Ok(failed("provider stream is unavailable"));
                 };
                 if let Some(model) = model.as_deref() {

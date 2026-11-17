@@ -777,7 +777,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 "../../../../../tests/fixtures/providers/codex/live-worktree_write-resume.jsonl"
             )
             .replace("FIXTURE_SESSION_IDENTIFIER", session);
-            let mut stream = Codex.stream(Some(&continuation))?;
+            let mut stream = Codex.stream(Some(&continuation), &provenant_records::policy::Policy::default())?;
             let events = Codex.observe(&mut stream, recorded.as_bytes())?;
             assert!(events.iter().any(|event| {
                 matches!(event, ProviderEvent::Session(started) if started == session)

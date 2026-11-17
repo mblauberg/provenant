@@ -510,7 +510,11 @@ pub trait Adapter: Sync {
     }
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
-    fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
+    fn stream(
+        &self,
+        continuation: Option<&Continuation>,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<StreamState, ProviderError>;
     /// Create the shared stream decoder bound to the retained session and
     /// applied model when the continuation object itself is no longer present
     /// at the custody/terminal boundary.
@@ -518,11 +522,12 @@ pub trait Adapter: Sync {
         &self,
         session: &str,
         model: &str,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<StreamState, ProviderError> {
         if session.is_empty() || model.is_empty() {
             return Err(ProviderError::UnknownIdentity);
         }
-        let mut state = self.stream(None)?;
+        let mut state = self.stream(None, policy)?;
         state.bind_identity(session, model);
         Ok(state)
     }

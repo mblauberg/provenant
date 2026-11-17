@@ -519,6 +519,15 @@ impl Holder for HostHolder<'_> {
             .map_err(|_| custody::CustodyError::InvalidRecord)? =
             registration.and_then(|entry| entry.stderr_decoder);
         if let (Some(registration), Some(route)) = (registration, record.applied_route.clone()) {
+            let request = store
+                .request(context.attempt_id, &call)
+                .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
+            let (configuration_root, _) = context.disk_roots();
+            let policy = provenant_config::policy::for_task(
+                &configuration_root,
+                &context.project_id.to_string(),
+                &request.task,
+            );
             let continuation = store
                 .continuation_expectation(context.attempt_id, &call)
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
@@ -528,13 +537,13 @@ impl Holder for HostHolder<'_> {
                         super::stream_model(&route).ok_or(custody::CustodyError::InvalidRecord)?;
                     registration
                         .adapter
-                        .stream_for_continuation(&continuation.session, &model)
+                        .stream_for_continuation(&continuation.session, &model, &policy)
                         .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?
                 }
                 None => {
                     let mut stream = registration
                         .adapter
-                        .stream(None)
+                        .stream(None, &policy)
                         .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
                     if let Some(model) = super::stream_model(&route) {
                         stream.expect_model(&model);
@@ -707,9 +716,11 @@ mod tests {
         let mut initial_frame = initial.as_bytes().to_vec();
         initial_frame.push(b'\n');
 
-        let stream = registration
-            .adapter
-            .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+        let stream = registration.adapter.stream_for_continuation(
+            EXPECTED_SESSION,
+            "gemini-3.8-flash",
+            &provenant_records::policy::Policy::default(),
+        )?;
         let first_frame = QuotaFrames {
             decoder: Mutex::new(None),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -753,9 +764,11 @@ mod tests {
                 .pending_identity_conflict
         );
 
-        let stream = registration
-            .adapter
-            .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+        let stream = registration.adapter.stream_for_continuation(
+            EXPECTED_SESSION,
+            "gemini-3.8-flash",
+            &provenant_records::policy::Policy::default(),
+        )?;
         let wrong_first_session = QuotaFrames {
             decoder: Mutex::new(None),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -806,7 +819,7 @@ mod tests {
         ] {
             let mut stream = registration
                 .adapter
-                .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash")?;
+                .stream_for_continuation(EXPECTED_SESSION, "gemini-3.8-flash", &provenant_records::policy::Policy::default())?;
             let observed = registration.adapter.observe(&mut stream, &initial_frame)?;
             assert!(observed.contains(&ProviderEvent::Session(EXPECTED_SESSION.into())));
             assert!(observed.contains(&ProviderEvent::Model("gemini-3.8-flash".into())));
@@ -850,7 +863,9 @@ mod tests {
             decoder: Mutex::new(None),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
                 adapter: registration.adapter,
-                stream: registration.adapter.stream(None)?,
+                stream: registration
+                    .adapter
+                    .stream(None, &provenant_records::policy::Policy::default())?,
                 attempt: Directory::open_anchor(&attempt_path)?,
                 state_root: temp.path().into(),
                 route,
@@ -903,9 +918,11 @@ mod tests {
             ..Default::default()
         };
         let make_frames = || -> Result<QuotaFrames, Box<dyn std::error::Error>> {
-            let stream = registration
-                .adapter
-                .stream_for_continuation("s1", "expected-model")?;
+            let stream = registration.adapter.stream_for_continuation(
+                "s1",
+                "expected-model",
+                &provenant_records::policy::Policy::default(),
+            )?;
             Ok(QuotaFrames {
                 decoder: Mutex::new(None),
                 evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -1082,7 +1099,9 @@ mod tests {
             decoder: Mutex::new(registration.stdout_decoder),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
                 adapter: registration.adapter,
-                stream: registration.adapter.stream(None)?,
+                stream: registration
+                    .adapter
+                    .stream(None, &provenant_records::policy::Policy::default())?,
                 attempt: Directory::open_anchor(&attempt_path)?,
                 state_root: state.clone(),
                 route: quota_test_route(),
@@ -1196,6 +1215,7 @@ mod tests {
         let records = crate::quota::read_cache_at(&state)?;
         assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(resets));
         let admission = provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &[],
             now_unix_seconds: observed + 1,
             records: &records,
@@ -1211,6 +1231,7 @@ mod tests {
             None
         );
         let after = provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             now_unix_seconds: resets,
             ..admission
         };
@@ -1242,7 +1263,9 @@ mod tests {
             decoder: Mutex::new(registration.stdout_decoder),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
                 adapter: registration.adapter,
-                stream: registration.adapter.stream(None)?,
+                stream: registration
+                    .adapter
+                    .stream(None, &provenant_records::policy::Policy::default())?,
                 attempt: Directory::open_anchor(&attempt)?,
                 state_root: state.clone(),
                 route: quota_test_route(),
@@ -1480,6 +1503,34 @@ mod tests {
                 "{field}"
             );
         }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+    #[test]
+    fn recovery_stream_uses_sealed_task_policy() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_providers::Adapter;
+        use provenant_records::policy::{Policy, Source, Strength};
+        let dir = tempfile::tempdir()?;
+        let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
+        let mut sealed = Policy::default();
+        sealed.overlay(
+            &[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(),
+            Source::Project,
+        );
+        child.request.task.profile.launch_policy = Some(sealed);
+        let recovered =
+            provenant_config::policy::for_task(dir.path(), "other-project", &child.request.task);
+        let stream = provenant_providers::codex::Codex
+            .stream_for_continuation("session", "model", &recovered)?;
+        assert_eq!(
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").rule.strength,
+            Strength::Refuse
+        );
+        assert_eq!(
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
+            Source::Project
+        );
         Ok(())
     }
 

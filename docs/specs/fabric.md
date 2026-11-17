@@ -143,6 +143,11 @@ never instruct.
 
 ## Bounded graphs and route fallback
 
+Policy has three operation scopes: graph-wide replay validation and expansion use
+current host then project policy; node decisions add that node's dispatch
+overlay; attempt resume, settlement, publication and recovery use the sealed
+task-profile snapshot. Host-only operations without a project use host policy.
+
 The graph runtime admits a template, document or planner fragment only after
 checking schema capability, structural limits, the fully expanded plan, the
 checkpoint envelope and selected outputs. A launch retry without a wall clock

@@ -517,6 +517,7 @@ pub fn report(
     query: &QuotaQuery,
     now: i64,
     path: String,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<QuotaReport, QuotaError> {
     validate_inputs(records, detections)?;
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
@@ -608,6 +609,7 @@ pub fn report(
         // A newer reading that clears the hold clears it here too: the one
         // rule is `Admission::refusal_holds`.
         let admission = crate::Admission {
+            policy,
             policies,
             now_unix_seconds: now,
             records,

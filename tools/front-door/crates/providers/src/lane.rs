@@ -2435,7 +2435,11 @@ mod tests {
                 spec: ProviderProfileSpec::default(),
                 observations: Default::default(),
             },
-            stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
+            stream: crate::StreamState::new(
+                "claude",
+                |_| Ok(Vec::new()),
+                &provenant_records::policy::Policy::default(),
+            ),
         }
     }
 
