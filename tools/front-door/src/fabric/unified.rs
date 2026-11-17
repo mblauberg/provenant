@@ -2708,6 +2708,36 @@ fn wait_remaining(
     }
 }
 
+/// Resolve the target's local graph and its earliest persisted launch retry.
+pub(crate) fn local_launch_retry(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
+) -> Result<
+    Option<(provenant_core::ProjectId, String, provenant_core::WallTime)>,
+    Box<dyn std::error::Error>,
+> {
+    if provenant_cli::fabric::in_lane() {
+        return Ok(None);
+    }
+    let context = match session {
+        Some(context) => context,
+        None => session.insert(read_context(edge)?.ok_or("project unavailable")?),
+    };
+    let (resolved, checkpoint) = resolve_checkpoint(
+        &context.roots.state,
+        context.identity.project,
+        target,
+        Want::Work,
+    )?;
+    Ok(checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
+        .min()
+        .map(|wake| (context.identity.project, resolved.graph, wake)))
+}
+
 /// The status rows one target names, read afresh: the wait verb's reader.
 /// `session` is opened on first use; a caller that polls keeps it, because
 /// opening resolves the repository and runs git.

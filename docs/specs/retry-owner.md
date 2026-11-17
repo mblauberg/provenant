@@ -16,7 +16,7 @@ fallbacks spend no settlement retries. Scoped account refusals remain scoped.
 
 ## Admission is distinct from observation
 
-A settlement wait observes work; it does not renew admission. Each admission
+A settlement wait observes work; it does not renew admission. A host graph waiter may drive a due persisted launch retry within the original admission allowance. Each admission
 window persists one deadline and next wake under the same operation identity.
 Transient, typed contention may back off within that window. An uncertain
 handoff reobserves the same guardian and route rather than launching a second

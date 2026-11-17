@@ -1,10 +1,11 @@
 //! `provenant wait`: block until graph targets or pull requests settle. A wait
-//! is a reader: neither expiry nor cancellation stops the work. Local graphs
+//! observes work; neither expiry nor cancellation stops it. A host waiter
+//! assists due launch retries for its selected local graphs. Local graphs
 //! share one event source; pull requests remain on forge observation.
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
 use provenant_cli::{Globals, wait::LocalCadence};
-use provenant_core::CancelToken;
+use provenant_core::{CancelToken, Clock};
 use provenant_records::Outcome;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -880,7 +881,11 @@ fn preflight_error(
     }
 }
 
-pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
+pub(crate) fn run(
+    command: provenant_cli::Wait,
+    globals: &Globals,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+) -> u8 {
     use crate::roots::{Product, Workspace};
     let mode = WaitMode::from_command(&command);
     let resolved = match crate::roots::resolve(globals, Workspace::Project, Product::Required) {
@@ -1145,6 +1150,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             let sender = sender.clone();
             let edge = &edge;
             let stop = &stop;
+            let resolved = &resolved;
             let observation = Arc::clone(&observation);
             let cadence = &cadence;
             let pending = graph_indices
@@ -1189,7 +1195,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     fallback_reason.as_deref(),
                 );
             }
-            scope.spawn(move || {
+            std::thread::Builder::new()
+                .name("graph-wait-owner".into())
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(scope, move || {
                 let mut session = None;
                 let mut observation_history = observation_history;
                 let mut pending = pending;
@@ -1246,13 +1255,45 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     if left.is_zero() {
                         break;
                     }
+                    // Assist due retries for selected local graphs. The scheduler
+                    // rechecks the checkpoint under its journal lock.
+                    let clock = provenant_os::clock::SystemClock::new();
+                    let mut until_retry = left;
+                    if let Ok(now) = clock.wall_now() {
+                        for index in &pending {
+                            let Some((_, Source::Graph(target))) = graph_sources.iter().find(|(candidate, _)| candidate == index) else {
+                                continue;
+                            };
+                            let Ok(Some((project, graph, wake))) = crate::fabric::local_launch_retry(target, edge, &mut session) else {
+                                continue;
+                            };
+                            let delay = Duration::from_micros(wake.as_micros().saturating_sub(now.as_micros()).max(0) as u64);
+                            if delay.is_zero() {
+                                let budget = provenant_core::WaitBudget::up_to(clock.mono_now(), provenant_core::DurationMicros::from_micros(
+                                    u64::try_from(deadline.saturating_duration_since(Instant::now()).as_micros()).unwrap_or(u64::MAX),
+                                ));
+                                match crate::fabric::tick_launch_retry(resolved, project, &graph, workers, budget, &stop.cancel) {
+                                    Ok(report) => for error in report.errors { eprintln!("warning: launch retry could not advance: {error}"); },
+                                    Err(error) => eprintln!("warning: launch retry for {graph} could not advance: {error}"),
+                                }
+                                // A concurrent owner may hold the journal. Retry promptly without spinning.
+                                until_retry = until_retry.min(Duration::from_millis(250));
+                            } else {
+                                until_retry = until_retry.min(delay);
+                            }
+                        }
+                    }
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() || stop.cancel.is_cancelled() {
+                        break;
+                    }
                     let wake = if let Some(source) = watcher.as_mut() {
                         let until_remote = if remote_indices.is_empty() {
                             left
                         } else {
                             next_remote_poll.saturating_duration_since(Instant::now())
                         };
-                        let wait_for = left.min(until_remote);
+                        let wait_for = left.min(until_remote).min(until_retry);
                         match source.wait(wait_for) {
                             Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
                                 Some(GraphWake::Event)
@@ -1282,7 +1323,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             }
                         }
                     } else {
-                        if !stop.pause(interval.min(left)) {
+                        if !stop.pause(interval.min(left).min(until_retry)) {
                             break;
                         }
                         Some(GraphWake::PacedFallback)
@@ -1355,7 +1396,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         next_remote_poll = Instant::now() + interval;
                     }
                 }
-            });
+            }).expect("start graph wait worker");
         }
         for (index, source) in sources.iter().enumerate() {
             if !matches!(source, Source::Pr { .. })

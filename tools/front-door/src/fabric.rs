@@ -9,9 +9,9 @@ mod lane_read_tests;
 mod refusal_detail;
 mod unified;
 pub(crate) use unified::{
-    GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,
-    read_status_rows, status_line, unified_graph_command, unified_graph_output,
-    unified_graph_steer, unified_graph_trace, unsettled_graphs,
+    GraphCommand, check_targets, command_fail, final_status_rows, graph_listing,
+    local_launch_retry, read_lane_graph, read_status_rows, status_line, unified_graph_command,
+    unified_graph_output, unified_graph_steer, unified_graph_trace, unsettled_graphs,
 };
 pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;
@@ -713,7 +713,7 @@ fn factory_mode(
 
 mod graph_execution;
 use graph_execution::*;
-pub(crate) use graph_execution::{Announce, tick_graphs};
+pub(crate) use graph_execution::{Announce, tick_graphs, tick_launch_retry};
 
 #[cfg(test)]
 #[allow(

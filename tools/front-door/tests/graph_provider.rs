@@ -2149,8 +2149,11 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
 /// Real repository-lock contention leaves concurrent launches retryable, then
 /// both launch after the lock holder releases the repository.
 fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
-    use provenant_core::RootInputs;
-    use provenant_os::fs::{Directory, LockMode, SystemPathResolver};
+    use provenant_core::{Clock, DurationMicros, RootInputs, WallTime};
+    use provenant_os::{
+        clock::SystemClock,
+        fs::{Directory, LockMode, SystemPathResolver},
+    };
 
     if !graph_fixture_available()? {
         return Ok(());
@@ -2232,19 +2235,46 @@ fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
     // Both launches have durably yielded while the real lock was held. Release
     // it before waiting so the persisted backoff can retry without lock nesting.
     drop(held);
-    for response in responses {
-        let graph = response["data"]["checkpoint"]["graph_id"]
-            .as_str()
-            .ok_or("graph id")?;
-        let waited = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
-        assert_eq!(code(&waited), 0, "{graph}: {waited:?}");
-        let checkpoint = rig.checkpoint(graph)?;
-        assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
-        assert!(
-            checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
-            "{checkpoint}"
-        );
-    }
+    std::thread::scope(|scope| -> Result {
+        let waits = responses
+            .into_iter()
+            .map(|response| {
+                let rig = &rig;
+                scope.spawn(move || {
+                    (|| -> Result {
+                        let graph = response["data"]["checkpoint"]["graph_id"]
+                            .as_str()
+                            .ok_or("graph id")?;
+                        let wake: WallTime = serde_json::from_value(
+                            response["data"]["checkpoint"]["nodes"][0]["launch_retry"]["wake_at"]
+                                .clone(),
+                        )?;
+                        let waited = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
+                        assert_eq!(code(&waited), 0, "{graph}: {waited:?}");
+                        let checkpoint = rig.checkpoint(graph)?;
+                        assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
+                        assert!(
+                            checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+                            "{checkpoint}"
+                        );
+                        // Allow another retry if both setups collide after the first wake,
+                        // plus bounded process startup and settlement on a loaded host.
+                        let bound = wake.checked_add(DurationMicros::from_seconds(25)?)?;
+                        assert!(
+                            SystemClock::new().wall_now()? <= bound,
+                            "{graph} did not settle promptly after {wake}"
+                        );
+                        Ok(())
+                    })()
+                    .map_err(|error| error.to_string())
+                })
+            })
+            .collect::<Vec<_>>();
+        for wait in waits {
+            wait.join().map_err(|_| "wait thread panicked")??;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 

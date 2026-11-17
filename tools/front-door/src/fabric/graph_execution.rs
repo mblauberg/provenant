@@ -92,10 +92,40 @@ pub(crate) fn tick_graphs(
     now: provenant_core::WallTime,
     workers: &'static dyn WorkerObserver,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
+    tick_graphs_selected(resolved, now, workers, None)
+}
+
+/// Advance only the requested local graph when its persisted launch retry is due.
+/// The journal is re-read under custody before any launch.
+pub(crate) fn tick_launch_retry(
+    resolved: &crate::roots::Resolved,
+    project: provenant_core::ProjectId,
+    graph: &str,
+    workers: &'static dyn WorkerObserver,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
+    tick_graphs_selected(
+        resolved,
+        SystemClock::new().wall_now()?,
+        workers,
+        Some((project, graph, budget, cancel)),
+    )
+}
+
+fn tick_graphs_selected(
+    resolved: &crate::roots::Resolved,
+    now: provenant_core::WallTime,
+    workers: &'static dyn WorkerObserver,
+    selected: Option<(provenant_core::ProjectId, &str, WaitBudget, &CancelToken)>,
+) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
     let mut report = crate::tick::Graphs::default();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
+        if selected.is_some_and(|(wanted, _, _, _)| wanted != project) {
+            continue;
+        }
         let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
             Ok(ids) => ids,
             Err(error) => {
@@ -104,6 +134,9 @@ pub(crate) fn tick_graphs(
             }
         };
         for id in ids {
+            if selected.is_some_and(|(_, wanted, _, _)| wanted != id) {
+                continue;
+            }
             let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
                 let checkpoint =
                     FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
@@ -134,13 +167,17 @@ pub(crate) fn tick_graphs(
                 };
                 let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
-                let cancel = CancelToken::new();
+                let tick_cancel = CancelToken::new();
+                let cancel = selected.map_or(&tick_cancel, |(_, _, _, cancel)| cancel);
+                if cancel.is_cancelled() {
+                    return Ok(false);
+                }
                 let mut journal = match FileJournal::open(
                     &resolved.roots.state,
                     project,
                     &id,
                     WaitBudget::nonblocking(clock.mono_now()),
-                    &cancel,
+                    cancel,
                     &clock,
                 ) {
                     Ok(journal) => journal,
@@ -182,7 +219,18 @@ pub(crate) fn tick_graphs(
                     Err(error) => return Err(error.into()),
                     Ok(_) => {}
                 }
-                if !due_at_start || !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                let now = clock.wall_now()?;
+                if !due_at_start
+                    || !graph_wake_due(&checkpoint, now)
+                    || (selected.is_some()
+                        && (checkpoint.cancelled
+                            || !checkpoint.nodes.iter().any(|node| {
+                                node.launch_retry
+                                    .as_ref()
+                                    .and_then(|retry| retry.wake_at)
+                                    .is_some_and(|wake| wake <= now)
+                            })))
+                {
                     return Ok(false);
                 }
                 let context =
@@ -190,10 +238,12 @@ pub(crate) fn tick_graphs(
                 if context.identity.project != project || context.in_lane {
                     return Err(EdgeError::Invalid.into());
                 }
-                // A tick has no caller wait: its launches, including writer
-                // binding, have the configured launch allowance.
-                let budget =
-                    WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
+                // Ordinary ticks use the configured launch allowance. A waiter
+                // supplies its remaining budget and cancellation token.
+                let budget = selected.map_or_else(
+                    || WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds),
+                    |(_, _, budget, _)| Ok(budget),
+                )?;
                 let mut factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
@@ -213,7 +263,7 @@ pub(crate) fn tick_graphs(
                         &mut journal,
                         &mut checkpoint,
                         budget,
-                        &cancel,
+                        cancel,
                     )?);
                 let mut owner = BoundGraphOwner {
                     writer_launch_budget: None,
@@ -227,7 +277,7 @@ pub(crate) fn tick_graphs(
                     capability_overrides: graph_capability_overrides(&execution.document),
                     exclude: graph_exclude(&execution.document),
                     budget,
-                    cancel: &cancel,
+                    cancel,
                     prices: None,
                     tick: true,
                 };

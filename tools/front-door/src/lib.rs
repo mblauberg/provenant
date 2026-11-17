@@ -1378,7 +1378,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
             process.workers(),
         ),
-        Command::Wait(cmd) => status_wait::run(cmd, globals),
+        Command::Wait(cmd) => status_wait::run(cmd, globals, process.workers()),
         Command::Land {
             numbers,
             strategy,

@@ -83,7 +83,7 @@ disclosed; unclassified graph input errors keep their generic message.
 
 ### Waits are readers
 
-Waiting observes work; timeout or cancellation does not stop it. `wait` defaults
+Waiting observes work; timeout or cancellation does not stop it. A host waiter also asks the graph scheduler to advance a due persisted launch retry for its selected local graphs, rechecking under the journal lock and spending the original wait budget. Lane and remote observations remain readers. `wait` defaults
 to `--all`, which waits for every target and returns the worst final result.
 `--any` returns at the first target that settles or needs input.
 `--fail-fast` returns at the first unsuccessful target, or after every target
