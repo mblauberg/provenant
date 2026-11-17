@@ -146,6 +146,45 @@ fn evaluate_commands(
 }
 
 /// Evaluate provenance, binding and check diagnostics once for the driver.
+/// Evidence already on record for the candidate's tree: a member head whose
+/// tree is the candidate's and whose required checks passed. The evidence is
+/// rebound to the candidate and names the head it came from.
+pub fn reusable_evidence(
+    forge: &mut dyn super::ports::Forge,
+    candidate: &Candidate,
+    definition: &GateDefinition,
+) -> Option<GateEvidence> {
+    if definition.kind != GateKind::Checks {
+        return None;
+    }
+    for step in &candidate.steps {
+        let head = &step.pr.head;
+        let Some(mut observed) = forge
+            .checks(head)
+            .ok()
+            .and_then(|runs| runs.into_iter().next())
+        else {
+            continue;
+        };
+        if observed.commit != *head || observed.tree != candidate.tree {
+            continue;
+        }
+        observed.commit = candidate.commit.clone();
+        let Ok(mut evidence) = super::adapters::bind_evidence(candidate, definition, &observed)
+        else {
+            continue;
+        };
+        if evidence.result != GateResult::Passed {
+            continue;
+        }
+        evidence
+            .extra
+            .insert("reused_from_commit".into(), head.clone().into());
+        return Some(evidence);
+    }
+    None
+}
+
 pub fn assess_evidence(
     candidate: &Candidate,
     definition: &GateDefinition,

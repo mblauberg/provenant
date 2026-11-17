@@ -381,6 +381,14 @@ impl Repo for FakeRepo {
         self.refs.remove(name);
         Ok(())
     }
+    fn list_refs(&mut self, prefix: &str) -> Result<Vec<(String, String)>, LandingError> {
+        Ok(self
+            .refs
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(name, commit)| (name.clone(), commit.clone()))
+            .collect())
+    }
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError> {
         let mut pending = vec![descendant.to_owned()];
         let mut seen = BTreeSet::new();

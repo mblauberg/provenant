@@ -101,6 +101,7 @@ pub mod adapters;
 pub mod approval;
 pub mod budget;
 pub mod candidate;
+pub mod collect;
 pub mod driver;
 pub mod gate;
 pub mod postmerge;
