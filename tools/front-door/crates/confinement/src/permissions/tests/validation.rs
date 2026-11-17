@@ -13,6 +13,66 @@ use std::path::{Path, PathBuf};
 fn fixture_credentials() -> provenant_core::CredentialRoots {
     provenant_core::CredentialRoots::for_home(Path::new("/Users/alice"))
 }
+
+#[test]
+// Spec: docs/specs/fabric.md#sources-and-read-roots
+fn read_refusal_reports_the_specific_credential_declaration_in_either_order() {
+    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+
+    let shared = PathBuf::from("/fixture/shared");
+    let lane = shared.join("lane");
+    for (grant, store, store_scope) in [
+        (
+            lane.join("endpoint"),
+            lane.join("endpoint"),
+            CredentialScope::Exact,
+        ),
+        (
+            lane.clone(),
+            lane.join("dedicated"),
+            CredentialScope::Subtree,
+        ),
+    ] {
+        for shared_first in [true, false] {
+            let mut credentials = CredentialRoots::default();
+            let add_shared = |roots: &mut CredentialRoots| {
+                roots.add(
+                    shared.clone(),
+                    CredentialScope::Subtree,
+                    "shared source",
+                    CredentialKind::Store,
+                );
+            };
+            let add_specific = |roots: &mut CredentialRoots| {
+                roots.add(
+                    store.clone(),
+                    store_scope,
+                    "specific source",
+                    CredentialKind::Store,
+                );
+            };
+            if shared_first {
+                add_shared(&mut credentials);
+                add_specific(&mut credentials);
+            } else {
+                add_specific(&mut credentials);
+                add_shared(&mut credentials);
+            }
+            let credentials = credentials.with_lane_roots(vec![lane.clone()]);
+            let error = validate_read_exec_grant(
+                &PathGrant {
+                    path: grant.clone(),
+                    scope: PathScope::Subtree,
+                },
+                &credentials,
+            )
+            .unwrap_err();
+            assert!(matches!(error, PermissionError::CredentialStore {
+                path, root, declaration_source
+            } if path == grant && root == store && declaration_source == "specific source"));
+        }
+    }
+}
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 

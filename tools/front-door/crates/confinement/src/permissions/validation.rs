@@ -526,13 +526,15 @@ impl<'a> SandboxReadAdmission<'a> {
     }
 
     fn refusal(&self, grant: &PathGrant) -> Option<&'a provenant_core::CredentialRoot> {
+        if let Some(endpoint) = self.0.entries().iter().find(|root| {
+            root.path == grant.path
+                || (grant.scope == PathScope::Subtree
+                    && root.scope == CredentialScope::Subtree
+                    && root.path.starts_with(&grant.path))
+        }) {
+            return Some(endpoint);
+        }
         self.0.entries().iter().find(|root| {
-            let encloses = grant.scope == PathScope::Subtree
-                && root.scope == CredentialScope::Subtree
-                && root.path.starts_with(&grant.path);
-            if root.path == grant.path || encloses {
-                return true;
-            }
             if self.permits_carve_out(root, grant) {
                 return false;
             }
