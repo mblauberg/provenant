@@ -31,7 +31,11 @@ pub(crate) fn exact_directory_credential_paths(
         return Err(fail("adapter declares no precise credential files"));
     }
     let mut paths = Vec::new();
-    for relative in spec.credential_files {
+    for relative in spec
+        .credential_files
+        .iter()
+        .chain(spec.credential_auxiliary_files)
+    {
         let path = Path::new(relative);
         if path.as_os_str().is_empty()
             || path.is_absolute()
@@ -44,10 +48,6 @@ pub(crate) fn exact_directory_credential_paths(
             ));
         }
         paths.push(directory.join(path));
-    }
-    if adapter == "claude" {
-        paths.push(directory.join(provenant_providers::claude::LANE_TOKEN_FILE));
-        paths.push(directory.join(provenant_providers::claude::OAUTH_REFRESH_LOCK));
     }
     if spec.credential_profile_sibling {
         paths.push(directory.with_extension("json"));

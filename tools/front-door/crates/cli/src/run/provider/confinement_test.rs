@@ -171,7 +171,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                     cwd,
                     home: &home,
                     state: &state,
-                    credential_roots: &provenant_core::CredentialRoots::default(),
+                    credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     github_roots: &[],
                     protected_worktrees: &[],
                     scratch: &scratch,
@@ -486,7 +486,8 @@ fn relocated_codex_stores_never_gain_the_builtin_package_exception()
         std::fs::create_dir_all(&nested)?;
         let shared = credential_roots(&registry, &home, &settings, &[&nested])?;
         assert!(shared.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false), "{origin}");
-        assert!(!shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
+        // Materialised reads cannot inherit the sandbox-only runtime carve-out.
+        assert!(shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
         assert!(!shared.refuses(&nested.join("ordinary"), CredentialScope::Exact, true), "{origin}");
         assert!(crate::run::admit_source_root(&project, &state, &nested, &shared, crate::run::SourceAdmissionMode::Live).is_ok(), "{origin}");
 
@@ -510,7 +511,7 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
         let store = home.join(store_name);
         let project = store.join("project");
         std::fs::create_dir_all(&project)?;
-        std::fs::create_dir_all(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let mut host = run::HostLaunchContext::from_environment(&state, &project, "git".into());
         host.credential_roots.clear();
         host.default_account_directories.clear();
