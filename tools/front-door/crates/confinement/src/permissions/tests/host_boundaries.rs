@@ -194,12 +194,16 @@ if printf overwrite > "$6"; then exit 85; fi
 
 // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
 #[test]
-fn native_shared_stores_deny_unlisted_files_outside_lanes_under_both_defaults()
+fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
     let temp = crate::test_support::tempdir()?;
     let root = provenant_os::fs::canonicalize(temp.path())?;
     let home = root.join("home");
+    let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
+    std::fs::create_dir_all(&state)?;
+    let state_secret = state.join("host-secret");
+    std::fs::write(&state_secret, b"synthetic host state\n")?;
     let executor = SystemExecutor::new(2)?;
     for store in [
         home.clone(),
@@ -213,6 +217,8 @@ fn native_shared_stores_deny_unlisted_files_outside_lanes_under_both_defaults()
         std::fs::create_dir_all(&scratch)?;
         let allowed = cwd.join("ordinary");
         let secret = store.join("unlisted-secret");
+        let project_file = project.join("ordinary");
+        std::fs::write(&project_file, b"ordinary\n")?;
         std::fs::write(&allowed, b"ordinary\n")?;
         std::fs::write(&secret, b"synthetic credential\n")?;
         let mut credentials = CredentialRoots::default();
@@ -229,13 +235,17 @@ fn native_shared_stores_deny_unlisted_files_outside_lanes_under_both_defaults()
             path: project.clone(),
             scope: PathScope::Subtree,
         }];
-        plan.selected_authentication = None;
         plan.scratch = PathGrant {
             path: scratch.clone(),
             scope: PathScope::Subtree,
         };
         plan.private_state = None;
-        profile.spec.authentication.clear();
+        // Broad selected authentication cannot turn the store protection into
+        // an enclosing grant, including when default state is below HOME.
+        profile.spec.authentication[1].roots = vec![PathGrant {
+            path: store.clone(),
+            scope: PathScope::Subtree,
+        }];
         profile.spec.allow_process_fork = true;
         profile.spec.process_executables = vec![PathGrant {
             path: "/bin/sh".into(),
@@ -258,8 +268,8 @@ fn native_shared_stores_deny_unlisted_files_outside_lanes_under_both_defaults()
             let command = launch.command(
                 &[
                     "/bin/sh".into(), "-c".into(),
-                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84".into(),
-                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(),
+                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87".into(),
+                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(),
                 ],
                 &provenant_core::AttemptId::from_bytes([10;16]),
                 &provenant_os::fs::Directory::open_anchor(&root)?,

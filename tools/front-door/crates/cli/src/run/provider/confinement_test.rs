@@ -636,6 +636,32 @@ fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
         let error = credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
         assert!(error.contains("host fixture inventory") && error.contains(credential.to_str().ok_or("path")?), "{error}");
     }
+    // Both link directions must refuse for exact declarations and inventories:
+    // a public path inside the lane cannot escape by pointing outside it.
+    for inside_to_outside in [true, false] {
+        let (credential, target, name) = if inside_to_outside {
+            (project.join("linked-token"), store.join("outside-target"), "project/linked-token")
+        } else {
+            (store.join("linked-token"), project.join("inside-target"), "linked-token")
+        };
+        std::fs::write(&target, b"synthetic")?;
+        std::os::unix::fs::symlink(&target, &credential)?;
+        for scope in [CredentialScope::Subtree, CredentialScope::Exact] {
+            host.credential_roots = vec![CredentialDeclaration {
+                root: CredentialRoot {
+                    path: if scope == CredentialScope::Subtree { store.clone() } else { credential.clone() },
+                    scope,
+                    kind: CredentialKind::Store,
+                    source: "host symlink inventory".into(),
+                },
+                inventory: CredentialInventory::Files(vec![name.into()]),
+            }];
+            let registry = Registry { host: Some(&host), ..Registry::default() };
+            let error = credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
+            assert!(error.contains("host symlink inventory") && error.contains(credential.to_str().ok_or("path")?), "{error}");
+        }
+        std::fs::remove_file(credential)?;
+    }
     // Adapter-declared files and Provenant-owned per-account files must also
     // refuse after alias resolution, even when absent from the filesystem.
     for name in [".credentials.json", provenant_providers::claude::LANE_TOKEN_FILE] {

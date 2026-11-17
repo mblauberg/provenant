@@ -837,26 +837,35 @@ pub(super) fn credential_roots(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Compare both public and resolved spellings, including aliased lane roots.
+    let mut lanes = resolved_lanes;
+    lanes.extend(lane_roots.iter().map(|path| path.to_path_buf()));
+    lanes.sort();
+    lanes.dedup();
+
     // All declarations, including built-ins, pass through this classifier.
     let mut roots = CredentialRoots::default();
     for decl in &declarations {
         let root = &decl.root;
         if root.scope == CredentialScope::Exact {
             let path = resolve_declared(&root.path, &root.source)?;
-            if resolved_lanes.iter().any(|lane| path.starts_with(lane)) {
+            if lanes
+                .iter()
+                .any(|lane| root.path.starts_with(lane) || path.starts_with(lane))
+            {
                 return Err(format!(
                     "{}: declared credential file {} lies inside lane root",
                     root.source,
-                    path.display()
+                    root.path.display()
                 ));
             }
             roots.add_entry(root.clone());
             continue;
         }
         let resolved_store = resolve_declared(&root.path, &root.source)?;
-        if resolved_lanes
+        if lanes
             .iter()
-            .any(|lane| resolved_store.starts_with(lane))
+            .any(|lane| root.path.starts_with(lane) || resolved_store.starts_with(lane))
         {
             return Err(format!(
                 "{}: credential store {} is equal to or inside lane root",
@@ -899,7 +908,10 @@ pub(super) fn credential_roots(
         };
         for path in inventory? {
             let resolved = resolve_declared(&path, &root.source)?;
-            if resolved_lanes.iter().any(|lane| resolved.starts_with(lane)) {
+            if lanes
+                .iter()
+                .any(|lane| path.starts_with(lane) || resolved.starts_with(lane))
+            {
                 return Err(format!(
                     "{}: declared credential file {} lies inside lane root",
                     root.source,
@@ -908,11 +920,6 @@ pub(super) fn credential_roots(
             }
         }
     }
-    // Both spellings are needed when a lane root is reached through an alias.
-    let mut lanes = resolved_lanes;
-    lanes.extend(lane_roots.iter().map(|path| path.to_path_buf()));
-    lanes.sort();
-    lanes.dedup();
     let roots = roots.with_lane_roots(lanes);
 
     bind_credential_roots(roots)

@@ -1249,6 +1249,16 @@ fn push_boundaries(
         }
         credential_reads.extend(mandatory.credential_alias_reads(&credential_reads));
     }
+    // A shared store is a protection with lane carve-outs, never a broad
+    // authentication grant. Discard broad reads overlapping it before checking
+    // enclosing grants against state; exact selected authentication stays usable.
+    credential_reads.retain(|grant| {
+        grant.scope == PathScope::Exact
+            || !mandatory
+                .credentials()
+                .iter()
+                .any(|root| !mandatory.lane_exceptions(root).is_empty() && grant.overlaps(root))
+    });
     // A package grant passes the existing standalone validator; it never opens
     // the credential/config/session siblings in the enclosing Codex home.
     let packages: Vec<_> = reads

@@ -1936,7 +1936,7 @@ fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
         assert!(!credentials.refuses(&project.join("ordinary"), CredentialScope::Exact, true));
         let (mut plan, mut profile) = write_grants_fixture();
         plan.credential_roots = credentials;
-        plan.network = NetworkAccess::Off;
+        plan.network = NetworkAccess::Local;
         plan.read_roots = lanes
             .iter()
             .map(|path| PathGrant {
@@ -1950,6 +1950,20 @@ fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
             scope: PathScope::Subtree,
         }];
         let source = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+        // The default state is independent of the enclosing store denial.
+        let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
+        for operation in ["file-read*", "file-write*"] {
+            assert!(
+                rule_index_with_facts(
+                    &source,
+                    RuleAction::Deny,
+                    operation,
+                    &[state.to_str().ok_or("state path")?],
+                    &["subpath"],
+                )
+                .is_some()
+            );
+        }
         for operation in [
             "file-read*",
             "file-clone",

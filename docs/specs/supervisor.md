@@ -221,10 +221,13 @@ a lane root refuses the launch.
 Adapter and host file inventories, including Provenant-owned per-account lane
 tokens and refresh locks, serve only to check that no declared credential file
 lies inside any lane root. Such a file refuses the launch, naming its origin
-and path, including when an alias resolves into a lane root. An inventory does
-not replace or narrow the store denial. Stores without an inventory retain the
-same subtree boundary. Independent sibling profiles and file declarations keep
-exact scope. No grant may enclose a store or declared credential file, or open
+and path. Both the declared path and its resolved target are checked against
+every declared and resolved lane root, so neither direction of a symlink can
+evade the boundary. An inventory does not replace or narrow the store denial. Stores without an inventory retain the
+same subtree boundary. A HOME-rooted store may enclose default state: the store
+is a protection rather than an authentication grant, and state retains its
+independent mandatory protection. Independent sibling profiles and file
+declarations keep exact scope. No grant may enclose a store or declared credential file, or open
 a store outside its lane carve-outs. Selected authentication retains its
 explicit exact-file access; a broad authentication or configuration grant
 cannot reopen a shared store.
