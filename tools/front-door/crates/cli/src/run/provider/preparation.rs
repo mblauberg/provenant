@@ -607,9 +607,20 @@ pub(crate) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
     wait: Option<u64>,
+    preparation_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
-    prepare_inner(registry, task, prompt_text, paths, resume, None, None, wait)
-        .map_err(|error| error.into_refusal())
+    prepare_inner(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        None,
+        None,
+        wait,
+        preparation_budget,
+    )
+    .map_err(|error| error.into_refusal())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1621,6 +1632,7 @@ pub(super) fn prepare_with_wait(
         Some(&locate),
         fixture_token,
         wait,
+        None,
     )
 }
 
@@ -1634,7 +1646,16 @@ fn prepare_inner(
     locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
+    preparation_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let preparation_budget = preparation_budget.or_else(|| {
+        wait.map(|seconds| {
+            provenant_core::WaitBudget::up_to(
+                provenant_core::Clock::mono_now(&provenant_os::clock::SystemClock),
+                provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
+            )
+        })
+    });
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && AdapterSpec::get(provider)
             .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
@@ -1692,6 +1713,7 @@ fn prepare_inner(
             locate_override,
             fixture_token,
             wait,
+            preparation_budget,
         )?;
         if launch.route.model.as_deref() != Some(model) {
             return Err("host-native requires its configured model; use graph routes for non-native fallback".into());
@@ -1717,6 +1739,7 @@ fn prepare_inner(
         locate_override,
         fixture_token,
         wait,
+        preparation_budget,
     )
 }
 
@@ -2476,6 +2499,7 @@ pub(super) fn prepare_candidates(
     locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
+    preparation_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(
@@ -2582,8 +2606,12 @@ pub(super) fn prepare_candidates(
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let clock = provenant_os::clock::SystemClock;
-    let writer_budget = provenant_core::WaitBudget::cli(clock.mono_now(), wait.unwrap_or(5))
-        .map_err(|error| error.to_string())?;
+    let writer_budget = preparation_budget.unwrap_or_else(|| {
+        provenant_core::WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(5_000_000),
+        )
+    });
     let writer = match &task.writer {
         Some(request) => Some(run::prepare_writer_with_context(
             request,

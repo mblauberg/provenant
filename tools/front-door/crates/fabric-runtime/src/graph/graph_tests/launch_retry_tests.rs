@@ -394,22 +394,30 @@ fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
     let document = graph(vec![node("writer", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(1, FacadeError::RepositoryLockBusy)].into(),
+        errors: [(2, FacadeError::RepositoryLockBusy)].into(),
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/queued".into()),
+        }]),
         cancelled_attempt_settled: true,
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(retry_of(&waiting.checkpoint).wake_at, Some(at(5)));
+    let accepted = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(accepted.checkpoint.nodes[0].attempts[0].attempt_ref.as_deref(), Some("host/queued"));
     assert_eq!(owner.calls.len(), 1);
 
-    // Cancellation wins before the retry wake and settles the unlaunched
-    // attempt. The launch owner is not called again even after the wake time.
-    journal.0.as_mut().unwrap().cancelled = true;
     owner.now = Some(at(5));
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(retry_of(&waiting.checkpoint).wake_at, Some(at(10)));
+    assert_eq!(owner.calls.len(), 2);
+
+    // Cancellation wins before the retry wake and settles the retained run
+    // reference. The launch owner is not called again after the wake time.
+    journal.0.as_mut().unwrap().cancelled = true;
+    owner.now = Some(at(9));
     let cancelled = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
-    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(owner.calls.len(), 2);
     assert_eq!(cancelled.checkpoint.nodes[0].state, NodeState::Skipped);
 }
 
@@ -418,6 +426,7 @@ fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
+        launch_deadline: Some(at(3600)),
         errors: [(
             1,
             crate::coordination::facade::FacadeError::DispatchUnobserved {
@@ -785,7 +794,7 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
 }
 
 #[test]
-fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
+fn a_saved_attempt_reference_keeps_its_deadline_without_retrying_other_errors() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -806,7 +815,9 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
     let pending = advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &pending.checkpoint.nodes[0];
     assert_eq!(progress.state, NodeState::Running);
-    assert!(progress.launch_retry.is_none());
+    let retry = progress.launch_retry.as_ref().expect("original launch deadline");
+    assert_eq!(retry.deadline, Some(at(3600)));
+    assert_eq!(retry.wake_at, None);
     assert_eq!(progress.attempts.len(), 1);
     assert_eq!(progress.attempts[0].attempt_ref.as_deref(), Some("host/1"));
 
@@ -817,7 +828,10 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
         .expect_err("error propagates without a disposition");
     assert!(matches!(error, GraphError::Run(_)));
     let progress = &journal.0.as_ref().unwrap().nodes[0];
-    assert!(progress.launch_retry.is_none());
+    let retry = progress.launch_retry.as_ref().expect("original launch deadline");
+    assert_eq!(retry.deadline, Some(at(3600)));
+    assert_eq!(retry.failures, 0);
+    assert_eq!(retry.wake_at, None);
     assert_eq!(progress.state, NodeState::Running);
     assert_eq!(progress.attempts[0].attempt_ref.as_deref(), Some("host/1"));
 
@@ -831,6 +845,108 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
         owner.stored_refs,
         vec![None, Some("host/1".into()), Some("host/1".into())]
     );
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_deadline() {
+    use crate::coordination::facade::FacadeError;
+
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        admission_seconds: Some(60),
+        launch_deadline: Some(at(60)),
+        errors: [(2, FacadeError::RepositoryLockBusy)].into(),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/queued".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    let first_attempt = first.checkpoint.nodes[0].attempts[0].clone();
+    assert_eq!(first_attempt.attempt_ref.as_deref(), Some("host/queued"));
+    assert_eq!(retry_of(&first.checkpoint).deadline, Some(at(60)));
+    assert_eq!(retry_of(&first.checkpoint).wake_at, None);
+
+    owner.now = Some(at(5));
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &waiting.checkpoint.nodes[0];
+    let retry = progress.launch_retry.as_ref().expect("persisted retry");
+    assert_eq!(progress.state, NodeState::Running);
+    assert_eq!(progress.attempts.len(), 1);
+    assert_eq!(progress.attempts[0].key, first_attempt.key);
+    assert_eq!(progress.attempts[0].attempt_ref, first_attempt.attempt_ref);
+    assert_eq!(retry.deadline, Some(at(60)), "retry must not renew budget");
+    assert_eq!(retry.wake_at, Some(at(10)));
+    assert_eq!(retry.failures, 1);
+
+    owner.now = Some(at(10));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.status, GraphStatus::Complete);
+    assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(done.checkpoint.nodes[0].attempts[0].key, first_attempt.key);
+    assert_eq!(done.checkpoint.nodes[0].attempts[0].attempt_ref, first_attempt.attempt_ref);
+    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.calls[0], owner.calls[1]);
+    assert_eq!(owner.calls[1], owner.calls[2]);
+    assert_eq!(
+        owner.stored_refs,
+        vec![None, Some("host/queued".into()), Some("host/queued".into())]
+    );
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_intact() {
+    use crate::coordination::facade::FacadeError;
+
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        now_after_error: Some(at(60)),
+        admission_seconds: Some(60),
+        launch_deadline: Some(at(60)),
+        errors: [(2, FacadeError::RepositoryLockBusy)].into(),
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/queued".into()),
+        }]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let attempt = pending.checkpoint.nodes[0].attempts[0].clone();
+
+    owner.now = Some(at(59));
+    let exhausted = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &exhausted.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Blocked);
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert_eq!(
+        progress.advance_owner_code.as_deref(),
+        Some("repository_lock_busy")
+    );
+    assert_eq!(progress.attempts.len(), 1);
+    assert_eq!(progress.attempts[0].key, attempt.key);
+    assert_eq!(progress.attempts[0].attempt_ref, attempt.attempt_ref);
+    let retry = progress.last_launch_retry.as_ref().expect("exhaustion evidence");
+    assert_eq!(retry.deadline, Some(at(60)));
+    assert_eq!(retry.failures, 1);
+    assert_eq!(retry.wake_at, None);
+
+    // The exhausted checkpoint remains valid and does not query or relaunch
+    // the retained run attempt on later graph advances.
+    let replayed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replayed.checkpoint, exhausted.checkpoint);
+    assert_eq!(owner.calls.len(), 2);
 }
 
 #[test]

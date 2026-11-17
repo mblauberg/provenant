@@ -23,6 +23,9 @@ scheduler persists capped exponential backoff within the original launch deadlin
 cancellation wins before any retry, and only deadline exhaustion blocks the node
 with a `launch_retry_exhausted` cause. Preparation inherits the launcher's budget
 and cancellation token, rather than creating a fresh wait allowance.
+An already-referenced queued attempt is relaunched under the same host authority,
+key and persisted retry allowance; a late preparation result cannot strand it as
+an indefinitely pending observation.
 - Why: one sibling's short repository mutation must not fail another writer or
   monopolise custody while waiting for it.
 
@@ -41,7 +44,7 @@ All repository-lock acquisitions share `worktrees::lock_repository`:
 
 | Acquisition owner | Contention disposition |
 | --- | --- |
-| `prepare_writer_with_context` / writer Git configuration | Unwind and retry launch within its existing deadline. |
+| `prepare_writer_with_context` / writer Git configuration | Launch unwinds and retries within its deadline; settlement preserves pending import and uses bounded recovery backoff. |
 | Worktree inventory and creation (`list_impl`, `create`) | Graph provisioning retries; a direct CLI command reports busy for caller retry. |
 | Worktree removal, ref retirement, `delete_ref_leased_when`, ownership retirement | No mutation on failed acquisition; CLI reports busy and GC retains for a later sweep. |
 | `doctor` shared inventory | Report busy; caller may retry. |

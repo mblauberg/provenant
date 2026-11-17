@@ -448,8 +448,10 @@ impl Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
         wait: Option<u64>,
+        preparation_budget: Option<provenant_core::WaitBudget>,
     ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
-        let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
+        let prepared =
+            provider::prepare(self, task, prompt, paths, resume, wait, preparation_budget)?;
         #[cfg(feature = "fixture")]
         let prepared = {
             let mut prepared = prepared;
@@ -765,7 +767,7 @@ impl run::Providers for Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
-        self.prepare_with_wait(task, prompt, paths, resume, None)
+        self.prepare_with_wait(task, prompt, paths, resume, None, None)
     }
 
     fn decode(

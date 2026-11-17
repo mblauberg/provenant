@@ -2439,14 +2439,13 @@ impl Factory {
                     && only.cancelled_from.is_some())
         });
         if target.node.is_none()
-            && !brief_given
             && extend.is_empty()
             && !retry_sole
-            && checkpoint.nodes.iter().all(|node| node.state.settled())
+            && (brief_given || checkpoint.nodes.iter().all(|node| node.state.settled()))
         {
             return Err(FacadeError::invalid(InvalidInputDetail::graph_reason(
                 format!(
-                    "graph retry requires unfinished work or an explicit node; node states: {}",
+                    "graph retry requires unfinished work without a replacement brief, or an explicit retryable node; node states: {}",
                     checkpoint
                         .nodes
                         .iter()
@@ -3662,14 +3661,17 @@ mod tests {
     #[test]
     fn graph_target_retry_resets_only_a_terminal_sole_node_and_resumes_unfinished_work() -> Result {
         use provenant_fabric_runtime::graph::{LaunchRetry, LaunchRetryPolicy, NodeState};
-        for (state, cancelled, multiple) in [
-            (NodeState::Failed, false, false),
-            (NodeState::Blocked, false, false),
-            (NodeState::Skipped, true, false),
-            (NodeState::Running, false, false),
-            (NodeState::Pending, false, false),
-            (NodeState::Succeeded, false, false),
-            (NodeState::Failed, false, true),
+        for (state, cancelled, multiple, brief) in [
+            (NodeState::Failed, false, false, false),
+            (NodeState::Failed, false, false, true),
+            (NodeState::Blocked, false, false, false),
+            (NodeState::Skipped, true, false, false),
+            (NodeState::Running, false, false, false),
+            (NodeState::Pending, false, false, false),
+            (NodeState::Running, false, false, true),
+            (NodeState::Pending, false, false, true),
+            (NodeState::Succeeded, false, false, false),
+            (NodeState::Failed, false, true, false),
         ] {
             let rig = crate::worktree_tests::repository()?;
             let factory = factory(&rig)?;
@@ -3742,12 +3744,12 @@ mod tests {
             })?;
             journal.save(&checkpoint)?;
             drop(journal);
+            let mut input = json!({"op":"retry", "id":document.graph_id});
+            if brief {
+                input["brief"] = json!("Replacement task");
+            }
             let result = provenant_cli::run::with_deferred_provider_launch(|| {
-                factory.graph_document(
-                    json!({"op":"retry", "id":document.graph_id}),
-                    budget,
-                    &cancel,
-                )
+                factory.graph_document(input, budget, &cancel)
             });
             let after = FileJournal::read_checkpoint(
                 &factory.context.roots.state,
@@ -3755,7 +3757,7 @@ mod tests {
                 &document.graph_id,
             )?
             .ok_or("checkpoint")?;
-            if multiple || state == NodeState::Succeeded {
+            if multiple || state == NodeState::Succeeded || brief && !state.settled() {
                 let error = result.expect_err("a settled graph needs a retry node");
                 assert!(
                     matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(ref reason)) }

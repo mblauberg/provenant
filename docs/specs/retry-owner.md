@@ -30,7 +30,9 @@ A graph-target retry resumes unfinished Pending or Running nodes without
 resetting their attempts. When a graph has exactly one failed, blocked or
 cancelled node, that target also identifies the terminal node to retry. Other
 settled graphs require an explicit node selector; refusal names the current
-node states rather than returning an unchanged success. `Factory::retry_document`
+node states rather than returning an unchanged success. A graph-only replacement
+brief requires that sole terminal node; an unfinished node refuses with its
+state instead of silently discarding the replacement. `Factory::retry_document`
 owns this choice before applying `retry_node_and_dependants`.
 - Why: resuming live work must preserve its identity, while a terminal retry
   must create a fresh generation and cannot silently do nothing.

@@ -3522,7 +3522,7 @@ impl BoundGraphOwner<'_> {
             ));
             (target, reference)
         };
-        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
         // A local attempt carries this node's exact work key. A remote attempt
         // lives in the receiver's own graph and carries its immutable origin.
         let remote_target = target
@@ -3539,6 +3539,66 @@ impl BoundGraphOwner<'_> {
         };
         if !identity_matches {
             return Err(FacadeError::StateCorrupt);
+        }
+        if !remote_target
+            && matches!(
+                attempt.state,
+                provenant_records::run::AttemptState::Queued { .. }
+            )
+        {
+            // A deferred child or delayed worker can be queued after the
+            // graph has already retained its reference. Observation must
+            // relaunch that same admitted attempt rather than leave it
+            // Pending forever.
+            let budget = self.writer_launch_budget.unwrap_or(self.budget);
+            let remaining = budget.remaining(self.factory.clock.mono_now());
+            // The worker lease protocol carries whole seconds. Defer the
+            // final subsecond slice rather than round it into a new allowance.
+            if remaining.as_micros() < 1_000_000 || self.cancel.is_cancelled() {
+                return Err(if self.cancel.is_cancelled() {
+                    FacadeError::Cancelled
+                } else {
+                    FacadeError::RepositoryLockBusy
+                });
+            }
+            let session = owner.session_with_facts(self.cancel, &self.repo_facts)?;
+            let call = owner.call(self.cancel);
+            let mut host = match &self.factory.host_launch {
+                Some(host) => host.clone(),
+                None => super::settlement::recovery_launch(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                )
+                .map_err(|_| FacadeError::io("resolve requeued graph launch context"))?,
+            };
+            super::run_owner::restore_graph_lane_path(self.factory, &key.graph_id, &mut host)?;
+            host.graph_directory = Some(self.factory.cwd.clone());
+            // Session and host recovery may consume the allowance. Sample it
+            // again at the launch boundary rather than renewing setup time.
+            let remaining = budget.remaining(self.factory.clock.mono_now());
+            if remaining.as_micros() < 1_000_000 {
+                return Err(FacadeError::RepositoryLockBusy);
+            }
+            let started = owner.with_edge(|edge| {
+                provenant_cli::run::relaunch_queued_on_host(
+                    &session,
+                    target.attempt,
+                    edge,
+                    &call,
+                    &host,
+                    std::time::Duration::from_micros(remaining.as_micros()),
+                )
+            })?;
+            if let Some(refusal) = super::run_owner::launch_refusal(&started, &[]) {
+                return Err(refusal);
+            }
+            attempt = owner.snapshot(target.clone(), budget, self.cancel)?;
+            if matches!(
+                attempt.state,
+                provenant_records::run::AttemptState::Queued { .. }
+            ) {
+                return Err(FacadeError::RepositoryLockBusy);
+            }
         }
         // A remote parent is one origin node until its receiver-owned graph
         // has drained, including children that outlive the provider process.

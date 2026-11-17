@@ -182,6 +182,27 @@ pub fn launch_budget_wrap_up(
     launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
 }
 
+/// Relaunch the same admitted graph attempt after a transient preparation
+/// refusal, retaining host authority and the caller's remaining allowance.
+pub fn relaunch_queued_on_host(
+    session: &Session,
+    attempt: AttemptId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: &run::HostLaunchContext,
+    remaining: Duration,
+) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(
+        session,
+        attempt,
+        edge,
+        call,
+        Some(host),
+        None,
+        Some(remaining.as_secs()),
+    )
+}
+
 /// Launch a queued same-session graph continuation after predecessor custody
 /// has settled and been released.
 pub fn launch_graph_continuation(
@@ -324,6 +345,7 @@ pub(super) struct PreparedProvider<'a> {
     fallback: &'a Registry<'a>,
     ready: Option<&'a run::PreparedStart>,
     provider_lease_wait: Option<u64>,
+    preparation_budget: Option<provenant_core::WaitBudget>,
 }
 
 impl PreparedProvider<'_> {
@@ -395,8 +417,14 @@ impl run::Providers for PreparedProvider<'_> {
                 self.identity_refusal(&ready.task, "prepared continuation consumed")
             });
         }
-        self.fallback
-            .prepare_with_wait(task, prompt, paths, resume, self.provider_lease_wait)
+        self.fallback.prepare_with_wait(
+            task,
+            prompt,
+            paths,
+            resume,
+            self.provider_lease_wait,
+            self.preparation_budget,
+        )
     }
     fn decode(
         &self,
@@ -507,6 +535,14 @@ pub(super) fn launch_on_host_with_wait(
     ready: Option<&run::PreparedStart>,
     provider_lease_wait: Option<u64>,
 ) -> Result<Vec<run::Started>, Fail> {
+    // Capture once before admission/preparation work. In particular, an
+    // expired ordinary allowance must never become a nonblocking sentinel.
+    let preparation_budget = provider_lease_wait.map(|seconds| {
+        provenant_core::WaitBudget::up_to(
+            call.clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
+        )
+    });
     let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
@@ -753,6 +789,7 @@ pub(super) fn launch_on_host_with_wait(
         fallback: &registry,
         ready,
         provider_lease_wait,
+        preparation_budget,
     };
     // Fixture guardians observe a recorded boot key, so the reservation must be
     // taken against the same key as on the lane-launch path of the test host.

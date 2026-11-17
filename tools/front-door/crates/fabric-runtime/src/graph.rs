@@ -3051,15 +3051,30 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     },
                 ) {
                     Ok(observation) => observation,
-                    // A launch that fails while its attempt is still starting
-                    // leaves the node stopped for good unless a disposition is
-                    // persisted here: a bounded retry wake or a blocked node.
+                    // Persist launch dispositions only before acceptance, or
+                    // for repository contention while re-observing this exact
+                    // stored attempt. Other live guardian errors must not
+                    // replace the attempt's owner or launch another one.
                     Err(error)
                         if checkpoint.nodes[node_index]
                             .attempts
                             .last()
                             .is_some_and(|last| {
-                                last.state == AttemptState::Starting && last.attempt_ref.is_none()
+                                let failed_before_acceptance = last.state
+                                    == AttemptState::Starting
+                                    && last.attempt_ref.is_none();
+                                let repository_retry_of_stored_attempt = stored_ref.is_some()
+                                    && last.state != AttemptState::Terminal
+                                    && last.attempt_ref.as_deref() == stored_ref.as_deref()
+                                    && (&error as &dyn Error)
+                                        .downcast_ref::<crate::coordination::facade::FacadeError>()
+                                        .is_some_and(|error| {
+                                            matches!(
+                                                error,
+                                                crate::coordination::facade::FacadeError::RepositoryLockBusy
+                                            )
+                                        });
+                                failed_before_acceptance || repository_retry_of_stored_attempt
                             }) =>
                     {
                         let clock = owner.wall_now();

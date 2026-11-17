@@ -958,7 +958,9 @@ struct ErrorLauncher {
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
     admission_seconds: Option<u64>,
+    launch_deadline: Option<provenant_core::WallTime>,
     launch_policy: Option<LaunchRetryPolicy>,
+    cancelled_attempt_settled: bool,
     accepted: bool,
     acceptance_lookup_error: bool,
 }
@@ -995,8 +997,18 @@ impl AttemptOwner for ErrorLauncher {
                 ..Default::default()
             })
     }
+    fn begin_launch(
+        &mut self,
+        _access: AccessMode,
+        prior: Option<provenant_core::WallTime>,
+    ) -> Result<Option<provenant_core::WallTime>, Self::Error> {
+        Ok(prior.or(self.launch_deadline))
+    }
     fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(self.accepted)
+    }
+    fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(self.cancelled_attempt_settled)
     }
     fn launch_refused_before_acceptance(
         &mut self,

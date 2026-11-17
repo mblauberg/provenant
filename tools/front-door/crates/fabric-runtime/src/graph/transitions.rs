@@ -272,9 +272,18 @@ pub(super) fn apply_attempt_observation(
             .attempts
             .last_mut()
             .ok_or("an observed attempt must have a checkpoint row")?;
-        // Any observation answers the stopped launch, so its wait
-        // is over and the checkpoint wake no longer owes it.
-        retry_was_pending = progress.launch_retry.take().is_some();
+        // Pending and Unknown answer only this wake. Keep the attempt's
+        // original admission deadline so a detached queued launch cannot
+        // renew its budget when repository contention appears later.
+        // Terminal observation ends the launch allowance altogether.
+        retry_was_pending = if matches!(&observation, AttemptObservation::Terminal { .. }) {
+            progress.launch_retry.take().is_some()
+        } else {
+            progress
+                .launch_retry
+                .as_mut()
+                .is_some_and(|retry| retry.wake_at.take().is_some())
+        };
         if retry_was_pending {
             progress.advance_owner_code = None;
         }

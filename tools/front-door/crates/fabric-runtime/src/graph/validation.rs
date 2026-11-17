@@ -1704,6 +1704,17 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     ) && last.is_some_and(|attempt| {
                         attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
                     }))
+                    || (progress.advance_error_code.as_deref() == Some("launch_retry_exhausted")
+                        && progress.advance_owner_code.as_deref() == Some("repository_lock_busy")
+                        && progress.launch_retry.is_none()
+                        && progress.last_launch_retry.as_ref().is_some_and(|retry| {
+                            retry.failures > 0
+                                && retry.deadline.is_some()
+                                && retry.wake_at.is_none()
+                        })
+                        && last.is_some_and(|attempt| {
+                            attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_some()
+                        }))
             }
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,

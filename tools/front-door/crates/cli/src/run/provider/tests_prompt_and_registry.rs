@@ -705,6 +705,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         }),
         None,
         None,
+        None,
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
     assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
