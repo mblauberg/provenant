@@ -394,6 +394,32 @@ mod tests {
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn concurrent_worktree_registry_creators_keep_private_mode() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = Directory::open_anchor(temp.path())?;
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let creators: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        subdir(&root, OsStr::new("worktrees"), true)
+                    })
+                })
+                .collect();
+            for creator in creators {
+                let directory = creator
+                    .join()
+                    .expect("creator panicked")
+                    .expect("private registry");
+                assert_eq!(directory.metadata().expect("metadata").mode & 0o777, 0o700);
+            }
+        });
+        Ok(())
+    }
+
     fn checkpoint(dir: &Directory, bytes: &[u8]) -> TestResult {
         dir.atomic_write(
             OsStr::new("process.json"),

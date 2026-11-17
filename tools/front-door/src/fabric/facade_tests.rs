@@ -310,6 +310,29 @@ fn scratch_prepare_lock_timeout_keeps_a_fixed_cause() {
         if path == ".provenant/scratch"));
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn unsafe_run_path_retains_role_and_failed_check() {
+    use provenant_fabric_runtime::coordination::facade::{RunPathCheck, RunPathRole};
+    let error = run_error(provenant_run::RunError::UnsafePath {
+        path: "worktrees/private-name".into(),
+        check: provenant_run::PathCheck::Mode,
+    });
+    assert!(matches!(
+        error,
+        FacadeError::UnsafeRunPath {
+            role: RunPathRole::Worktrees,
+            check: RunPathCheck::Mode
+        }
+    ));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "unsafe_run_path");
+    assert_eq!(
+        diagnostic.detail.as_deref(),
+        Some("run-store worktrees path failed the mode check")
+    );
+}
+
 #[test]
 fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
     let error = run_error(provenant_run::RunError::PromptTooLarge { limit: 1_048_576 });

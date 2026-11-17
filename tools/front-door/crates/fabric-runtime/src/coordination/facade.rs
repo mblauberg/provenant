@@ -6,6 +6,52 @@ use provenant_records::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Safe classification of a refused run-store path; no host path crosses the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPathRole {
+    Worktrees,
+    RunState,
+}
+
+impl std::fmt::Display for RunPathRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Worktrees => "worktrees",
+            Self::RunState => "run state",
+        })
+    }
+}
+
+/// Privacy or containment check that refused the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPathCheck {
+    Owner,
+    Mode,
+    Symlink,
+    Kind,
+    Links,
+    Containment,
+    Identity,
+    Missing,
+}
+
+impl std::fmt::Display for RunPathCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Owner => "owner",
+            Self::Mode => "mode",
+            Self::Symlink => "symlink",
+            Self::Kind => "kind",
+            Self::Links => "link count",
+            Self::Containment => "containment",
+            Self::Identity => "identity",
+            Self::Missing => "missing",
+        })
+    }
+}
+
 /// A run target is an attempt ID, optionally qualified by its owning host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptTarget {
@@ -598,6 +644,11 @@ pub enum FacadeError {
     BranchExists,
     #[error("artifact exceeds max_bytes; page it with an output read")]
     OutputTooLarge,
+    #[error("run-store {role} path failed the {check} check")]
+    UnsafeRunPath {
+        role: RunPathRole,
+        check: RunPathCheck,
+    },
     #[error("stored state is corrupt")]
     StateCorrupt,
     #[error("stored state is corrupt: {detail}")]
@@ -922,6 +973,9 @@ impl FacadeError {
         let mut projected = Diagnostic::new(self.code());
         match self {
             Self::RecordedRefusal { diagnostic, .. } => return (**diagnostic).clone(),
+            Self::UnsafeRunPath { role, check } => {
+                projected = projected.detail(format!("run-store {role} path failed the {check} check"));
+            }
             Self::GitMutationFailed { operation, lock_failure } => {
                 projected = projected.detail(format!("{operation} failed (Git reported lock failure: {lock_failure})"))
                     .next("inspect repository Git mutation state before retrying");
@@ -1101,6 +1155,7 @@ impl FacadeError {
             Self::BaseUnreachable => "base_unreachable",
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
+            Self::UnsafeRunPath { .. } => "unsafe_run_path",
             Self::StateCorrupt | Self::StateCorruptDetail { .. } => "state_corrupt",
             Self::UpgradeRequired { .. } => "upgrade_required",
             Self::UpgradeRefused => "upgrade_refused",

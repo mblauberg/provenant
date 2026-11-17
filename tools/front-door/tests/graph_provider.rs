@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::ExitCode,
 };
@@ -2171,8 +2171,10 @@ fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
         .state
         .join("worktrees")
         .join(binding.project_id().to_string());
-    fs::create_dir_all(&registry)?;
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&registry)?;
 
     let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let held = directory.try_lock(
@@ -2304,8 +2306,10 @@ fn repository_lock_contention_is_durable_without_creating_a_writer() -> Result {
         .state
         .join("worktrees")
         .join(binding.project_id().to_string());
-    fs::create_dir_all(&registry)?;
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&registry)?;
     let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let clock = SystemClock;
     let _held = directory.lock(
@@ -2440,8 +2444,10 @@ fn expanded_repository_lock_contention_remains_retryable() -> Result {
         .state
         .join("worktrees")
         .join(binding.project_id().to_string());
-    fs::create_dir_all(&registry)?;
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&registry)?;
     let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let clock = SystemClock;
     let _held = directory.lock(

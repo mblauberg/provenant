@@ -445,6 +445,29 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    if let provenant_run::RunError::UnsafePath { path, check } = &error {
+        use provenant_fabric_runtime::coordination::facade::{RunPathCheck as C, RunPathRole};
+        use provenant_run::PathCheck;
+        let role = if path
+            .components()
+            .any(|part| part.as_os_str() == "worktrees")
+        {
+            RunPathRole::Worktrees
+        } else {
+            RunPathRole::RunState
+        };
+        let check = match check {
+            PathCheck::Owner => C::Owner,
+            PathCheck::Mode => C::Mode,
+            PathCheck::Symlink => C::Symlink,
+            PathCheck::Kind => C::Kind,
+            PathCheck::Links => C::Links,
+            PathCheck::Containment => C::Containment,
+            PathCheck::Identity => C::Identity,
+            PathCheck::Missing => C::Missing,
+        };
+        return FacadeError::UnsafeRunPath { role, check };
+    }
     if let Some((path, operation)) = error.repository_lock_identity() {
         return FacadeError::RepositoryLockBusy {
             path: Some(path.display().to_string()),
