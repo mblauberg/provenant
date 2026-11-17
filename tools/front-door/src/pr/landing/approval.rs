@@ -394,6 +394,58 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn unusable_graph_diagnostic_keeps_decision_correct() -> Result<(), LandingError> {
+        use crate::pr::landing::ports::ReviewRecord;
+        use provenant_records::workflow::ReviewVerdict;
+
+        let graph = "graph-broken-review";
+        let sources = [ApprovalSource::ProvenantReview];
+        let mut forge = FakeForge::default();
+        let mut repo = FakeRepo::default();
+        let reviews = FakeReviews {
+            records: BTreeMap::from([(
+                1,
+                vec![ReviewRecord {
+                    reference: "review-attempt".into(),
+                    reviewer: "independent-reviewer".into(),
+                    head: "head".into(),
+                    verdict: ReviewVerdict::Approve,
+                    independent: true,
+                }],
+            )]),
+            unusable: BTreeMap::from([(1, vec![format!("graph {graph}: bad checkpoint digest")])]),
+            ..FakeReviews::default()
+        };
+
+        let decision = Approvals::new(&sources, &reviews)
+            .at(&mut repo, "base")
+            .decide(&mut forge, 1, "head", "writer")?;
+        let Decision::Approved(approved) = decision else {
+            return Err(LandingError::Failed(
+                "valid approval was hidden by an unusable graph".into(),
+            ));
+        };
+        assert_eq!(approved.reference, "review-attempt");
+        assert_eq!(approved.evidence.len(), 1);
+
+        let no_approval = FakeReviews {
+            unusable: BTreeMap::from([(1, vec![format!("graph {graph}: bad checkpoint digest")])]),
+            ..FakeReviews::default()
+        };
+        let decision = Approvals::new(&sources, &no_approval)
+            .at(&mut repo, "base")
+            .decide(&mut forge, 1, "head", "writer")?;
+        let Decision::Refused(reason) = decision else {
+            return Err(LandingError::Failed(
+                "unusable graph was treated as an approval".into(),
+            ));
+        };
+        assert!(reason.contains(graph), "{reason}");
+        Ok(())
+    }
+
     #[test]
     fn owner_override_is_explicit_and_records_actor_and_reason() -> Result<(), LandingError> {
         let mut forge = FakeForge::default();

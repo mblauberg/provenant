@@ -257,9 +257,6 @@ impl FileJournal {
                 Ok(Some(checkpoint)) => checkpoint,
                 Ok(None) => continue,
                 Err(error) => {
-                    if error.is_unreadable() && Self::unreadable_settled(root, project, &id)? {
-                        continue;
-                    }
                     Self::set_advance_error(root, project, &id, Some(&error.to_string()))?;
                     continue;
                 }
@@ -777,8 +774,6 @@ impl FileJournal {
                     write_pending_marker(markers, &id).map_err(|error| error.for_graph(&id))?
                 }
                 // Leave load failures for the individual graph tick to report.
-                Err(error)
-                    if error.is_unreadable() && Self::unreadable_settled(root, project, &id)? => {}
                 Err(_) => {
                     write_pending_marker(markers, &id).map_err(|error| error.for_graph(&id))?
                 }
@@ -959,7 +954,8 @@ impl FileJournal {
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
-    /// Report each unreadable byte snapshot once, independently of advance errors.
+    /// Corrupt checkpoints remain errors on every tick, independently of advance errors.
+    /// Only a genuinely absent record returns `None`.
     pub fn read_checkpoint_for_tick(
         root: &StateRoot,
         project: ProjectId,
@@ -988,51 +984,24 @@ impl FileJournal {
                 Ok(Some(stored.checkpoint))
             }
             Err(error) if error.is_unreadable() => {
-                if checkpoint_json_settled(&bytes) {
-                    return Ok(None);
-                }
                 let digest = CanonicalV1::file_digest(&bytes).to_string();
                 let name = unreadable_marker_name(graph_id);
                 let mut previous = String::new();
                 if let Ok(mut file) = directory.open_read(&name) {
                     let _ = file.by_ref().take(72).read_to_string(&mut previous);
                 }
-                if previous == digest {
-                    return Ok(None);
+                if previous != digest {
+                    let _ = directory.atomic_write(
+                        &name,
+                        ".graph-unreadable.",
+                        digest.as_bytes(),
+                        PublishMode::Replace,
+                    );
                 }
-                let _ = directory.atomic_write(
-                    &name,
-                    ".graph-unreadable.",
-                    digest.as_bytes(),
-                    PublishMode::Replace,
-                );
                 Err(UnreadableCheckpointNotice(graph_id.to_owned()).into())
             }
             Err(error) => Err(error.for_graph(graph_id).into()),
         }
-    }
-
-    /// Check only the lifecycle fields of an otherwise unreadable checkpoint.
-    pub fn unreadable_settled(
-        root: &StateRoot,
-        project: ProjectId,
-        graph_id: &str,
-    ) -> Result<bool, JournalError> {
-        let error_graph_id = graph_id.to_owned();
-        (|| {
-            if !valid_identifier(graph_id) {
-                return Err(JournalError::InvalidGraphId);
-            }
-            let directory = match graph_directory(root, project) {
-                Ok(directory) => directory,
-                Err(error) if error.is_not_found() => return Ok(false),
-                Err(error) => return Err(error.into()),
-            };
-            Ok(read_checkpoint_bytes(&directory, graph_id)
-                .map_err(|error| error.for_graph(graph_id))?
-                .is_some_and(|bytes| checkpoint_json_settled(&bytes)))
-        })()
-        .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
     /// Retire an unreadable record under its graph lock without releasing other fences.
@@ -1469,53 +1438,6 @@ pub(super) fn graph_directory(root: &StateRoot, project: ProjectId) -> Result<Di
     let fabric = root.open_verified_directory(OsStr::new("fabric"))?;
     let graphs = fabric.open_verified_directory(OsStr::new("graphs"))?;
     graphs.open_verified_directory(OsStr::new(&project.to_string()))
-}
-
-fn checkpoint_json_settled(bytes: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
-    };
-    let Some(checkpoint) = value
-        .get("checkpoint")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return false;
-    };
-    if checkpoint.get("cancelled") == Some(&serde_json::Value::Bool(true)) {
-        return true;
-    }
-    if checkpoint
-        .get("cancelled")
-        .is_some_and(|value| value != false)
-    {
-        return false;
-    }
-    let Some(nodes) = checkpoint
-        .get("nodes")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-    let terminal = nodes.iter().all(|node| {
-        matches!(
-            node.get("state").and_then(serde_json::Value::as_str),
-            Some("succeeded" | "failed" | "blocked" | "skipped")
-        )
-    });
-    // A link means an inbox request that is still open or unread.
-    let asks_closed = match checkpoint.get("asks") {
-        None => true,
-        Some(asks) => asks.as_array().is_some_and(Vec::is_empty),
-    };
-    if !terminal || !asks_closed {
-        return false;
-    }
-    let pr_delivery_pending = value
-        .pointer("/execution/document/delivery")
-        .and_then(serde_json::Value::as_str)
-        == Some("pr")
-        && checkpoint.get("delivered") != Some(&serde_json::Value::Bool(true));
-    !pr_delivery_pending
 }
 
 pub(super) fn load_checkpoint(

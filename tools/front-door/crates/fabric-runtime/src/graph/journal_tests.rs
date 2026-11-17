@@ -110,8 +110,9 @@ fn advance_reopened_prompt(prompt: &str) {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 2, "graph_id": "normalised",
+    let graph_id = "AKIAIOSFODNN7EXAMPLE";
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": graph_id,
         "provenance": {"parameters": {"brief": prompt}},
         "nodes": [{
             "id": "reader", "prompt": prompt, "acceptance_checks": [prompt],
@@ -119,9 +120,17 @@ fn advance_reopened_prompt(prompt: &str) {
         }]
     }))
     .unwrap();
+    // Exercise the production submission path before binding or advancing.
+    patch::submission(
+        &mut document,
+        "initial",
+        &plans::generous(),
+        provenant_config::PortTable::builtin().worktree_layout,
+    )
+    .unwrap();
     let first = {
         let mut journal = ReadableJournal(
-            FileJournal::open(&root, project, "normalised", budget, &cancel, &clock).unwrap(),
+            FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap(),
         );
         journal
             .0
@@ -140,7 +149,7 @@ fn advance_reopened_prompt(prompt: &str) {
             .checkpoint
     };
     assert_eq!(first.nodes[0].state, NodeState::Running);
-    let execution = FileJournal::pending_execution(&root, project, "normalised")
+    let execution = FileJournal::pending_execution(&root, project, graph_id)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -148,13 +157,13 @@ fn advance_reopened_prompt(prompt: &str) {
         prompt_text::normalise(&document).unwrap()
     );
     let mut journal = ReadableJournal(
-        FileJournal::open(&root, project, "normalised", budget, &cancel, &clock).unwrap(),
+        FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap(),
     );
     let second = advance(&execution.document, &mut Owner, &mut journal)
         .unwrap()
         .checkpoint;
     assert_eq!(first.plan_digest, second.plan_digest);
-    // Replaying the original submission also uses the same normal form.
+    // Explicit re-advance also uses the same normal form.
     advance(&document, &mut Owner, &mut journal).unwrap();
 }
 
@@ -1042,8 +1051,9 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap()
-            .is_none()
+            .unwrap_err()
+            .to_string()
+            .contains("g-test")
     );
 }
 impl AttemptOwner for Owner {
@@ -1198,8 +1208,9 @@ fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
         ["g-test"]
     );
 }
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
 #[test]
-fn tick_reports_undecodable_checkpoint_once_and_recovers() {
+fn tick_keeps_corrupt_checkpoints_visible_until_repaired() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -1227,15 +1238,17 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     assert!(first.to_string().contains("provenant stop -- g-test"));
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap()
-            .is_none()
+            .unwrap_err()
+            .to_string()
+            .contains("g-test")
     );
     FileJournal::set_advance_error(&root, project, "g-test", Some("another error")).unwrap();
     FileJournal::set_advance_error(&root, project, "g-test", None).unwrap();
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap()
-            .is_none()
+            .unwrap_err()
+            .to_string()
+            .contains("g-test")
     );
     std::fs::write(&path, &valid).unwrap();
     assert!(
@@ -1246,15 +1259,26 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     assert!(!path.with_file_name("graph-g-test.unreadable").exists());
     let mut bad_digest: serde_json::Value = serde_json::from_slice(&valid).unwrap();
     bad_digest["digest"] = "sha256:bad".into();
+    bad_digest["checkpoint"]["nodes"][0]["state"] = "succeeded".into();
+    bad_digest["checkpoint"]["cancelled"] = true.into();
     std::fs::write(&path, serde_json::to_vec(&bad_digest).unwrap()).unwrap();
+    std::fs::remove_dir_all(path.parent().unwrap().join("pending")).unwrap();
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    let status_error = FileJournal::read_status_snapshot(&root, project, "g-test").unwrap_err();
+    assert_eq!(status_error.code(), "bad_digest");
+    assert!(status_error.to_string().contains("g-test"));
     let error = FileJournal::read_checkpoint(&root, project, "g-test").unwrap_err();
     assert_eq!(error.code(), "bad_digest");
     assert!(error.to_string().contains("g-test"));
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap()
-            .is_none()
+            .unwrap_err()
+            .to_string()
+            .contains("g-test")
     );
     std::fs::write(&path, b"{} ").unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
@@ -1290,8 +1314,9 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap()
-            .is_none()
+            .unwrap_err()
+            .to_string()
+            .contains("g-test")
     );
 }
 #[test]

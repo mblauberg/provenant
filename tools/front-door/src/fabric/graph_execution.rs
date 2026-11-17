@@ -108,7 +108,8 @@ pub(crate) fn tick_graphs(
                 let checkpoint =
                     FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
                 let Some(checkpoint) = checkpoint else {
-                    // An already reported unreadable checkpoint must stay marked.
+                    // Only an absent checkpoint reaches this branch. Recheck
+                    // under the writer lock before retiring its pending marker.
                     if matches!(
                         FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
                         Ok(None)

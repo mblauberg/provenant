@@ -303,9 +303,9 @@ fn admit_patch_for_retry(
     context: &PatchContext<'_>,
     retry: Option<&str>,
 ) -> Result<Admitted, PatchError> {
-    scan(patch, context)?;
     let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
     let patch = &normalised;
+    scan(patch, context)?;
     // Initial nodes live in the immutable source, rather than being copied
     // into an expansion. They still enter through the same admission gate.
     if parent.is_none() && graph.document.submission_patch.as_ref() == Some(patch) {
@@ -528,9 +528,6 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
-    if let Some(brief) = brief {
-        (context.scan)(brief).map_err(|reason| PatchError::new("secret", reason))?;
-    }
     let normalised_brief = brief
         .map(prompt_text::text)
         .transpose()
@@ -927,6 +924,7 @@ pub fn submission(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
+    *document = prompt_text::normalise(document).map_err(PatchError::invalid)?;
     for node in &mut document.nodes {
         node.template.get_or_insert_with(|| "raw".into());
     }
@@ -1020,7 +1018,6 @@ pub fn submit(
     context: &PatchContext<'_>,
     integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
-    scan(patch, context)?;
     let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
     let patch = &normalised;
     if patch.schema_version != PATCH_SCHEMA_VERSION {
@@ -1160,7 +1157,6 @@ pub(super) fn prepare(
         Preparation::Live { retry } => retry,
         Preparation::FinalFragment => None,
     };
-    scan(patch, context)?;
     let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
     let patch = &normalised;
     if patch.schema_version != PATCH_SCHEMA_VERSION {

@@ -9,22 +9,81 @@ pub(super) fn text(text: &str) -> Result<String, &'static str> {
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
 }
 
-/// Include nested template parameters, acceptance checks and retained fields,
-/// which can all contribute text to a later prompt. Never rewrite object keys.
+/// Normalise prompt-bearing fields, including nested template arguments and
+/// findings. Identifiers, paths, routes and digests retain their exact identity.
 pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
     input: &T,
 ) -> Result<T, &'static str> {
-    fn visit(value: &mut serde_json::Value) -> Result<(), &'static str> {
+    fn visit(value: &mut serde_json::Value, content: bool) -> Result<(), &'static str> {
         match value {
-            serde_json::Value::String(value) => *value = text(value)?,
+            serde_json::Value::String(value) if content => *value = text(value)?,
             serde_json::Value::Array(values) => {
                 for value in values {
-                    visit(value)?;
+                    visit(value, content)?;
                 }
             }
             serde_json::Value::Object(values) => {
-                for value in values.values_mut() {
-                    visit(value)?;
+                for (key, value) in values {
+                    let identity = matches!(
+                        key.as_str(),
+                        "id" | "graph_id"
+                            | "node"
+                            | "source"
+                            | "reference"
+                            | "file"
+                            | "path"
+                            | "branch"
+                            | "commit"
+                            | "digest"
+                            | "route"
+                            | "routes"
+                            | "worktree"
+                            | "depends_on"
+                            | "after"
+                            | "after_settled"
+                            | "after_expansion"
+                            | "lens"
+                            | "template"
+                            | "use"
+                    );
+                    if identity {
+                        continue;
+                    }
+                    let content = content
+                        || matches!(
+                            key.as_str(),
+                            "prompt"
+                                | "brief"
+                                | "spec"
+                                | "fragment"
+                                | "excerpt"
+                                | "_artifact_findings"
+                                | "_compact_disposition_findings"
+                                | "acceptance_checks"
+                                | "parameters"
+                                | "with"
+                                | "findings"
+                                | "repair_items"
+                                | "spec_concerns"
+                                | "failed_checks"
+                                | "summary"
+                                | "description"
+                                | "detail"
+                                | "reason"
+                                | "question"
+                                | "note"
+                                | "remaining"
+                                | "decisions"
+                                | "verify"
+                                | "warnings"
+                                | "criterion"
+                                | "claim"
+                                | "evidence"
+                                | "proposed_change"
+                                | "alternative"
+                        )
+                        || value.as_str().is_some_and(|text| text.len() > 4096);
+                    visit(value, content)?;
                 }
             }
             _ => {}
@@ -32,7 +91,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
         Ok(())
     }
     let mut value = serde_json::to_value(input).map_err(|_| "cannot encode graph text")?;
-    visit(&mut value)?;
+    visit(&mut value, false)?;
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 
@@ -58,6 +117,28 @@ pub(super) fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn prompt_normalisation_preserves_control_identities() {
+        let identity = "AKIAIOSFODNN7EXAMPLE";
+        let value = serde_json::json!({
+            "graph_id": identity,
+            "nodes": [{"id": identity, "prompt": identity,
+                "depends_on": [identity], "route": {"alias": identity}}],
+            "findings": [{"id": identity, "file": identity, "summary": identity}]
+        });
+        let safe: serde_json::Value = normalise(&value).unwrap();
+        assert_eq!(safe["graph_id"], identity);
+        assert_eq!(safe["nodes"][0]["id"], identity);
+        assert_eq!(safe["nodes"][0]["depends_on"][0], identity);
+        assert_eq!(safe["nodes"][0]["route"]["alias"], identity);
+        assert_eq!(safe["findings"][0]["id"], identity);
+        assert_eq!(safe["findings"][0]["file"], identity);
+        assert_ne!(safe["nodes"][0]["prompt"], identity);
+        assert_ne!(safe["findings"][0]["summary"], identity);
+        assert_eq!(safe, normalise(&safe).unwrap());
+    }
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]

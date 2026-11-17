@@ -450,12 +450,6 @@ fn live_graph_children(
         let checkpoint = match FileJournal::read_checkpoint(state, project, &id) {
             Ok(Some(checkpoint)) => checkpoint,
             Ok(None) => return Err("missing graph checkpoint".into()),
-            Err(error)
-                if error.is_unreadable()
-                    && FileJournal::unreadable_settled(state, project, &id)? =>
-            {
-                continue;
-            }
             Err(error) => return Err(error.into()),
         };
         if let Some(parent) = relay::historical_parent_of_attempt(&checkpoint, reference) {
