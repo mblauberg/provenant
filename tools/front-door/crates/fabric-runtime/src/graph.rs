@@ -281,7 +281,9 @@ fn graph_envelope_bound(
 }
 
 pub const MAX_CANCEL_REASON_BYTES: usize = 256;
-const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
+// 16 MiB plus the pending-steer reserve (#3303 session-ready steering), so a
+// graph at the default node limit stays admitted.
+const MAX_CHECKPOINT_BYTES: u64 = 17_825_792;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
 const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;

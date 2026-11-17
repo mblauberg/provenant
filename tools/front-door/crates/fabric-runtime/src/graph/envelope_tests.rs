@@ -264,6 +264,41 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
     }
 }
 
+/// A full steer queue at its worst case: every slot used, escape-heavy text
+/// filling the shared text budget, and long identifiers.
+fn worst_case_pending_steers() -> PendingSteerQueue {
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    let host = provenant_core::HostId::from_bytes([2; 16]);
+    let requester = crate::identity::Address::new(host, "codex").unwrap();
+    let mut queue = PendingSteerQueue::default();
+    for index in 0..MAX_PENDING_GRAPH_STEERS {
+        let operation_id =
+            provenant_core::OperationId::parse(&format!("{}{index:02}", "s".repeat(100))).unwrap();
+        let work_key = provenant_records::WorkKey::new(project, "graph", "writer", 1).unwrap();
+        queue
+            .enqueue(
+                operation_id.to_string(),
+                PendingGraphSteer {
+                    operation_id: operation_id.clone(),
+                    caller_operation_id: Some(operation_id.clone()),
+                    work_key: work_key.clone(),
+                    graph_context: crate::inbox::GraphSteerContext {
+                        launch_actor: provenant_core::ActorId::from_bytes([3; 16]),
+                        launch_operation: operation_id,
+                        origin_work_key: work_key,
+                    },
+                    requester_host: host,
+                    requester_agent: requester.agent.clone(),
+                    requester_actor: requester.actor,
+                    text: "\u{1}".repeat(MAX_PENDING_GRAPH_STEER_BYTES / MAX_PENDING_GRAPH_STEERS),
+                    refusal: Some(PendingSteerRefusal::OwnerRefused),
+                },
+            )
+            .unwrap();
+    }
+    queue
+}
+
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
     let placeholder_base = provenant_core::GitOid::parse(&"f".repeat(64)).unwrap();
     let bases = GraphBaseBinding::new(
@@ -478,7 +513,7 @@ host_refused_before_acceptance: false,
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
-        pending_steers: Default::default(),
+        pending_steers: worst_case_pending_steers(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
             extra: Default::default(),
@@ -1339,6 +1374,7 @@ fn graph_status_never_serializes_pending_steer_text() {
     let document = mixed();
     let plan = planned(&document);
     let mut checkpoint = filled_checkpoint(&document, &plan);
+    checkpoint.pending_steers = PendingSteerQueue::default();
     let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let host = provenant_core::HostId::from_bytes([2; 16]);
     let actor = provenant_core::ActorId::from_bytes([3; 16]);
