@@ -253,7 +253,7 @@ fn batch_response(
         Some(LandingError::RefusedWith { cause, repair, .. }) => (Some(*cause), Some(*repair)),
         _ => (None, None),
     };
-    let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps});
+    let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps, "steps": []});
     if let Some(LandingError::Unavailable { id, reason }) = &failure {
         value["landing_id"] = serde_json::json!(id);
         value["unavailable"] = serde_json::json!(reason);
