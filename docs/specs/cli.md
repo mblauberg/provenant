@@ -196,6 +196,9 @@ Landing verifies and merges the same head, and refuses changed heads or
 incomplete required check evidence.
 
 - Why: a merge must land the head that CI verified.
+- A refused merge keeps the unified `LAND_REFUSED` code, plus a typed `cause`
+  (`HEAD_MOVED`, `MERGE_NOT_ALLOWED`) and a non-empty `repair` for the next
+  step, so callers branch on the cause rather than on message text.
 
 ### Landing adds no merge authority
 

@@ -165,6 +165,15 @@ jobs:
         if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
+      # Shipped builds omit the fixture feature. Checking and linting their lib
+      # and bin targets here keeps code that only the fixture build uses from
+      # hiding dead code or cfg gaps; ci-status requires this job.
+      - name: Check and lint shipped targets without fixture
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        working-directory: tools/front-door
+        run: |
+          cargo check --workspace --lib --bins --locked
+          cargo clippy --workspace --lib --bins --locked --keep-going -- -D warnings
 
       - name: Check harness assets
         run: |
