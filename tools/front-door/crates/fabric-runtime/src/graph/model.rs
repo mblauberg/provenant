@@ -1453,7 +1453,7 @@ pub const MAX_PENDING_GRAPH_STEER_METADATA_BYTES: usize = 4096;
 pub const MAX_PENDING_GRAPH_STEER_ENCODED_BYTES: usize = MAX_PENDING_GRAPH_STEER_BYTES * 6
     + MAX_PENDING_GRAPH_STEERS * MAX_PENDING_GRAPH_STEER_METADATA_BYTES;
 
-/// One authorized graph steer waiting for its exact accepted run owner to appear.
+/// One authorised graph steer waiting for its exact accepted run owner to appear.
 /// The stored requester address preserves inbox replay scope; dispatch still
 /// revalidates the launch actor, operation, WorkKey and live attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

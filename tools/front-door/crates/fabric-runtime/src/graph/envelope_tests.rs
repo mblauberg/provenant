@@ -1370,7 +1370,7 @@ fn pending_steer_replay_keeps_work_and_requester_identity_until_receipt_commit()
 // Spec: docs/specs/fabric.md#session-ready-steering
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
-fn graph_status_never_serializes_pending_steer_text() {
+fn graph_status_never_serialises_pending_steer_text() {
     let document = mixed();
     let plan = planned(&document);
     let mut checkpoint = filled_checkpoint(&document, &plan);
