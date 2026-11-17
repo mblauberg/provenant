@@ -100,7 +100,7 @@ while custody is uncertain or reset a worktree with edits.
 
 | Intent | Command |
 | --- | --- |
-| Resume unfinished work | `provenant retry GRAPH` keeps completed outputs and reconciles uncertain launches under their recorded identity. |
+| Resume unfinished work | `provenant retry GRAPH` keeps completed outputs and reconciles uncertain launches under their recorded identity. A sole failed, blocked or cancelled node is retried; other settled graphs require `GRAPH/NODE`. |
 | Retry a node | `provenant retry GRAPH/NODE`, optionally `--brief TEXT` for a replacement brief; review and land gates still apply. |
 | Fall back to another route | Configured routes handle a typed unavailability once custody release is confirmed; an uncertain handoff blocks the switch. |
 | Start fresh | A template with `identity = "fresh"`, or a new `--name`. An unchanged `identity = "content"` submission reattaches, even after cancellation; `retry GRAPH` resumes it. |

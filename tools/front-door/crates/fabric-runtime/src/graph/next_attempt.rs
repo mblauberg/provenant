@@ -31,6 +31,7 @@ pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
         error.downcast_ref::<FacadeError>(),
         Some(
             FacadeError::Busy
+                | FacadeError::RepositoryLockBusy
                 | FacadeError::WriterLockBusy
                 | FacadeError::WriterUnknown
                 | FacadeError::WriterBusy { .. }
@@ -215,8 +216,13 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error = Some(bounded(
         &format!(
-            "node {}: the launch failed [{}]: {action}; {detail}{recovery}",
+            "node {}: {} [{}]: {action}; {detail}{recovery}",
             provenant_records::diagnostic::safe_text(id),
+            if retrying {
+                "launch budget exhausted"
+            } else {
+                "the launch failed"
+            },
             projected.code
         ),
         MAX_ADVANCE_ERROR_BYTES,

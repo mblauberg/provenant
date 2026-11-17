@@ -342,6 +342,77 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
     assert_eq!(owner.calls[0], owner.calls[1]);
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn repository_lock_contention_retries_while_a_sibling_runs() {
+    use crate::coordination::facade::FacadeError;
+
+    let document = graph(vec![
+        node("writer", route("first")),
+        node("sibling", route("first")),
+    ]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, FacadeError::RepositoryLockBusy)].into(),
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::Succeeded),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+
+    // The first writer observes the held repository lock. That node waits on
+    // the persisted launch wake; the independent sibling can still launch.
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.status, GraphStatus::Pending);
+    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(&waiting.checkpoint).wake_at, Some(at(5)));
+    assert_eq!(waiting.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 2);
+
+    // Once the contention clears, the same attempt key is replayed and both
+    // graph nodes finish without creating a duplicate attempt for the writer.
+    owner.now = Some(at(5));
+    let completed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(completed.status, GraphStatus::Complete);
+    assert!(completed
+        .checkpoint
+        .nodes
+        .iter()
+        .all(|node| node.state == NodeState::Succeeded));
+    assert_eq!(completed.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.calls[0], owner.calls[2]);
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
+    use crate::coordination::facade::FacadeError;
+
+    let document = graph(vec![node("writer", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, FacadeError::RepositoryLockBusy)].into(),
+        cancelled_attempt_settled: true,
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(retry_of(&waiting.checkpoint).wake_at, Some(at(5)));
+    assert_eq!(owner.calls.len(), 1);
+
+    // Cancellation wins before the retry wake and settles the unlaunched
+    // attempt. The launch owner is not called again even after the wake time.
+    journal.0.as_mut().unwrap().cancelled = true;
+    owner.now = Some(at(5));
+    let cancelled = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(cancelled.status, GraphStatus::Cancelled);
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(cancelled.checkpoint.nodes[0].state, NodeState::Skipped);
+}
+
 #[test]
 fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
     let document = graph(vec![node("one", route("first"))]);
@@ -768,6 +839,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     let operation = provenant_core::OperationId::parse("op").unwrap();
     for transient in [
         FacadeError::Busy,
+        FacadeError::RepositoryLockBusy,
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
         FacadeError::WriterUnknown,

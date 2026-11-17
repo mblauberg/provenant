@@ -92,8 +92,8 @@ pub use retention::{
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,
-    prepare_writer, prepare_writer_with_facts, resolve_reader_source, resolve_writer,
-    resolve_writer_proposal, trusted_lane_toolchain_diagnostic,
+    prepare_writer, prepare_writer_with_context, prepare_writer_with_facts, resolve_reader_source,
+    resolve_writer, resolve_writer_proposal, trusted_lane_toolchain_diagnostic,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
@@ -654,6 +654,18 @@ impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {
+    /// Repository contention is transient. Callers must unwind custody and
+    /// coordination locks before scheduling another attempt.
+    pub fn is_repository_lock_busy(&self) -> bool {
+        match self {
+            Self::Filesystem(error)
+            | Self::Writer(provenant_confinement::worktrees::WorktreeError::Filesystem(error)) => {
+                provenant_confinement::worktrees::repository_lock_busy(error)
+            }
+            _ => false,
+        }
+    }
+
     /// A refusal whose inputs do not change on retry. Settlement seals it as a
     /// failed, non-retryable import instead of looping on it.
     pub(crate) fn import_refusal_is_final(&self) -> bool {

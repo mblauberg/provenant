@@ -14,6 +14,39 @@ the same captured project and actor identity as the run store. Uncertain custody
 keeps its ownership until release is proved.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
+Repository coordination is always a single non-blocking try, including shared
+configuration snapshots. A busy repository is a typed transient launch outcome,
+never a terminal preparation refusal. `RunStore::start_inner` unwinds preparation,
+withdraws unlaunched writer custody, releases repository admission and requeues
+the same attempt before returning contention to the graph scheduler. The
+scheduler persists capped exponential backoff within the original launch deadline;
+cancellation wins before any retry, and only deadline exhaustion blocks the node
+with a `launch_retry_exhausted` cause. Preparation inherits the launcher's budget
+and cancellation token, rather than creating a fresh wait allowance.
+- Why: one sibling's short repository mutation must not fail another writer or
+  monopolise custody while waiting for it.
+
+Lock order is launcher exclusion (`launcher.lock`), publication reservation,
+then writer/custody exclusion in `RunStore::hand_off`. Git setup under that
+custody may only **try** the common-directory repository lock. In the reverse
+direction, worktree mutation and removal may hold the repository lock while
+**trying** writer exclusion; neither direction waits for the other. Repository
+snapshots release their hold before network work. Every acquired guard and
+admission hold is released before the scheduler's backoff, so no retry sleeps
+under launcher, publication, writer or repository exclusion. A failed custody or
+admission withdrawal remains protected for reconciliation; it is not proof that
+retry is safe.
+
+All repository-lock acquisitions share `worktrees::lock_repository`:
+
+| Acquisition owner | Contention disposition |
+| --- | --- |
+| `prepare_writer_with_context` / writer Git configuration | Unwind and retry launch within its existing deadline. |
+| Worktree inventory and creation (`list_impl`, `create`) | Graph provisioning retries; a direct CLI command reports busy for caller retry. |
+| Worktree removal, ref retirement, `delete_ref_leased_when`, ownership retirement | No mutation on failed acquisition; CLI reports busy and GC retains for a later sweep. |
+| `doctor` shared inventory | Report busy; caller may retry. |
+| Recursive submodule custody | Try shared repository ownership, then retain busy work if unavailable. |
+
 Before entering handoff or spawning a guardian, the launcher durably prepares
 the per-attempt `guardian.lock` inode alongside the attempt, writer and custody
 identities. The guardian acquires and verifies that original inode before

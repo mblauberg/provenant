@@ -26,6 +26,16 @@ Preparation fallback requires evidence that custody was released before launch.
 
 ## Recovery preserves work and budget
 
+A graph-target retry resumes unfinished Pending or Running nodes without
+resetting their attempts. When a graph has exactly one failed, blocked or
+cancelled node, that target also identifies the terminal node to retry. Other
+settled graphs require an explicit node selector; refusal names the current
+node states rather than returning an unchanged success. `Factory::retry_document`
+owns this choice before applying `retry_node_and_dependants`.
+- Why: resuming live work must preserve its identity, while a terminal retry
+  must create a fresh generation and cannot silently do nothing.
+
+
 A writer continuation retains predecessor work and the original review diff
 base. Budgets survive resumption; terminal receipts remain immutable. Recovery
 reopens selected consumers without restarting unrelated work.

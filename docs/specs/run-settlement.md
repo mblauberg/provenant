@@ -13,6 +13,16 @@ writer branch publication, the terminal record is committed before custody relea
 import refusal retains private Git for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
+Repository-lock contention during import preparation is transient. Preserve the
+committed outcome and lane worktree, leave Git import pending, release the
+settlement and custody leases, then retry after the persisted bounded backoff.
+After three contention retries, automatic recovery stops with the pending
+private Git retained; an explicit reconcile starts a fresh retry budget.
+Cancellation remains authoritative while each retry runs. Contention never
+creates an import refusal or restores the worktree to its older host ref.
+- Why: failure to acquire the repository lock proves no import or publication
+  failed, and must not roll back a lane's committed work.
+
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`

@@ -817,6 +817,7 @@ impl PrepareError {
                 cause,
                 note,
             } => Box::new(run::PrepareRefusal {
+                repository_lock_busy: false,
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -906,6 +907,7 @@ impl PrepareError {
                 let message =
                     candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
                 let mut refusal = Box::new(run::PrepareRefusal {
+                    repository_lock_busy: false,
                     boundary_class,
                     policy_code,
                     resource: candidate_resource,
@@ -984,11 +986,13 @@ impl PrepareError {
             }
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
+                let repository_lock_busy = error.is_repository_lock_busy();
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::HandoffRefused,
                     error.to_string(),
                 );
+                refusal.repository_lock_busy = repository_lock_busy;
                 refusal.boundary_class = boundary_class;
                 refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
                 refusal
@@ -2575,12 +2579,20 @@ pub(super) fn prepare_candidates(
         task.access.inputs_root.as_deref(),
     )
     .map_err(PrepareError::GraphInputsAuthority)?;
+    let fallback_cancel = provenant_core::CancelToken::new();
+    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
+    let clock = provenant_os::clock::SystemClock;
+    let writer_budget = provenant_core::WaitBudget::cli(clock.mono_now(), wait.unwrap_or(5))
+        .map_err(|error| error.to_string())?;
     let writer = match &task.writer {
-        Some(request) => Some(run::prepare_writer_with_facts(
+        Some(request) => Some(run::prepare_writer_with_context(
             request,
             roots.state.as_path(),
             project_id,
             &registry.repo_facts,
+            writer_budget,
+            cancel,
+            &clock,
         )?),
         None => None,
     };
@@ -2596,8 +2608,6 @@ pub(super) fn prepare_candidates(
     } else {
         source.clone()
     };
-    let fallback_cancel = provenant_core::CancelToken::new();
-    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     let project_binding = super::confinement::registered_project_binding(roots, project_id)?;
     let requester_cwd = registry.cwd.unwrap_or(&source);

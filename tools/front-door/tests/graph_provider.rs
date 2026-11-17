@@ -2145,6 +2145,109 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+/// Real repository-lock contention leaves concurrent launches retryable, then
+/// both launch after the lock holder releases the repository.
+fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
+    use provenant_core::RootInputs;
+    use provenant_os::fs::{Directory, LockMode, SystemPathResolver};
+
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
+    )?;
+    let registry = rig
+        .state
+        .join("worktrees")
+        .join(binding.project_id().to_string());
+    fs::create_dir_all(&registry)?;
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
+
+    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
+    let held = directory.try_lock(
+        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
+        LockMode::Exclusive,
+    )?;
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+    let barrier = std::sync::Barrier::new(2);
+    let responses = std::thread::scope(|scope| -> Result<Vec<Value>> {
+        let mut launches = Vec::new();
+        for index in 0..2 {
+            let barrier = &barrier;
+            let rig = &rig;
+            launches.push(scope.spawn(move || {
+                barrier.wait();
+                std::process::Command::new(binary)
+                    .current_dir(&rig.project)
+                    .env_clear()
+                    .envs(rig.env.iter().cloned())
+                    .arg("--state-dir")
+                    .arg(&rig.state)
+                    .args([
+                        "run",
+                        "task",
+                        "fixture writer",
+                        "--route",
+                        "junior",
+                        "--mode",
+                        "worktree-write",
+                        "--branch",
+                        &format!("repository-lock-{index}"),
+                        "--base",
+                        "HEAD",
+                        "--json",
+                    ])
+                    .output()
+            }));
+        }
+        let mut responses = Vec::new();
+        for launch in launches {
+            let output = launch.join().map_err(|_| "launch thread panicked")??;
+            let response: Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(response["status"], "waiting", "{response}");
+            let node = &response["data"]["checkpoint"]["nodes"][0];
+            assert_eq!(node["state"], "running", "{response}");
+            assert_eq!(node["attempts"], json!([]), "{response}");
+            let cause = node["advance_owner_code"]
+                .as_str()
+                .ok_or("typed contention cause")?;
+            assert!(
+                matches!(cause, "repository_lock_busy" | "writer_lock_busy"),
+                "expected typed repository contention, got {cause}: {response}"
+            );
+            assert!(node["launch_retry"]["wake_at"].is_string(), "{response}");
+            responses.push(response);
+        }
+        Ok(responses)
+    })?;
+
+    // Both launches have durably yielded while the real lock was held. Release
+    // it before waiting so the persisted backoff can retry without lock nesting.
+    drop(held);
+    for response in responses {
+        let graph = response["data"]["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or("graph id")?;
+        let waited = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
+        assert_eq!(code(&waited), 0, "{graph}: {waited:?}");
+        let checkpoint = rig.checkpoint(graph)?;
+        assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
+        assert!(
+            checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{checkpoint}"
+        );
+    }
+    Ok(())
+}
+
 /// A held registry preserves a typed, durable retry without creating a writer.
 fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
     use provenant_core::{Clock, RootInputs, WaitBudget};
@@ -5458,6 +5561,10 @@ fn main() -> ExitCode {
             (
                 "simultaneous_writer_launches_are_admitted_or_scheduled_for_retry",
                 simultaneous_writer_launches_are_admitted_or_scheduled_for_retry,
+            ),
+            (
+                "simultaneous_repository_lock_contention_retries_both_launches",
+                simultaneous_repository_lock_contention_retries_both_launches,
             ),
             (
                 "simultaneous_first_launches_pass_cutover_guard",

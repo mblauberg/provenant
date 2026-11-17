@@ -1776,10 +1776,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             &directory,
         )
         .map_err(run_error)?;
-        let writer = provenant_run::prepare_writer_with_facts(
+        let writer = provenant_run::prepare_writer_with_context(
             &request,
             self.factory.context.roots.state.as_path(),
-            self.factory.context.identity.project, &self.repo_facts)
+            self.factory.context.identity.project, &self.repo_facts,
+            self.writer_launch_budget.unwrap_or(self.budget), self.cancel, &self.factory.clock)
         .map_err(|error| match error {
             provenant_run::RunError::Validation("writer needs a branch") => FacadeError::DispatchRefused {
                 fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
@@ -2848,20 +2849,22 @@ impl BoundGraphOwner<'_> {
                     }
                     other => run_error(other),
                 })?;
-                if let Err(provenant_run::RunError::Validation("writer needs a branch")) =
-                    provenant_run::prepare_writer_with_facts(
+                provenant_run::prepare_writer_with_context(
                         &writer,
                         self.factory.context.roots.state.as_path(),
                         self.factory.context.identity.project,
                         &self.repo_facts,
-                    )
-                {
-                    return Err(FacadeError::DispatchRefused {
+                        self.writer_launch_budget.unwrap_or(self.budget),
+                        self.cancel,
+                        &self.factory.clock,
+                    ).map_err(|error| match error {
+                        provenant_run::RunError::Validation("writer needs a branch") => FacadeError::DispatchRefused {
                         fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
                         disk: None,
                         reason: "writer needs a branch".into(),
-                    });
-                }
+                        },
+                        other => run_error(other),
+                    })?;
             }
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -2966,11 +2969,14 @@ impl BoundGraphOwner<'_> {
                         Path::new(path),
                     )
                     .map_err(run_error)?;
-                    provenant_run::prepare_writer_with_facts(
+                    provenant_run::prepare_writer_with_context(
                         &writer,
                         self.factory.context.roots.state.as_path(),
                         self.factory.context.identity.project,
                         &self.repo_facts,
+                        self.writer_launch_budget.unwrap_or(self.budget),
+                        self.cancel,
+                        &self.factory.clock,
                     )
                     .map_err(run_error)?
                     .branch

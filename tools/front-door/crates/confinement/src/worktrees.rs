@@ -104,14 +104,20 @@ const MAX_STATE_RECORD: u64 = 64 * 1024;
 /// this owner before network discovery, slow census, or provider execution.
 pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
 
+/// Preserve the repository contention class through callers' error wrappers.
+pub fn repository_lock_busy(error: &FsError) -> bool {
+    matches!(error, FsError::LockTimeout { path, .. }
+        if path.file_name() == Some(OsStr::new(REPOSITORY_LOCK)))
+}
+
 /// Coordinate all checkouts, independently of their state registry or caller.
 /// Shared holders read Git configuration; exclusive holders mutate Git state.
 pub fn lock_repository(
     common: &Directory,
     mode: LockMode,
-    budget: WaitBudget,
+    _budget: WaitBudget,
     cancel: &CancelToken,
-    clock: &dyn Clock,
+    _clock: &dyn Clock,
 ) -> Result<LockGuard, FsError> {
     if cancel.is_cancelled() {
         return Err(FsError::Cancelled {
@@ -120,7 +126,7 @@ pub fn lock_repository(
     }
     // Protect creation/removal, registration, and coherent Git config snapshots.
     // Never retain this hold across provider work or network discovery.
-    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
+    common.try_lock(OsStr::new(REPOSITORY_LOCK), mode)
 }
 const WRITER_LOCK: &str = "writer.lock";
 
@@ -387,6 +393,9 @@ impl WorktreeError {
     pub fn admission_cause(&self) -> Option<AdmissionCause> {
         match self {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::Filesystem(error) if repository_lock_busy(error) => {
+                Some(AdmissionCause::RegistryLockTimeout)
+            }
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::UnknownWriter
@@ -977,10 +986,19 @@ mod tests {
 
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
-        assert_eq!(
-            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout),
-            RetainReason::LockBusy
-        );
+        for error in [
+            WorktreeError::RegistryLockTimeout,
+            WorktreeError::Filesystem(FsError::LockTimeout {
+                path: PathBuf::from("/project/.git").join(REPOSITORY_LOCK),
+                timeout: std::time::Duration::ZERO,
+            }),
+        ] {
+            assert_eq!(lifecycle::retain_reason(&error), RetainReason::LockBusy);
+            assert_eq!(
+                error.admission_cause(),
+                Some(AdmissionCause::RegistryLockTimeout)
+            );
+        }
         assert_eq!(
             WorktreeError::RegistryLockTimeout.admission_cause(),
             Some(AdmissionCause::RegistryLockTimeout)

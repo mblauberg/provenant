@@ -141,6 +141,7 @@ fn registered_project_layout(
     executor: &dyn provenant_os::exec::Executor,
     utility: &UtilityRuntime,
     cancel: &CancelToken,
+    utility_budget: UtilityBudget,
 ) -> Result<(provenant_config::ProjectBinding, worktrees::ProjectLayout)> {
     if repo.private_git_dir() != repo.common_git_dir() {
         // A linked checkout is a Git executor only after Git's inventory
@@ -158,7 +159,7 @@ fn registered_project_layout(
             "writer custody project is not registered",
         ))?;
     let layout = utility
-        .project_layout_for_repository(executor, repo, budget()?, cancel)
+        .project_layout_for_repository(executor, repo, utility_budget, cancel)
         .map_err(utility_error(
             "resolve writer project layout",
             Some(repo.common_git_dir()),
@@ -282,8 +283,14 @@ fn resolve_writer_with(
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
-    let (binding, layout) =
-        registered_project_layout(state, &repo, &executor, &utility, &CancelToken::new())?;
+    let (binding, layout) = registered_project_layout(
+        state,
+        &repo,
+        &executor,
+        &utility,
+        &CancelToken::new(),
+        budget()?,
+    )?;
     let managed_root = layout.root();
     let selected = managed_root.join(path);
     let path = canonicalize(&selected).map_err(|error| {
@@ -965,18 +972,52 @@ pub fn prepare_writer_with_facts(
 ) -> Result<WriterLaunch> {
     use provenant_os::clock::SystemClock;
     let clock = SystemClock::new();
-    prepare_writer_with_facts_and_clock(request, state, project, facts, &clock)
+    let budget = provenant_core::WaitBudget::nonblocking(clock.mono_now());
+    prepare_writer_with_context(
+        request,
+        state,
+        project,
+        facts,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    )
 }
 
-fn prepare_writer_with_facts_and_clock(
+/// Prepare within the caller's launch deadline and cancellation scope.
+pub fn prepare_writer_with_context(
     request: &WriterRequest,
     state: &Path,
     project: ProjectId,
     facts: &worktrees::RepoFacts,
+    launch_budget: provenant_core::WaitBudget,
+    cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<WriterLaunch> {
-    use provenant_core::WaitBudget;
     use provenant_os::fs::LockMode;
+    let remaining = || -> Result<UtilityBudget> {
+        if cancel.is_cancelled() {
+            return Err(FsError::Cancelled {
+                path: request.project.clone(),
+            }
+            .into());
+        }
+        let micros = launch_budget.remaining(clock.mono_now()).as_micros();
+        if micros == 0 && !launch_budget.is_nonblocking() {
+            return Err(worktrees::WorktreeError::Utility(
+                provenant_confinement::utility::UtilityError::TimedOut,
+            )
+            .into());
+        }
+        let micros = if launch_budget.is_nonblocking() {
+            5_000_000
+        } else {
+            micros.min(5_000_000)
+        };
+        UtilityBudget::bounded(Duration::from_micros(micros.max(1)))
+            .map_err(error("set writer Git utility budget", None))
+    };
+    remaining()?;
     let utility = runtime(state)?;
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
@@ -984,17 +1025,10 @@ fn prepare_writer_with_facts_and_clock(
     // first probed open reads config snapshots and must exclude sibling writes.
     let common = provenant_confinement::repo::VerifiedRepo::open_common_directory(&request.project)
         .map_err(worktrees::WorktreeError::from)?;
-    let cancel = CancelToken::new();
-    let _config_lock = worktrees::lock_repository(
-        &common,
-        LockMode::Shared,
-        WaitBudget::cli(clock.mono_now(), 60)
-            .map_err(error("set writer config lock budget", None))?,
-        &cancel,
-        clock,
-    )?;
+    let _config_lock =
+        worktrees::lock_repository(&common, LockMode::Shared, launch_budget, cancel, clock)?;
     let repo = utility
-        .open_repo(&executor, &request.project, budget()?, &cancel)
+        .open_repo(&executor, &request.project, remaining()?, cancel)
         .map_err(utility_error(
             "open writer repository",
             Some(&request.project),
@@ -1011,12 +1045,13 @@ fn prepare_writer_with_facts_and_clock(
         worktree.repo(),
         &executor,
         &utility,
-        budget()?,
+        remaining()?,
         branch.clone(),
-        &CancelToken::new(),
+        cancel,
     )?;
     let custody_project = writer_project_id(request)?;
-    let (binding, layout) = registered_project_layout(state, &repo, &executor, &utility, &cancel)?;
+    let (binding, layout) =
+        registered_project_layout(state, &repo, &executor, &utility, cancel, remaining()?)?;
     if binding.project_id() != custody_project {
         return Err(RunError::Validation(
             "writer custody project does not match its repository",
@@ -1058,8 +1093,8 @@ fn prepare_writer_with_facts_and_clock(
                 &repo,
                 &executor,
                 &utility,
-                budget().map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
-                &CancelToken::new(),
+                remaining().map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                cancel,
             )
         },
     )
@@ -1413,8 +1448,7 @@ fn prepare_writer_git(
         Ok(worktrees::lock_repository(
             &common,
             mode,
-            WaitBudget::cli(clock.mono_now(), 60)
-                .map_err(error("set writer config lock budget", None))?,
+            WaitBudget::nonblocking(clock.mono_now()),
             cancel,
             &clock,
         )?)
@@ -1434,7 +1468,8 @@ fn prepare_writer_git(
     {
         return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
     }
-    let (_, layout) = registered_project_layout(state, &repo, &executor, &utility, cancel)?;
+    let (_, layout) =
+        registered_project_layout(state, &repo, &executor, &utility, cancel, budget()?)?;
     if !same_project_layout(&writer.layout, &layout)? {
         return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
     }
@@ -1498,7 +1533,8 @@ fn prepare_writer_git(
     {
         return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
     }
-    let (_, layout) = registered_project_layout(state, &fresh_repo, &executor, &utility, cancel)?;
+    let (_, layout) =
+        registered_project_layout(state, &fresh_repo, &executor, &utility, cancel, budget()?)?;
     if !same_project_layout(&writer.layout, &layout)? {
         return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
     }
@@ -2441,6 +2477,53 @@ mod cargo_setup_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn initial_writer_preparation_honours_cancellation_and_expired_launch_budget()
+    -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            initial_writer_preparation_honours_cancellation_and_expired_launch_budget
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let request = fixture.request(&fixture.project);
+        let clock = crate::tests::clock();
+        for cancelled in [false, true] {
+            let cancel = CancelToken::new();
+            let budget = provenant_core::WaitBudget::up_to(
+                clock.mono_now(),
+                provenant_core::DurationMicros::from_micros(0),
+            );
+            if cancelled {
+                cancel.cancel();
+            }
+            let result = prepare_writer_with_context(
+                &request,
+                &fixture.state,
+                fixture.custody_project,
+                &worktrees::RepoFacts::default(),
+                budget,
+                &cancel,
+                &clock,
+            );
+            if cancelled {
+                assert!(matches!(
+                    result,
+                    Err(RunError::Filesystem(FsError::Cancelled { .. }))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(RunError::Writer(worktrees::WorktreeError::Utility(
+                        provenant_confinement::utility::UtilityError::TimedOut
+                    )))
+                ));
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn writer_preparation_refuses_incomplete_config_while_config_lock_is_held() -> FixtureResult<()>
     {
@@ -2468,11 +2551,13 @@ mod cargo_setup_tests {
             .require_durable()?;
 
         let clock = crate::tests::clock();
-        let result = prepare_writer_with_facts_and_clock(
+        let result = prepare_writer_with_context(
             &request,
             &fixture.state,
             fixture.custody_project,
             &worktrees::RepoFacts::default(),
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &CancelToken::new(),
             &clock,
         );
         let observed = common.read_bounded(OsStr::new("config"), 1024 * 1024);

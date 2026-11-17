@@ -399,6 +399,7 @@ pub(crate) enum ClaimRefusal {
     Complete,
     LiveOwner,
     RetryDeadline(u64),
+    RetryLimit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -500,6 +501,12 @@ impl Guard {
                 "settlement exhausted three attempts; private Git retained for host recovery",
             ));
         }
+        // Repeated repository-lock contention is a separate bounded retry
+        // budget. Leave the import pending at exhaustion so explicit reconcile
+        // can retry without refusing or rewriting the lane's worktree.
+        if journal.phase == Phase::Import && journal.recovery_failures >= LIMIT {
+            return Ok((None, Some(ClaimRefusal::RetryLimit)));
+        }
         if now_ms < journal.retry_after_ms {
             return Ok((
                 None,
@@ -522,6 +529,7 @@ impl Guard {
                 owner,
                 cancel: CancelToken::new(),
                 import_started: false,
+                repository_contention: false,
                 clock,
             }),
             None,
@@ -539,6 +547,7 @@ pub(crate) struct Driver<'a> {
     owner: ProcessIdentity,
     cancel: CancelToken,
     import_started: bool,
+    repository_contention: bool,
 }
 
 impl Driver<'_> {
@@ -616,6 +625,20 @@ impl Driver<'_> {
             Ok(())
         })
     }
+    /// Record repository contention without spending an actual Git-import
+    /// attempt. The recovery counter bounds retries until explicit reconcile.
+    pub(crate) fn record_repository_contention(&mut self, reason: &str) -> Result<()> {
+        let now = now_ms(self.clock)?;
+        self.update(|journal| {
+            journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
+            journal.blocking_reason =
+                Some(provenant_confinement::redact::bounded_line(reason, 4096));
+            journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
+            Ok(())
+        })?;
+        self.repository_contention = true;
+        Ok(())
+    }
     fn update(&mut self, action: impl FnOnce(&mut Journal) -> Result<()>) -> Result<()> {
         let _lock = journal_lock(&self.attempt)?;
         let mut journal = read(&self.attempt, self.journal.scope)?;
@@ -639,7 +662,9 @@ impl Drop for Driver<'_> {
         };
         if journal.owner.as_ref() == Some(&self.owner) {
             journal.owner = None;
-            if let Ok(now) = now_ms(self.clock) {
+            if !self.repository_contention
+                && let Ok(now) = now_ms(self.clock)
+            {
                 journal.retry_after_ms = now.saturating_add(backoff_ms(journal.attempts));
             }
             let _ = write(&self.attempt, &journal);
@@ -3121,6 +3146,7 @@ impl crate::RunStore {
                         let mut journal = read(&directory, scope)?;
                         // Keep the last reason visible until recovery succeeds.
                         journal.recovery_failures = 0;
+                        journal.retry_after_ms = 0;
                         write(&directory, &journal)?;
                     }
                     Ok(())

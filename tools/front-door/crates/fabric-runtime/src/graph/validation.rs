@@ -1724,7 +1724,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         && progress.advance_error.is_none()
                         && matches!(
                             progress.advance_owner_code.as_deref(),
-                            Some("busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy")
+                            Some(
+                                "busy"
+                                    | "repository_lock_busy"
+                                    | "writer_lock_busy"
+                                    | "writer_unknown"
+                                    | "writer_busy"
+                            )
                         )
                         && progress.launch_retry.as_ref().is_some_and(|retry| {
                             retry.failures > 0

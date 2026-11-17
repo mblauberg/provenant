@@ -265,10 +265,10 @@ fn inspect_submodules(
                 cancel,
                 context.clock,
             )
-            .map_err(|error| match error {
-                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
-                error => error.into(),
-            })?;
+            // Preserve repository-lock identity across this boundary. The
+            // launcher treats it as transient; `LockBusy` also means a writer
+            // lease and would incorrectly turn repository contention terminal.
+            ?;
             guards.push(guard);
         }
         check_writer_terminal(child)?;

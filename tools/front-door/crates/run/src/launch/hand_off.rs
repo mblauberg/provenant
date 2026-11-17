@@ -5,6 +5,7 @@ use std::io::Write;
 thread_local! {
     static TEST_UNCERTAIN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_LOCAL_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_REPOSITORY_BUSY_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn typed_local(
@@ -12,6 +13,9 @@ fn typed_local(
     phase: &str,
     error: &RunError,
 ) -> HandOff {
+    if error.is_repository_lock_busy() {
+        return HandOff::RepositoryBusy;
+    }
     if let RunError::Admission(error) = error
         && let Some(fact) = error.resource_fact()
     {
@@ -188,6 +192,9 @@ impl RunStore {
             call.clock,
         )
         .map_err(|e| custody_local(&policy, "publication reservation", &e))?;
+        // The reservation is transferred to the guardian below. Keep a
+        // separate directory capability for pre-spawn cleanup on local errors.
+        let publication_directory = directory()?;
         let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
@@ -242,6 +249,21 @@ impl RunStore {
                             };
                             HandOff::Protected(format!("{cause}; custody withdrawal: {release}"))
                         })?;
+                        if matches!(&error, HandOff::RepositoryBusy) {
+                            let publication = &publication_directory;
+                            publication
+                                .unlink(std::ffi::OsStr::new("reserve"))
+                                .map_err(|release| {
+                                    HandOff::Protected(format!(
+                                        "repository lock busy; publication reservation cleanup: {release}"
+                                    ))
+                                })?;
+                            publication.sync().map_err(|release| {
+                                HandOff::Protected(format!(
+                                    "repository lock busy; publication reservation sync: {release}"
+                                ))
+                            })?;
+                        }
                         return Err(error);
                     }
                 }
@@ -376,14 +398,22 @@ impl RunStore {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
         let mut profile_file = None;
+        // Inject the typed error at the Git setup boundary even for a read-only
+        // fixture, then exercise the same withdrawal/requeue path as a writer.
+        #[cfg(test)]
+        if TEST_REPOSITORY_BUSY_HANDOFF.with(|fault| fault.replace(false)) {
+            let error = RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+                path: std::path::PathBuf::from("/fixture/.git")
+                    .join(provenant_confinement::worktrees::REPOSITORY_LOCK),
+                timeout: std::time::Duration::ZERO,
+            });
+            local_or_withdraw!(Err::<(), _>(typed_local(&policy, "Git setup", &error)));
+        }
         if let Some(confinement) = &mut plan.confinement {
-            let prepared = confinement.prepare_git(&setup_cancel, &policy);
-            if let Err(error) = prepared {
-                lease.withdraw_unlaunched().map_err(|release| {
-                    HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
-                })?;
-                return Err(typed_local(&policy, "Git setup", &error));
-            }
+            let prepared = confinement
+                .prepare_git(&setup_cancel, &policy)
+                .map_err(|error| typed_local(&policy, "Git setup", &error));
+            local_or_withdraw!(prepared);
             // Git setup has finished; cache seeding needs no repository lock.
             let seed_attempt = local_or_withdraw!(directory());
             // A lock, not an assertion: observers stop reporting this phase if
@@ -1069,6 +1099,7 @@ mod tests {
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
+            Err(HandOff::RepositoryBusy) => panic!("repository busy"),
             Err(HandOff::Busy) => panic!("custody busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -1114,6 +1145,7 @@ mod tests {
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
+            Err(HandOff::RepositoryBusy) => panic!("repository busy"),
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -1156,6 +1188,7 @@ mod tests {
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
+            Err(HandOff::RepositoryBusy) => panic!("repository busy"),
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -1166,6 +1199,206 @@ mod tests {
             &store.attempt_dir(id, false)?,
             RunStore::scope(&record),
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn repository_lock_contention_withdraws_handoff_and_requeues_attempt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+
+        TEST_REPOSITORY_BUSY_HANDOFF.with(|fault| fault.set(true));
+        let started = store.start_inner(
+            request.attempt_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Ok(Vec::new()),
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            None,
+            &call,
+        )?;
+        assert!(matches!(
+            started.as_slice(),
+            [Started::RepositoryBusy { attempt }] if *attempt == request.attempt_id
+        ));
+
+        let record = store.record(request.attempt_id, &call)?;
+        assert!(matches!(record.state, AttemptState::Queued { .. }));
+        assert!(record.settlement_receipts.is_none());
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(request.attempt_id, false)?;
+        assert!(!custody::reservation_present(&attempt, scope)?);
+        for name in ["launcher.lock", "custody.lock", "writer.lock"] {
+            drop(attempt.try_lock_existing(
+                std::ffi::OsStr::new(name),
+                provenant_os::fs::LockMode::Exclusive,
+            )?);
+        }
+        let operation = store
+            .operation(&request.operation_id, &call)?
+            .ok_or("operation")?;
+        assert_eq!(operation.state, OperationState::Accepted);
+
+        // A second preparation reaches the local handoff seam. This catches a
+        // stale publication reserve left behind by the transient first try.
+        TEST_LOCAL_HANDOFF.with(|fault| fault.set(true));
+        let retried = store.start_inner(
+            request.attempt_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Ok(Vec::new()),
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            None,
+            &call,
+        )?;
+        assert!(matches!(
+            retried.as_slice(),
+            [Started::Refused { reason, .. }] if reason.contains("injected local handoff")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn initial_repository_lock_refusal_requeues_without_terminal_settlement()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct RepositoryBusy;
+        impl Providers for RepositoryBusy {
+            fn prepare(
+                &self,
+                _: &TaskRequest,
+                _: &str,
+                _: &LaunchPaths,
+                _: Option<&AttemptRecord>,
+            ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
+                let mut refusal =
+                    PrepareRefusal::boxed(TerminalCause::HandoffRefused, "repository lock is busy");
+                refusal.repository_lock_busy = true;
+                Err(refusal)
+            }
+
+            fn decode(
+                &self,
+                _: &RouteRecord,
+                _: &[u8],
+                _: &ExitObservation,
+                _: &std::path::Path,
+            ) -> std::result::Result<Decoded, String> {
+                unreachable!("repository contention never starts a provider")
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+
+        let started = store.start(
+            request.attempt_id,
+            &RepositoryBusy,
+            &|_, _| Ok(Vec::new()),
+            &call,
+        )?;
+        assert!(matches!(
+            started.as_slice(),
+            [Started::RepositoryBusy { attempt }] if *attempt == request.attempt_id
+        ));
+        let record = store.record(request.attempt_id, &call)?;
+        assert!(matches!(record.state, AttemptState::Queued { .. }));
+        assert!(record.settlement_receipts.is_none());
+        let attempt = store.attempt_dir(request.attempt_id, false)?;
+        drop(attempt.try_lock_existing(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
+        assert_eq!(
+            store
+                .operation(&request.operation_id, &call)?
+                .ok_or("operation")?
+                .state,
+            OperationState::Accepted
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_wins_before_initial_repository_retry_requeue()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct CancelOnPrepare(CancelToken);
+        impl Providers for CancelOnPrepare {
+            fn prepare(
+                &self,
+                _: &TaskRequest,
+                _: &str,
+                _: &LaunchPaths,
+                _: Option<&AttemptRecord>,
+            ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
+                self.0.cancel();
+                let mut refusal =
+                    PrepareRefusal::boxed(TerminalCause::HandoffRefused, "repository lock is busy");
+                refusal.repository_lock_busy = true;
+                Err(refusal)
+            }
+
+            fn decode(
+                &self,
+                _: &RouteRecord,
+                _: &[u8],
+                _: &ExitObservation,
+                _: &std::path::Path,
+            ) -> std::result::Result<Decoded, String> {
+                unreachable!("cancelled repository contention never starts a provider")
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+
+        let started = store.start(
+            request.attempt_id,
+            &CancelOnPrepare(cancel.clone()),
+            &|_, _| Ok(Vec::new()),
+            &call,
+        )?;
+        assert!(matches!(
+            started.as_slice(),
+            [Started::Refused { attempt, reason, .. }]
+                if *attempt == request.attempt_id && reason == "cancelled before launch"
+        ));
+        let record = store.record(request.attempt_id, &call)?;
+        assert!(matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
         Ok(())
     }
 

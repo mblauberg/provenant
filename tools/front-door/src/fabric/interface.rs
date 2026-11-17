@@ -2429,7 +2429,34 @@ impl Factory {
             [only] => Some(only.id.clone()),
             _ => None,
         };
-        if target.node.is_some() || brief_given || (extend.is_empty() && sole_node.is_some()) {
+        let retry_sole = checkpoint.nodes.as_slice().first().is_some_and(|only| {
+            sole_node.is_some()
+                && (matches!(
+                    only.state,
+                    provenant_fabric_runtime::graph::NodeState::Failed
+                        | provenant_fabric_runtime::graph::NodeState::Blocked
+                ) || only.state == provenant_fabric_runtime::graph::NodeState::Skipped
+                    && only.cancelled_from.is_some())
+        });
+        if target.node.is_none()
+            && !brief_given
+            && extend.is_empty()
+            && !retry_sole
+            && checkpoint.nodes.iter().all(|node| node.state.settled())
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::graph_reason(
+                format!(
+                    "graph retry requires unfinished work or an explicit node; node states: {}",
+                    checkpoint
+                        .nodes
+                        .iter()
+                        .map(|node| format!("{}={:?}", node.id, node.state))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )));
+        }
+        if target.node.is_some() || brief_given || (extend.is_empty() && retry_sole) {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
             let node = match target.node.clone() {
@@ -3628,6 +3655,135 @@ mod tests {
             FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?,
             Some(checkpoint)
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+    #[test]
+    fn graph_target_retry_resets_only_a_terminal_sole_node_and_resumes_unfinished_work() -> Result {
+        use provenant_fabric_runtime::graph::{LaunchRetry, LaunchRetryPolicy, NodeState};
+        for (state, cancelled, multiple) in [
+            (NodeState::Failed, false, false),
+            (NodeState::Blocked, false, false),
+            (NodeState::Skipped, true, false),
+            (NodeState::Running, false, false),
+            (NodeState::Pending, false, false),
+            (NodeState::Succeeded, false, false),
+            (NodeState::Failed, false, true),
+        ] {
+            let rig = crate::worktree_tests::repository()?;
+            let factory = factory(&rig)?;
+            let project = factory.context.identity.project;
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+            let fixture: Value = serde_json::from_str(include_str!(
+                "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+            ))?;
+            let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+                serde_json::from_value(fixture["checkpoint"].clone())?;
+            let mut document: GraphDocument =
+                serde_json::from_value(fixture["execution"]["document"].clone())?;
+            let node = &mut checkpoint.nodes[0];
+            node.state = state;
+            node.cancelled_from = cancelled.then_some(NodeState::Running);
+            match state {
+                NodeState::Pending | NodeState::Blocked | NodeState::Skipped => {
+                    node.attempts.clear()
+                }
+                NodeState::Running => {
+                    node.attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Running;
+                    node.attempts[0].outcome = None;
+                }
+                NodeState::Failed => {
+                    node.attempts[0].outcome =
+                        Some(provenant_fabric_runtime::graph::AttemptOutcome::TaskFailed)
+                }
+                _ => {}
+            }
+            if !state.settled() {
+                let now = factory.clock.wall_now()?;
+                let later = now.checked_add(provenant_core::DurationMicros::from_seconds(60)?)?;
+                node.launch_retry = Some(LaunchRetry {
+                    extra: Default::default(),
+                    policy: LaunchRetryPolicy::default(),
+                    failures: 1,
+                    deadline: Some(later),
+                    wake_at: Some(later),
+                    reason: Some("repository contention".into()),
+                });
+            }
+            checkpoint.cancelled = cancelled;
+            if multiple {
+                let mut second = checkpoint.nodes[0].clone();
+                second.id = "second".into();
+                second.state = NodeState::Blocked;
+                second.attempts.clear();
+                checkpoint.nodes.push(second);
+                let mut second = document.nodes[0].clone();
+                second.id = "second".into();
+                document.nodes.push(second);
+            }
+            let mut journal = FileJournal::open(
+                &factory.context.roots.state,
+                project,
+                &document.graph_id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+                requester_path: None,
+                extra: Default::default(),
+                bases: None,
+                directory: factory.cwd.clone(),
+                document: document.clone(),
+            })?;
+            journal.save(&checkpoint)?;
+            drop(journal);
+            let result = provenant_cli::run::with_deferred_provider_launch(|| {
+                factory.graph_document(
+                    json!({"op":"retry", "id":document.graph_id}),
+                    budget,
+                    &cancel,
+                )
+            });
+            let after = FileJournal::read_checkpoint(
+                &factory.context.roots.state,
+                project,
+                &document.graph_id,
+            )?
+            .ok_or("checkpoint")?;
+            if multiple || state == NodeState::Succeeded {
+                let error = result.expect_err("a settled graph needs a retry node");
+                assert!(
+                    matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(ref reason)) }
+                    if reason.contains(&format!("{state:?}"))),
+                    "{error:?}"
+                );
+                assert_eq!(after, checkpoint);
+            } else if state.settled() {
+                // Resume can encounter the fixture's unavailable provider; the
+                // terminal predecessor must already have been archived once.
+                assert!(after.nodes[0].retry_generation.is_some(), "{result:?}");
+                assert_eq!(
+                    after.nodes[0].previous_attempts.len(),
+                    checkpoint.nodes[0].attempts.len()
+                );
+            } else {
+                assert!(result.is_ok(), "{result:?}");
+                assert_eq!(after.nodes[0].retry_generation, None);
+                assert_eq!(
+                    after.nodes[0].previous_attempts,
+                    checkpoint.nodes[0].previous_attempts
+                );
+                assert_eq!(
+                    after.nodes[0].launch_retry,
+                    checkpoint.nodes[0].launch_retry
+                );
+            }
+        }
         Ok(())
     }
 

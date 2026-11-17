@@ -1099,7 +1099,11 @@ impl RunStore {
                 )
             });
             if let Err(error) = &imported {
-                driver.record_failure(&error.to_string())?;
+                if error.is_repository_lock_busy() {
+                    driver.record_repository_contention(&error.to_string())?;
+                } else {
+                    driver.record_failure(&error.to_string())?;
+                }
             }
             match imported {
                 Ok(_) => {
@@ -1110,6 +1114,14 @@ impl RunStore {
                         EffectDisposition::Done,
                         call,
                     )?;
+                }
+                Err(error) if error.is_repository_lock_busy() => {
+                    // Keep Pending rather than Failed so reboot recovery does
+                    // not mistake contention for a final import refusal.
+                    return Ok(Finished {
+                        record: self.record(record.attempt_id, call)?,
+                        release_permitted: false,
+                    });
                 }
                 Err(error) if driver.exhausted() => {
                     let reason = format!(
@@ -2483,7 +2495,11 @@ impl RunStore {
             if let Err(error) = &check
                 && let Some(driver) = &mut settlement
             {
-                driver.record_failure(&error.to_string())?;
+                if error.is_repository_lock_busy() {
+                    driver.record_repository_contention(&error.to_string())?;
+                } else {
+                    driver.record_failure(&error.to_string())?;
+                }
             }
             let last_failure = check.as_ref().err().map(ToString::to_string);
             match crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), false) {
@@ -2542,6 +2558,15 @@ impl RunStore {
                             decoded.outcome = Outcome::Cancelled;
                             decoded.reason = Some("cancelled during Git import".into());
                         }
+                        Ok(())
+                    } else if error.is_repository_lock_busy() {
+                        // Repository contention is transient. Keep the sealed
+                        // outcome and lane worktree intact, retain the private
+                        // Git fence, and leave this effect pending for the
+                        // driver's bounded, cancellable retry schedule.
+                        import_failed = true;
+                        self.retain_import_fence(&record)?;
+                        deferred.push((SettlementEffect::GitImport, EffectDisposition::Pending));
                         Ok(())
                     } else if settlement
                         .as_ref()
@@ -6820,6 +6845,13 @@ mod writer_recovery_tests {
         settlement_fault_modes(&["publish_diverged"])
     }
 
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn repository_lock_contention_keeps_lane_work_and_bounds_automatic_retries()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["repository_lock_busy"])
+    }
+
     fn settlement_fault_modes(
         modes: &[&str],
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -6868,57 +6900,58 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let retained_commit = if mode.starts_with("reconcile_") {
-                // Make a real commit that exists only in the lane's private objects.
-                let tree = crate::objects::command(
-                    &git,
-                    launch.worktree.repo().common_git_dir(),
-                    launch.worktree.path(),
-                    &[
-                        "rev-parse".into(),
-                        format!("{}^{{tree}}", launch.base).into(),
-                    ],
-                    None,
-                )?;
-                let tree = std::str::from_utf8(&tree)?.trim();
-                let output = provenant_os::fixture::git_command_at(&git)
-                    .arg("--git-dir")
-                    .arg(candidate.join("git-common"))
-                    .args([
-                        "commit-tree",
-                        tree,
-                        "-p",
-                        &launch.base.to_string(),
-                        "-m",
-                        "Retained lane commit",
-                    ])
-                    .current_dir(launch.worktree.path())
-                    .env("GIT_OBJECT_DIRECTORY", candidate.join("git-objects"))
-                    .env(
-                        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                        launch.worktree.repo().common_git_dir().join("objects"),
-                    )
-                    .output()?;
-                assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                let raw = output.stdout;
-                let head = provenant_core::GitOid::parse(std::str::from_utf8(&raw)?.trim())?;
-                std::fs::write(
-                    candidate.join("git-common").join(launch.branch.as_str()),
-                    format!("{head}\n"),
-                )?;
-                let oid = head.to_string();
-                let path = candidate
-                    .join("git-objects")
-                    .join(&oid[..2])
-                    .join(&oid[2..]);
-                Some((head, path.clone(), std::fs::read(path)?))
-            } else {
-                None
-            };
+            let retained_commit =
+                if mode.starts_with("reconcile_") || mode == "repository_lock_busy" {
+                    // Make a real commit that exists only in the lane's private objects.
+                    let tree = crate::objects::command(
+                        &git,
+                        launch.worktree.repo().common_git_dir(),
+                        launch.worktree.path(),
+                        &[
+                            "rev-parse".into(),
+                            format!("{}^{{tree}}", launch.base).into(),
+                        ],
+                        None,
+                    )?;
+                    let tree = std::str::from_utf8(&tree)?.trim();
+                    let output = provenant_os::fixture::git_command_at(&git)
+                        .arg("--git-dir")
+                        .arg(candidate.join("git-common"))
+                        .args([
+                            "commit-tree",
+                            tree,
+                            "-p",
+                            &launch.base.to_string(),
+                            "-m",
+                            "Retained lane commit",
+                        ])
+                        .current_dir(launch.worktree.path())
+                        .env("GIT_OBJECT_DIRECTORY", candidate.join("git-objects"))
+                        .env(
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            launch.worktree.repo().common_git_dir().join("objects"),
+                        )
+                        .output()?;
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let raw = output.stdout;
+                    let head = provenant_core::GitOid::parse(std::str::from_utf8(&raw)?.trim())?;
+                    std::fs::write(
+                        candidate.join("git-common").join(launch.branch.as_str()),
+                        format!("{head}\n"),
+                    )?;
+                    let oid = head.to_string();
+                    let path = candidate
+                        .join("git-objects")
+                        .join(&oid[..2])
+                        .join(&oid[2..]);
+                    Some((head, path.clone(), std::fs::read(path)?))
+                } else {
+                    None
+                };
             let mut published_head = None;
             if mode.starts_with("publish_") {
                 fixture.commit(&fixture.writer.worktree, "Lane head")?;
@@ -7026,6 +7059,161 @@ mod writer_recovery_tests {
                         )?
                         .is_empty()
                 );
+                continue;
+            }
+            if mode == "repository_lock_busy" {
+                let repository = launch.worktree.repo().common_dir();
+                let mut latest_record = record.clone();
+                let (_, private_commit_path, private_commit_bytes) =
+                    retained_commit.as_ref().ok_or("private commit")?;
+                for expected_failures in 1..=3 {
+                    let lock = repository.try_lock(
+                        OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )?;
+                    let result = store.drive_settlement(
+                        id,
+                        &attempt,
+                        &observed,
+                        Completion::Recovered(Some(&recovery)),
+                        &providers,
+                        &call,
+                    );
+                    drop(lock);
+                    let finished = result?;
+                    latest_record = finished.record.clone();
+                    assert!(!finished.release_permitted);
+                    assert!(matches!(
+                        finished.record.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted,
+                            terminal_cause: cause,
+                            ..
+                        } if cause != Some(TerminalCause::SettlementFailure)
+                    ));
+                    assert_eq!(
+                        finished
+                            .record
+                            .settlement_receipts
+                            .as_ref()
+                            .unwrap()
+                            .git_import,
+                        EffectDisposition::Pending
+                    );
+                    assert!(!crate::objects::worktree::reverted(&attempt)?);
+                    assert_eq!(&std::fs::read(private_commit_path)?, private_commit_bytes);
+                    assert_eq!(
+                        crate::objects::resolve_ref(
+                            &git,
+                            launch.worktree.repo(),
+                            launch.branch.as_str()
+                        )?,
+                        launch.base,
+                        "contention leaves the host branch untouched"
+                    );
+                    let journal: serde_json::Value = crate::db::decode(
+                        &attempt
+                            .read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+                    )?;
+                    assert_eq!(
+                        journal["attempts"], 0,
+                        "contention is not an import attempt"
+                    );
+                    assert_eq!(journal["recovery_failures"], expected_failures);
+                    assert!(journal["retry_after_ms"].as_u64().unwrap_or_default() > 0);
+                    assert!(
+                        journal["owner"].is_null(),
+                        "settlement lease must be released"
+                    );
+                    drop(recovery);
+                    if expected_failures < 3 {
+                        // The deadline is durable; move the fixture clock past
+                        // it without sleeping through production backoff.
+                        let mut journal: serde_json::Value =
+                            crate::db::decode(&attempt.read_stable(
+                                OsStr::new("settlement-progress.json"),
+                                RECORD_LIMIT,
+                            )?)?;
+                        journal["retry_after_ms"] = 0.into();
+                        attempt
+                            .atomic_write(
+                                OsStr::new("settlement-progress.json"),
+                                ".fixture-backoff-",
+                                &crate::db::bytes(&journal)?,
+                                provenant_os::fs::PublishMode::Replace,
+                            )?
+                            .require_durable()?;
+                        let directory =
+                            store.writer_custody_directory(&finished.record, &fixture.writer)?;
+                        recovery = store
+                            .recover_writer_exit(directory, scope, &call)?
+                            .ok_or("released custody must be recoverable")?;
+                        recovery.prepare_settlement()?;
+                    }
+                }
+                let mut spawned = false;
+                let _ = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
+                    spawned = true;
+                    Ok(())
+                })?;
+                assert!(!spawned, "automatic contention retries have a finite limit");
+                assert!(store.retained_import_fence(scope)?);
+                assert!(!crate::objects::worktree::reverted(&attempt)?);
+                assert_eq!(&std::fs::read(private_commit_path)?, private_commit_bytes);
+
+                // An explicit reconcile clears the exhausted contention budget.
+                store.queue_reconcile_mode(run.attempt_id, &call, |_, _| Ok(()), true)?;
+                let journal: serde_json::Value = crate::db::decode(
+                    &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+                )?;
+                assert_eq!(journal["recovery_failures"], 0);
+                assert_eq!(journal["retry_after_ms"], 0);
+                if attempt
+                    .metadata_at(OsStr::new("settlement-queued.json"), false)
+                    .is_ok()
+                {
+                    attempt.unlink(OsStr::new("settlement-queued.json"))?;
+                }
+                let directory = store.writer_custody_directory(&latest_record, &fixture.writer)?;
+                recovery = store
+                    .recover_writer_exit(directory, scope, &call)?
+                    .ok_or("explicit retry custody")?;
+                recovery.prepare_settlement()?;
+                let finished = store.drive_settlement(
+                    id,
+                    &attempt,
+                    &observed,
+                    Completion::Recovered(Some(&recovery)),
+                    &providers,
+                    &call,
+                )?;
+                assert!(finished.release_permitted);
+                assert!(matches!(
+                    finished
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .unwrap()
+                        .git_import,
+                    EffectDisposition::Done
+                ));
+                assert!(matches!(
+                    finished.record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted,
+                        terminal_cause: cause,
+                        ..
+                    } if cause != Some(TerminalCause::SettlementFailure)
+                ));
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    retained_commit.as_ref().unwrap().0
+                );
+                store.settle_recovered(&attempt, recovery)?;
                 continue;
             }
             crate::writer::FAIL_IMPORT.with(|fault| {

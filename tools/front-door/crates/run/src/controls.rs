@@ -3730,7 +3730,10 @@ impl RunStore {
                 self.persist_live_steer_successor_evidence(successor, call)
             }
             Started::Refused { .. } => self.record_steer_refused(id, successor, call),
-            Started::Skipped { .. } | Started::Unknown { .. } | Started::Blocked { .. } => Ok(()),
+            Started::RepositoryBusy { .. }
+            | Started::Skipped { .. }
+            | Started::Unknown { .. }
+            | Started::Blocked { .. } => Ok(()),
         }
     }
 
@@ -6219,6 +6222,7 @@ fn started_attempt(started: &Started) -> AttemptId {
     match started {
         Started::Launched(attempt)
         | Started::Refused { attempt, .. }
+        | Started::RepositoryBusy { attempt }
         | Started::Skipped { attempt, .. }
         | Started::Unknown { attempt, .. }
         | Started::Blocked { attempt, .. } => *attempt,

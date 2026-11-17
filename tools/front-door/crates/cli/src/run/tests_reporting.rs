@@ -218,6 +218,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
             Err(Box::new(run::PrepareRefusal {
+                repository_lock_busy: false,
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,

@@ -940,7 +940,7 @@ pub(super) fn retry_exhausted(progress: &mut NodeProgress, reason: &str) {
     progress.advance_error_code = Some("launch_retry_exhausted".into());
     progress.advance_error = Some(bounded(
         &format!(
-            "node {}: the launch failed: {reason}",
+            "node {}: launch budget exhausted: {reason}",
             provenant_records::diagnostic::safe_text(&progress.id)
         ),
         MAX_ADVANCE_ERROR_BYTES,
