@@ -86,7 +86,7 @@ fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> S
         });
     }
     match error.admission {
-        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(admission)),
+        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(*admission)),
         None => refused(error.code, error.message),
     }
 }

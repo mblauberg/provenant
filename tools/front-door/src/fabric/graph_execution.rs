@@ -35,6 +35,7 @@ impl super::Factory {
 }
 
 use super::*;
+use serde_json::Value;
 
 /// Called once, as soon as a submitted graph's first checkpoint is saved.
 pub(crate) type Announce<'a> = &'a dyn Fn(

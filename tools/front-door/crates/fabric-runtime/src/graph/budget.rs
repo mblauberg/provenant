@@ -113,16 +113,14 @@ pub(super) fn apply_extension(
     replay: bool,
 ) -> Result<(), BudgetExtensionError> {
     let limit = refusal::ExtensionLimit::parse(extension);
-    let (key, value) = extension
-        .split_once('=')
-        .ok_or_else(|| BudgetExtensionError {
-            kind: refusal::ExtensionKind::Budget,
-            loop_id: None,
-            limit,
-            rule: refusal::ExtensionRule::Syntax,
-        })?;
+    let (key, value) = extension.split_once('=').ok_or(BudgetExtensionError {
+        kind: refusal::ExtensionKind::Budget,
+        loop_id: None,
+        limit,
+        rule: refusal::ExtensionRule::Syntax,
+    })?;
     let key = key.strip_prefix("budget.").unwrap_or(key);
-    let (scope, field) = key.split_once('.').ok_or_else(|| BudgetExtensionError {
+    let (scope, field) = key.split_once('.').ok_or(BudgetExtensionError {
         kind: refusal::ExtensionKind::Budget,
         loop_id: None,
         limit,

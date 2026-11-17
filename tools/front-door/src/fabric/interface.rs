@@ -155,7 +155,7 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
         return FacadeError::graph_candidate(*candidate);
     }
     if let Some(admission) = error.admission.clone() {
-        return FacadeError::graph_admission(admission);
+        return FacadeError::graph_admission(*admission);
     }
     if let Some(refusal) = error.parameter.clone() {
         return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));

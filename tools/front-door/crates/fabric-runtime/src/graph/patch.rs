@@ -204,7 +204,7 @@ pub struct PatchError {
     /// `GraphDocument::admit`. Keeping the typed value lets the front door
     /// project it exactly as it projects a raw document, so one compile
     /// failure reads the same through every entry path.
-    pub admission: Option<AdmissionError>,
+    pub admission: Option<Box<AdmissionError>>,
     pub candidate: Option<Box<CandidateError>>,
     /// The supplied parameter a template refused, when compilation failed on one.
     pub parameter: Option<Box<ParameterRefusal>>,
@@ -1109,7 +1109,7 @@ pub fn submit(
     document.schema_version = u64::from(minimum_schema_version(&document));
     document.admit(context.limits).map_err(|error| {
         let mut refusal = classify(error.to_string());
-        refusal.admission = Some(error);
+        refusal.admission = Some(Box::new(error));
         refusal
     })?;
     admit_candidate(
