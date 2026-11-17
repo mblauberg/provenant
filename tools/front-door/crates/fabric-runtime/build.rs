@@ -5,75 +5,81 @@
 //! `name/` directory are spliced into that module after its own file; they
 //! declare their own modules and `use super::*` the helpers it defines.
 
-use std::{env, fs, path::Path, path::PathBuf};
+use std::{env, error::Error, fs, path::Path, path::PathBuf};
 
-fn spliced(dir: &Path) -> String {
+type BuildResult<T> = Result<T, Box<dyn Error>>;
+
+/// The sorted `.rs` files directly under `dir`.
+fn rust_files(dir: &Path) -> BuildResult<Vec<PathBuf>> {
     println!("cargo:rerun-if-changed={}", dir.display());
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .expect("graph test directory")
-        .map(|entry| entry.expect("directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect();
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
     files.sort();
-    files
-        .iter()
-        .map(|file| format!("    include!({file:?});\n"))
-        .collect()
+    Ok(files)
 }
 
-fn modules(dir: &Path) -> String {
-    println!("cargo:rerun-if-changed={}", dir.display());
-    let mut stems: Vec<String> = fs::read_dir(dir)
-        .expect("graph test directory")
-        .map(|entry| entry.expect("directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .map(|path| {
-            path.file_stem()
-                .expect("file stem")
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    stems.sort();
-    for entry in fs::read_dir(dir).expect("graph test directory") {
-        let path = entry.expect("directory entry").path();
-        if path.is_dir() {
-            let stem = path.file_name().expect("directory name").to_string_lossy();
-            assert!(
-                stems.iter().any(|name| name == &*stem),
-                "orphan graph test directory: {}",
-                path.display()
-            );
-            for child in fs::read_dir(&path).expect("graph test subdirectory") {
-                let child = child.expect("directory entry").path();
-                assert!(
-                    !child.is_dir(),
+fn spliced(dir: &Path) -> BuildResult<String> {
+    Ok(rust_files(dir)?
+        .iter()
+        .map(|file| format!("    include!({file:?});\n"))
+        .collect())
+}
+
+fn modules(dir: &Path) -> BuildResult<String> {
+    let mut stems = Vec::new();
+    for path in rust_files(dir)? {
+        let stem = path.file_stem().ok_or("graph test file has no stem")?;
+        stems.push(stem.to_string_lossy().into_owned());
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let stem = path.file_name().ok_or("graph test directory has no name")?;
+        if !stems
+            .iter()
+            .any(|name| name.as_str() == stem.to_string_lossy())
+        {
+            return Err(format!("orphan graph test directory: {}", path.display()).into());
+        }
+        for child in fs::read_dir(&path)? {
+            let child = child?.path();
+            if child.is_dir() {
+                return Err(format!(
                     "nested graph test directory is not dispatched: {}",
                     child.display()
-                );
+                )
+                .into());
             }
         }
     }
-    stems
-        .iter()
-        .map(|stem| {
-            let nested = dir.join(stem);
-            let children = if nested.is_dir() {
-                spliced(&nested)
-            } else {
-                String::new()
-            };
-            format!(
-                "mod {stem} {{\n    include!({:?});\n{children}}}\n",
-                dir.join(format!("{stem}.rs"))
-            )
-        })
-        .collect()
+    let mut out = String::new();
+    for stem in &stems {
+        let nested = dir.join(stem);
+        let children = if nested.is_dir() {
+            spliced(&nested)?
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "mod {stem} {{\n    include!({:?});\n{children}}}\n",
+            dir.join(format!("{stem}.rs"))
+        ));
+    }
+    Ok(out)
 }
 
-fn main() {
-    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let out = PathBuf::from(env::var_os("OUT_DIR").expect("out dir")).join("graph_test_modules.rs");
-    fs::write(out, modules(&manifest.join("src/graph/graph_tests")))
-        .expect("write graph test modules");
+fn main() -> BuildResult<()> {
+    let manifest =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR unset")?);
+    let out =
+        PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR unset")?).join("graph_test_modules.rs");
+    fs::write(out, modules(&manifest.join("src/graph/graph_tests"))?)?;
+    Ok(())
 }

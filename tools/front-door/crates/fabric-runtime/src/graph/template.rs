@@ -1441,6 +1441,9 @@ fn implementation_template(name: &str) -> bool {
     name == "implement" || name.starts_with("implement.")
 }
 
+/// One batch item: its key and its per-item `with` overrides.
+type BatchItem = (String, Map<String, Value>);
+
 impl<'a> Compiler<'a> {
     pub fn new(library: &'a TemplateLibrary) -> Self {
         Self {
@@ -1895,8 +1898,8 @@ impl<'a> Compiler<'a> {
         self.finish(boundary, stack)
     }
 
-    fn items(&self, over: &Value) -> Result<Vec<(String, Map<String, Value>)>, String> {
-        let items: Vec<(String, Map<String, Value>)> = match over {
+    fn items(&self, over: &Value) -> Result<Vec<BatchItem>, String> {
+        let items: Vec<BatchItem> = match over {
             Value::Array(values) => values
                 .iter()
                 .map(|value| match value {
