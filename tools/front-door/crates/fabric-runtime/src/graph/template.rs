@@ -1905,18 +1905,18 @@ impl<'a> Compiler<'a> {
         }
         let mut ids = BTreeSet::new();
         let mut children = Vec::with_capacity(items.len());
-        let review_panel = over.as_str() == Some("@review-panel")
+        let lens_panel = over.as_str() == Some("@review-panel")
             && copy
                 .get("use")
                 .and_then(Value::as_str)
                 .and_then(|name| self.library.resolve(name).ok())
                 .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens));
-        let panel_routes = if review_panel {
+        let panel_routes = if lens_panel {
             self.resolvers.get("review-panel-routes")
         } else {
             None
         };
-        let coverage_floor = if review_panel {
+        let coverage_floor = if lens_panel {
             self.resolvers
                 .get("review-coverage-floor")
                 .and_then(|values| values.first())
