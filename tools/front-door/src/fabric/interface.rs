@@ -1255,7 +1255,7 @@ impl Factory {
             input,
             self.context.config.implement.warn_unbounded_junior,
         ) {
-            eprintln!("warning: {warning}");
+            warn_operator(warning);
         }
         let writer = compiled["access"] == "worktree_write"
             && compiled.get("composite").is_none()
@@ -2083,7 +2083,7 @@ impl Factory {
             }));
         }
         for warning in &warnings {
-            eprintln!("warning: {warning}");
+            warn_operator(warning);
         }
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
             // A concurrent launch bound this name to other input between the
@@ -6380,4 +6380,10 @@ mod tests {
         assert!(!reason.contains("not both"), "{reason}");
         Ok(())
     }
+}
+
+/// Prints a launch warning for the operator; a warning never blocks a launch.
+fn warn_operator(warning: impl std::fmt::Display) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
 }
