@@ -508,8 +508,8 @@ const ASSIGNMENT_RUN: usize = 32;
 /// Scheme words longer than this are not `Basic` or `Bearer`.
 const SCHEME_WORD: usize = 16;
 
-/// Where the assignment scanner is. Only a value is withheld; keys, separators
-/// and quotes stream through, so state never has to be replayed across chunks.
+/// Where the assignment scanner is. Quoted values remain masked until a
+/// definite closing delimiter or the raw line end.
 #[derive(Default)]
 enum Assignment {
     #[default]
@@ -532,6 +532,7 @@ enum Assignment {
         quote_slashes: usize,
         backslashes: usize,
         line: bool,
+        masked: bool,
     },
 }
 
@@ -553,11 +554,10 @@ impl AssignmentScanner {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) {
-        // A held scheme word never reached its whitespace, so it is the credential.
-        if matches!(self.state, Assignment::Scheme { .. }) {
+        if let Assignment::Scheme { .. } = std::mem::take(&mut self.state) {
+            // A held scheme word never reached whitespace, so it is the credential.
             self.mask(output);
         }
-        self.state = Assignment::Scan;
         self.run.clear();
         self.after_backslash = false;
     }
@@ -621,7 +621,7 @@ impl AssignmentScanner {
                     quote_slashes,
                     backslashes,
                 } => {
-                    if byte.is_ascii_whitespace() || byte == b'\\' {
+                    if quote.is_none() && (byte.is_ascii_whitespace() || byte == b'\\') {
                         output.push(byte);
                         self.state = Assignment::Lead {
                             scheme,
@@ -635,32 +635,7 @@ impl AssignmentScanner {
                         };
                         return;
                     }
-                    if byte == b'"' || byte == b'\'' {
-                        if quote.is_some() && quote != Some(byte) {
-                            self.mask(output);
-                            self.state = Assignment::Value {
-                                quote,
-                                quote_slashes,
-                                backslashes: 0,
-                                line: scheme,
-                            };
-                            return;
-                        }
-                        // An empty quoted value has nothing to redact.
-                        if quote == Some(byte) {
-                            if closing_quote(backslashes, quote_slashes) {
-                                output.push(byte);
-                            } else {
-                                self.mask(output);
-                                self.state = Assignment::Value {
-                                    quote,
-                                    quote_slashes,
-                                    backslashes: 0,
-                                    line: scheme,
-                                };
-                            }
-                            return;
-                        }
+                    if quote.is_none() && (byte == b'"' || byte == b'\'') {
                         output.push(byte);
                         self.state = Assignment::Lead {
                             scheme,
@@ -677,12 +652,13 @@ impl AssignmentScanner {
                         self.state = Assignment::Scheme { word: vec![byte] };
                         return;
                     }
-                    self.mask(output);
+                    // Defer the mask until a value byte is known: empty quotes stay empty.
                     self.state = Assignment::Value {
                         quote,
                         quote_slashes,
                         backslashes: 0,
                         line: scheme,
+                        masked: false,
                     };
                     continue;
                 }
@@ -711,6 +687,7 @@ impl AssignmentScanner {
                         quote_slashes: 0,
                         backslashes: 0,
                         line: true,
+                        masked: true,
                     };
                     continue;
                 }
@@ -719,12 +696,20 @@ impl AssignmentScanner {
                     quote_slashes,
                     backslashes,
                     line,
+                    mut masked,
                 } => match quote {
                     Some(quote) => {
-                        if byte == quote && closing_quote(backslashes, quote_slashes) {
+                        if byte == b'\n' || byte == b'\r' {
+                            continue;
+                        }
+                        if byte == quote && quote_close(backslashes, quote_slashes) {
                             output.extend(std::iter::repeat_n(b'\\', quote_slashes));
                             output.push(byte);
                             return;
+                        }
+                        if !masked {
+                            self.mask(output);
+                            masked = true;
                         }
                         self.state = Assignment::Value {
                             quote: Some(quote),
@@ -735,6 +720,7 @@ impl AssignmentScanner {
                                 0
                             },
                             line,
+                            masked,
                         };
                         return;
                     }
@@ -747,11 +733,15 @@ impl AssignmentScanner {
                         if ends {
                             continue;
                         }
+                        if !masked {
+                            self.mask(output);
+                        }
                         self.state = Assignment::Value {
                             quote: None,
                             quote_slashes: 0,
                             backslashes: 0,
                             line,
+                            masked: true,
                         };
                         return;
                     }
@@ -770,11 +760,28 @@ impl AssignmentScanner {
     }
 }
 
-// An encoded delimiter has N backslashes; a value-level escape adds N + 1.
-// Only an even number of those escapes leaves the delimiter unescaped.
-fn closing_quote(backslashes: usize, quote_slashes: usize) -> bool {
-    let layer = quote_slashes.saturating_add(1);
+// The delimiter has its own source slashes; each value-level backslash takes
+// one encoding layer. An even number leaves the delimiter unescaped.
+fn closing_quote(backslashes: usize, quote_slashes: usize, layer: usize) -> bool {
     backslashes % layer == quote_slashes && (backslashes / layer).is_multiple_of(2)
+}
+
+// The opener's slashes give the shallowest layer that can represent it, but
+// the value may be escaped any number of layers deeper (an apostrophe, which
+// JSON never escapes, reveals nothing at all). A quote is a definite close
+// only when every power-of-two layer from the opener's up to the backslash run
+// agrees; a fixed depth cap would release a value escaped one layer deeper.
+fn quote_close(backslashes: usize, quote_slashes: usize) -> bool {
+    let mut layer = quote_slashes.saturating_add(1).next_power_of_two();
+    loop {
+        if !closing_quote(backslashes, quote_slashes, layer) {
+            return false;
+        }
+        layer = layer.saturating_mul(2);
+        if layer > backslashes {
+            return true;
+        }
+    }
 }
 
 /// Bytes that end an unquoted value.
@@ -1606,7 +1613,7 @@ mod tests {
             ),
             (
                 r#"{\"password\":\"abc\\\\\"} end"#,
-                r#"{\"password\":\"[REDACTED]\"} end"#,
+                r#"{\"password\":\"[REDACTED]"#,
             ),
             (
                 r#"\"{\\\"password\\\":\\\"abc\\\\\\\"LEAK_SENTINEL\\\"}\""#,
@@ -1650,6 +1657,123 @@ mod tests {
                 "{input:?} byte by byte"
             );
             assert!(redactor.has_redaction(), "{input:?}");
+        }
+
+        // Encode the whole log repeatedly so the expected source span follows
+        // the same encoding as the credential, including its closing delimiter.
+        for quote in ['\'', '"'] {
+            for value in [
+                format!("abc\\{quote}LEAK_SENTINEL"),
+                "LEAK_SENTINEL\\\\".into(),
+            ] {
+                let mut input = format!("password={quote}{value}{quote} end");
+                let ambiguous_close = value.ends_with("\\\\");
+                let mut expected = if ambiguous_close {
+                    format!("password={quote}[REDACTED]")
+                } else {
+                    format!("password={quote}[REDACTED]{quote} end")
+                };
+                for depth in 0..=2 {
+                    for split in 0..=input.len() {
+                        let mut redactor = Redactor::new([]).expect("empty secret set");
+                        assert_eq!(
+                            joined(
+                                &mut redactor,
+                                &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                            ),
+                            expected.as_bytes(),
+                            "depth {depth}, split {split}, {input:?}"
+                        );
+                    }
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(
+                        joined(
+                            &mut redactor,
+                            &input.as_bytes().chunks(1).collect::<Vec<_>>()
+                        ),
+                        expected.as_bytes(),
+                        "depth {depth}, bytewise, {input:?}"
+                    );
+                    input = serde_json::to_string(&input).expect("encode input");
+                    expected = serde_json::to_string(&expected).expect("encode expected");
+                    if ambiguous_close {
+                        expected.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn quoted_credentials_are_line_bounded_and_hide_leading_bytes() {
+        let cases = [
+            (
+                r#"{"msg": "escaped \" quote", "password": "val\\"} end"#,
+                r#"{"msg": "escaped \" quote", "password": "[REDACTED]"#,
+            ),
+            (
+                r#"Today is a 6" pipe and password="val\\" end"#,
+                r#"Today is a 6" pipe and password="[REDACTED]"#,
+            ),
+            (
+                r#""{\"a\": \"hello \\\" world\", \"password\": \"val\\\\\"} end""#,
+                r#""{\"a\": \"hello \\\" world\", \"password\": \"[REDACTED]"#,
+            ),
+            (r#"password="\\" end"#, r#"password="[REDACTED]"#),
+            (r#"password="  " end"#, r#"password="[REDACTED]" end"#),
+            (r#"password="\secret""#, r#"password="[REDACTED]""#),
+            (r#"password=" secret""#, r#"password="[REDACTED]""#),
+            (
+                "\"password=\\\"\\\\\\\" end\"\nfollowing line",
+                "\"password=\\\"[REDACTED]\nfollowing line",
+            ),
+            (
+                r#"{"log":"password='abc\\'LEAK_SENTINEL' end"}"#,
+                r#"{"log":"password='[REDACTED]' end"}"#,
+            ),
+            (
+                "password=\" LEAK_SENTINEL\nfollowing line",
+                "password=\"[REDACTED]\nfollowing line",
+            ),
+            (
+                "password=\"\\LEAK_SENTINEL\r\nfollowing line",
+                "password=\"[REDACTED]\r\nfollowing line",
+            ),
+            (
+                "password=\"abc\\\"LEAK_SENTINEL\nfollowing line",
+                "password=\"[REDACTED]\nfollowing line",
+            ),
+            (
+                "password=\"safe\" token=LEAK_SENTINEL\nfollowing line",
+                "password=\"[REDACTED]\" token=[REDACTED]\nfollowing line",
+            ),
+            (
+                "password=\"safe\" same line\nfollowing line",
+                "password=\"[REDACTED]\" same line\nfollowing line",
+            ),
+            (
+                r#"password="abc\\" token=LEAK_SENTINEL"#,
+                r#"password="[REDACTED]"#,
+            ),
+        ];
+        for (input, expected) in cases {
+            let bytes = input.as_bytes();
+            for split in 0..=bytes.len() {
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(
+                    joined(&mut redactor, &[&bytes[..split], &bytes[split..]]),
+                    expected.as_bytes(),
+                    "{input:?}, split {split}"
+                );
+                assert!(redactor.has_redaction(), "{input:?}, split {split}");
+            }
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                joined(&mut redactor, &bytes.chunks(1).collect::<Vec<_>>()),
+                expected.as_bytes(),
+                "{input:?}, bytewise"
+            );
         }
     }
 
