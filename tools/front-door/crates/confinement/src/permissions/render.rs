@@ -151,7 +151,7 @@ pub(super) fn compile_sbpl_with_diagnostic(
 }
 
 #[cfg(target_os = "macos")]
-fn compile_sbpl_impl(
+pub(super) fn compile_sbpl_impl(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     anchors: &Anchors<'_>,
@@ -425,7 +425,11 @@ fn compile_sbpl_inner(
         validate_noncredential_grant(state, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&state.path, Some(anchors.home)))?;
         if state.overlaps(&plan.scratch) {
-            return Err(PermissionError::ProtectedOverlap);
+            policy.warn_or(
+                "PLAN_STATE_SCRATCH_OVERLAP",
+                Facts::violation("private state overlaps scratch"),
+                |_| PermissionError::ProtectedOverlap,
+            )?;
         }
         verify_private_scratch(state, &scratch_exclusions, anchors)?;
     }
