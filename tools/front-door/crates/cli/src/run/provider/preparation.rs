@@ -3540,13 +3540,12 @@ pub(super) fn prepare_candidates(
             );
             refused_accounts.insert((route.adapter.clone(), key));
             let remaining = without_refused_accounts(&availability, &refused_accounts);
-            if let Ok(model) = provenant_routing::ModelId::parse(&label) {
-                if remaining
+            if let Ok(model) = provenant_routing::ModelId::parse(&label)
+                && remaining
                     .iter()
                     .any(|record| record.adapter == route.adapter)
-                {
-                    rejected.retain(|tried| *tried != model);
-                }
+            {
+                rejected.retain(|tried| *tried != model);
             }
             if let Ok(next) = resolve(&remaining, &rejected) {
                 queue.extend(candidates(next));

@@ -367,7 +367,10 @@ fn busy_slot_waits_a_bounded_time_then_builds_without_one() -> Result {
     assert!(finish(&mut child, Duration::from_secs(40))?);
     assert!(rig.started("end"));
     let message = stderr_of(&mut child)?;
-    assert!(message.contains("waiting for a host build slot"), "{message}");
+    assert!(
+        message.contains("waiting for a host build slot"),
+        "{message}"
+    );
     assert!(message.contains("building without one"), "{message}");
     Ok(())
 }

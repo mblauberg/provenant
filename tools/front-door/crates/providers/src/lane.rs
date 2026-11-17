@@ -2607,7 +2607,8 @@ mod tests {
 
     #[test]
     fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
-        for (state, slots) in [("/s", 65)] {
+        let (state, slots) = ("/s", 65);
+        {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
                 disk_gate: None,

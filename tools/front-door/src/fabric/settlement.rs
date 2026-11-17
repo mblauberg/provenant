@@ -682,6 +682,7 @@ fn steer_fallback_warning(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
 
     // Spec: docs/specs/fabric.md#session-ready-steering

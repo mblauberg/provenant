@@ -280,7 +280,7 @@ fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> 
 
 struct Taken {
     guard: Option<provenant_os::build_slots::SlotGuard>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)] // Read by tests; the harness-free worktree driver omits them.
     status: Option<String>,
 }
 
