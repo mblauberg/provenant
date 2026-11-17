@@ -1504,7 +1504,9 @@ mod graph_ask_inbox_tests {
             ask: &corrupt_link,
         };
         {
-            let conn = rusqlite::Connection::open(roots.state.as_path().join("fabric.sqlite3"))?;
+            let conn = rusqlite::Connection::open(
+                roots.state.as_path().join("fabric").join("fabric.sqlite3"),
+            )?;
             conn.execute(
                 "UPDATE human_requests SET record = X'deadbeef' WHERE id = ?1",
                 rusqlite::params![corrupt_filed.request],
