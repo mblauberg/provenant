@@ -5051,6 +5051,7 @@ mod writer_recovery_tests {
                         &git,
                         source.parse()?,
                         shared_head.ok_or("committed writer head")?,
+                        &provenant_records::policy::Policy::default(),
                     )?;
                     store.check_launch_writer_lineage(
                         &store.record(child, &call)?,

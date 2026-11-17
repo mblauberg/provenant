@@ -377,7 +377,7 @@ impl RunStore {
         }
         let mut profile_file = None;
         if let Some(confinement) = &mut plan.confinement {
-            let prepared = confinement.prepare_git(&setup_cancel);
+            let prepared = confinement.prepare_git(&setup_cancel, &policy);
             if let Err(error) = prepared {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))

@@ -368,7 +368,11 @@ impl WriterLaunch {
 
     /// Bind a graph writer to its immutable source. The launch preparation
     /// rechecks this prepared base while holding writer custody before launch.
-    pub fn require_source(&self, expected: GitOid) -> Result<()> {
+    pub fn require_source(
+        &self,
+        expected: GitOid,
+        _policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         if self.base != expected {
             return Err(RunError::WriterSourceMismatch {
                 expected,
@@ -381,20 +385,6 @@ impl WriterLaunch {
     /// Bind a graph writer continuation to its predecessor head, verifying that
     /// the predecessor head descends from the original lineage source commit.
     pub fn require_continuation_source(
-        &self,
-        git: &Path,
-        source: GitOid,
-        predecessor: GitOid,
-    ) -> Result<()> {
-        self.require_continuation_source_with_policy(
-            git,
-            source,
-            predecessor,
-            &provenant_records::policy::Policy::default(),
-        )
-    }
-
-    pub fn require_continuation_source_with_policy(
         &self,
         git: &Path,
         source: GitOid,
@@ -1227,7 +1217,11 @@ impl LaunchConfinement {
 
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
-    pub(crate) fn prepare_git(&mut self, cancel: &CancelToken) -> Result<()> {
+    pub(crate) fn prepare_git(
+        &mut self,
+        cancel: &CancelToken,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(());
         };
@@ -1249,6 +1243,7 @@ impl LaunchConfinement {
             &self.home,
             Some((authority, &self.plan.permissions().credential_roots)),
             cancel,
+            policy,
         )
     }
     /// Prepare a private target from host-built output while writer custody is held.
@@ -1399,6 +1394,7 @@ fn prepare_writer_git(
         &provenant_core::CredentialRoots,
     )>,
     cancel: &CancelToken,
+    _policy: &provenant_records::policy::Policy,
 ) -> Result<()> {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::{clock::SystemClock, fs::LockMode};
@@ -1978,7 +1974,14 @@ mod cargo_setup_tests {
         }
 
         fn prepare_git(&self, writer: &mut WriterLaunch) -> FixtureResult<()> {
-            prepare_writer_git(writer, &self.state, &self.root, None, &CancelToken::new())?;
+            prepare_writer_git(
+                writer,
+                &self.state,
+                &self.root,
+                None,
+                &CancelToken::new(),
+                &provenant_records::policy::Policy::default(),
+            )?;
             Ok(())
         }
     }
@@ -2247,13 +2250,13 @@ mod cargo_setup_tests {
         let lane = fixture.add_worktree("chore/source", "lane")?;
         let mut writer = fixture.prepare(&lane)?;
         let source = GitOid::parse(&fixture.source)?;
-        writer.require_source(source)?;
+        writer.require_source(source, &provenant_records::policy::Policy::default())?;
 
         let tree = fixture.run_git(&["rev-parse", "HEAD^{tree}"])?;
         let unrelated =
             GitOid::parse(&fixture.run_git(&["commit-tree", &tree, "-m", "unrelated root"])?)?;
         assert!(matches!(
-            writer.require_source(unrelated),
+            writer.require_source(unrelated, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, actual })
                 if expected == unrelated && actual == source
         ));
@@ -2268,14 +2271,19 @@ mod cargo_setup_tests {
         ])?)?;
         writer.base = child;
         let utility = runtime(&fixture.state)?;
-        writer.require_continuation_source(utility.git_program_path(), source, child)?;
+        writer.require_continuation_source(
+            utility.git_program_path(),
+            source,
+            child,
+            &provenant_records::policy::Policy::default(),
+        )?;
         assert!(matches!(
-            writer.require_continuation_source(utility.git_program_path(), unrelated, child),
+            writer.require_continuation_source(utility.git_program_path(), unrelated, child, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, actual })
                 if expected == unrelated && actual == child
         ));
         assert!(matches!(
-            writer.require_continuation_source(utility.git_program_path(), source, source),
+            writer.require_continuation_source(utility.git_program_path(), source, source, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, actual })
                 if expected == source && actual == child
         ));

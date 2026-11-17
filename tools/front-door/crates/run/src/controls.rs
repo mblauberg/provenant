@@ -839,6 +839,36 @@ mod reboot_tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
+    // Spec: docs/specs/run-settlement.md#continuation
+    fn resume_policy_uses_the_sealed_project_override() -> TestResult {
+        use provenant_records::policy::{Source, Strength};
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let mut run = crate::tests::input();
+        let mut settings = provenant_config::policy::Settings::default();
+        settings
+            .projects
+            .entry(context.project_id.to_string())
+            .or_default()
+            .rules
+            .insert("WRITE_SCOPE".into(), Strength::Refuse);
+        run.request.task.profile.launch_policy =
+            Some(settings.resolve(&context.project_id.to_string(), &Default::default()));
+        crate::tests::rekey(&mut run);
+        store.create(&run, &call)?;
+        // No project configuration is installed in the resumed host state.
+        // The sealed project decision must still be the one resume carries.
+        let policy = store.resume_policy(run.attempt_id, &call)?;
+        assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
+        assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Project);
+        Ok(())
+    }
+
+    #[test]
     fn missing_terminal_attempt_directory_does_not_abort_reconcile()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -1990,7 +2020,12 @@ mod lineage_tests {
             &store.writer_registry,
             project_id,
         )?;
-        resumed.require_continuation_source(&git, source, predecessor)?;
+        resumed.require_continuation_source(
+            &git,
+            source,
+            predecessor,
+            &provenant_records::policy::Policy::default(),
+        )?;
         store.check_launch_writer_lineage(
             &store.record(child.attempt_id, &call)?,
             &child_task,
@@ -2013,7 +2048,7 @@ mod lineage_tests {
             project_id,
         )?;
         assert!(matches!(
-            drifted.require_continuation_source(&git, source, predecessor),
+            drifted.require_continuation_source(&git, source, predecessor, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, .. }) if expected == predecessor
         ));
         Ok(())
@@ -4596,7 +4631,8 @@ impl RunStore {
         writer: &WriterRequest,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        let branch = self.fresh_writer_branch(input, writer)?;
+        let policy = self.resume_policy(input.prior, call)?;
+        let branch = self.fresh_writer_branch(input, writer, &policy)?;
         self.resume_mode(
             input,
             call,
@@ -4618,8 +4654,9 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<(AttemptRecord, Option<PreparedStart>)> {
+        let policy = self.resume_policy(input.prior, call)?;
         let branch = writer
-            .map(|writer| self.fresh_writer_branch(input, writer))
+            .map(|writer| self.fresh_writer_branch(input, writer, &policy))
             .transpose()?;
         self.resume_mode(
             input,
@@ -4650,7 +4687,25 @@ impl RunStore {
         )
         .map(|(run, _)| run)
     }
-    fn fresh_writer_branch(&self, input: &Resume, writer: &WriterRequest) -> Result<String> {
+    fn resume_policy(
+        &self,
+        prior: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<provenant_records::policy::Policy> {
+        let request = self.request(prior, call)?;
+        Ok(crate::launch_policy(
+            self.writer_registry(),
+            &self.context.project_id.to_string(),
+            &request.task,
+        ))
+    }
+
+    fn fresh_writer_branch(
+        &self,
+        input: &Resume,
+        writer: &WriterRequest,
+        _policy: &provenant_records::policy::Policy,
+    ) -> Result<String> {
         let launch = crate::prepare_writer_with_facts(
             writer,
             &self.writer_registry,
@@ -4860,13 +4915,14 @@ impl RunStore {
         if !replay && writer.is_none() {
             self.check_continuation_writer(input.prior, call)?;
         }
+        let policy = self.resume_policy(prior.attempt_id, call)?;
         let _retention = if replay || fresh.is_some() {
             None
         } else if parent_publication_locked {
-            self.ensure_provider_state_not_expired(input.prior)?;
+            self.ensure_provider_state_not_expired(input.prior, &policy)?;
             None
         } else {
-            Some(self.retain_provider_state(input.prior, call)?)
+            Some(self.retain_provider_state(input.prior, call, &policy)?)
         };
         let request = self.request(prior.attempt_id, call)?;
         let task = &request.task;
