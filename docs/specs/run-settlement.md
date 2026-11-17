@@ -13,6 +13,16 @@ publication, the terminal record is committed before custody release, and
 import refusal retains private Git for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
+Publication accepts a lane tip that descends from the launch base, the origin
+default branch, the ref the lane launched against, or any remote-tracking
+branch. It records the ancestor in the branch reflog and `publication-ancestor.json`
+and warns. A tip that descends from none of them settles `failed` with a typed
+`LANE_TIP_UNROOTED` cause naming the tip and launch base. That refusal is final:
+its inputs do not change on retry, so settlement seals it like an exhausted
+import and never retries it. Refusals that depend on a moving branch stay retryable.
+- Why: rebasing a lane onto the branch it feeds is legitimate, and a refusal that
+  cannot change must not leave a finished lane running.
+
 A launch with an unknown acknowledgement is not replayed while custody remains
 uncertain.
 - Why: an unobserved provider may still be writing.
@@ -70,6 +80,12 @@ text may be empty. The `remaining`, `decisions` and `verify` fields also accept 
 single string as a one-item array. Handoff status accepts casing differences and
 surrounding whitespace, with the same three spellings. Serialisation always
 writes canonical arrays, lowercase status and concern objects.
+
+Adjacent repeated handoff blocks are one declaration: identical copies are
+accepted, and differing copies settle on the last, each with a warning. Prose
+between blocks, or after the last, still fails as not ending the answer.
+- Why: a decoder or model repeating a finished handoff must not fail a lane that
+  committed its work.
 
 The immutable handoff artifact and the handoff inside a sealed stop store the
 same typed parse outcome: `Ok(null)` for absent, `Ok(handoff)` for valid, or

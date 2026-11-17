@@ -441,6 +441,7 @@ impl PrepareFixture {
                 launch.worktree.repo(),
                 launch.branch.as_str(),
                 base,
+                None,
                 tip,
             )?;
             if advance_after_publish {

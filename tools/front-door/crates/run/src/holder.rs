@@ -2250,10 +2250,7 @@ impl RunStore {
                 }
                 // An exhausted import cannot progress, so a request to stop is
                 // the only way to settle it other than a refusal.
-                Err(error)
-                    if import_stop_requested
-                        || !matches!(error, RunError::ObjectImportLimit(_)) =>
-                {
+                Err(error) if import_stop_requested || !error.import_refusal_is_final() => {
                     if cancelled || import_stop_requested {
                         import_stopped = true;
                         // A stop can end import, but cannot rewrite a sealed
@@ -2317,7 +2314,7 @@ impl RunStore {
                 other => other,
             };
             match check {
-                Err(error @ RunError::ObjectImportLimit(_)) => {
+                Err(error) if error.import_refusal_is_final() => {
                     let reason = format!(
                         "writer terminal check failed for {}: {error}; {}; private Git retained for host recovery; live writer custody released",
                         writer.worktree.display(),
@@ -6520,6 +6517,7 @@ mod writer_recovery_tests {
                             launch.worktree.repo(),
                             launch.branch.as_str(),
                             launch.base,
+                            None,
                             head
                         )
                         .is_err()
