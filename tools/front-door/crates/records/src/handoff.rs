@@ -1134,7 +1134,9 @@ mod tests {
         }
         for result in [
             format!("{STOP}\nMore text"),
-            format!("{STOP}\n{STOP}"),
+            // Adjacent repeated blocks are one declaration since #3341 (see
+            // the repeated-block tests); prose between them still fails.
+            format!("{STOP}\nMore text\n{STOP}"),
             STOP.trim_end_matches("\n```").to_owned(),
             STOP.replace("\"remaining\":[\"Renderer\"],", ""),
             STOP.replace("stopped_early", "incomplete"),
