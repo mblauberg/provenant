@@ -1426,6 +1426,7 @@ pub(super) fn retain_reason(error: &WorktreeError) -> RetainReason {
         error if error.is_custody_unknown() => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
         WorktreeError::IdentityChanged => RetainReason::Changed,
+        WorktreeError::UnprovenLanding { .. } => RetainReason::NotMerged,
         WorktreeError::Primary => RetainReason::Primary,
         WorktreeError::NotFound => RetainReason::Unregistered,
         _ => RetainReason::GitFailure,
@@ -1908,6 +1909,27 @@ fn revalidate_landing_evidence(
     }
 }
 
+/// At named-removal apply, a missing or invalidated proof is a landing
+/// refusal. Repository binding errors remain separately typed by the utility.
+pub(super) fn revalidate_named_landing_evidence(
+    context: &WorktreeContext<'_>,
+    branch: Option<&GitRefName>,
+    tip: GitOid,
+    evidence: &provenant_records::custody::LandedEvidence,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    revalidate_landing_evidence(context, tip, evidence, cancel).map_err(|error| match error {
+        WorktreeError::IdentityChanged | WorktreeError::NotFound => {
+            WorktreeError::UnprovenLanding {
+                branch: branch
+                    .map(|branch| branch.as_str().to_owned())
+                    .unwrap_or_else(|| "detached HEAD".into()),
+            }
+        }
+        other => other,
+    })
+}
+
 fn revalidate_landing_evidence_with_forge(
     context: &WorktreeContext<'_>,
     tip: GitOid,
@@ -2025,7 +2047,13 @@ fn remove_with_owner(
                                 removal_evidence(context, tip, &refs, cancel)?,
                                 LandingAssessment::Proven(_)
                             ) {
-                                return Err(WorktreeError::IdentityChanged);
+                                return Err(WorktreeError::UnprovenLanding {
+                                    branch: entry
+                                        .branch
+                                        .as_ref()
+                                        .map(|branch| branch.as_str().to_owned())
+                                        .unwrap_or_else(|| "detached HEAD".into()),
+                                });
                             }
                         }
                         if let Some(operation) = operation {
@@ -2084,7 +2112,13 @@ fn remove_with_owner(
                                     let evidence = landing
                                         .as_ref()
                                         .ok_or(WorktreeError::RegistrationUnconfirmed)?;
-                                    revalidate_landing_evidence(context, tip, evidence, cancel)?;
+                                    revalidate_named_landing_evidence(
+                                        context,
+                                        entry.branch.as_ref(),
+                                        tip,
+                                        evidence,
+                                        cancel,
+                                    )?;
                                     provenant_records::custody::RemovalEvidence::Landing {
                                         evidence: evidence.clone(),
                                     }
@@ -2230,7 +2264,11 @@ fn remove_with_owner(
                     let refs = retained_refs(context, Some(branch), None, &[], cancel)?;
                     let evidence = match removal_evidence(context, tip, &refs, cancel)? {
                         LandingAssessment::Proven(evidence) => evidence,
-                        _ => return Err(WorktreeError::IdentityChanged),
+                        _ => {
+                            return Err(WorktreeError::UnprovenLanding {
+                                branch: branch.as_str().to_owned(),
+                            });
+                        }
                     };
                     Some((false, Some(evidence)))
                 };

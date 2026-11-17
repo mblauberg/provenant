@@ -123,6 +123,62 @@ fn is_integration_evidence(evidence: &provenant_records::custody::LandedEvidence
     )
 }
 
+/// Subsumption retires the checkout, while integration evidence also permits
+/// deleting its local branch. A retained delivery ref is not integration proof.
+fn cleanup_decision(
+    authority: provenant_core::ActorId,
+    evidence: provenant_records::custody::LandedEvidence,
+) -> provenant_records::custody::RetirementDecision {
+    use provenant_records::custody::{RemovalEvidence, RetirementDecision};
+    let remove_reference = is_integration_evidence(&evidence);
+    let evidence = RemovalEvidence::Landing { evidence };
+    if remove_reference {
+        RetirementDecision::Discard {
+            authority,
+            evidence,
+        }
+    } else {
+        RetirementDecision::RetireWorktree {
+            authority,
+            evidence,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "pruning receipt {retirement_id} has no custody retirement owner; run `provenant gc --apply` to retire the orphaned receipt without certifying removal"
+)]
+struct MissingRetirementOwner {
+    retirement_id: String,
+}
+
+/// An absent checkout is not removal evidence. Retire only the orphaned
+/// operation receipt, leaving its branch to the normal evidence-based sweep.
+fn retire_orphaned_receipt(
+    receipt: &mut serde_json::Value,
+    error: &MissingRetirementOwner,
+    project: provenant_core::ProjectId,
+    path: &Path,
+) -> Result<Vec<provenant_records::custody::RemovalRecord>, Box<dyn std::error::Error>> {
+    let tip = serde_json::from_value(receipt["retirement_tip"].clone())?;
+    let mut removal = kept_unproven_worktree(project, path, tip);
+    removal.outcome = provenant_records::custody::RemovalOutcome::Kept {
+        cause: provenant_records::custody::RemovalUncertainty::CustodyUnknown,
+    };
+    receipt["state"] = serde_json::json!("retained");
+    receipt["cause"] = serde_json::json!("missing_retirement_owner");
+    receipt["recovery"] = serde_json::json!("orphaned_receipt_retired");
+    receipt["cleanup_complete"] = serde_json::json!(true);
+    receipt["cleanup_warning"] = serde_json::json!(error.to_string());
+    receipt["removal_records"] = serde_json::to_value([&removal])?;
+    if let Some(object) = receipt.as_object_mut() {
+        object.remove("retryable");
+        object.remove("recovered_from_intent");
+    }
+    Ok(vec![removal])
+}
+
 fn delivered_removal_evidence(
     request: Option<&provenant_records::run::WriterDeliveryRequest>,
     receipt: Option<&provenant_run::WriterDeliveryReceipt>,
@@ -230,7 +286,10 @@ fn retirement_records_for_receipt(
         return Err("pruning receipt has an invalid reference anchor".into());
     }
     let Some(mut retirement) = port.retirement_for_subject(project, &subject)? else {
-        return Err("pruning receipt has no custody retirement owner".into());
+        return Err(MissingRetirementOwner {
+            retirement_id: id.to_owned(),
+        }
+        .into());
     };
     let worktree = retirement
         .related_subjects
@@ -256,7 +315,9 @@ fn retirement_records_for_receipt(
         provenant_confinement::worktrees::resume_pending_retirements(context, port, feeds, cancel)?;
     retirement = port
         .retirement_for_subject(project, &subject)?
-        .ok_or("pruning receipt has no custody retirement owner")?;
+        .ok_or_else(|| MissingRetirementOwner {
+            retirement_id: id.to_owned(),
+        })?;
     if retirement.id != id
         || !retirement.related_subjects.contains(&worktree)
         || retirement.outcomes.iter().any(|outcome| {
@@ -703,7 +764,22 @@ fn collect_owned_worktree_with(
                             &writer.worktree,
                             replayed_receipt,
                             cancel,
-                        )?;
+                        );
+                        let confirmed = match confirmed {
+                            Ok(confirmed) => confirmed,
+                            Err(error) => {
+                                if let Some(missing) = error.downcast_ref::<MissingRetirementOwner>() {
+                                    let kept = retire_orphaned_receipt(
+                                        replayed_receipt, missing, settled.project_id, &writer.worktree,
+                                    )?;
+                                    if let Some(records) = removal_records.as_deref_mut() {
+                                        records.extend(kept);
+                                    }
+                                    return Ok(None);
+                                }
+                                return Err(error);
+                            }
+                        };
                         if let Some(records) = removal_records.as_deref_mut() {
                             records.extend(confirmed.iter().cloned());
                         }
@@ -890,12 +966,7 @@ fn collect_owned_worktree_with(
                 };
                 let branch = provenant_confinement::repo::GitRefName::branch(&owner.branch)
                     .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
-                let decision = provenant_records::custody::RetirementDecision::Discard {
-                    authority: chair.actor,
-                    evidence: provenant_records::custody::RemovalEvidence::Landing {
-                        evidence: evidence.clone(),
-                    },
-                };
+                let decision = cleanup_decision(chair.actor, evidence.clone());
                 let (outcome, updated_retirement) = worktrees::prune_owned(
                     context,
                     &writer.worktree,
@@ -1148,7 +1219,49 @@ mod removal_tests {
     use super::*;
 
     #[test]
+    fn orphaned_pruning_receipt_retires_without_certifying_deletion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+        use provenant_records::custody::{RemovalOutcome, RemovalUncertainty};
+        let tip = provenant_core::GitOid::parse(&"a1".repeat(20))?;
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let mut receipt = serde_json::json!({
+            "state": "pruning", "retirement_tip": tip,
+            "retryable": true, "recovered_from_intent": true,
+        });
+        let error = MissingRetirementOwner {
+            retirement_id: "orphan".into(),
+        };
+        let removals =
+            retire_orphaned_receipt(&mut receipt, &error, project, Path::new("/missing"))?;
+        assert_eq!(receipt["state"], "retained");
+        assert_eq!(receipt["cause"], "missing_retirement_owner");
+        assert_eq!(receipt["cleanup_complete"], true);
+        assert!(receipt.get("retryable").is_none());
+        assert!(
+            receipt["cleanup_warning"]
+                .as_str()
+                .unwrap()
+                .contains("provenant gc --apply")
+        );
+        assert!(matches!(
+            removals[0].outcome,
+            RemovalOutcome::Kept {
+                cause: RemovalUncertainty::CustodyUnknown
+            }
+        ));
+        assert_eq!(
+            serde_json::from_value::<Vec<provenant_records::custody::RemovalRecord>>(
+                receipt["removal_records"].clone()
+            )?,
+            removals
+        );
+        Ok(())
+    }
+
+    #[test]
     fn delivery_removal_evidence_distinguishes_retained_refs_from_integration_targets() {
+        // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
         use provenant_records::run::{
             DeliveryMode, WriterDeliveryRequest, WriterDeliveryState, WriterIntegration,
         };
@@ -1199,6 +1312,10 @@ mod removal_tests {
                 retained_ref_evidence("refs/remotes/origin/topic".into(), head)
             );
             assert!(!is_integration_evidence(&evidence));
+            let decision = cleanup_decision(provenant_core::ActorId::from_bytes([1; 16]), evidence);
+            let subject = provenant_records::custody::Subject::worktree("/writer", "generation");
+            assert!(decision.valid_for(&[subject], head));
+            assert!(!decision.removes_reference());
         }
 
         let request = make_request(
@@ -1231,6 +1348,9 @@ mod removal_tests {
             landed_evidence("refs/remotes/origin/main".into(), target)
         );
         assert!(is_integration_evidence(&evidence));
+        let decision = cleanup_decision(provenant_core::ActorId::from_bytes([1; 16]), evidence);
+        assert!(decision.valid_for(&[], head));
+        assert!(decision.removes_reference());
 
         let mismatched = make_request(
             DeliveryMode::Integrate("origin/other".into()),

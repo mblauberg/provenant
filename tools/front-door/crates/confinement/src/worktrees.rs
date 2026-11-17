@@ -272,6 +272,10 @@ pub enum WorktreeError {
     LiveProcess(ObservedProcess),
     #[error("incomplete worker census: {detail}")]
     IncompleteCensus { detail: String },
+    #[error(
+        "landing is unproven for branch {branch}: missing current retained-ref, tree-equivalent, integration or merged-forge proof"
+    )]
+    UnprovenLanding { branch: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
     #[error("worktree writer or registration is unknown at {}", .path.display())]
@@ -456,6 +460,9 @@ impl WorktreeError {
             }
             Self::Primary => {
                 "run `provenant worktree list` and select a linked checkout instead of the primary"
+            }
+            Self::UnprovenLanding { .. } => {
+                "verify the branch's landing with `provenant worktree list`, or explicitly discard it with `provenant worktree remove NAME --discard`"
             }
             Self::IdentityChanged => {
                 "run `provenant worktree list` and retry against the current checkout identity"
