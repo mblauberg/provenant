@@ -1405,8 +1405,12 @@ impl ReviewRecordSource for ProvenantReviews {
             .map_err(|error| LandingError::Failed(error.to_string()))?;
         let found = provenant_fabric_runtime::graph::landing_reviews(&self.root, project, head)
             .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
+        for warning in &found.unusable {
+            eprintln!("warning: review source skipped: {warning}");
+        }
         Ok(Reviews {
             records: found
+                .reviews
                 .into_iter()
                 .map(|record| ReviewRecord {
                     reference: record.attempt_id.to_string(),
@@ -1416,7 +1420,7 @@ impl ReviewRecordSource for ProvenantReviews {
                     independent: record.independent,
                 })
                 .collect(),
-            unusable: Vec::new(),
+            unusable: found.unusable,
         })
     }
 }

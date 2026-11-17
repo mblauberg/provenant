@@ -124,9 +124,7 @@ pub(crate) fn tick_graphs(
                             &clock,
                         ) {
                             Ok(mut journal) => journal.clear_stale_pending()?,
-                            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                                provenant_os::fs::FsError::LockTimeout { .. },
-                            )) => {}
+                            Err(error) if error.is_lock_timeout() => {}
                             Err(error) => return Err(error.into()),
                         }
                     }
@@ -144,9 +142,7 @@ pub(crate) fn tick_graphs(
                     &clock,
                 ) {
                     Ok(journal) => journal,
-                    Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                        provenant_os::fs::FsError::LockTimeout { .. },
-                    )) => return Ok(false),
+                    Err(error) if error.is_lock_timeout() => return Ok(false),
                     Err(error) => return Err(error.into()),
                 };
                 let Some(mut checkpoint) = journal.load(&id)? else {
@@ -857,9 +853,7 @@ impl Factory {
                 id,
             ) {
                 Ok(journal) => journal,
-                Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                    provenant_os::fs::FsError::LockTimeout { .. },
-                )) => {
+                Err(error) if error.is_lock_timeout() => {
                     let checkpoint = FileJournal::read_checkpoint(
                         &self.context.roots.state,
                         self.context.identity.project,
@@ -888,9 +882,10 @@ impl Factory {
                     )
                     .cap_at(budget.deadline().as_mono_time());
                     match open(slice) {
-                        Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                            provenant_os::fs::FsError::LockTimeout { .. },
-                        )) if budget.remaining(self.clock.mono_now()).as_micros() > 0 => {
+                        Err(error)
+                            if error.is_lock_timeout()
+                                && budget.remaining(self.clock.mono_now()).as_micros() > 0 =>
+                        {
                             let bound = FileJournal::execution(
                                 &self.context.roots.state,
                                 self.context.identity.project,
@@ -1036,9 +1031,7 @@ impl Factory {
                     document: document.clone(),
                 })
                 .map_err(|error| match error {
-                    provenant_fabric_runtime::graph::JournalError::TooLarge => {
-                        graph_journal_error(error)
-                    }
+                    error if error.code() == "too_large" => graph_journal_error(error),
                     _ => FacadeError::Conflict,
                 })?;
             // Manual replay must use the same host directory as the original

@@ -97,9 +97,7 @@ impl Factory {
             &target.graph,
         ) {
             Ok(journal) => journal,
-            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                provenant_os::fs::FsError::LockTimeout { .. },
-            )) => {
+            Err(error) if error.is_lock_timeout() => {
                 let checkpoint = FileJournal::read_status_checkpoint(
                     &self.context.roots.state,
                     self.context.identity.project,

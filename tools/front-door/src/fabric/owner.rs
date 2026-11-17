@@ -807,6 +807,34 @@ pub(crate) fn graph_journal_error(
     error: provenant_fabric_runtime::graph::JournalError,
 ) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
+    if let JournalError::Graph { ref source, .. } = error {
+        return match source.cause() {
+            JournalError::TooLarge => FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: error.to_string(),
+            },
+            JournalError::NameReserved => FacadeError::Conflict,
+            JournalError::Filesystem(_)
+            | JournalError::Io(_)
+            | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
+            JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
+                found,
+                ..
+            }) if *found > 1 => FacadeError::UpgradeRequired {
+                reader_release: env!("CARGO_PKG_VERSION").into(),
+                writer_release: "unknown".into(),
+                record: "graph checkpoint schema".into(),
+                version: *found,
+            },
+            _ if source.is_unreadable() => FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: error.to_string(),
+            },
+            _ => FacadeError::StateCorrupt,
+        };
+    }
     match error {
         JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
             found, ..

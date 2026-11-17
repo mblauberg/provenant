@@ -85,12 +85,69 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
-    assert_eq!(landing_reviews(&root, project, head).unwrap(), vec![review]);
+    let corrupt = root
+        .as_path()
+        .join(format!("fabric/graphs/{project}/graph-broken.json"));
+    std::fs::write(corrupt, b"not a checkpoint").unwrap();
+    let found = landing_reviews(&root, project, head).unwrap();
+    assert_eq!(found.reviews, vec![review]);
+    assert_eq!(found.unusable.len(), 1);
+    assert!(found.unusable[0].contains("broken"));
     let changed = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
-    assert!(landing_reviews(&root, project, changed).unwrap().is_empty());
+    assert!(
+        landing_reviews(&root, project, changed)
+            .unwrap()
+            .reviews
+            .is_empty()
+    );
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     journal.save(&fixture.checkpoint).unwrap();
-    assert!(landing_reviews(&root, project, head).unwrap().is_empty());
+    assert!(
+        landing_reviews(&root, project, head)
+            .unwrap()
+            .reviews
+            .is_empty()
+    );
+}
+
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
+fn checkpoint_external_text_round_trips_for_generated_prompts() {
+    let samples = [
+        "",
+        "plain",
+        "秘密 🦀 café",
+        "AKIAIOSFODNN7EXAMPLE",
+        "token=supersecretvalue123456789",
+        "line\n\"escaped\"",
+        "long ordinary prompt",
+    ]
+    .map(str::to_owned);
+    for (index, prefix) in samples.iter().enumerate() {
+        for suffix in &samples {
+            let temp = crate::test_support::tempdir().unwrap();
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let base = std::fs::canonicalize(temp.path()).unwrap();
+            let inputs = provenant_test_support::root_inputs(&base).unwrap();
+            let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+            let project = ProjectId::from_bytes([1; 16]);
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+            let mut fixture = stored_fixture();
+            fixture.execution.document.nodes[0].prompt = format!("{prefix} {suffix} {index}");
+            let mut journal =
+                FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+            journal.bind(fixture.execution).unwrap();
+            journal.save(&fixture.checkpoint).unwrap();
+            assert!(
+                FileJournal::read_checkpoint(&root, project, "g-test")
+                    .unwrap()
+                    .is_some()
+            );
+            journal.save(&fixture.checkpoint).unwrap();
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -165,10 +222,10 @@ fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
     );
     fixture.execution.document.nodes[0].prompt = "changed input".into();
     let mut retry = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    assert!(matches!(
-        retry.bind(fixture.execution),
-        Err(JournalError::NameReserved)
-    ));
+    assert_eq!(
+        retry.bind(fixture.execution).unwrap_err().code(),
+        "name_reserved"
+    );
 }
 
 #[test]
@@ -699,10 +756,10 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
         Ok(crate::graph::template::NameDecision::Create { id, .. }) if id == "g-test-2"
     ));
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    assert!(matches!(
-        journal.bind(fixture.execution.clone()),
-        Err(JournalError::NameReserved)
-    ));
+    assert_eq!(
+        journal.bind(fixture.execution.clone()).unwrap_err().code(),
+        "name_reserved"
+    );
 }
 
 #[test]
@@ -805,10 +862,11 @@ fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
     );
     assert!(directory.join("pending/complete").is_file());
     let error = FileJournal::read_checkpoint_for_tick(&root, project, "bad").unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<JournalError>(),
-        Some(JournalError::TooLarge)
-    ));
+    assert_eq!(
+        error.downcast_ref::<JournalError>().unwrap().code(),
+        "too_large"
+    );
+    assert!(error.to_string().contains("bad"));
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
             .unwrap()
@@ -1094,10 +1152,9 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     let mut bad_digest: serde_json::Value = serde_json::from_slice(&valid).unwrap();
     bad_digest["digest"] = "sha256:bad".into();
     std::fs::write(&path, serde_json::to_vec(&bad_digest).unwrap()).unwrap();
-    assert!(matches!(
-        FileJournal::read_checkpoint(&root, project, "g-test"),
-        Err(JournalError::BadDigest)
-    ));
+    let error = FileJournal::read_checkpoint(&root, project, "g-test").unwrap_err();
+    assert_eq!(error.code(), "bad_digest");
+    assert!(error.to_string().contains("g-test"));
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
@@ -1353,13 +1410,16 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         assert_eq!(journal.integration_base(), Some(integration));
         let changed_integration = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
         let changed_bases = GraphBaseBinding::new(None, Some(changed_integration)).unwrap();
-        assert!(matches!(
-            journal.bind(GraphExecution {
-                bases: Some(changed_bases),
-                ..execution.clone()
-            }),
-            Err(JournalError::GraphMismatch)
-        ));
+        assert_eq!(
+            journal
+                .bind(GraphExecution {
+                    bases: Some(changed_bases),
+                    ..execution.clone()
+                })
+                .unwrap_err()
+                .code(),
+            "graph_mismatch"
+        );
     }
     {
         let other_project = ProjectId::from_bytes([2; 16]);
@@ -1397,14 +1457,19 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     stored["checkpoint"]["graph_id"] = serde_json::json!("changed");
     std::fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
-    assert!(matches!(
-        FileJournal::read_checkpoint(&root, project, "reopen"),
-        Err(JournalError::BadDigest)
-    ));
-    assert!(matches!(
-        FileJournal::open(&root, project, "reopen", budget, &cancel, &clock),
-        Err(JournalError::BadDigest)
-    ));
+    assert_eq!(
+        FileJournal::read_checkpoint(&root, project, "reopen")
+            .unwrap_err()
+            .code(),
+        "bad_digest"
+    );
+    assert_eq!(
+        FileJournal::open(&root, project, "reopen", budget, &cancel, &clock)
+            .err()
+            .unwrap()
+            .code(),
+        "bad_digest"
+    );
 }
 
 #[test]
@@ -2064,10 +2129,7 @@ mod launch_recovery {
     }
 
     fn assert_lock_timeout<T>(result: Result<T, JournalError>) {
-        assert!(matches!(
-            result,
-            Err(JournalError::Filesystem(FsError::LockTimeout { .. }))
-        ));
+        assert!(result.err().is_some_and(|error| error.is_lock_timeout()));
     }
 
     #[test]

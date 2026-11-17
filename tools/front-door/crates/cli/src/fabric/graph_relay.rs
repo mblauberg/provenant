@@ -165,9 +165,9 @@ pub fn serve_with_read(
     }
     let mut journal = match FileJournal::open(state, project, &graph_id, budget, cancel, clock) {
         Ok(journal) => journal,
-        Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-            provenant_os::fs::FsError::LockTimeout { .. },
-        )) if matches!(&op, RelayOp::Wait { waiting: false }) => {
+        Err(error)
+            if error.is_lock_timeout() && matches!(&op, RelayOp::Wait { waiting: false }) =>
+        {
             return Ok(json!({"graph_id": graph_id, "waiting": true, "reclaiming": true}));
         }
         Err(error) => return Err(journal_error(error)),

@@ -73,6 +73,17 @@ collected name is not allocated to a later graph.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`,
   `src/fabric/interface.rs`
 
+### Graph checkpoints cover persisted text
+
+`FileJournal` hashes the typed checkpoint and execution reconstructed from the
+persisted prompt blobs after redaction, and validates the result before atomic
+publication. Landing review queries retain valid settlements while reporting
+unreadable graph sources by graph ID. Readers of an atomic checkpoint see one
+complete published record.
+- Why: stored text must verify on reload, and one damaged graph must not hide
+  independent review evidence in another.
+- Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
+
 ## SQLite stores
 
 ### A format major permits additive evolution
