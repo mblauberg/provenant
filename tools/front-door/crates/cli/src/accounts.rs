@@ -14,8 +14,7 @@ pub(crate) fn credential_directories(
 }
 
 /// Resolve the registered account's credential stores from the adapter's
-/// declared file inventory. Account directories can be much broader than the
-/// stores they contain (notably an Agy account home), so they are not roots.
+/// declared file inventory and files owned by Provenant itself.
 pub(crate) fn credential_store_paths(
     entry: &provenant_providers::accounts::Registration,
 ) -> Result<Vec<PathBuf>, String> {
@@ -57,6 +56,10 @@ pub(crate) fn credential_store_paths(
                 ));
             }
             paths.push(directory.join(path));
+        }
+        if entry.adapter == "claude" {
+            paths.push(directory.join(provenant_providers::claude::LANE_TOKEN_FILE));
+            paths.push(directory.join(provenant_providers::claude::OAUTH_REFRESH_LOCK));
         }
         if spec.credential_profile_sibling {
             paths.push(directory.with_extension("json"));

@@ -141,7 +141,8 @@ pub(super) fn prepare_command(
     let scratch = scratch_directory
         .current_path()
         .map_err(|error| error.to_string())?;
-    let credential_roots = credential_roots(registry, &home, &config.domains.accounts)?;
+    let credential_roots =
+        credential_roots(registry, &home, &config.domains.accounts, &[&source, &cwd])?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let mut access = task.access.clone();

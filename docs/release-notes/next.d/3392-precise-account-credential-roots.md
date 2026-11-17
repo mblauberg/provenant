@@ -2,4 +2,4 @@
 
 ### Accounts, quota and routing
 
-- Protect registered accounts' declared credential files individually, so an account directory that is a home no longer blocks unrelated lane roots; refuse registrations whose store paths cannot be resolved. #3392
+- Protect dedicated account directories and resolve shared roots to declared and Provenant-owned credential files, so a shared home does not block unrelated lane roots; name the account when its store cannot be resolved. #3392

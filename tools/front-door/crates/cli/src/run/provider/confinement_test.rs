@@ -296,3 +296,70 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
     }
     Ok(())
 }
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn registered_credential_roots_protect_lane_tokens_for_dedicated_and_shared_roots()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let dedicated = base.join("dedicated");
+    let shared = base.join("shared");
+    for dir in [&home, &dedicated, &shared] {
+        std::fs::create_dir(dir)?;
+    }
+    let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+        serde_json::json!({"entries": {
+            "dedicated": {"adapter":"claude", "label":"dedicated", "key":"dedicated", "directory":dedicated},
+            "shared": {"adapter":"claude", "label":"shared", "key":"shared", "directory":shared},
+            "home": {"adapter":"claude", "label":"home", "key":"home", "directory":home}
+        }}),
+    )?;
+    let lane = shared.join("lane");
+    let roots = credential_roots(&Registry::default(), &home, &settings, &[&lane])?;
+    for (dir, scope) in [
+        (&dedicated, CredentialScope::Subtree),
+        (&shared, CredentialScope::Exact),
+        (&home, CredentialScope::Exact),
+    ] {
+        let token = dir.join(provenant_providers::claude::LANE_TOKEN_FILE);
+        assert!(
+            roots
+                .refusal(&token, CredentialScope::Exact, true)
+                .is_some()
+        );
+        assert!(roots.entries().iter().any(|root| root.path
+            == if scope == CredentialScope::Subtree {
+                dir.clone()
+            } else {
+                token.clone()
+            }
+            && root.scope == scope));
+    }
+    assert!(!roots.entries().iter().any(|root| root.path == shared
+        && root.scope == CredentialScope::Subtree
+        && root.source.starts_with("account registry:")));
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn unresolvable_registered_store_names_its_account() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let account = base.join("account");
+    std::fs::create_dir(&home)?;
+    std::fs::create_dir(&account)?;
+    std::os::unix::fs::symlink(base.join("missing"), account.join("provenant-lane-token"))?;
+    let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+        serde_json::json!({"entries": {"work": {"adapter":"claude", "label":"work", "key":"work", "directory":account}}}),
+    )?;
+    let error = credential_roots(&Registry::default(), &home, &settings, &[])
+        .expect_err("dangling store must refuse");
+    assert!(error.contains("claude/work"), "{error}");
+    assert!(error.contains("provenant-lane-token"), "{error}");
+    Ok(())
+}

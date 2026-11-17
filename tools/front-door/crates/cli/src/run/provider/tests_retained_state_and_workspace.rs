@@ -780,7 +780,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         host: Some(&host),
         ..Default::default()
     };
-    let inventory = credential_roots(&registry, &home, &settings)?;
+    let inventory = credential_roots(&registry, &home, &settings, &[])?;
     assert!(inventory.entries().iter().any(|entry| {
         entry.path == root.join("agent/socket")
             && entry.scope == provenant_core::CredentialScope::Exact

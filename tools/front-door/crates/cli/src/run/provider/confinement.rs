@@ -701,15 +701,50 @@ pub(super) fn credential_roots(
     registry: &Registry<'_>,
     home: &Path,
     settings: &provenant_providers::accounts::Settings,
+    lane_roots: &[&Path],
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
     let mut roots = CredentialRoots::for_home(home);
+    let resolve = |path: &Path| {
+        provenant_confinement::permissions::resolve_boundary_path(path)
+            .map_err(|error| error.to_string())
+    };
+    let resolved_home = resolve(home)?;
+    let resolved_lanes = lane_roots
+        .iter()
+        .map(|path| resolve(path))
+        .collect::<Result<Vec<_>, _>>()?;
     for entry in settings.entries.values() {
         let source = format!(
-            "account registry: {}/{} credential file",
+            "account registry: {}/{} credential store",
             entry.adapter, entry.label
         );
+        let account_resolve = |path: &Path| {
+            resolve(path).map_err(|error| {
+                format!(
+                    "{source} at {} cannot be resolved precisely: {error}",
+                    path.display()
+                )
+            })
+        };
+        for directory in crate::accounts::credential_directories(entry) {
+            let resolved = account_resolve(directory)?;
+            let shared = resolved == resolved_home
+                || resolved_lanes
+                    .iter()
+                    .any(|lane| lane.starts_with(&resolved));
+            if !shared {
+                roots.add(
+                    directory.to_owned(),
+                    CredentialScope::Subtree,
+                    source.clone(),
+                    CredentialKind::Store,
+                );
+            }
+        }
         for path in crate::accounts::credential_store_paths(entry)? {
+            // Validate here so a later alias-resolution refusal identifies the account.
+            account_resolve(&path)?;
             roots.add(
                 path,
                 CredentialScope::Exact,
@@ -719,7 +754,7 @@ pub(super) fn credential_roots(
         }
     }
     // Preserve each adapter's declared kind for its implicit default root;
-    // registered-account files above are always individual credential stores.
+    // registered-account roots above are credential stores.
     let kind = |adapter: &str, path: &Path| {
         AdapterSpec::get(adapter)
             .and_then(|spec| {
@@ -764,14 +799,37 @@ pub(super) fn credential_roots(
     // Keep both the declaration and its resolved alias, and give every
     // spelling of one location all of its declarations. A candidate can use
     // either spelling, and no credential file contents are opened here.
+    let account_sources = roots
+        .entries()
+        .iter()
+        .filter(|root| root.source.starts_with("account registry:"))
+        .map(|root| (root.path.clone(), root.source.clone()))
+        .collect::<Vec<_>>();
     roots.with_aliases(|path| {
-        provenant_confinement::permissions::resolve_boundary_path(path)
-            .map_err(|error| error.to_string())
+        resolve(path).map_err(|error| {
+            match account_sources
+                .iter()
+                .find(|(declared, _)| declared == path)
+            {
+                Some((_, source)) => format!(
+                    "{source} at {} cannot be resolved precisely: {error}",
+                    path.display()
+                ),
+                None => error,
+            }
+        })
     })
 }
 
 pub fn declared_credentials(
     registry: &Registry<'_>,
+) -> Result<provenant_core::CredentialRoots, String> {
+    declared_credentials_for(registry, &registry.cwd.into_iter().collect::<Vec<_>>())
+}
+
+fn declared_credentials_for(
+    registry: &Registry<'_>,
+    lane_roots: &[&Path],
 ) -> Result<provenant_core::CredentialRoots, String> {
     let home = registry.home.ok_or("home directory is unavailable")?;
     let roots = registry
@@ -782,7 +840,7 @@ pub fn declared_credentials(
         .domains
         .accounts
         .unique_accounts();
-    credential_roots(registry, home, &settings)
+    credential_roots(registry, home, &settings, lane_roots)
 }
 
 pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
@@ -1054,7 +1112,10 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    let credentials = crate::run::declared_credentials(registry).map_err(|error| {
+    let lane_roots = std::iter::once(cwd)
+        .chain(task.access.source_root.as_deref())
+        .collect::<Vec<_>>();
+    let credentials = declared_credentials_for(registry, &lane_roots).map_err(|error| {
         source_cwd_authority(format!("credential declarations unavailable: {error}"))
     })?;
     let Some(source) = &task.access.source_root else {
