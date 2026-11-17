@@ -224,6 +224,11 @@ unreadable or contradictory state stays not-continued. Native account state is
 not scanned or copied into the successor. Sandboxed state continues from
 attempt-private storage; providers that explicitly retain state there, such as
 OpenCode, continue through that same private-state owner.
+Settlement scratch cleanup must preserve the predecessor's session state until
+the continuation has launched. A refused continuation retains closed facts
+identifying the authority rule, affected field and failure kind through
+preparation and into its settled reason. Provider output and identity values
+never supply that public explanation.
 The guardian preserves the typed `steered` stop through exit publication, and
 Run admits that continuation only when the intentional interrupt was delivered
 before exit. A stream identity error also leaves a route- and process-bound

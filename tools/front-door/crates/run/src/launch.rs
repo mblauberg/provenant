@@ -317,6 +317,20 @@ pub(crate) fn fixture_refusal(message: impl Into<String>) -> Box<PrepareRefusal>
 }
 
 impl PrepareRefusal {
+    /// Public continuation errors use typed candidate projections, never the
+    /// raw preparation message, which may include paths or provider output.
+    pub(crate) fn safe_reason(&self) -> String {
+        if self.skipped_routes.is_empty() {
+            self.terminal_cause.detail().into()
+        } else {
+            self.skipped_routes
+                .iter()
+                .map(SkippedRoute::describe)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    }
+
     pub fn boxed(cause: TerminalCause, message: impl Into<String>) -> Box<Self> {
         Box::new(Self {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
@@ -684,15 +698,11 @@ impl RunStore {
             task,
         );
         let plan = check_launch_policy(providers, task, &policy)
-            .map_err(|error| RunError::ContinuationRefused {
-                cause: error.terminal_cause,
-            })
+            .map_err(|refusal| RunError::ContinuationRefused { refusal })
             .and_then(|()| {
                 providers
                     .prepare(task, &prompt, &paths, None)
-                    .map_err(|error| RunError::ContinuationRefused {
-                        cause: error.terminal_cause,
-                    })
+                    .map_err(|refusal| RunError::ContinuationRefused { refusal })
             })
             .and_then(|mut plan| {
                 let limit = providers.write_grant_limit(&policy).checked(&policy);

@@ -429,9 +429,9 @@ pub enum RunError {
     AbandonBlocked(Box<settlement::AbandonmentRefusal>),
     #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
     RecordedRefusal(Box<provenant_records::diagnostic::Diagnostic>),
-    #[error("continuation preparation refused: {}", cause.detail())]
+    #[error("continuation preparation refused: {}", refusal.safe_reason())]
     ContinuationRefused {
-        cause: provenant_records::run::TerminalCause,
+        refusal: Box<launch::PrepareRefusal>,
     },
     #[error("{0}")]
     InvalidTaskTitle(String),
@@ -692,8 +692,8 @@ impl RunError {
                     "abandonment requires non-live presence, free exclusion and a free worktree census".into()
                 });
             }
-            Self::ContinuationRefused { cause } => {
-                diagnostic = diagnostic.detail(cause.detail());
+            Self::ContinuationRefused { refusal } => {
+                diagnostic = diagnostic.detail(refusal.safe_reason());
             }
             Self::PromptTooLarge { limit } => {
                 diagnostic = diagnostic

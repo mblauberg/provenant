@@ -1,6 +1,9 @@
 use super::*;
 use provenant_records::ModelObservation;
 use provenant_records::diagnostic::ContinuationCopyLimit;
+use provenant_records::diagnostic::{
+    ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ContinuationRequestError {
@@ -98,6 +101,23 @@ pub(super) fn continuation_request<'a>(
     ))
 }
 
+impl ContinuationRequestError {
+    pub(super) fn guard(&self) -> ContinuationGuard {
+        let (field, issue) = match self {
+            Self::MissingRoute => (F::AppliedRoute, I::Missing),
+            Self::MissingModel => (F::Model, I::Missing),
+            Self::MissingProvider => (F::Provider, I::Missing),
+            Self::InvalidModel(_) => (F::Model, I::Invalid),
+            Self::ProviderMismatch => (F::Provider, I::Mismatch),
+        };
+        ContinuationGuard {
+            rule: R::Request,
+            field,
+            issue,
+        }
+    }
+}
+
 // Spec: docs/specs/routing.md#accounts-and-credentials
 #[test]
 fn retained_identity_keeps_provider_and_optional_account_key_together() {
@@ -138,8 +158,8 @@ fn retained_identity_keeps_provider_and_optional_account_key_together() {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ContinuationError {
-    #[error("route differs from the prior attempt's provider, model or account")]
-    RouteMismatch,
+    #[error("continuation route field `{}` differs from the prior attempt", .0.name())]
+    RouteMismatch(F),
     #[error("the prior attempt recorded no provider session")]
     MissingSession,
     #[error("the prior attempt recorded no applied route")]
@@ -173,10 +193,25 @@ impl ContinuationError {
         }
     }
 
+    pub(super) fn guard(&self) -> Option<ContinuationGuard> {
+        let (rule, field, issue) = match self {
+            Self::RouteMismatch(field) => (R::RetainedRoute, *field, I::Mismatch),
+            Self::MissingSession => (R::RetainedRoute, F::Session, I::Missing),
+            Self::MissingRoute => (R::RetainedRoute, F::AppliedRoute, I::Missing),
+            Self::NativeSessionUnavailable => (R::NativeSession, F::Rollout, I::Unavailable),
+            Self::NativeSessionLocation(error) => return Some(error.guard()),
+            Self::Provider(provenant_providers::ProviderError::ContinuationRefused(guard)) => {
+                return Some(*guard);
+            }
+            _ => return None,
+        };
+        Some(ContinuationGuard { rule, field, issue })
+    }
+
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
-            Self::RouteMismatch
+            Self::RouteMismatch(_)
             | Self::MissingSession
             | Self::MissingRoute
             | Self::NativeSessionUnavailable
@@ -192,7 +227,7 @@ impl ContinuationError {
 fn continuation_route_mismatch_is_a_typed_authority_boundary() {
     use provenant_records::diagnostic::BoundaryClass;
     assert_eq!(
-        ContinuationError::RouteMismatch.boundary_class(),
+        ContinuationError::RouteMismatch(F::Model).boundary_class(),
         BoundaryClass::Authority
     );
     for error in [
@@ -282,16 +317,14 @@ pub(super) fn continuation_for_policy(
             ContinuationError::MissingRoute,
         )
     })?;
-    if applied.provider.as_deref() != Some(route.adapter.as_str())
-        || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
-        || applied.account_key != route.account_key
-    {
+    if let Some(field) = route_mismatch(applied, route) {
         return Err(enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
-            provenant_records::policy::Facts::violation(
-                "selected continuation route differs from the prior provider, model or account",
-            ),
-            ContinuationError::RouteMismatch,
+            provenant_records::policy::Facts::violation(&format!(
+                "selected continuation route field `{}` differs from the prior attempt",
+                field.name()
+            )),
+            ContinuationError::RouteMismatch(field),
         ));
     }
     let continuation =
@@ -358,6 +391,23 @@ pub(super) fn continuation_for_policy(
     Ok(continuation)
 }
 
+fn route_mismatch(applied: &run::RouteRecord, route: &ResolvedRoute) -> Option<F> {
+    [
+        (
+            applied.provider.as_deref() != Some(route.adapter.as_str()),
+            F::Provider,
+        ),
+        (
+            applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str()),
+            F::Model,
+        ),
+        (applied.account_key != route.account_key, F::Account),
+        (applied.effort != route.effort, F::Effort),
+    ]
+    .into_iter()
+    .find_map(|(changed, field)| changed.then_some(field))
+}
+
 pub(super) fn prior_uses_native_session_state(applied: &run::RouteRecord, provider: &str) -> bool {
     applied
         .sandbox
@@ -381,50 +431,60 @@ pub(super) fn verify_native_continuation(
         .applied_route
         .as_ref()
         .ok_or(ContinuationError::MissingRoute)?;
-    if applied.provider.as_deref() != Some(route.adapter.as_str())
-        || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
-        || applied.account_key != route.account_key
-    {
-        return Err(ContinuationError::RouteMismatch);
+    if let Some(field) = route_mismatch(applied, route) {
+        return Err(ContinuationError::RouteMismatch(field));
     }
     if applied
         .sandbox
         .as_ref()
         .is_some_and(|sandbox| sandbox.effective)
     {
-        return Err(ContinuationError::RouteMismatch);
+        return Err(ContinuationError::RouteMismatch(F::SessionState));
     }
     let prior_state = state_root
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
+    let prior_root = super::observation::native_session_location_for_route(
+        &prior_state,
+        &route.adapter,
+        &route.model,
+        route.account_key.as_deref(),
+    )?;
+    if prior_root != current_root {
+        return Err(super::observation::NativeSessionLocationError::Mismatch(F::NativeHome).into());
+    }
     if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::Rollout)
     {
-        match super::observation::find_native_codex_rollout(
-            &prior_state,
-            session,
-            &route.model,
-            route.account_key.as_deref(),
-            Some(current_root),
-        ) {
-            Ok(Some(_)) => {}
-            Ok(None)
-            | Err(provenant_providers::ProviderError::UnknownIdentity)
-            | Err(provenant_providers::ProviderError::IdentityMismatch) => {
+        let observed = match provenant_providers::codex_rollout::observe(&prior_root, session) {
+            Ok(observed) => observed,
+            Err(provenant_providers::ProviderError::UnknownIdentity) => {
                 return Err(ContinuationError::NativeSessionUnavailable);
             }
+            Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                return Err(ContinuationError::Provider(
+                    provenant_providers::ProviderError::ContinuationRefused(ContinuationGuard {
+                        rule: R::NativeSession,
+                        field: F::Session,
+                        issue: I::Mismatch,
+                    }),
+                ));
+            }
             Err(error) => return Err(error.into()),
-        }
-    } else {
-        let prior_root = super::observation::native_session_location_for_route(
-            &prior_state,
-            &route.adapter,
-            &route.model,
-            route.account_key.as_deref(),
-        )?;
-        if prior_root != current_root {
-            return Err(super::observation::NativeSessionLocationError::Mismatch.into());
+        };
+        let model = observed
+            .model
+            .strip_prefix("codex/")
+            .unwrap_or(&observed.model);
+        if model != route.model {
+            return Err(ContinuationError::Provider(
+                provenant_providers::ProviderError::ContinuationRefused(ContinuationGuard {
+                    rule: R::NativeSession,
+                    field: F::Model,
+                    issue: I::Mismatch,
+                }),
+            ));
         }
     }
     Ok(())

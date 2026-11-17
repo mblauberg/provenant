@@ -120,6 +120,103 @@ impl ConfinementGuard {
     }
 }
 
+/// Closed continuation facts, safe to retain in public settlement reasons.
+/// Values, paths and provider output never enter this projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationGuard {
+    pub rule: ContinuationRule,
+    pub field: ContinuationField,
+    pub issue: ContinuationIssue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRule {
+    Request,
+    RetainedRoute,
+    Contract,
+    NativeSession,
+}
+
+impl ContinuationRule {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Request => "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            Self::RetainedRoute => "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
+            Self::Contract => "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY",
+            Self::NativeSession => "PREPARATION_PREPARE_CANDIDATES_AUTHORITY",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationField {
+    AppliedRoute,
+    Provider,
+    Model,
+    Account,
+    Effort,
+    Session,
+    Host,
+    GrantDigest,
+    NativeHome,
+    SessionState,
+    Rollout,
+}
+
+impl ContinuationField {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AppliedRoute => "applied_route",
+            Self::Provider => "provider",
+            Self::Model => "model",
+            Self::Account => "account",
+            Self::Effort => "effort",
+            Self::Session => "session",
+            Self::Host => "host",
+            Self::GrantDigest => "grant_digest",
+            Self::NativeHome => "native_home",
+            Self::SessionState => "session_state",
+            Self::Rollout => "rollout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationIssue {
+    Missing,
+    Invalid,
+    Mismatch,
+    Unavailable,
+}
+
+impl std::fmt::Display for ContinuationGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let issue = match self.issue {
+            ContinuationIssue::Missing => "missing",
+            ContinuationIssue::Invalid => "invalid",
+            ContinuationIssue::Mismatch => "mismatched",
+            ContinuationIssue::Unavailable => "unavailable",
+        };
+        write!(
+            f,
+            "{}: continuation field `{}` is {issue}",
+            self.rule.code(),
+            self.field.name()
+        )
+    }
+}
+
+impl ContinuationGuard {
+    pub fn project(self, diagnostic: Diagnostic) -> Diagnostic {
+        diagnostic
+            .detail(self.to_string())
+            .next("inspect the predecessor's applied route and retained session before retrying")
+    }
+}
+
 /// Where a configurable admission threshold came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -745,6 +842,7 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/fabric.md#session-ready-steering
     fn skipped_route_projects_typed_readiness_without_source_text() {
         use crate::{
             RouteExclusionReason,
@@ -779,6 +877,25 @@ mod tests {
         let mut malformed = serde_json::to_value(&route).unwrap();
         malformed["confinement_guard"] = serde_json::json!("TOKEN_SENTINEL /private/source");
         assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
+        let guard = ContinuationGuard {
+            rule: ContinuationRule::RetainedRoute,
+            field: ContinuationField::Effort,
+            issue: ContinuationIssue::Mismatch,
+        };
+        route.set_continuation_guard(guard);
+        let encoded = serde_json::to_value(&route).unwrap();
+        let restored: SkippedRoute = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored.continuation_guard, Some(guard));
+        let reason = restored.describe();
+        assert!(reason.contains(guard.rule.code()));
+        assert!(reason.contains(guard.field.name()));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        for field in ["rule", "field", "issue"] {
+            let mut malformed = encoded.clone();
+            malformed["continuation_guard"][field] =
+                serde_json::json!("TOKEN_SENTINEL /private/source");
+            assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
+        }
     }
 
     #[test]
