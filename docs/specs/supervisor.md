@@ -301,7 +301,9 @@ available from `provenant config show`.
 
 A prompt snapshot with a known secret is refused before sealing, and output is
 redacted across chunk boundaries before it reaches disk. Quoted credential values
-are masked through ambiguous closing quotes, at most to the end of their raw line.
+are masked until a definite closing quote at every plausible encoding depth 0..=2;
+without one, masking continues through the end of the raw line. Scanning resumes
+after a definite close or the line end.
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

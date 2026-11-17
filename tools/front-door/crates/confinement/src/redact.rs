@@ -508,8 +508,8 @@ const ASSIGNMENT_RUN: usize = 32;
 /// Scheme words longer than this are not `Basic` or `Bearer`.
 const SCHEME_WORD: usize = 16;
 
-/// Where the assignment scanner is. An ambiguous quoted value holds the suffix
-/// after its last candidate delimiter until the line ends, then rescans it.
+/// Where the assignment scanner is. Quoted values remain masked until a
+/// definite closing delimiter or the raw line end.
 #[derive(Default)]
 enum Assignment {
     #[default]
@@ -533,7 +533,6 @@ enum Assignment {
         backslashes: usize,
         line: bool,
         masked: bool,
-        pending: Option<Vec<u8>>,
     },
 }
 
@@ -555,33 +554,12 @@ impl AssignmentScanner {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) {
-        loop {
-            match std::mem::take(&mut self.state) {
-                // A held scheme word never reached whitespace, so it is the credential.
-                Assignment::Scheme { .. } => self.mask(output),
-                Assignment::Value {
-                    pending: Some(tail),
-                    quote_slashes,
-                    ..
-                } => {
-                    self.release_tail(tail, quote_slashes, output);
-                    continue;
-                }
-                _ => {}
-            }
-            break;
+        if let Assignment::Scheme { .. } = std::mem::take(&mut self.state) {
+            // A held scheme word never reached whitespace, so it is the credential.
+            self.mask(output);
         }
         self.run.clear();
         self.after_backslash = false;
-    }
-
-    // Rescan the suffix: it can contain another credential assignment.
-    fn release_tail(&mut self, tail: Vec<u8>, quote_slashes: usize, output: &mut Vec<u8>) {
-        let delimiter_len = quote_slashes.saturating_add(1).min(tail.len());
-        output.extend_from_slice(&tail[..delimiter_len]);
-        for byte in &tail[delimiter_len..] {
-            self.step(*byte, output);
-        }
     }
 
     fn mask(&mut self, output: &mut Vec<u8>) {
@@ -681,7 +659,6 @@ impl AssignmentScanner {
                         backslashes: 0,
                         line: scheme,
                         masked: false,
-                        pending: None,
                     };
                     continue;
                 }
@@ -711,7 +688,6 @@ impl AssignmentScanner {
                         backslashes: 0,
                         line: true,
                         masked: true,
-                        pending: None,
                     };
                     continue;
                 }
@@ -721,47 +697,17 @@ impl AssignmentScanner {
                     backslashes,
                     line,
                     mut masked,
-                    mut pending,
                 } => match quote {
                     Some(quote) => {
                         if byte == b'\n' || byte == b'\r' {
-                            if let Some(tail) = pending {
-                                self.release_tail(tail, quote_slashes, output);
-                            }
                             continue;
                         }
-                        if byte == quote {
-                            let (candidate, definite) = quote_close(backslashes, quote_slashes);
-                            if candidate {
-                                if definite && pending.is_none() {
-                                    output.extend(std::iter::repeat_n(b'\\', quote_slashes));
-                                    output.push(byte);
-                                    return;
-                                }
-                                // An ambiguous quote might be escaped. Retain the suffix after
-                                // the last possible close until the line ends, so no later value
-                                // bytes can escape. Cap retained text; excess is overmasked.
-                                if !masked {
-                                    self.mask(output);
-                                    masked = true;
-                                }
-                                let mut tail = Vec::new();
-                                tail.extend(std::iter::repeat_n(b'\\', quote_slashes));
-                                tail.push(byte);
-                                pending = Some(tail);
-                            } else if let Some(tail) = &mut pending {
-                                if tail.len() < FRAME_LIMIT {
-                                    tail.push(byte);
-                                }
-                            } else if !masked {
-                                self.mask(output);
-                                masked = true;
-                            }
-                        } else if let Some(tail) = &mut pending {
-                            if tail.len() < FRAME_LIMIT {
-                                tail.push(byte);
-                            }
-                        } else if !masked {
+                        if byte == quote && quote_close(backslashes, quote_slashes) {
+                            output.extend(std::iter::repeat_n(b'\\', quote_slashes));
+                            output.push(byte);
+                            return;
+                        }
+                        if !masked {
                             self.mask(output);
                             masked = true;
                         }
@@ -775,7 +721,6 @@ impl AssignmentScanner {
                             },
                             line,
                             masked,
-                            pending,
                         };
                         return;
                     }
@@ -797,7 +742,6 @@ impl AssignmentScanner {
                             backslashes: 0,
                             line,
                             masked: true,
-                            pending: None,
                         };
                         return;
                     }
@@ -824,8 +768,7 @@ fn closing_quote(backslashes: usize, quote_slashes: usize, layer: usize) -> bool
 
 // Only layers able to represent the opener are plausible. A quote is
 // definite when every such layer agrees it closes the value.
-fn quote_close(backslashes: usize, quote_slashes: usize) -> (bool, bool) {
-    let mut candidate = false;
+fn quote_close(backslashes: usize, quote_slashes: usize) -> bool {
     let mut definite = true;
     let mut plausible = false;
     for layer in [1, 2, 4] {
@@ -834,10 +777,9 @@ fn quote_close(backslashes: usize, quote_slashes: usize) -> (bool, bool) {
         }
         plausible = true;
         let closes = closing_quote(backslashes, quote_slashes, layer);
-        candidate |= closes;
         definite &= closes;
     }
-    (candidate, plausible && definite)
+    plausible && definite
 }
 
 /// Bytes that end an unquoted value.
@@ -1669,7 +1611,7 @@ mod tests {
             ),
             (
                 r#"{\"password\":\"abc\\\\\"} end"#,
-                r#"{\"password\":\"[REDACTED]\"} end"#,
+                r#"{\"password\":\"[REDACTED]"#,
             ),
             (
                 r#"\"{\\\"password\\\":\\\"abc\\\\\\\"LEAK_SENTINEL\\\"}\""#,
@@ -1723,7 +1665,12 @@ mod tests {
                 "LEAK_SENTINEL\\\\".into(),
             ] {
                 let mut input = format!("password={quote}{value}{quote} end");
-                let mut expected = format!("password={quote}[REDACTED]{quote} end");
+                let ambiguous_close = value.ends_with("\\\\");
+                let mut expected = if ambiguous_close {
+                    format!("password={quote}[REDACTED]")
+                } else {
+                    format!("password={quote}[REDACTED]{quote} end")
+                };
                 for depth in 0..=2 {
                     for split in 0..=input.len() {
                         let mut redactor = Redactor::new([]).expect("empty secret set");
@@ -1747,6 +1694,9 @@ mod tests {
                     );
                     input = serde_json::to_string(&input).expect("encode input");
                     expected = serde_json::to_string(&expected).expect("encode expected");
+                    if ambiguous_close {
+                        expected.pop();
+                    }
                 }
             }
         }
@@ -1758,17 +1708,17 @@ mod tests {
         let cases = [
             (
                 r#"{"msg": "escaped \" quote", "password": "val\\"} end"#,
-                r#"{"msg": "escaped \" quote", "password": "[REDACTED]"} end"#,
+                r#"{"msg": "escaped \" quote", "password": "[REDACTED]"#,
             ),
             (
                 r#"Today is a 6" pipe and password="val\\" end"#,
-                r#"Today is a 6" pipe and password="[REDACTED]" end"#,
+                r#"Today is a 6" pipe and password="[REDACTED]"#,
             ),
             (
                 r#""{\"a\": \"hello \\\" world\", \"password\": \"val\\\\\"} end""#,
-                r#""{\"a\": \"hello \\\" world\", \"password\": \"[REDACTED]\"} end""#,
+                r#""{\"a\": \"hello \\\" world\", \"password\": \"[REDACTED]"#,
             ),
-            (r#"password="\\" end"#, r#"password="[REDACTED]" end"#),
+            (r#"password="\\" end"#, r#"password="[REDACTED]"#),
             (r#"password="  " end"#, r#"password="[REDACTED]" end"#),
             (r#"password="\secret""#, r#"password="[REDACTED]""#),
             (r#"password=" secret""#, r#"password="[REDACTED]""#),
@@ -1789,12 +1739,20 @@ mod tests {
                 "password=\"[REDACTED]\r\nfollowing line",
             ),
             (
+                "password=\"abc\\\"LEAK_SENTINEL\nfollowing line",
+                "password=\"[REDACTED]\nfollowing line",
+            ),
+            (
+                "password=\"safe\" token=LEAK_SENTINEL\nfollowing line",
+                "password=\"[REDACTED]\" token=[REDACTED]\nfollowing line",
+            ),
+            (
                 "password=\"safe\" same line\nfollowing line",
                 "password=\"[REDACTED]\" same line\nfollowing line",
             ),
             (
                 r#"password="abc\\" token=LEAK_SENTINEL"#,
-                r#"password="[REDACTED]" token=[REDACTED]"#,
+                r#"password="[REDACTED]"#,
             ),
         ];
         for (input, expected) in cases {
