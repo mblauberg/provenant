@@ -61,6 +61,48 @@ pub fn admit_candidate(
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
 ) -> Result<AdmittedCandidate, CandidateError> {
+    admit(
+        document,
+        checkpoint,
+        extensions,
+        limits,
+        budget,
+        requester_path,
+        false,
+    )
+}
+
+/// Recheck an unchanged running graph; lowered structural limits pause it in the driver.
+pub fn admit_running_candidate(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    extensions: &[String],
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    requester_path: Option<&[u8]>,
+) -> Result<AdmittedCandidate, CandidateError> {
+    let topology_changes = extensions.iter().any(|e| e.starts_with("loop."));
+    admit(
+        document,
+        Some(checkpoint),
+        extensions,
+        limits,
+        budget,
+        requester_path,
+        !topology_changes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit(
+    document: &GraphDocument,
+    checkpoint: Option<&GraphCheckpoint>,
+    extensions: &[String],
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    requester_path: Option<&[u8]>,
+    running_unchanged: bool,
+) -> Result<AdmittedCandidate, CandidateError> {
     GraphInput::Resume {
         extra: Default::default(),
         document: document.graph_id.clone().into(),
@@ -147,7 +189,9 @@ pub fn admit_candidate(
     if expanded != *document {
         scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
     }
-    if let Some(limit) = structural_limit(&expanded, &plan, limits) {
+    if let Some(limit) = structural_limit(&expanded, &plan, limits)
+        && !running_unchanged
+    {
         let node = expanded.nodes.iter().find(|node| match limit.key {
             GraphLimitKey::NodePromptBytes => node.content_bytes() > limit.max,
             GraphLimitKey::RoutesPerNode => {

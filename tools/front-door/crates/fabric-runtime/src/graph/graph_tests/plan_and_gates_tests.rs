@@ -673,16 +673,14 @@ fn gate_only_graph_obeys_structural_limits_before_evaluating() {
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let run = advance_with_budget(
-        &document,
-        &mut FakeOwner::default(),
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.nodes.iter().all(|node| node.gate.is_none()));
+    let mut owner = FakeOwner::default();
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let error = advance_with_budget(
+        &document, &mut owner, &mut journal, &limits, &Default::default(),
+    ).unwrap_err();
+    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    assert!(journal.0.is_none());
+    assert!(owner.calls.is_empty());
 }
 
 #[test]

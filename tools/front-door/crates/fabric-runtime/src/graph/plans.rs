@@ -10,15 +10,38 @@ pub(super) fn set_expansion_pause(
     reason: String,
     fallback: bool,
     fragment_error: Option<PlanFailureFact>,
+    structural_limit: Option<GraphStructuralLimit>,
 ) {
     checkpoint.nodes[index].expansion_pause = Some(reason.clone());
     checkpoint.nodes[index].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
         active: false,
         fallback,
         fragment_error,
+        structural_limit,
     });
     checkpoint.activate_expansion_pause(index);
-    checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
+    checkpoint.set_pause(
+        if structural_limit.is_some() {
+            PauseCause::StructuralLimit
+        } else {
+            PauseCause::InvalidPlanExpansion
+        },
+        &reason,
+    );
+}
+
+pub(super) fn expansion_pause_cause(node: &NodeProgress) -> PauseCause {
+    if matches!(
+        node.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused {
+            structural_limit: Some(_),
+            ..
+        })
+    ) {
+        PauseCause::StructuralLimit
+    } else {
+        PauseCause::InvalidPlanExpansion
+    }
 }
 
 pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
@@ -48,8 +71,9 @@ pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usi
             });
         checkpoint.deactivate_expansion_pauses();
         checkpoint.pause = None;
-        if let Some((_, reason)) = &next {
-            checkpoint.set_pause(PauseCause::InvalidPlanExpansion, reason);
+        if let Some((index, reason)) = &next {
+            let cause = expansion_pause_cause(&checkpoint.nodes[*index]);
+            checkpoint.set_pause(cause, reason);
         }
         if let Some((next, _)) = next {
             checkpoint.activate_expansion_pause(next);
@@ -1762,6 +1786,7 @@ pub(super) fn settle(
         let reason = fallback_reason(&checkpoint.nodes[index]);
         let mut safe_fallback_error =
             "fallback graph is invalid; check the declared graph constraints".to_owned();
+        let mut fallback_limit = None;
         let built = (|| {
             let mut addition = fallback_expansion_for_generation(
                 &node.id,
@@ -1775,9 +1800,10 @@ pub(super) fn settle(
             append(&mut preview, &addition);
             let (plan, positions) =
                 validate_flat_plan(&preview, &generous()).map_err(|error| error.to_string())?;
-            if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
-                safe_fallback_error = reason.clone();
-                return Err(reason);
+            if let Some(limit) = structural_limit(&preview, &plan, limits) {
+                fallback_limit = Some(limit);
+                safe_fallback_error = limit.to_string();
+                return Err(safe_fallback_error.clone());
             }
             let mut expansions = checkpoint.expansions.clone();
             expansions.push(addition.clone());
@@ -1800,7 +1826,7 @@ pub(super) fn settle(
                     ),
                     MAX_ADVANCE_ERROR_BYTES,
                 );
-                set_expansion_pause(checkpoint, index, reason, true, None);
+                set_expansion_pause(checkpoint, index, reason, true, None, fallback_limit);
                 return None;
             }
         };
@@ -1989,6 +2015,7 @@ pub(super) fn settle(
                 );
                 let mut safe_fallback_error =
                     "fallback graph is invalid; check the declared graph constraints".to_owned();
+                let mut fallback_limit = None;
                 let fallback = (|| {
                     let mut addition = fallback_expansion_for_generation(
                         &node.id,
@@ -2004,9 +2031,10 @@ pub(super) fn settle(
                     let (plan, positions) = validate_flat_plan(&preview, &generous())
                         .map_err(|error| error.to_string())?;
                     validate_output_kinds(&preview).map_err(|error| error.to_string())?;
-                    if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
-                        safe_fallback_error = reason.clone();
-                        return Err(reason);
+                    if let Some(limit) = structural_limit(&preview, &plan, limits) {
+                        fallback_limit = Some(limit);
+                        safe_fallback_error = limit.to_string();
+                        return Err(safe_fallback_error.clone());
                     }
                     let mut expansions = checkpoint.expansions.clone();
                     expansions.push(addition.clone());
@@ -2048,6 +2076,7 @@ pub(super) fn settle(
                             bounded(&display_reason, MAX_ADVANCE_ERROR_BYTES),
                             false,
                             Some(fragment_error),
+                            fallback_limit,
                         );
                         return None;
                     }
@@ -2057,7 +2086,11 @@ pub(super) fn settle(
                 &format!("node {} expansion paused: {safe_reason}: {reason}", node.id),
                 MAX_ADVANCE_ERROR_BYTES,
             );
-            set_expansion_pause(checkpoint, index, reason, false, None);
+            let structural_limit = match safe_reason {
+                PlanFailureFact::Structural(limit) => Some(limit),
+                _ => None,
+            };
+            set_expansion_pause(checkpoint, index, reason, false, None, structural_limit);
             None
         }
     }

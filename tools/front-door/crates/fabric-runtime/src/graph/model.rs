@@ -1734,6 +1734,8 @@ pub enum NodeDecisionCause {
         active: bool,
         fallback: bool,
         fragment_error: Option<PlanFailureFact>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structural_limit: Option<GraphStructuralLimit>,
     },
     CompositeFindingsTruncated {
         warning_indices: Vec<usize>,

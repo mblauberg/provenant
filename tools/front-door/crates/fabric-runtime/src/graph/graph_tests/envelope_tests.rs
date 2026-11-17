@@ -370,7 +370,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 },
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
-                expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),
+                expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, structural_limit: Some(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX }), fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),
                 loop_pause: node.loop_body.as_ref().map(|_| {
                     format!(
                         "loop {0} exhausted; decision cannot be applied: {1}; use graph resume --extend loop.{0}.rounds=N or --extend loop.{0}.decision=stop|accept",

@@ -143,6 +143,11 @@ never instruct.
 
 ## Bounded graphs and route fallback
 
+Policy has three operation scopes: graph-wide replay validation and expansion use
+current host then project policy; node decisions add that node's dispatch
+overlay; attempt resume, settlement, publication and recovery use the sealed
+task-profile snapshot. Host-only operations without a project use host policy.
+
 The graph runtime admits a template, document or planner fragment only after
 checking schema capability, structural limits, the fully expanded plan, the
 checkpoint envelope and selected outputs. A launch retry without a wall clock
@@ -181,6 +186,10 @@ journal lock covers reading the original state through publication. A refused
 candidate leaves the checkpoint and execution binding unchanged. The pure
 `admit_candidate` gate owns admission; entry points do not maintain separate
 resume validators.
+A structural limit at first admission refuses without publishing. An existing
+running graph that exceeds a structural limit, including during expansion or
+following a host limit reduction, saves a `StructuralLimit` pause and can
+resume after the limit is raised. A settled graph saves no new structural pause.
 
 Admission refusals may name node IDs, loop keys and field paths that passed the
 identifier grammar, and host-owned rule identifiers and schema positions. They

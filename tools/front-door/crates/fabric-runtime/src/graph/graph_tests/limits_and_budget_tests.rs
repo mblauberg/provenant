@@ -110,18 +110,23 @@ fn document_limits_are_ignored_with_a_warning() {
     ]);
     document.limits = Some(serde_json::json!({"nodes": 999, "future": 0}));
     let limits = crate::config::GraphLimits {
-        nodes: 1,
+        nodes: 2,
         ..Default::default()
     };
     let run = advance_with_budget(
         &document,
-        &mut FakeOwner::default(),
+        &mut FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        },
         &mut MemoryJournal::default(),
         &limits,
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
     assert!(run.checkpoint.limit_notes[0].contains("ignored"));
 }
 
@@ -224,6 +229,26 @@ fn structural_limit_refuses_without_saving_and_host_limit_change_admits() {
     )
     .unwrap();
     assert_eq!(resumed.status, GraphStatus::Complete);
+}
+
+#[test]
+fn lowered_structural_limit_pauses_running_graph_until_raised() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let mut owner = FakeOwner {
+        observations: std::iter::repeat_n(AttemptObservation::Pending { attempt_ref: None }, 12).collect(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default()).unwrap();
+    let lowered = crate::config::GraphLimits { nodes: 1, ..Default::default() };
+    let paused = resume_with_budget(&document, &mut owner, &mut journal, &lowered, &Default::default(), &[]).unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(journal.0.as_ref().unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
+    let resumed = resume_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default(), &[]).unwrap();
+    assert_ne!(resumed.status, GraphStatus::Paused);
+    assert_eq!(resumed.checkpoint.pause_cause(), None);
 }
 
 #[test]

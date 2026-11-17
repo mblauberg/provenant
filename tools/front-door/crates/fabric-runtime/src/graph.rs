@@ -24,7 +24,7 @@ pub use ci::{CiFailedCheck, CiTarget};
 mod budget;
 mod candidate;
 pub mod refusal;
-pub use candidate::{AdmittedCandidate, CandidateError, admit_candidate};
+pub use candidate::{AdmittedCandidate, CandidateError, admit_candidate, admit_running_candidate};
 mod cancellation_intent;
 #[cfg(test)]
 #[path = "graph/checkpoint_tests.rs"]
@@ -1434,14 +1434,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     } else {
         validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
     };
-    // A tick of an already admitted graph is not a new candidate. Tightened
-    // host policy pauses it below; explicit resume and new topology must pass
-    // admission before changing any durable state.
-    let admission_limits = if stored.is_some() && !resume && extensions.is_empty() {
-        &unbounded
-    } else {
-        limits
-    };
     let admitted = match admitted_candidate {
         Some(candidate) => {
             if candidate.source != *document
@@ -1454,14 +1446,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
             candidate
         }
-        None => admit_candidate(
-            document,
-            stored.as_ref(),
-            extensions,
-            admission_limits,
-            budget,
-            None,
-        )
+        None => match stored.as_ref() {
+            Some(checkpoint) => {
+                admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
+            }
+            None => admit_candidate(document, None, extensions, limits, budget, None),
+        }
         .map_err(GraphError::Candidate)?,
     };
     if let Some(checkpoint) = &stored {
@@ -1798,7 +1788,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         let structural_pause =
             transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
-        if structural_pause.is_some() {
+        if structural_pause.is_some()
+            || (checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
+                && checkpoint.nodes.iter().any(|node| {
+                    matches!(
+                        node.expansion_cause,
+                        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                    )
+                }))
+        {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
 

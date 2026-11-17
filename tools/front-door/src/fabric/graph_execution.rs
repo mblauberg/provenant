@@ -1026,14 +1026,24 @@ impl Factory {
                 GraphInput::Resume { extend, .. } => extend.as_slice(),
                 _ => &[],
             };
-            let candidate = provenant_fabric_runtime::graph::admit_candidate(
-                document,
-                checkpoint.as_ref(),
-                extensions,
-                &self.context.config.graph.limits,
-                &self.context.config.graph.budget,
-                Some(&requester_path),
-            )
+            let candidate = match checkpoint.as_ref().filter(|_| !is_retry) {
+                Some(checkpoint) => provenant_fabric_runtime::graph::admit_running_candidate(
+                    document,
+                    checkpoint,
+                    extensions,
+                    &self.context.config.graph.limits,
+                    &self.context.config.graph.budget,
+                    Some(&requester_path),
+                ),
+                None => provenant_fabric_runtime::graph::admit_candidate(
+                    document,
+                    checkpoint.as_ref(),
+                    extensions,
+                    &self.context.config.graph.limits,
+                    &self.context.config.graph.budget,
+                    Some(&requester_path),
+                ),
+            }
             .map_err(FacadeError::graph_candidate)?;
             let mut ledger_warning = None;
             let integration_base = if existing {

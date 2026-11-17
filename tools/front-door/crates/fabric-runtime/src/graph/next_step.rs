@@ -556,7 +556,7 @@ pub(super) fn settle_stop(
             return Some((index, next));
         }
         Settle::Pause(reason) => {
-            plans::set_expansion_pause(&mut next, index, reason, false, None);
+            plans::set_expansion_pause(&mut next, index, reason, false, None, None);
             return Some((index, next));
         }
         Settle::Restart { routes, restart } => (routes, restart),
@@ -639,6 +639,7 @@ pub(super) fn refused(
                 node.id
             ),
             false,
+            None,
             None,
         );
     }

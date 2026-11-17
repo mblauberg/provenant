@@ -272,6 +272,11 @@ fn node_bound(
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
             fallback: false,
+            structural_limit: Some(GraphStructuralLimit {
+                key: GraphLimitKey::GraphPromptBytes,
+                actual: usize::MAX,
+                max: usize::MAX,
+            }),
             fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit {
                 key: GraphLimitKey::GraphPromptBytes,
                 actual: usize::MAX,

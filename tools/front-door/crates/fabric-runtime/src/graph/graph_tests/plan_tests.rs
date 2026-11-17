@@ -669,7 +669,7 @@ fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::StructuralLimit)
     );
     let reason = run.checkpoint.pause_reason().unwrap();
     assert!(
@@ -705,6 +705,7 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
+    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
     let reason = paused.checkpoint.pause_reason().unwrap();
     assert!(
         reason.contains("planner fragment invalid: fragment block missing"),

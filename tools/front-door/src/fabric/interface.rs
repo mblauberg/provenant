@@ -1628,15 +1628,15 @@ impl Factory {
             })
             .to_owned();
         let template_name = template_name.as_str();
-        if let Some(brief) = input.get("brief").and_then(Value::as_str) {
-            if patch::scan_for_secrets(brief).is_err() {
-                return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                    provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                        field: SchemaPath::root(SchemaField::Brief),
-                        rule: SecretRule::Secret,
-                    },
-                )));
-            }
+        if let Some(brief) = input.get("brief").and_then(Value::as_str)
+            && patch::scan_for_secrets(brief).is_err()
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                    field: SchemaPath::root(SchemaField::Brief),
+                    rule: SecretRule::Secret,
+                },
+            )));
         }
         if patch::scan_for_secrets(template_name).is_err() {
             return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
@@ -2531,8 +2531,8 @@ impl Factory {
                 let resolver = self.launch_resolvers(Some(&encode(document)?))?;
                 patch::retry_node_and_dependants(
                     &mut LiveGraph {
-                        document: document,
-                        checkpoint: checkpoint,
+                        document,
+                        checkpoint,
                     },
                     &node,
                     input.get("brief").and_then(Value::as_str),

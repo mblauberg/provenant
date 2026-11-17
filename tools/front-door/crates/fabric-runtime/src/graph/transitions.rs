@@ -1593,8 +1593,9 @@ pub(super) fn refresh_structure_pause(
                 .map(|reason| (index, reason.clone()))
         })
     {
+        let cause = plans::expansion_pause_cause(&checkpoint.nodes[index]);
         checkpoint.activate_expansion_pause(index);
-        checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
+        checkpoint.set_pause(cause, &reason);
     }
     let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
         None

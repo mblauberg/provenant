@@ -1253,8 +1253,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         })
         .count();
     if active_expansions > 1
-        || (active_expansions == 1)
-            != (checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
+        || (active_expansions == 1
+            && !checkpoint.nodes.iter().any(|node| {
+                matches!(
+                    node.expansion_cause,
+                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                ) && Some(plans::expansion_pause_cause(node)) == checkpoint.pause_cause()
+            }))
+        || (active_expansions == 0
+            && checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
@@ -1333,11 +1340,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     active,
                     fallback,
                     fragment_error,
+                    structural_limit,
                 }),
                 pause,
             ) => {
                 plans::agent(node)
                     && (pause.is_some() || (*active && *fallback))
+                    && structural_limit.is_none_or(|limit| limit.actual > limit.max)
                     && fragment_error.is_none_or(|fact| match fact {
                         PlanFailureFact::Structural(limit) => limit.actual > limit.max,
                         PlanFailureFact::Envelope(limit) => {
