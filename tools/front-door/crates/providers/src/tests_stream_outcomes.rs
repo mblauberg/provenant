@@ -258,7 +258,7 @@ fn failed_chunk_retains_earlier_decoded_events_for_finish() -> Result<(), Provid
     let raw = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"kept\"}}\ninvalid\n";
     assert!(matches!(
         codex::Codex.observe(&mut stream, raw),
-        Err(ProviderError::Malformed)
+        Err(ProviderError::MalformedFrame { line: 2 })
     ));
     let outcome = codex::Codex.finish(stream, EXIT)?;
     assert_eq!(
