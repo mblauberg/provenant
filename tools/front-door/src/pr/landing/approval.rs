@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 /// The approval source and tier of one landing run.
 #[derive(Clone, Copy)]
 pub struct Approvals<'a> {
+    warnings: Option<&'a std::cell::RefCell<Vec<String>>>,
     sources: &'a [ApprovalSource],
     records: &'a dyn ReviewRecords,
     tier: ApprovalTier,
@@ -59,6 +60,7 @@ impl ReviewRecords for NoRecords {
 impl<'a> Approvals<'a> {
     pub fn new(sources: &'a [ApprovalSource], records: &'a dyn ReviewRecords) -> Self {
         Self {
+            warnings: None,
             sources,
             records,
             tier: ApprovalTier::Auto,
@@ -68,12 +70,25 @@ impl<'a> Approvals<'a> {
         }
     }
 
+    /// Keep source diagnostics in the caller's structured landing report,
+    /// including successful approval by another usable source.
+    pub fn with_warnings<'b>(self, warnings: &'b std::cell::RefCell<Vec<String>>) -> Approvals<'b>
+    where
+        'a: 'b,
+    {
+        Approvals {
+            warnings: Some(warnings),
+            ..self
+        }
+    }
+
     /// Carry each member's explicit owner acceptance.
     pub fn with_acceptances<'b>(self, acceptances: &'b BTreeMap<u64, String>) -> Approvals<'b>
     where
         'a: 'b,
     {
         Approvals {
+            warnings: self.warnings,
             sources: self.sources,
             records: self.records,
             tier: self.tier,
@@ -102,6 +117,7 @@ impl<'a> Approvals<'a> {
     #[cfg(test)]
     pub fn forge() -> Approvals<'static> {
         Approvals {
+            warnings: None,
             sources: &[ApprovalSource::Forge],
             records: &NoRecords,
             tier: ApprovalTier::Carry,
@@ -181,6 +197,17 @@ impl Approver<'_, '_> {
             let candidates = match source {
                 ApprovalSource::ProvenantReview => match approvals.records.reviews(number, head) {
                     Ok(reviews) => {
+                        if let Some(warnings) = approvals.warnings {
+                            let mut warnings = warnings.borrow_mut();
+                            for source in &reviews.unusable {
+                                let warning = format!(
+                                    "pull request {number}: review source skipped: {source}"
+                                );
+                                if !warnings.contains(&warning) {
+                                    warnings.push(warning);
+                                }
+                            }
+                        }
                         unusable.extend(reviews.unusable);
                         reviews
                             .records
@@ -419,9 +446,17 @@ mod tests {
             ..FakeReviews::default()
         };
 
+        let warnings = std::cell::RefCell::new(Vec::new());
         let decision = Approvals::new(&sources, &reviews)
+            .with_warnings(&warnings)
             .at(&mut repo, "base")
             .decide(&mut forge, 1, "head", "writer")?;
+        assert!(
+            warnings
+                .borrow()
+                .iter()
+                .any(|warning| warning.contains(graph))
+        );
         let Decision::Approved(approved) = decision else {
             return Err(LandingError::Failed(
                 "valid approval was hidden by an unusable graph".into(),

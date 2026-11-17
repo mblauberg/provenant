@@ -119,7 +119,7 @@ fn journal_requires_and_projects_execution_bases_for_review_documents() {
         Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
         None,
     );
-    record.execution.bases = expected_bases.clone();
+    record.execution.bases = expected_bases;
     let bytes = sealed(record);
     let decoded = decode_checkpoint(&bytes, "g-test").unwrap();
     assert_eq!(decoded.checkpoint.bases, expected_bases);

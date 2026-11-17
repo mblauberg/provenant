@@ -426,21 +426,39 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     assert!(outputs.warnings.is_empty());
 
     let finding = serde_json::json!({
-        "id": "AKIAIOSFODNN7EXAMPLE", "severity": "high", "file": "a.rs", "line": 1,
-        "summary": "issue", "status": "open"
+        "id": "AKIAIOSFODNN7EXAMPLE", "severity": "high", "file": "AKIAIOSFODNN7EXAMPLE", "line": 1,
+        "propagates": "AKIAIOSFODNN7EXAMPLE", "summary": "issue", "status": "open"
     });
     let many = vec![finding.clone(); MAX_FINDINGS + 1];
     let block = serde_json::json!({"schema_version": 1, "findings": many});
     let captured = capture(&format!("```findings\n{block}\n```"));
     let mut outputs = make_outputs(Some(&captured), None, None, None, None);
     assert_eq!(outputs.findings_available, Some(true));
-    compact_findings(&mut outputs, Some(&captured), &[]);
+    let original = outputs.findings.clone();
+    let (_, calls) = prompt_text::trace(|| compact_findings(&mut outputs, Some(&captured), &[]));
+    assert!(calls.is_empty());
+    assert_eq!(outputs.full_artifact_findings.as_ref(), Some(&original));
     assert!(!outputs.findings.is_empty());
     assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
-    assert_eq!(outputs.full_artifact_findings.as_ref().unwrap().len(), MAX_FINDINGS + 1);
+    assert_eq!(
+        outputs.full_artifact_findings.as_ref().unwrap().len(),
+        MAX_FINDINGS + 1
+    );
     let stored = serde_json::to_vec(&outputs).unwrap();
     let restored: NodeOutputs = serde_json::from_slice(&stored).unwrap();
-    assert_eq!(restored.full_artifact_findings.unwrap()[0].id, "AKIAIOSFODNN7EXAMPLE");
+    assert_eq!(restored.full_artifact_findings.as_ref().unwrap(), &original);
+    let temp = crate::test_support::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut projection = serde_json::to_value(&restored).unwrap();
+    let (_, calls) = prompt_text::trace(|| {
+        prompt_store::externalise(&directory, "compacted", &mut projection).unwrap();
+        assert!(canonical_len(&projection) <= prompt_store::compacted_len(&restored));
+        let persisted = serde_json::to_vec(&projection).unwrap();
+        let restored = prompt_store::rehydrate(&directory, "compacted", &persisted).unwrap();
+        let restored: NodeOutputs = serde_json::from_slice(&restored).unwrap();
+        assert_eq!(restored.full_artifact_findings.as_ref().unwrap(), &original);
+    });
+    assert!(calls.is_empty());
 
     let oversized = serde_json::json!({
         "schema_version": 1,

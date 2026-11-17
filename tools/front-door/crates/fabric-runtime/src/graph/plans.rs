@@ -393,6 +393,15 @@ fn block<'a>(
     Ok(Some(json))
 }
 
+/// New captured patches enter as structured JSON so identities survive. A
+/// saved fragment is already admitted text and bypasses this function on replay.
+fn normalise_fragment(json: &str) -> Result<String, String> {
+    let value = super::patch::Patch::from_fragment(json)?;
+    let value =
+        prompt_text::normalise(&value, prompt_text::Context::Patch).map_err(str::to_owned)?;
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
 ) -> Result<Option<provenant_records::handoff::Handoff>, String> {
@@ -1849,9 +1858,10 @@ pub(super) fn settle(
         let json = if let Some(capture) = capture {
             let _ = capture;
             match final_patch.unwrap_or(Ok(None)) {
-                Ok(Some(json)) => super::patch::scan_for_secrets(&json).map(|()| {
+                Ok(Some(json)) => normalise_fragment(&json).and_then(|json| {
+                    super::patch::scan_for_secrets(&json)?;
                     checkpoint.nodes[index].fragment = Some(json.clone());
-                    json
+                    Ok(json)
                 }),
                 Ok(None) => {
                     safe_reason = PlanFailureFact::MissingBlock;

@@ -1405,9 +1405,6 @@ impl ReviewRecordSource for ProvenantReviews {
             .map_err(|error| LandingError::Failed(error.to_string()))?;
         let found = provenant_fabric_runtime::graph::landing_reviews(&self.root, project, head)
             .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
-        for warning in &found.unusable {
-            eprintln!("warning: review source skipped: {warning}");
-        }
         Ok(Reviews {
             records: found
                 .reviews

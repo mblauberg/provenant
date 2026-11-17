@@ -400,7 +400,7 @@ impl FileJournal {
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
-    pub fn bind(&mut self, mut execution: GraphExecution) -> Result<(), JournalError> {
+    pub fn bind(&mut self, execution: GraphExecution) -> Result<(), JournalError> {
         let error_graph_id = self.graph_id.clone();
         (|| {
             if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
@@ -421,8 +421,6 @@ impl FileJournal {
                 // or discard fields retained by a newer writer.
                 return Ok(());
             }
-            execution.document = prompt_text::normalise(&execution.document)
-                .map_err(|_| JournalError::BadEnvelope)?;
             self.execution = Some(execution);
             Ok(())
         })()

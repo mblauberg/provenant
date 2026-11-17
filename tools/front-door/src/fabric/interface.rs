@@ -1762,7 +1762,7 @@ impl Factory {
                     nodes: decode_input(raw["nodes"].clone(), "nodes")?,
                     ..Default::default()
                 };
-                patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
+                patch::compile_submission(id, &patch, &context, raw["integration_branch"].as_str())
                     .map_err(graph_patch_error)?
             } else {
                 let mut document = decode_input::<GraphDocument>(raw.clone(), "document")?;
@@ -1876,7 +1876,7 @@ impl Factory {
                 parameters["integration_branch"] = branch.clone();
             }
             node["with"] = parameters;
-            patch::submit(
+            patch::compile_submission(
                 id,
                 &Patch {
                     schema_version: patch::PATCH_SCHEMA_VERSION,
@@ -1961,9 +1961,6 @@ impl Factory {
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         document.set_replay_digest(&digest);
-        document
-            .admit(&self.context.config.graph.limits)
-            .map_err(FacadeError::graph_admission)?;
         let submission_key = format!("submit:{}", document.graph_id);
         patch::submission(
             &mut document,

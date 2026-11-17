@@ -403,22 +403,36 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 Admission bounds the worst-case checkpoint before saving the plan.
-Graph text is normalised exactly once, at ingress, by field type. Each schema
-schema identity retains its bytes; every other string is content, including
-extension fields and template documentation. Parameter map values are content. Live patches, retry briefs and CI
-observations use the same representation at ingress before planning or hashing.
-Captured findings, handoffs and result excerpts are parsed and normalised
-through the field-typed walker before becoming graph outputs or subsequent
-prompts; propagation markers are preserved as identities. Checkpoints persist
+Graph text is normalised exactly once, at ingress, by schema path.
+`prompt_text::Context` enumerates identity positions (finding IDs, files and
+propagation markers, repair item IDs, node references, routes, template names
+and sources). Only declared scalar identity fields retain their bytes: a route
+or source object does not exempt its extension values. Every other string is
+content, including flattened extension maps and template or parameter
+documentation. Content descendants cannot re-enter a schema context through
+identity-like keys. Live patches, retry briefs and CI observations use this
+representation before planning or hashing. A steer normalises only its new
+brief and replacement routes, preserving the rest of its stored node.
+Captured findings are parsed and normalised before merging stored upstream
+evidence; the remaining fresh capture projection (including handoff fields and
+repair item extensions) is normalised once before becoming graph outputs.
+Raw transient captures remain available to parse new patches at their own
+ingress, and never become persisted graph text. Captured fragments are parsed,
+normalised and scanned before storage; retries parse stored fragments without
+normalising them again. Typed handoffs are normalised at capture before any
+consumer retains them. Checkpoints persist
 the normalised form. Compaction retains parsed, normalised findings as typed
 values in content-addressed storage. Resume never fills templates or rewrites a
-sealed submission. Every strict read and every digest check verifies the
+sealed submission. Journal binding and compilation move admitted text without
+another normalisation pass. Every strict read and every digest check verifies the
 stored bytes as stored and never normalises again. Normalising is idempotent.
 Content-addressed storage only externalises bytes and never rewrites digested
 content. The journal strictly validates the stored representation before
 publishing it. The strict checkpoint decoder verifies both the envelope digest
 and the base plan digest, so publication and landing review reads reject the same
-corrupt state.
+corrupt state. Landing skips unusable review sources and retains their graph
+identities in structured report warnings, including when another source
+supplies a valid approval.
 
 - Why: an accepted graph must be able to save its checkpoint.
 

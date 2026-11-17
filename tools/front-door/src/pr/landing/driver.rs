@@ -162,7 +162,13 @@ pub fn run(
     let state = request.state;
     let shadow = request.shadow;
     let mut report = Report::default();
+    let review_warnings = std::cell::RefCell::new(Vec::new());
+    let request = Request {
+        approvals: request.approvals.with_warnings(&review_warnings),
+        ..request
+    };
     let result = run_inner(forge, repo, runner, alarms, request, &mut report);
+    report.warnings.extend(review_warnings.into_inner());
     if let Err(error) = &result {
         let unknown = matches!(
             error,
@@ -1139,7 +1145,7 @@ pub(super) mod tests {
             if !forge_approved {
                 forge.approvals_at_head.clear();
             }
-            let reviews = FakeReviews::of(BTreeMap::from([(
+            let mut reviews = FakeReviews::of(BTreeMap::from([(
                 1,
                 vec![ReviewRecord {
                     reference: "review-attempt".into(),
@@ -1149,6 +1155,8 @@ pub(super) mod tests {
                     independent,
                 }],
             )]));
+            let skipped = "graph-corrupt-review: bad checkpoint digest";
+            reviews.unusable.insert(1, vec![skipped.into()]);
             let state = tempfile::tempdir()?;
             let report = exercise_with(
                 &mut forge,
@@ -1161,6 +1169,12 @@ pub(super) mod tests {
                 state.path(),
                 Approvals::new(&settings.approval_sources, &reviews),
             )?;
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(skipped))
+            );
             if let Some(source) = expected {
                 assert_eq!(report.outcomes[&1], Outcome::Landed);
                 let pr = report

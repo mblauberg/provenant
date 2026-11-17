@@ -228,7 +228,7 @@ mod tests {
         let mut value = json!({"execution": {"document": {"nodes": [
             {"id": "a", "prompt": format!("deploy with {secret} now")}
         ]}}});
-        value = prompt_text::normalise(&value).unwrap();
+        value = prompt_text::normalise(&value, prompt_text::Context::Content).unwrap();
         externalise(&directory, "g", &mut value).unwrap();
         let digest = value[STORED_TEXT]["/execution/document/nodes/0/prompt"]
             .as_str()

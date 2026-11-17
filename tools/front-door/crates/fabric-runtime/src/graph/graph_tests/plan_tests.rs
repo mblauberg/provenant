@@ -1083,8 +1083,19 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
         let run = advance(&doc, &mut owner, &mut journal).unwrap();
         assert!(!run.checkpoint.successful());
         let progress = &run.checkpoint.nodes[0];
-        assert_eq!(progress.attempts.last().unwrap().stop, Some(provenant_records::StopCause::HandoffMalformed));
-        assert!(progress.outputs.as_ref().unwrap().warnings.iter().any(|warning| warning.contains("handoff_malformed")));
+        assert_eq!(
+            progress.attempts.last().unwrap().stop,
+            Some(provenant_records::StopCause::HandoffMalformed)
+        );
+        assert!(
+            progress
+                .outputs
+                .as_ref()
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("handoff_malformed"))
+        );
         assert_eq!(owner.deliveries, 0);
     }
 }
@@ -3274,6 +3285,153 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     );
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn submission_normalises_free_form_fields_once() {
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let doc = format!("template documentation {secret}");
+    let parameter_doc = format!("parameter documentation {secret}");
+    let prompt = format!("new submission {secret}");
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "submit-once",
+        "template_library": {"unused": {
+            "doc": doc, "brief": "unused", "parameters": {
+                "value": {"type": "string", "doc": parameter_doc, "default": "ok"}
+            }
+        }},
+        "nodes": [{"id": "work", "prompt": prompt, "access": "read_only",
+            "route": {"alias": "senior"}}]
+    }))
+    .unwrap();
+    let (_, calls) = prompt_text::trace(|| {
+        patch::submission(
+            &mut document,
+            "submit-once",
+            &plans::generous(),
+            provenant_config::PortTable::builtin().worktree_layout,
+        )
+        .unwrap()
+    });
+    for field in [&doc, &parameter_doc, &prompt] {
+        prompt_text::assert_once(&calls, field);
+    }
+    assert!(
+        !document.template_library["unused"]
+            .doc
+            .as_ref()
+            .unwrap()
+            .contains(secret)
+    );
+    assert!(
+        !document.template_library["unused"].parameters["value"]
+            .doc
+            .as_ref()
+            .unwrap()
+            .contains(secret)
+    );
+    assert!(!document.nodes[0].prompt.contains(secret));
+    let mut journal = MemoryJournal::default();
+    let (_, calls) = prompt_text::trace(|| {
+        let mut owner = FakeOwner {
+            observations: [AttemptObservation::Pending {
+                attempt_ref: Some("submission-once".into()),
+            }]
+            .into(),
+            ..Default::default()
+        };
+        advance(&document, &mut owner, &mut journal).unwrap();
+    });
+    assert!(
+        calls.is_empty(),
+        "initial patch admission rewrote stored text: {calls:?}"
+    );
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn live_patch_normalises_docs_and_extensions_once() {
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let doc = format!("inline template documentation {secret}");
+    let parameter_doc = format!("inline parameter documentation {secret}");
+    let comment = format!("node extension {secret}");
+    let (document, mut checkpoint) = running_graph();
+    let (_, calls) = prompt_text::trace(|| {
+        admit(
+            &document,
+            &mut checkpoint,
+            json!({
+                "schema_version": 1,
+                "templates": {"probe": {"doc": doc, "brief": "new work", "parameters": {
+                    "value": {"type": "string", "doc": parameter_doc, "default": "ok"}
+                }}},
+                "nodes": [{"id": "probe", "use": "probe", "comment": comment}]
+            }),
+        )
+        .unwrap()
+    });
+    for field in [&doc, &parameter_doc, &comment] {
+        prompt_text::assert_once(&calls, field);
+    }
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let added = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "probe")
+        .unwrap();
+    assert!(!added.extra["comment"].as_str().unwrap().contains(secret));
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
+    let prompt = "captured patch prompt AKIAIOSFODNN7EXAMPLE";
+    let doc = "captured template doc AKIAIOSFODNN7EXAMPLE";
+    let patch = json!({"schema_version":1,
+        "templates":{"probe":{"brief":"work", "doc":doc}},
+        "nodes":[{"id":"child","use":"probe","prompt":prompt}]});
+    let text = format!("```fragment\n{patch}\n```");
+    let document = planner(8);
+    let mut journal = MemoryJournal::default();
+    let mut limits = plans::generous();
+    limits.nodes = 1;
+    let (run, calls) = prompt_text::trace(|| {
+        advance_with_budget(
+            &document,
+            &mut fixture_owner(&[&text]),
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap()
+    });
+    prompt_text::assert_once(&calls, prompt);
+    prompt_text::assert_once(&calls, doc);
+    let stored = run.checkpoint.nodes[0].fragment.as_ref().unwrap().clone();
+    assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"));
+    let (replayed, calls) = prompt_text::trace(|| {
+        resume_with_budget(
+            &document,
+            &mut fixture_owner(&[]),
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &[],
+        )
+        .unwrap()
+    });
+    assert!(calls.is_empty());
+    assert_eq!(
+        replayed.checkpoint.nodes[0].fragment.as_deref(),
+        Some(stored.as_str())
+    );
+}
+
 #[test]
 fn submit_compiles_a_patch_into_a_new_graph() {
     let library = TemplateLibrary::bundled();
@@ -3547,11 +3705,10 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
 #[test]
 fn continuation_fragment_resolves_the_host_review_panel() {
     let mut document = planner(8);
-    document.nodes[0].plan.as_mut().unwrap().resolvers =
-        std::collections::BTreeMap::from([(
-            "review-panel".to_owned(),
-            vec!["correctness".to_owned(), "tests".to_owned()],
-        )]);
+    document.nodes[0].plan.as_mut().unwrap().resolvers = std::collections::BTreeMap::from([(
+        "review-panel".to_owned(),
+        vec!["correctness".to_owned(), "tests".to_owned()],
+    )]);
     let output = result(vec![json!({
         "id":"delta", "use":"review", "over":"@review-panel",
         "with":{"lens":"${item}"}, "acceptance_checks":["Review the repair delta"]

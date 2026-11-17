@@ -156,10 +156,7 @@ fn advance_reopened_prompt(prompt: &str) {
     let execution = FileJournal::pending_execution(&root, project, graph_id)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        execution.document,
-        prompt_text::normalise(&document).unwrap()
-    );
+    assert_eq!(execution.document, document);
     let mut journal = ReadableJournal(
         FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap(),
     );
@@ -350,11 +347,21 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
 
     let mut journal = FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap();
     // Stored checkpoint in round-2 normal form must resume without BadCheckpoint/BadDigest.
-    let run = resume(&document, &mut Owner, &mut journal).unwrap();
+    let ((run, found), calls) = prompt_text::trace(|| {
+        let execution = FileJournal::execution(&root, project, graph_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(execution.document, document);
+        let run = resume(&execution.document, &mut Owner, &mut journal).unwrap();
+        let found = landing_reviews(&root, project, head).unwrap();
+        (run, found)
+    });
+    assert!(
+        calls.is_empty(),
+        "stored text re-entered normalisation: {calls:?}"
+    );
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
-
-    // And verify it lands.
-    let found = landing_reviews(&root, project, head).unwrap();
+    assert!(document.nodes[0].template.is_none());
     assert_eq!(found.reviews, vec![review]);
     assert!(found.unusable.is_empty());
     assert_eq!(

@@ -5,30 +5,157 @@ use super::*;
 
 /// Redact known credential shapes before graph text is planned or persisted.
 pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
+    #[cfg(test)]
+    NORMALISATION_TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            trace.push(text.to_owned());
+        }
+    });
     let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
         .map_err(|_| "graph text redaction failed")?;
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
 }
 
-/// Normalise prompt-bearing fields, including nested template arguments and
-/// findings. Identifiers, paths, routes and digests retain their exact identity.
+#[cfg(test)]
+thread_local! {
+    static NORMALISATION_TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Observe calls at ingress, so regressions cannot hide a second pass behind
+/// the redactor's idempotence. The guard also clears the trace on test panic.
+#[cfg(test)]
+pub(super) fn trace<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NORMALISATION_TRACE.with_borrow_mut(|trace| *trace = None);
+        }
+    }
+    NORMALISATION_TRACE.with_borrow_mut(|trace| {
+        assert!(trace.is_none());
+        *trace = Some(Vec::new());
+    });
+    let _guard = Guard;
+    let result = run();
+    let trace = NORMALISATION_TRACE.with_borrow_mut(|trace| trace.take().unwrap());
+    (result, trace)
+}
+
+#[cfg(test)]
+pub(super) fn assert_once(trace: &[String], original: &str) {
+    assert_eq!(trace.iter().filter(|text| *text == original).count(), 1);
+    let normal = normalise_prompt_text(original).unwrap();
+    assert_ne!(normal, original, "fixture must exercise normalisation");
+    assert!(
+        !trace.contains(&normal),
+        "already normalised text re-entered ingress"
+    );
+}
+
+/// A schema position, never inferred from user-defined keys or object shape.
+#[derive(Clone, Copy)]
+pub(super) enum Context {
+    Content,
+    Identity,
+    Document,
+    Patch,
+    Node,
+    Route,
+    RequestedRoute,
+    Source,
+    TemplateMap,
+    Template,
+    Plan,
+    Composite,
+    Loop,
+    Input,
+    Land,
+    Condition,
+    CiTarget,
+    Outputs,
+    Result,
+    Finding,
+    RepairItem,
+    CiObservation,
+}
+
+impl Context {
+    fn child(self, key: &str) -> Self {
+        use Context::*;
+        match (self, key) {
+            (
+                Document,
+                "graph_id" | "review_base" | "integration_branch" | "replay_digest"
+                | "decision_session",
+            ) => Identity,
+            (Document, "nodes")
+            | (Patch, "nodes" | "replace")
+            | (Template, "node" | "nodes")
+            | (Composite, "nodes")
+            | (Loop, "body") => Node,
+            (Document, "submission_patch") => Patch,
+            (Document, "template_library") | (Patch, "templates") => TemplateMap,
+            (TemplateMap, _) => Template,
+            (Template, "name" | "tier") => Identity,
+            (Template, "exports")
+            | (Node, "inputs")
+            | (Composite, "exports")
+            | (Plan, "fallback_inputs") => Input,
+            (Patch, "idempotency_key" | "skip") => Identity,
+            (
+                Node,
+                "id" | "template" | "use" | "depends_on" | "after" | "after_settled"
+                | "after_expansion" | "continues" | "dispositions" | "parent_node" | "worktree"
+                | "review_base" | "review_lens" | "repair_lens",
+            ) => Identity,
+            (Node, "route" | "routes") => Route,
+            (Node, "source") => Source,
+            (Node, "composite") | (Plan, "fallback") => Composite,
+            (Node, "loop" | "repeat") => Loop,
+            (Node, "plan") => Plan,
+            (Node, "land") => Land,
+            (Node, "condition") => Condition,
+            (Plan, "patterns") => Template,
+            (Plan, "fallback_depends_on") | (Loop, "until" | "decision_session") => Identity,
+            (
+                Route,
+                "adapter" | "name" | "model" | "alias" | "effort" | "account" | "tier"
+                | "required_family" | "peer_source_head",
+            ) => Identity,
+            (Route, "peer_requested_route") => RequestedRoute,
+            (
+                RequestedRoute,
+                "kind" | "required_family" | "provider" | "name" | "model" | "effort"
+                | "excluded_families" | "preferred_families",
+            ) => Identity,
+            (Source, "type" | "commit" | "node") => Identity,
+            (Input, "node") | (Land, "node" | "session") | (CiTarget, "node") => Identity,
+            (Condition, "target") => CiTarget,
+            (Outputs, "findings") => Finding,
+            (Outputs, "repair_items") => RepairItem,
+            (Outputs, "result") => Result,
+            (Outputs, "branch" | "commit") | (Result, "path" | "digest") => Identity,
+            (Finding, "id" | "file" | "path" | "lens" | "propagates")
+            | (RepairItem, "id")
+            | (CiObservation, "head_sha") => Identity,
+            // Everything else, including flattened extension values, is content.
+            // A content subtree can never re-enter a schema context.
+            _ => Content,
+        }
+    }
+}
+
 pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
     input: &T,
+    context: Context,
 ) -> Result<T, &'static str> {
-    #[derive(Clone, Copy)]
-    enum Context {
-        Schema,
-        Content,
-        Finding,
-        RepairItem,
-        Node,
-        Template,
-        TemplateMap,
-    }
-
     fn visit(value: &mut serde_json::Value, context: Context) -> Result<(), &'static str> {
         match value {
-            serde_json::Value::String(value) => *value = normalise_prompt_text(value)?,
+            serde_json::Value::String(value)
+                if !matches!(context, Context::Identity | Context::CiTarget) =>
+            {
+                *value = normalise_prompt_text(value)?;
+            }
             serde_json::Value::Array(values) => {
                 for value in values {
                     visit(value, context)?;
@@ -36,94 +163,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
             }
             serde_json::Value::Object(values) => {
                 for (key, value) in values {
-                    // Once inside prose or a user-defined parameter map, every
-                    // descendant is content, regardless of its key or shape.
-                    if matches!(context, Context::Content) {
-                        visit(value, Context::Content)?;
-                        continue;
-                    }
-                    // Finding records carry schema identities alongside prose.
-                    // This context is entered only at the schema findings field,
-                    // never at a similarly named key inside parameter content.
-                    if matches!(context, Context::Finding) {
-                        if !matches!(key.as_str(), "id" | "file" | "path" | "lens" | "propagates") {
-                            visit(value, Context::Content)?;
-                        }
-                        continue;
-                    }
-                    if matches!(context, Context::RepairItem) {
-                        if key != "id" {
-                            visit(value, Context::Content)?;
-                        }
-                        continue;
-                    }
-                    if key == "repair_items" {
-                        visit(value, Context::RepairItem)?;
-                        continue;
-                    }
-                    if matches!(context, Context::TemplateMap) {
-                        visit(value, Context::Template)?;
-                        continue;
-                    }
-                    // Only known schema positions carry identities. Unknown
-                    // extension maps are visited as content below.
-                    let identity = match context {
-                        Context::Node => matches!(
-                            key.as_str(),
-                            "id" | "template"
-                                | "use"
-                                | "route"
-                                | "routes"
-                                | "source"
-                                | "depends_on"
-                                | "after"
-                                | "after_settled"
-                                | "after_expansion"
-                        ),
-                        Context::Template => key == "name",
-                        Context::Schema => matches!(
-                            key.as_str(),
-                            "graph_id"
-                                | "node"
-                                | "route"
-                                | "routes"
-                                | "source"
-                                | "template"
-                                | "use"
-                                | "depends_on"
-                                | "after"
-                                | "after_settled"
-                                | "after_expansion"
-                                | "reference"
-                                | "branch"
-                                | "commit"
-                                | "digest"
-                                | "worktree"
-                                | "skip"
-                                | "idempotency_key"
-                        ),
-                        _ => false,
-                    };
-                    if identity {
-                        continue;
-                    }
-                    let child = match key.as_str() {
-                        "findings" => Context::Finding,
-                        "repair_items" => Context::RepairItem,
-                        "nodes" | "replace" => Context::Node,
-                        "node" if matches!(context, Context::Template) => Context::Node,
-                        "templates" | "template_library" => Context::TemplateMap,
-                        "parameters" | "with" => Context::Content,
-                        // These are structural schema containers, not arbitrary
-                        // user-defined extension maps.
-                        "provenance" | "submission_patch" | "composite" | "loop" | "body"
-                        | "inputs" | "plan" | "condition" | "when" | "context" | "review"
-                        | "extensions" | "template_layers" | "template_resolvers" => {
-                            Context::Schema
-                        }
-                        _ => Context::Content,
-                    };
-                    visit(value, child)?;
+                    visit(value, context.child(key))?;
                 }
             }
             _ => {}
@@ -131,49 +171,29 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
         Ok(())
     }
     let mut value = serde_json::to_value(input).map_err(|_| "cannot encode graph text")?;
-    let is_node = |value: &serde_json::Value| {
-        value.get("id").is_some() && value.get("access").is_some() && value.get("prompt").is_some()
-    };
-    let root = if is_node(&value)
-        || value
-            .as_array()
-            .is_some_and(|values| values.first().is_some_and(is_node))
-    {
-        Context::Node
-    } else {
-        Context::Schema
-    };
-    visit(&mut value, root)?;
+    visit(&mut value, context)?;
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 
-pub(super) fn capture(
-    input: &crate::result_capture::CapturedResult,
-) -> Result<crate::result_capture::CapturedResult, &'static str> {
-    let mut capture = input.clone();
-    capture.excerpt = normalise_prompt_text(&capture.excerpt)?;
-    capture.tail = normalise_prompt_text(&capture.tail)?;
-    capture.verdict = capture
-        .verdict
-        .as_deref()
-        .map(normalise_prompt_text)
-        .transpose()?
-        .map(String::into_boxed_str);
-    capture.verdict_cause = capture
-        .verdict_cause
-        .as_deref()
-        .map(normalise_prompt_text)
-        .transpose()?;
-    capture.handoff = match &capture.handoff {
-        Ok(handoff) => Ok(normalise(handoff)?),
-        Err(error) => {
-            let mut error = error.clone();
-            error.retained = normalise(&error.retained)?;
-            Err(error)
-        }
-    };
-    // The digest identifies the immutable result artifact, not its prompt projection.
-    Ok(capture)
+/// The typed handoff is a separate persisted projection from output summaries.
+/// Normalise it while the capture is fresh, before any consumer retains it.
+pub(super) fn captured_handoff(
+    capture: &mut crate::result_capture::CapturedResult,
+) -> Result<(), &'static str> {
+    match &mut capture.handoff {
+        Ok(handoff) => *handoff = normalise(handoff, Context::Content)?,
+        Err(error) => error.retained = normalise(&error.retained, Context::Content)?,
+    }
+    Ok(())
+}
+
+/// Findings have already been normalised while parsing, before merging stored
+/// upstream evidence. Only the fresh output projection enters the walker here.
+pub(super) fn captured_outputs(mut outputs: NodeOutputs) -> Result<NodeOutputs, &'static str> {
+    let findings = std::mem::take(&mut outputs.findings);
+    let mut outputs = normalise(&outputs, Context::Outputs)?;
+    outputs.findings = findings;
+    Ok(outputs)
 }
 
 #[cfg(test)]
@@ -187,19 +207,36 @@ mod tests {
         let value = serde_json::json!({
             "graph_id": identity,
             "nodes": [{"id": identity, "prompt": identity,
-                "depends_on": [identity], "route": {"alias": identity}}],
+                "depends_on": [identity], "route": {"alias": identity, "comment": {"source": identity}},
+                "source": {"type": "node", "node": identity, "comment": identity},
+                "comment": {"nodes": [{"id": identity}], "route": {"alias": identity}}}],
             "findings": [{"id": identity, "file": identity, "propagates": identity, "summary": identity}],
             "provenance": {"parameters": {"source": identity,
                 "nested": {"file": identity, "findings": [{"id": identity}]}}},
             "with": {"source": identity, "path": [identity], "template": identity},
             "repair_items": [{"id": identity, "reason": identity, "comment": {"id": identity}}],
-            "templates": {"test": {"doc": identity, "parameters": {"value": {"type": "string", "doc": identity}}}}
+            "template_library": {"test": {"doc": identity, "parameters": {"value": {"type": "string", "doc": identity}}}}
         });
-        let safe: serde_json::Value = normalise(&value).unwrap();
+        let mut safe: serde_json::Value = normalise(&value, Context::Document).unwrap();
+        for (key, context) in [
+            ("findings", Context::Finding),
+            ("repair_items", Context::RepairItem),
+        ] {
+            safe[key] = normalise(&value[key], context).unwrap();
+        }
         assert_eq!(safe["graph_id"], identity);
         assert_eq!(safe["nodes"][0]["id"], identity);
         assert_eq!(safe["nodes"][0]["depends_on"][0], identity);
         assert_eq!(safe["nodes"][0]["route"]["alias"], identity);
+        assert_eq!(safe["nodes"][0]["source"]["node"], identity);
+        for pointer in [
+            "/nodes/0/route/comment/source",
+            "/nodes/0/source/comment",
+            "/nodes/0/comment/nodes/0/id",
+            "/nodes/0/comment/route/alias",
+        ] {
+            assert_ne!(safe.pointer(pointer).unwrap(), identity);
+        }
         assert_eq!(safe["findings"][0]["id"], identity);
         assert_eq!(safe["findings"][0]["file"], identity);
         assert_eq!(safe["findings"][0]["propagates"], identity);
@@ -208,9 +245,9 @@ mod tests {
         assert_eq!(safe["repair_items"][0]["id"], identity);
         assert_ne!(safe["repair_items"][0]["reason"], identity);
         assert_ne!(safe["repair_items"][0]["comment"]["id"], identity);
-        assert_ne!(safe["templates"]["test"]["doc"], identity);
+        assert_ne!(safe["template_library"]["test"]["doc"], identity);
         assert_ne!(
-            safe["templates"]["test"]["parameters"]["value"]["doc"],
+            safe["template_library"]["test"]["parameters"]["value"]["doc"],
             identity
         );
         for pointer in [
@@ -223,46 +260,72 @@ mod tests {
         ] {
             assert_ne!(safe.pointer(pointer).unwrap(), identity);
         }
-        assert_eq!(safe, normalise(&safe).unwrap());
+        assert_eq!(safe, {
+            let mut again = normalise(&safe, Context::Document).unwrap();
+            for (key, context) in [
+                ("findings", Context::Finding),
+                ("repair_items", Context::RepairItem),
+            ] {
+                again[key] = normalise(&safe[key], context).unwrap();
+            }
+            again
+        });
     }
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
     fn captured_findings_and_handoff_use_the_same_normal_form() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
+        let summary = format!("finding summary {secret}");
+        let comment = format!("repair extension {secret}");
         let mut input = crate::result_capture::ResultCapture::new(None);
-        input.push(format!("VERDICT: {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"{secret}\",\"severity\":\"high\",\"file\":\"{secret}\",\"propagates\":\"{secret}\",\"summary\":\"{secret}\",\"status\":\"open\"}}]}}\n```\n").as_bytes());
+        input.push(format!("VERDICT: {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"{secret}\",\"severity\":\"high\",\"file\":\"{secret}\",\"propagates\":\"{secret}\",\"summary\":\"{summary}\",\"status\":\"open\"}}],\"repair_items\":[{{\"id\":\"{secret}\",\"status\":\"fixed\",\"reason\":\"fixed it\",\"comment\":\"{comment}\"}}]}}\n```\n").as_bytes());
         let mut input = input.finish();
         assert_eq!(
             input.verdict.as_deref(),
             Some(format!("VERDICT: {secret}").as_str())
         );
         input.verdict_cause = Some(format!("untrusted verdict diagnostic {secret}"));
+        let note = format!("captured handoff note {secret}");
         input.handoff = Ok(Some(
             serde_json::from_value(serde_json::json!({
-                "schema_version": 2, "status": "done", "note": secret,
+                "schema_version": 2, "status": "done", "note": note,
                 "remaining": [], "decisions": [secret], "verify": []
             }))
             .unwrap(),
         ));
-        let safe = capture(&input).unwrap();
-        assert_eq!(safe.digest, input.digest);
-        assert!(!safe.verdict.as_deref().unwrap().contains(secret));
-        assert!(!safe.verdict_cause.as_deref().unwrap().contains(secret));
+        let (safe, calls) = trace(|| {
+            let outputs = outputs::make_outputs(Some(&input), None, None, None, None);
+            let outputs = captured_outputs(outputs).unwrap();
+            captured_handoff(&mut input).unwrap();
+            outputs
+        });
+        assert_once(&calls, &note);
         assert!(
-            !serde_json::to_string(safe.handoff.as_ref().unwrap())
+            !input
+                .handoff
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .note
+                .contains(secret)
+        );
+        assert_once(&calls, &summary);
+        assert_once(&calls, &comment);
+        assert_eq!(safe.repair_items.as_ref().unwrap()[0].id, secret);
+        assert!(
+            !safe.repair_items.as_ref().unwrap()[0].extra["comment"]
+                .as_str()
                 .unwrap()
                 .contains(secret)
         );
-        assert!(!safe.excerpt.contains(secret));
-        assert!(!safe.tail.contains(secret));
-        // Transient findings JSON is parsed first, not prematurely normalised as prose.
-        let outputs = outputs::make_outputs(Some(&safe), None, None, None, None);
-        let outputs = normalise(&outputs).unwrap();
-        assert_eq!(outputs.findings[0].id, secret);
-        assert_eq!(outputs.findings[0].file, secret);
-        assert_eq!(outputs.findings[0].propagates.as_deref(), Some(secret));
-        assert!(!outputs.findings[0].summary.contains(secret));
-        assert_eq!(safe, capture(&safe).unwrap());
+        assert_eq!(safe.result.as_ref().unwrap().digest, input.digest);
+        assert!(!safe.verdict.as_deref().unwrap().contains(secret));
+        assert!(!safe.result.as_ref().unwrap().excerpt.contains(secret));
+        assert_eq!(safe.findings[0].id, secret);
+        assert_eq!(safe.findings[0].file, secret);
+        assert_eq!(safe.findings[0].propagates.as_deref(), Some(secret));
+        assert!(!safe.findings[0].summary.contains(secret));
     }
 }

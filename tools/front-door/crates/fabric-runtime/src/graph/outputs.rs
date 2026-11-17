@@ -440,8 +440,10 @@ fn parse_findings_mode(
         }
         if ingress {
             let wrapper = serde_json::json!({"findings": [entry]});
-            let mut wrapper = prompt_text::normalise(&wrapper).map_err(str::to_owned)?;
-            entry = wrapper["findings"][0]
+            let mut wrapper =
+                prompt_text::normalise(&wrapper["findings"], prompt_text::Context::Finding)
+                    .map_err(str::to_owned)?;
+            entry = wrapper[0]
                 .take()
                 .as_object()
                 .cloned()
@@ -738,8 +740,8 @@ fn findings_block(capture: &crate::result_capture::CapturedResult) -> Result<&st
     Ok(block)
 }
 
-/// Replace an oversized disposition projection by its original bounded block.
-/// The original upstream inputs remain in the checkpoint and reconstruct it.
+/// Keep the full, already-normalised typed findings alongside their bounded
+/// checkpoint projection. Storage externalises the full list without rewriting it.
 pub(super) fn compact_findings(
     outputs: &mut NodeOutputs,
     capture: Option<&crate::result_capture::CapturedResult>,

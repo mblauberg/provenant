@@ -303,9 +303,6 @@ fn admit_patch_for_retry(
     context: &PatchContext<'_>,
     retry: Option<&str>,
 ) -> Result<Admitted, PatchError> {
-    let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
-    let patch = &normalised;
-    scan(patch, context)?;
     // Initial nodes live in the immutable source, rather than being copied
     // into an expansion. They still enter through the same admission gate.
     if parent.is_none() && graph.document.submission_patch.as_ref() == Some(patch) {
@@ -344,7 +341,7 @@ fn admit_patch_for_retry(
                 "initial submission must precede launch",
             ));
         }
-        let compiled = submit(
+        let compiled = compile_submission(
             &graph.document.graph_id,
             patch,
             context,
@@ -533,6 +530,9 @@ fn retry_node_scope(
         .transpose()
         .map_err(PatchError::invalid)?;
     let brief = normalised_brief.as_deref();
+    if let Some(brief) = brief {
+        (context.scan)(brief).map_err(|reason| PatchError::new("secret", reason))?;
+    }
     let expanded = plans::expand(
         graph.document,
         &graph.checkpoint.extensions,
@@ -747,7 +747,13 @@ fn retry_node_scope(
     }
     if let Some(routes) = replacement_routes {
         node.route = None;
-        node.routes = Some(routes.to_vec());
+        let routes: Vec<GraphRoute> =
+            prompt_text::normalise(&routes.to_vec(), prompt_text::Context::Route)
+                .map_err(PatchError::invalid)?;
+        let text =
+            serde_json::to_string(&routes).map_err(|e| PatchError::invalid(e.to_string()))?;
+        (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+        node.routes = Some(routes);
     }
     // A reset removes its expansion-pause marker. Move the graph pause to
     // another waiting node, or clear it, before removing that marker.
@@ -924,7 +930,8 @@ pub fn submission(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
-    *document = prompt_text::normalise(document).map_err(PatchError::invalid)?;
+    *document = prompt_text::normalise(document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
     for node in &mut document.nodes {
         node.template.get_or_insert_with(|| "raw".into());
     }
@@ -997,7 +1004,8 @@ pub fn submission(
         limits,
         worktree_layout,
     };
-    let compiled = submit(
+    scan(&patch, &context)?;
+    let compiled = compile_submission(
         &document.graph_id,
         &patch,
         &context,
@@ -1006,7 +1014,8 @@ pub fn submission(
     if compiled.nodes != document.nodes {
         return Err(PatchError::invalid("submission differs from bound nodes"));
     }
-    document.submission_patch = Some(patch.clone());
+    document.submission_patch = Some(patch);
+    admit_submission(document, &context)?;
     Ok(())
 }
 
@@ -1018,8 +1027,24 @@ pub fn submit(
     context: &PatchContext<'_>,
     integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
-    let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
-    let patch = &normalised;
+    let document = compile_submission(graph_id, patch, context, integration_branch)?;
+    let document: GraphDocument = prompt_text::normalise(&document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
+    let text = serde_json::to_string(&document).map_err(|e| PatchError::invalid(e.to_string()))?;
+    (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+    admit_submission(&document, context)?;
+    Ok(document)
+}
+
+/// Build a new submission before host binding. This intermediate document is
+/// not admitted text: the host must call `submission` after binding, which
+/// normalises, scans and admits the complete document exactly once.
+pub fn compile_submission(
+    graph_id: &str,
+    patch: &Patch,
+    context: &PatchContext<'_>,
+    integration_branch: Option<&str>,
+) -> Result<GraphDocument, PatchError> {
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"
@@ -1058,7 +1083,6 @@ pub fn submit(
             "a new graph has no nodes to skip or replace",
         ));
     }
-    scan(patch, context)?;
     let library = context
         .library
         .with(Layer::Inline, &patch.templates)
@@ -1067,8 +1091,7 @@ pub fn submit(
         library: &library,
         resolvers: context.resolvers,
     };
-    let nodes = prompt_text::normalise(&compiler.compile_all(&patch.nodes)?)
-        .map_err(PatchError::invalid)?;
+    let nodes = compiler.compile_all(&patch.nodes)?;
     if nodes.is_empty() {
         return Err(PatchError::invalid("patch adds no nodes"));
     }
@@ -1101,12 +1124,19 @@ pub fn submit(
     };
 
     document.schema_version = u64::from(minimum_schema_version(&document));
+    Ok(document)
+}
+
+fn admit_submission(
+    document: &GraphDocument,
+    context: &PatchContext<'_>,
+) -> Result<(), PatchError> {
     document.admit(context.limits).map_err(|error| {
         let mut refusal = classify(error.to_string());
         refusal.admission = Some(error);
         refusal
     })?;
-    Ok(document)
+    Ok(())
 }
 
 /// A dependency cycle gets its own code so a caller can tell it from other
@@ -1157,8 +1187,18 @@ pub(super) fn prepare(
         Preparation::Live { retry } => retry,
         Preparation::FinalFragment => None,
     };
-    let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
-    let patch = &normalised;
+    // A retry patch is assembled from stored nodes and a brief normalised at
+    // the steer boundary. Captured fragments were normalised before storage.
+    // Only a live patch still carries unprocessed ingress text.
+    let normalised = if matches!(mode, Preparation::Live { retry: None }) {
+        Some(
+            prompt_text::normalise(patch, prompt_text::Context::Patch)
+                .map_err(PatchError::invalid)?,
+        )
+    } else {
+        None
+    };
+    let patch = normalised.as_ref().unwrap_or(patch);
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"
@@ -1210,7 +1250,9 @@ pub(super) fn prepare(
             "patch adds, skips and replaces nothing",
         ));
     }
-    scan(patch, context)?;
+    if matches!(mode, Preparation::Live { retry: None }) {
+        scan(patch, context)?;
+    }
 
     // A planner's catalogue is host-authored and trusted; inline templates
     // are the author's own and get no more authority than raw nodes.
@@ -1239,8 +1281,7 @@ pub(super) fn prepare(
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
     for raw in &patch.nodes {
-        let mut node =
-            prompt_text::normalise(&compiler.compile(raw)?).map_err(PatchError::invalid)?;
+        let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
             (catalogue.contains_key(name) || context.library.layer(name).is_some())
@@ -1381,8 +1422,7 @@ pub(super) fn prepare(
     }
     let mut replaced = Vec::with_capacity(patch.replace.len());
     for raw in &patch.replace {
-        let mut node =
-            prompt_text::normalise(&compiler.compile(raw)?).map_err(PatchError::invalid)?;
+        let mut node = compiler.compile(raw)?;
         let id = node.id.clone();
         unstarted(&id)?;
         if !edited.insert(id.clone()) {
