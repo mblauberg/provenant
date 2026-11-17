@@ -2553,6 +2553,14 @@ impl RunStore {
                         } else {
                             (Outcome::Rejected, reason.clone())
                         };
+                        // The execution token can expire during preparation.
+                        // Settling an unlaunched attempt still needs its own
+                        // bounded cleanup request, as in cancellation requeue.
+                        let cleanup_cancel = provenant_core::CancelToken::new();
+                        let cleanup_call = Request {
+                            clock: call.clock,
+                            cancel: &cleanup_cancel,
+                        };
                         match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
@@ -2566,7 +2574,7 @@ impl RunStore {
                                 terminal_cause,
                                 terminal_note: kind.terminal_note(),
                             },
-                            call,
+                            &cleanup_call,
                         ) {
                             // Cancel already settled it from the other side.
                             Ok(_) | Err(RunError::Conflict) if cancelled => {}
