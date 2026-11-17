@@ -50,11 +50,14 @@ tools on every host and a stable checkout. A failure on one host leaves hosts on
 different versions: fix the reported cause and rerun; there is no distributed
 rollback.
 
-Drain first: no lane should run across a binary swap. Check
-`provenant status` and the current attempt custody and process evidence, then
-collect `provenant output TARGET`. A workflow still labelled Running can retain
-an exited attempt; confirm its process identity before treating it as a live
-writer. Preserve unfinished work and retry it after installation.
+Lanes need not drain. Install swaps the `provenant` link atomically and keeps
+every release directory a running process still uses, so a live supervisor
+and its provider keep their own binary. Two things cross the swap: later
+re-executions through the link (settlement resume, tick, the peer agent) run
+the new release against the live attempt's records, and install restarts the
+peer and tick agents. Drain first only when the release notes name a state or
+record format change, or for a multi-host upgrade that would leave peers on
+mixed versions for longer.
 
 If installation fails after stopping agents, the output names the stopped
 agents and those that may still be running, prints the quoted state directory
