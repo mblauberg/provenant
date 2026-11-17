@@ -1014,7 +1014,28 @@ pub struct CiScopeReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
+/// The identity of the provider session a route resumes: provider, model,
+/// effort, account and host-native lane. Excludes route-selection history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionIdentity<'a> {
+    pub provider: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub account_key: Option<&'a str>,
+    pub host_native: Option<&'a str>,
+}
+
 impl RouteRecord {
+    /// Project the session identity, ignoring how the route was selected.
+    pub fn session_identity(&self) -> SessionIdentity<'_> {
+        SessionIdentity {
+            provider: self.provider.as_deref(),
+            model: self.model.as_deref(),
+            effort: self.effort.as_deref(),
+            account_key: self.account_key.as_deref(),
+            host_native: self.host_native.as_deref(),
+        }
+    }
     /// Copy the resolved routing decision into the launch record.
     pub fn from_resolved(
         route: &crate::ResolvedRoute,
@@ -3594,5 +3615,49 @@ mod tests {
             Some(&serde_json::json!({"kept":true}))
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+
+    #[test]
+    fn identity_ignores_selection_history_but_not_identity() {
+        let base = RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("m".into()),
+            account_key: Some("a".into()),
+            source: Some("pool".into()),
+            account_source: Some(AccountSource::Automatic),
+            ..Default::default()
+        };
+        let child = RouteRecord {
+            source: Some("continuation".into()),
+            account_source: Some(AccountSource::Continuation),
+            account_label: Some("x".into()),
+            ..base.clone()
+        };
+        assert_eq!(base.session_identity(), child.session_identity());
+        for changed in [
+            RouteRecord {
+                account_key: Some("b".into()),
+                ..base.clone()
+            },
+            RouteRecord {
+                model: Some("n".into()),
+                ..base.clone()
+            },
+            RouteRecord {
+                provider: Some("x".into()),
+                ..base.clone()
+            },
+            RouteRecord {
+                effort: Some("high".into()),
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(base.session_identity(), changed.session_identity());
+        }
     }
 }

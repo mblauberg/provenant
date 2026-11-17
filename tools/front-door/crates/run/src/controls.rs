@@ -86,24 +86,13 @@ struct ResumeOptions<'a> {
     parent_publication_locked: bool,
 }
 
+/// Digest of the session identity only; route-selection history (source,
+/// account source, pool selection) is deliberately excluded.
 pub(crate) fn steer_route_digest(route: &RouteRecord) -> Result<String> {
-    let pool = route
-        .pool_selection
-        .as_ref()
-        .map(|selection| (&selection.pool, &selection.pick));
     Ok(provenant_records::CanonicalV1::record_digest(
         "steer-provider-route",
-        1,
-        &(
-            route.provider.as_deref(),
-            route.model.as_deref(),
-            route.effort.as_deref(),
-            route.account_key.as_deref(),
-            route.account_source,
-            route.source.as_deref(),
-            route.host_native.as_deref(),
-            pool,
-        ),
+        2,
+        &route.session_identity(),
     )?
     .to_string())
 }
@@ -6766,6 +6755,8 @@ mod tests {
             LiveThenTerminalEofIncomplete,
             LiveThenTerminalEofConflict,
             AccountMismatch,
+            ModelMismatch,
+            PoolParentResumes,
         }
         for case in [
             Case::Refused,
@@ -6778,6 +6769,8 @@ mod tests {
             Case::LiveThenTerminalEofIncomplete,
             Case::LiveThenTerminalEofConflict,
             Case::AccountMismatch,
+            Case::ModelMismatch,
+            Case::PoolParentResumes,
         ] {
             let temp = tempfile::tempdir()?;
             let mut clock = crate::tests::clock();
@@ -6789,6 +6782,31 @@ mod tests {
             let parent = run.attempt_id;
             let mut route = crate::tests::route();
             route.account_key = Some("fixture-account".into());
+            if matches!(case, Case::PoolParentResumes) {
+                route.source = Some("pool".into());
+                route.account_source = Some(provenant_records::run::AccountSource::Automatic);
+                route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+                    selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+                    considered_exclusions: Vec::new(),
+                    exploration: provenant_records::route_selection::Exploration {
+                        extra: Default::default(),
+                        selected: false,
+                        percent: 0,
+                        enabled: false,
+                        source: "fixture".into(),
+                    },
+                    weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+                    account_load: None,
+                    extra: Default::default(),
+                    pool: "junior".into(),
+                    candidates: vec![],
+                    roll: 0,
+                    total_weight: 1,
+                    pick: "fixture/pick".into(),
+                    reason: None,
+                    redraws: vec![],
+                });
+            }
             store.create(&run, &call)?;
             store.mark_starting(
                 &store.record(parent, &call)?,
@@ -6862,10 +6880,22 @@ mod tests {
                     Some(provenant_records::run::SteeringCause::ContinuationRefused)
                 );
             } else {
+                let mismatch = matches!(case, Case::AccountMismatch | Case::ModelMismatch);
                 let child_route = if matches!(case, Case::AccountMismatch) {
                     let mut changed = route.clone();
                     changed.account_key = Some("other-account".into());
                     changed
+                } else if matches!(case, Case::ModelMismatch) {
+                    let mut changed = route.clone();
+                    changed.model = Some("other-model".into());
+                    changed
+                } else if matches!(case, Case::PoolParentResumes) {
+                    let mut resumed = route.clone();
+                    resumed.source = Some("continuation".into());
+                    resumed.account_source =
+                        Some(provenant_records::run::AccountSource::Continuation);
+                    resumed.pool_selection = None;
+                    resumed
                 } else {
                     route.clone()
                 };
@@ -6891,7 +6921,7 @@ mod tests {
                     &Default::default(),
                     &call,
                 );
-                if matches!(case, Case::AccountMismatch) {
+                if mismatch {
                     assert!(matches!(launch, Err(RunError::SteerSessionMismatch)));
                     let status = store
                         .record(parent, &call)?
@@ -6945,6 +6975,7 @@ mod tests {
                         | Case::LiveThenTerminalExplicitCancelEof
                         | Case::LiveThenTerminalEofIncomplete
                         | Case::LiveThenTerminalEofConflict
+                        | Case::PoolParentResumes
                 );
                 if live_ack {
                     assert!(store.record_provider_session_ready(
@@ -7078,7 +7109,11 @@ mod tests {
                             Some(provenant_records::run::SteeringCause::SessionMismatch),
                         )
                     }
-                    Case::AccountMismatch => unreachable!(),
+                    Case::PoolParentResumes => {
+                        publication.session = Some("fixture-session".into());
+                        (provenant_records::run::SteeringState::Resumed, None)
+                    }
+                    Case::AccountMismatch | Case::ModelMismatch => unreachable!(),
                     Case::Refused => unreachable!(),
                 };
                 crate::dispatch_tests::seal_exit(&store, &exit)?;

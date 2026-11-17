@@ -182,6 +182,9 @@ Launched review panels settle with partial coverage by default. When a selected 
 `provenant steer` accepts bounded, operation-idempotent instructions for the
 exact running graph attempt. Each accepted operation has its own durable text
 and receipt; settlement combines them in arrival order into one continuation.
+The route digest that binds a steer covers session identity (provider, model,
+effort, account and host-native lane), not route-selection history such as
+pool draws or account source, so a same-identity continuation always resumes.
 The host's shared adapter stream decoder records the first validated session
 identity against the admitted provider route and spawned process identity. It
 requests an interrupt through the attempt's existing custody owner only after
