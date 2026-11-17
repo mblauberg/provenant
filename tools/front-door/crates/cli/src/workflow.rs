@@ -1326,6 +1326,7 @@ mod tests {
         .unwrap()
     }
 
+    // Spec: docs/specs/routing.md#pinned-review-selection
     #[test]
     fn real_diff_boundary_omitted_from_input_still_gets_floor() {
         use provenant_confinement::GitRead;
@@ -1348,7 +1349,16 @@ mod tests {
         };
         let reviewed = super::reviewed_base(base, head, &mut read).unwrap();
         let paths = super::diff_paths(reviewed, head, &mut read).unwrap();
-        let policy = provenant_routing::ReviewConfig::default().workflow_risk_policy(&paths);
+        let floor = provenant_routing::ReviewFloor {
+            paths: vec!["src/credentials/**".into()],
+            tier: "crucial".into(),
+            lenses: vec!["correctness-spec".into()],
+            hard: true,
+        };
+        let review = provenant_routing::ReviewConfig::default()
+            .with_project_floors([("fixture_boundary".into(), floor)].into_iter().collect())
+            .unwrap();
+        let policy = review.workflow_risk_policy(&paths);
         assert_eq!(
             policy.boundary_floors["src/credentials/store.rs"],
             RiskTier::Crucial
