@@ -3071,6 +3071,13 @@ impl RunStore {
             session: decoded.session,
             partial_signals: partial,
         };
+        // A writer's success waits for the quiet pass: a live descendant can still change the worktree.
+        if outcome_only && task.writer.is_some() && decoded.outcome == Outcome::Succeeded {
+            return Ok(Finished {
+                record,
+                release_permitted: false,
+            });
+        }
         if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
             let saved: crate::store::TerminalEffects = crate::db::decode(&raw)?;
             if saved.schema_version != 1 || saved.scope != exit.scope {
@@ -4363,6 +4370,8 @@ mod writer_recovery_tests {
             DeliveredSteer, DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel,
         };
         for (changed, dirty, blocked, shared, budget, marker) in [
+            (true, true, false, true, false, Marker::None),
+            (true, false, false, true, true, Marker::None),
             (false, false, false, false, false, Marker::AdmissionSteer),
             (false, false, false, false, false, Marker::AdmissionCancel),
             (false, false, false, false, false, Marker::None),
@@ -4660,7 +4669,10 @@ mod writer_recovery_tests {
                 observed.stop_reason = Some(StopReason::ExplicitCancellation);
                 observed.cancel_delivered_before_exit = Some(true);
             }
-            let deferred_outcome = changed && shared && !dirty && !budget && marker == Marker::None;
+            // A dirty writer settles Uncommitted in the quiet pass; a failed (budget) writer commits in the outcome-only pass.
+            let early_failed = budget && shared && changed && !dirty && marker == Marker::None;
+            let deferred_outcome =
+                changed && shared && (!budget || early_failed) && marker == Marker::None;
             let mut first_exit = observed.clone();
             first_exit.unresolved_cleanup = deferred_outcome;
             crate::dispatch_tests::seal_exit(&store, &first_exit)?;
@@ -4722,6 +4734,23 @@ mod writer_recovery_tests {
                     &fake,
                     &call,
                 )?;
+                if early_failed {
+                    assert!(matches!(
+                        early.record.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::Failed,
+                            ..
+                        }
+                    ));
+                    continue;
+                }
+                if dirty {
+                    // A writer's success is not decided until the quiet pass checks the worktree.
+                    assert!(!matches!(early.record.state, AttemptState::Terminal { .. }));
+                    assert!(
+                        read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)?.is_none()
+                    );
+                }
                 assert!(!store.import_release_permitted(&early.record, &call)?);
                 assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
                 let mut resolved = serde_json::to_value(&observed)?;
@@ -4775,7 +4804,7 @@ mod writer_recovery_tests {
                     "replay keeps the sealed pre-push/ahead summary"
                 );
             }
-            if deferred_outcome {
+            if deferred_outcome && !dirty {
                 assert!(store.import_release_permitted(&finished, &call)?);
                 assert!(store.custody_released(&finished, &call)?);
                 let receipt = WriterDeliveryReceipt {
