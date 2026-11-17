@@ -683,7 +683,10 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
     ] {
         let mut state = codex::Codex.stream(None)?;
         let observed = codex::Codex.observe(&mut state, format!("{raw}\n").as_bytes());
-        assert!(matches!(observed, Err(ProviderError::Malformed)));
+        assert!(matches!(
+            observed,
+            Err(ProviderError::MalformedFrame { line: 1 })
+        ));
         assert_eq!(
             codex::Codex.finish(state, EXIT)?.status(),
             OutcomeStatus::Malformed
@@ -698,7 +701,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
     let mut complete_partial = codex::Codex.stream(None)?;
     assert!(matches!(
         codex::Codex.observe(&mut complete_partial, b"{\n"),
-        Err(ProviderError::Malformed)
+        Err(ProviderError::MalformedFrame { line: 1 })
     ));
     assert_eq!(
         codex::Codex.finish(complete_partial, EXIT)?.status(),

@@ -731,7 +731,7 @@ fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
     assert!(decoded.result.is_empty());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider protocol is malformed")
+        Some("evidence defect: provider protocol frame on line 5 is malformed")
     );
 }
 #[test]
@@ -829,6 +829,81 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
             .starts_with("Checking the commit.\nVERDICT: PASS\n")
     );
 }
+
+#[test]
+fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done_handoff() {
+    use provenant_os::exec::CaptureFilter;
+
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        ..Default::default()
+    };
+    let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"n\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let message = |text: &str| {
+        serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":text}})
+            .to_string()
+    };
+    let stream = [
+        r#"{"type":"thread.started","thread_id":"t"}"#.to_owned(),
+        r#"{"type":"item.started","item":{"id":"item_30","type":"command_execution","command":"/bin/zsh -lc \"sed -n '145,180p' src/main.rs; rg -n 'fn scan|credential-shaped|password='\"","aggregated_output":""}}"#.to_owned(),
+        message("Done inspecting files."),
+        message("VERDICT: PASS"),
+        message(handoff),
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#.to_owned(),
+    ]
+    .join("\n") + "\n";
+
+    let mut redactor = provenant_confinement::redact::JsonlRedactor::new([]).unwrap();
+    let mut filtered = Vec::new();
+    let mut sink = |frame: &[u8]| filtered.extend_from_slice(frame);
+    for chunk in stream.as_bytes().chunks(128) {
+        redactor.filter(chunk, &mut sink).unwrap();
+    }
+    redactor.finish(&mut sink).unwrap();
+    assert!(redactor.has_redaction());
+
+    let decoded = Registry::default()
+        .decode(&route, &filtered, &clean_exit(), Path::new("/unused"))
+        .unwrap();
+
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert_eq!(decoded.reason, None);
+    let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
+        .expect("handoff parses")
+        .expect("handoff found");
+    assert_eq!(declared.status, provenant_records::handoff::Status::Done);
+    assert_eq!(declared.note, "n");
+}
+
+#[test]
+fn malformed_replay_frame_reports_evidence_defect_naming_the_line() {
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+        "this is not valid json\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+
+    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    assert_eq!(
+        decoded.reason.as_deref(),
+        Some("evidence defect: provider protocol frame on line 2 is malformed")
+    );
+}
+
 #[test]
 fn codex_usage_records_cache_read_apart_from_uncached_input() {
     let route = run::RouteRecord {

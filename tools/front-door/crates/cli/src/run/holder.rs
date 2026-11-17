@@ -998,7 +998,7 @@ mod tests {
         )?;
         assert_eq!(
             decoded.reason.as_deref(),
-            Some("provider protocol is malformed")
+            Some("evidence defect: provider protocol frame on line 2 is malformed")
         );
 
         let valid_tail = make_frames()?;

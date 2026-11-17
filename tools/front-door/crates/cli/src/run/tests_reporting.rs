@@ -183,7 +183,10 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
             result.as_str(),
             format!("provider protocol is malformed: {message}"),
         ),
-        ("{", "provider protocol is malformed".into()),
+        (
+            "{",
+            "evidence defect: provider protocol frame on line 2 is malformed".into(),
+        ),
     ] {
         for suffix in ["", "\n"] {
             let decoded = Registry::default()

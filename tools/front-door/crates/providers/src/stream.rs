@@ -193,6 +193,9 @@ pub struct StreamState {
     refusal: bool,
     auth_required: bool,
     malformed: bool,
+    line_count: usize,
+    malformed_line: Option<usize>,
+    protocol_error: Option<String>,
     tail_truncated: bool,
     last_assistant_text: Option<String>,
     result_text_seen: bool,
@@ -219,6 +222,9 @@ impl StreamState {
             refusal: false,
             auth_required: false,
             malformed: false,
+            line_count: 0,
+            malformed_line: None,
+            protocol_error: None,
             tail_truncated: false,
             last_assistant_text: None,
             result_text_seen: false,
@@ -272,11 +278,16 @@ impl StreamState {
             return Ok(Vec::new());
         }
         if self.malformed {
-            return Err(ProviderError::Malformed);
+            return Err(match self.malformed_line {
+                Some(line) => ProviderError::MalformedFrame { line },
+                None => ProviderError::Malformed,
+            });
         }
         let mut events = Vec::new();
         for byte in bytes {
             if *byte == b'\n' {
+                self.line_count += 1;
+                let current_line = self.line_count;
                 if std::mem::take(&mut self.discarding) {
                     continue;
                 }
@@ -289,11 +300,15 @@ impl StreamState {
                     Err(error) => {
                         self.malformed = true;
                         self.retained_events = events;
-                        return Err(if matches!(&error, ProviderError::IncompleteFrame) {
-                            ProviderError::Malformed
-                        } else {
-                            error
-                        });
+                        let error = match error {
+                            ProviderError::IncompleteFrame | ProviderError::Malformed => {
+                                self.malformed_line = Some(current_line);
+                                ProviderError::MalformedFrame { line: current_line }
+                            }
+                            other => other,
+                        };
+                        self.protocol_error = Some(error.to_string());
+                        return Err(error);
                     }
                 }
             } else if self.discarding {
@@ -333,6 +348,15 @@ impl StreamState {
             Err(error) => {
                 self.malformed = true;
                 self.retained_events = events;
+                let error = match error {
+                    ProviderError::IncompleteFrame | ProviderError::Malformed => {
+                        let line = self.line_count + 1;
+                        self.malformed_line = Some(line);
+                        ProviderError::MalformedFrame { line }
+                    }
+                    other => other,
+                };
+                self.protocol_error = Some(error.to_string());
                 Err(error)
             }
         }
@@ -456,7 +480,7 @@ impl StreamState {
         exit: ExitObservation,
     ) -> Result<ProviderOutcome, ProviderError> {
         let mut final_events = std::mem::take(&mut self.retained_events);
-        let mut protocol_error = None;
+        let mut protocol_error = self.protocol_error.take();
         if self.adapter == "command" {
             let mut text = String::new();
             if self.tail_truncated {
@@ -495,6 +519,15 @@ impl StreamState {
                 Ok(events) => final_events.extend(events),
                 Err(error) => {
                     self.malformed = true;
+                    let error = match error {
+                        ProviderError::IncompleteFrame => ProviderError::IncompleteFrame,
+                        ProviderError::Malformed => {
+                            let line = self.line_count + 1;
+                            self.malformed_line = Some(line);
+                            ProviderError::MalformedFrame { line }
+                        }
+                        other => other,
+                    };
                     protocol_error = Some(error.to_string());
                 }
             }
