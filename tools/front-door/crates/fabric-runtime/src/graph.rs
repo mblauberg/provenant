@@ -1725,6 +1725,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
         if structural_pause.is_some() {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            // A resume against tighter limits must return the durable pause
+            // before observing attempts can settle the graph and clear it.
+            if resume {
+                return Ok(transitions::graph_run(checkpoint));
+            }
         }
         if structural_pause.is_none() {
             if let Some(next) =
