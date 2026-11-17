@@ -483,6 +483,8 @@ impl Owner<'_> {
             .set_poll_interval_override(poll_interval_override);
         self.runner
             .set_poll_interval_override(poll_interval_override);
+        self.runner
+            .set_progress_interval(std::time::Duration::from_secs(settings.progress_seconds));
         let mut gate = (*gate).clone();
         gate.timeout_seconds = context
             .request
