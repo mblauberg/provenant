@@ -1366,7 +1366,12 @@ impl TemplateLibrary {
             nearest_names(name, candidates)
         };
         if suggestions.is_empty() {
-            format!("unknown template {name}; no close {label} names were found")
+            match base {
+                Some(base) => {
+                    format!("unknown template {name}; base template {base} has no known flavours")
+                }
+                None => format!("unknown template {name}; no known templates are available"),
+            }
         } else {
             format!(
                 "unknown template {name}; {label}: {}",

@@ -412,10 +412,20 @@ fn safe_template_name_error(reason: &str) -> Option<String> {
         .map(|offset| &reason[offset..])?;
     let (unknown, remainder) = message
         .strip_prefix("unknown template ")?
-        .split_once("; known ")?;
+        .split_once("; ")?;
     if !crate::graph::template::valid_template_name(unknown) {
         return None;
     }
+    if remainder == "no known templates are available" {
+        return Some(message.to_owned());
+    }
+    if let Some(base) = remainder
+        .strip_prefix("base template ")
+        .and_then(|base| base.strip_suffix(" has no known flavours"))
+    {
+        return crate::graph::template::valid_template_name(base).then(|| message.to_owned());
+    }
+    let remainder = remainder.strip_prefix("known ")?;
     let (known, names) = remainder.split_once(": ")?;
     let known = known.strip_suffix(" flavours").unwrap_or(known);
     if known != "templates" && !crate::graph::template::valid_template_name(known) {
@@ -1611,6 +1621,21 @@ mod diagnostic_tests {
             projected.diagnostic().detail.as_deref(),
             Some(distant.as_str())
         );
+
+        let no_flavours = library.resolve("task.some-flavour").unwrap_err();
+        assert_eq!(
+            no_flavours,
+            "unknown template task.some-flavour; base template task has no known flavours"
+        );
+        let projected = FacadeError::invalid(super::InvalidInputDetail::graph_reason(format!(
+            "node task: {no_flavours}"
+        )));
+        assert_eq!(
+            projected.diagnostic().detail.as_deref(),
+            Some(no_flavours.as_str())
+        );
+        let wire = serde_json::to_value(&projected)?;
+        assert_eq!(wire["detail"], no_flavours);
         Ok(())
     }
 
