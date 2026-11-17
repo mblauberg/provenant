@@ -480,8 +480,8 @@ fn relocated_codex_stores_never_gain_the_builtin_package_exception()
         let nested = store.join("project");
         std::fs::create_dir_all(&nested)?;
         let shared = credential_roots(&registry, &home, &settings, &[&nested])?;
-        assert!(shared.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, true), "{origin}");
-        assert!(shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
+        assert!(shared.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false), "{origin}");
+        assert!(!shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
         assert!(!shared.refuses(&nested.join("ordinary"), CredentialScope::Exact, true), "{origin}");
         assert!(crate::run::admit_source_root(&project, &state, &nested, &shared, crate::run::SourceAdmissionMode::Live).is_ok(), "{origin}");
 
@@ -517,7 +517,7 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
         };
         let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
         assert!(roots.entries().iter().any(|root| root.path == store && root.scope == CredentialScope::Subtree));
-        assert!(roots.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, true));
+        assert!(roots.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false));
         // The initial project's table must never be unioned back into this
         // launch's mandatory roots, even when the alternate source is .claude.
         let mut inputs = provenant_core::RootInputs::new(home.clone(), base.join("initial-project"));
@@ -580,7 +580,7 @@ fn shared_host_stores_retain_subtrees_even_without_file_inventories()
         assert!(roots.refuses(&home.join(name), CredentialScope::Exact, true));
     }
     assert!(roots.entries().iter().any(|root| root.path == home && root.scope == CredentialScope::Subtree));
-    assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, true));
+    assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, false));
     assert!(
         crate::run::admit_source_root(
             &project,
@@ -601,7 +601,7 @@ fn shared_host_stores_retain_subtrees_even_without_file_inventories()
         ..registry
     };
     let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
-    assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, true));
+    assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, false));
     assert!(!roots.refuses(&project, CredentialScope::Subtree, true));
     Ok(())
 }

@@ -184,7 +184,6 @@ struct InventorySummary {
     unresolved_paths: std::collections::BTreeSet<PathBuf>,
     depth: std::collections::BTreeMap<PathBuf, usize>,
     entries: std::collections::BTreeMap<PathBuf, usize>,
-    outside_home: std::collections::BTreeMap<PathBuf, usize>,
     unrepresentable: std::collections::BTreeMap<PathBuf, usize>,
     inspection: std::collections::BTreeMap<PathBuf, usize>,
     covering_work: std::collections::BTreeMap<PathBuf, usize>,
@@ -208,10 +207,6 @@ impl InventorySummary {
         let mut details = Vec::new();
         for (label, counts) in [
             ("cannot resolve credential symlink", &self.unresolved),
-            (
-                "skipping credential symlink directory outside home",
-                &self.outside_home,
-            ),
             (
                 "cannot represent credential symlink target",
                 &self.unrepresentable,
@@ -323,6 +318,26 @@ fn inventory_links(
                     summary.record_unresolved(&root.path, &path);
                     continue;
                 };
+                if metadata.is_dir()
+                    && !target.starts_with(home)
+                    && mandatory
+                        .credential_roots()
+                        .lane_roots()
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .chain([source, scratch])
+                        .any(|lane| lane.starts_with(&target) || target.starts_with(lane))
+                {
+                    return Err(PermissionError::credential_root_at(
+                        &target,
+                        None,
+                        &format!(
+                            "credential directory link {} under {}",
+                            path.display(),
+                            root.path.display()
+                        ),
+                    ));
+                }
                 // Declared credential endpoints resolving into a lane already
                 // refused during classification. An undeclared link to ordinary
                 // lane data must not turn that target into a credential denial.
@@ -353,10 +368,6 @@ fn inventory_links(
                 {
                     continue;
                 }
-                if scope == PathScope::Subtree && !target.starts_with(home) {
-                    InventorySummary::record(&mut summary.outside_home, &root.path);
-                    continue;
-                }
                 if scope == PathScope::Subtree
                     && (source.starts_with(&target) || scratch.starts_with(&target))
                 {
@@ -378,11 +389,37 @@ fn inventory_links(
                     .validate()
                     .is_err()
                 {
+                    if scope == PathScope::Subtree && !target.starts_with(home) {
+                        return Err(PermissionError::credential_root_at(
+                            &target,
+                            None,
+                            &format!(
+                                "unrepresentable credential directory link {} under {}",
+                                path.display(),
+                                root.path.display()
+                            ),
+                        ));
+                    }
                     InventorySummary::record(&mut summary.unrepresentable, &root.path);
                     continue;
                 }
-                for path in [path, target] {
-                    mandatory.add_credentials_alias(root, PathGrant { path, scope })?;
+                if scope == PathScope::Subtree && !target.starts_with(home) {
+                    let origin = format!(
+                        "credential directory link {} under {}",
+                        path.display(),
+                        root.path.display()
+                    );
+                    for path in [path, target] {
+                        mandatory.add_declared_credential(
+                            PathGrant { path, scope },
+                            &origin,
+                            CredentialKind::Store,
+                        )?;
+                    }
+                } else {
+                    for path in [path, target] {
+                        mandatory.add_credentials_alias(root, PathGrant { path, scope })?;
+                    }
                 }
             } else if kind.is_dir() {
                 // OpenCode keeps session data here, separately from its root
@@ -969,7 +1006,12 @@ mod tests {
                 &mut summary,
             )?;
         }
-        assert!(!summary.outside_home.is_empty());
+        assert!(
+            mandatory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == outside && grant.scope == PathScope::Subtree)
+        );
         assert!(!summary.unrepresentable.is_empty());
         assert!(!summary.inspection.is_empty());
         assert!(!summary.covering_work.is_empty());
@@ -977,7 +1019,7 @@ mod tests {
             !mandatory
                 .credentials()
                 .iter()
-                .any(|grant| grant.path == target || grant.path == outside)
+                .any(|grant| grant.path == target)
         );
         Ok(())
     }
@@ -1278,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_skips_unrepresentable_links_and_external_directories()
+    fn inventory_denies_external_directories_and_skips_unrepresentable_links()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::ffi::OsStringExt;
 
@@ -1314,9 +1356,6 @@ mod tests {
             &bad_target,
             &store.join("bad-target"),
             &store.join("auth.json"),
-            &external_dir,
-            &store.join("external-dir"),
-            &store.join("config.yml"),
             &store.join("hosts.yml"),
         ] {
             assert!(
@@ -1328,7 +1367,13 @@ mod tests {
                 path.display()
             );
         }
-        for path in [&external_file, &internal_dir] {
+        for path in [
+            &external_file,
+            &internal_dir,
+            &external_dir,
+            &store.join("external-dir"),
+            &store.join("config.yml"),
+        ] {
             assert!(
                 inventory
                     .credentials()

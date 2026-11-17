@@ -325,6 +325,24 @@ impl CredentialRoots {
         })
     }
 
+    /// Read/exec authority may carve a shared store only when it contains no
+    /// declared endpoint (or dedicated store). Enclosing stores are denials,
+    /// not endpoints; their own admission is checked independently.
+    pub fn permits_carve_out(
+        &self,
+        root: &CredentialRoot,
+        path: &Path,
+        scope: CredentialScope,
+    ) -> bool {
+        self.lane_exceptions(root).next().is_some()
+            && path != root.path
+            && path.starts_with(&root.path)
+            && !self.entries.iter().any(|endpoint| {
+                endpoint.path == path
+                    || (scope == CredentialScope::Subtree && endpoint.path.starts_with(path))
+            })
+    }
+
     pub fn for_home(home: &Path) -> Self {
         let mut roots = Self::default();
         for declaration in crate::CredentialDeclaration::for_home(home) {
@@ -420,10 +438,19 @@ impl CredentialRoots {
         scope: CredentialScope,
         read: bool,
     ) -> Option<&CredentialRoot> {
+        // Report the enclosed endpoint's origin rather than the enclosing
+        // shared store when a requested carve-out would expose that endpoint.
+        if let Some(endpoint) = self.entries.iter().find(|root| {
+            root.path == path || (scope == CredentialScope::Subtree && root.path.starts_with(path))
+        }) {
+            return Some(endpoint);
+        }
         self.entries.iter().find(|root| {
-            if self
-                .lane_exceptions(root)
-                .any(|lane| path.starts_with(lane))
+            if (read
+                || self
+                    .lane_exceptions(root)
+                    .any(|lane| path.starts_with(lane)))
+                && self.permits_carve_out(root, path, scope)
             {
                 return false;
             }

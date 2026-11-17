@@ -267,14 +267,26 @@ fn compile_sbpl_inner(
     )? {
         report_policy_message(warning);
     }
-    validate_profile_spec_with_home(
-        &profile.spec,
-        anchors.home,
-        &plan.credential_roots,
-        usize::MAX,
-    )?;
+    // Admission uses inventory aliases too, so runtime authority cannot reopen
+    // an external directory target discovered underneath a store.
+    let mandatory = mandatory_for_plan(plan, anchors.home, None)?;
+    let mut credentials = mandatory.credential_roots().clone();
+    for auth in &profile.spec.authentication {
+        for grant in &auth.roots {
+            credentials.add(
+                &grant.path,
+                match grant.scope {
+                    PathScope::Exact => provenant_core::CredentialScope::Exact,
+                    PathScope::Subtree => provenant_core::CredentialScope::Subtree,
+                },
+                format!("provider authentication: {}", auth.mechanism),
+                provenant_core::CredentialKind::Store,
+            );
+        }
+    }
+    validate_profile_spec_with_home(&profile.spec, anchors.home, &credentials, usize::MAX)?;
     for grant in &plan.read_roots {
-        validate_read_exec_grant(grant, &plan.credential_roots)
+        validate_read_exec_grant(grant, &credentials)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     // Every lexical credential check runs before any filesystem anchor check,
@@ -1213,6 +1225,15 @@ fn push_boundaries(
     {
         mandatory.add_credentials(root.clone())?;
     }
+    let runtime: Vec<_> = plan
+        .read_roots
+        .iter()
+        .chain(&profile.spec.process_executables)
+        .chain(&profile.spec.runtime_reads)
+        .chain(&profile.spec.tool_exec_roots)
+        .filter(|grant| validate_read_exec_grant(grant, mandatory.credential_roots()).is_ok())
+        .cloned()
+        .collect();
     let keychain = selected_keychain(plan, profile, home, &mandatory).cloned();
     let selected = selected_authentication(plan, profile);
     let gh = network == NetworkAccess::Open
@@ -1284,7 +1305,37 @@ fn push_boundaries(
             .chain(&lane_exceptions)
             .cloned()
             .collect();
-        let exec: Vec<_> = packages.iter().chain(&lane_exceptions).cloned().collect();
+        let runtime_exceptions: Vec<_> = runtime
+            .iter()
+            .filter(|grant| {
+                mandatory
+                    .credential_roots()
+                    .entries()
+                    .iter()
+                    .any(|declaration| {
+                        declaration.path == root.path
+                            && mandatory.credential_roots().permits_carve_out(
+                                declaration,
+                                &grant.path,
+                                match grant.scope {
+                                    PathScope::Exact => provenant_core::CredentialScope::Exact,
+                                    PathScope::Subtree => provenant_core::CredentialScope::Subtree,
+                                },
+                            )
+                    })
+            })
+            .cloned()
+            .collect();
+        let reads: Vec<_> = reads
+            .into_iter()
+            .chain(runtime_exceptions.iter().cloned())
+            .collect();
+        let exec: Vec<_> = packages
+            .iter()
+            .chain(&lane_exceptions)
+            .chain(&runtime_exceptions)
+            .cloned()
+            .collect();
         push_denial(source, "file-read*", root, &reads)?;
         push_denial(source, "file-clone", root, &reads)?;
         push_denial(source, "process-exec", root, &exec)?;

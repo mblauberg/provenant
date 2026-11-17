@@ -211,6 +211,16 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
     let state_secret = state.join("host-secret");
     std::fs::write(&state_secret, b"synthetic host state\n")?;
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let package = home.join("provider-package");
+    std::fs::create_dir_all(&package)?;
+    let provider = package.join("provider");
+    std::fs::copy("/bin/bash", &provider)?;
+    let asset = package.join("asset");
+    std::fs::write(&asset, b"runtime\n")?;
+    let external = root.join("external-directory");
+    std::fs::create_dir_all(external.join("nested"))?;
+    let external_secret = external.join("nested/secret");
+    std::fs::write(&external_secret, b"external credential\n")?;
     let executor = SystemExecutor::new(2)?;
     for store in [
         home.clone(),
@@ -222,6 +232,12 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
         let scratch = store.join("scratch");
         std::fs::create_dir_all(&cwd)?;
         std::fs::create_dir_all(&scratch)?;
+        std::fs::set_permissions(
+            &scratch,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+        let external_link = store.join("external-link");
+        std::os::unix::fs::symlink(&external, &external_link)?;
         let allowed = cwd.join("ordinary");
         let secret = store.join(".config/cursor/sibling-credential");
         let project_file = project.join("ordinary");
@@ -273,6 +289,15 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             scope: PathScope::Subtree,
         };
         plan.private_state = None;
+        plan.read_only = None;
+        plan.write_roots.clear();
+        profile.spec.state_writes.clear();
+        profile.spec.tool_writes.clear();
+        profile.spec.authentication[0].roots = vec![PathGrant {
+            path: store.join("unselected-auth"),
+            scope: PathScope::Exact,
+        }];
+        profile.spec.authentication[0].in_place_writes.clear();
         // The selected Cursor endpoint stays readable; neither the sibling
         // store nor its external symlink target becomes authentication.
         profile.spec.authentication[1].roots = vec![PathGrant {
@@ -282,10 +307,30 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
         profile.spec.authentication[1].in_place_writes.clear();
         profile.spec.allow_process_fork = true;
         profile.spec.process_executables = vec![PathGrant {
-            path: "/bin/bash".into(),
+            path: provider.clone(),
             scope: PathScope::Exact,
         }];
-        let rendered = render(&GrantSet::build(&plan, &profile, &home, None)?)?;
+        profile.spec.runtime_reads = vec![PathGrant {
+            path: package.clone(),
+            scope: PathScope::Subtree,
+        }];
+        profile.spec.tool_exec_roots = vec![PathGrant {
+            path: package.clone(),
+            scope: PathScope::Subtree,
+        }];
+        let directories = required_anchors(&plan, &profile, None)
+            .iter()
+            .map(AnchoredDirectory::open_canonical)
+            .collect::<Result<Vec<_>, _>>()?;
+        let anchors = Anchors {
+            home: &home,
+            directories: &directories,
+            worktree: None,
+        };
+        // Exercise profile validation, held anchors and rendering, rather than
+        // rendering a profile that a real launch would refuse.
+        let compiled = super::super::render::compile_sbpl(&plan, &profile, &anchors)?;
+        let rendered = std::str::from_utf8(&compiled.profile)?;
         // Production is open. Change only the ambient default to exercise the
         // same store boundary in an allowlist fixture, granting runtime files
         // and the lane roots explicitly, never the enclosing store.
@@ -301,9 +346,9 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             };
             let command = launch.command(
                 &[
-                    "/bin/bash".into(), "-c".into(),
-                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87; IFS= read -r value < \"$6\" || exit 88; test \"$value\" = selected || exit 89; if IFS= read -r value < \"$7\"; then exit 90; fi".into(),
-                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(), login.as_os_str().to_owned(), outside.as_os_str().to_owned(),
+                    provider.as_os_str().to_owned(), "-c".into(),
+                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87; IFS= read -r value < \"$6\" || exit 88; test \"$value\" = selected || exit 89; if IFS= read -r value < \"$7\"; then exit 90; fi; if IFS= read -r value < \"$8\"; then exit 91; fi; if IFS= read -r value < \"$9\"; then exit 92; fi; IFS= read -r value < \"${10}\" || exit 93; test \"$value\" = runtime || exit 94".into(),
+                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(), login.as_os_str().to_owned(), outside.as_os_str().to_owned(), external_secret.as_os_str().to_owned(), external_link.join("nested/secret").into_os_string(), asset.as_os_str().to_owned(),
                 ],
                 &provenant_core::AttemptId::from_bytes([10;16]),
                 &provenant_os::fs::Directory::open_anchor(&root)?,
@@ -314,6 +359,65 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
                 "default={default}, store={store:?}: {result:?}"
             );
         }
+        // Runtime authority may neither reopen an inventoried external subtree
+        // nor enclose a declared authentication endpoint inside its package.
+        profile.spec.runtime_reads.push(PathGrant {
+            path: external.clone(),
+            scope: PathScope::Subtree,
+        });
+        let directories = required_anchors(&plan, &profile, None)
+            .iter()
+            .map(AnchoredDirectory::open_canonical)
+            .collect::<Result<Vec<_>, _>>()?;
+        let anchors = Anchors {
+            home: &home,
+            directories: &directories,
+            worktree: None,
+        };
+        let error = super::super::render::compile_sbpl(&plan, &profile, &anchors)
+            .err()
+            .ok_or("external credential directory reopened by runtime")?;
+        let message = error.to_string();
+        assert!(
+            message.contains(external.to_str().ok_or("external path")?),
+            "{message}"
+        );
+        assert!(
+            message.contains(external_link.to_str().ok_or("link path")?),
+            "{message}"
+        );
+        profile.spec.runtime_reads.pop();
+        profile.spec.authentication[0].roots = vec![PathGrant {
+            path: package.join("auth.json"),
+            scope: PathScope::Exact,
+        }];
+        let error = super::super::render::compile_sbpl(&plan, &profile, &anchors)
+            .err()
+            .ok_or("runtime package enclosing a credential accepted")?;
+        let message = error.to_string();
+        assert!(
+            message.contains("unselected")
+                && message.contains(package.to_str().ok_or("package path")?),
+            "{message}"
+        );
+        let error = MandatoryRoots::for_host_with_scratch_mode(
+            &roots,
+            &home,
+            &external,
+            &scratch,
+            &plan.credential_roots,
+            &[],
+            &[],
+            true,
+        )
+        .err()
+        .ok_or("external directory link overlapping lane authority accepted")?;
+        let message = error.to_string();
+        assert!(
+            message.contains(external.to_str().ok_or("external path")?)
+                && message.contains(external_link.to_str().ok_or("link path")?),
+            "{message}"
+        );
     }
     Ok(())
 }

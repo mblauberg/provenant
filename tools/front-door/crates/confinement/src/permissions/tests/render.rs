@@ -1940,7 +1940,8 @@ fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
             CredentialKind::Store,
         );
         let credentials = credentials.with_lane_roots(lanes.clone());
-        assert!(credentials.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, true));
+        // A read grant can be validated here; only actual grants become carve-outs.
+        assert!(!credentials.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, true));
         assert!(!credentials.refuses(&project.join("ordinary"), CredentialScope::Exact, true));
         let (mut plan, mut profile) = write_grants_fixture();
         plan.credential_roots = credentials;

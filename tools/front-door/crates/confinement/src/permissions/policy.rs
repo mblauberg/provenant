@@ -199,6 +199,9 @@ impl MandatoryRoots {
                 root.scope == PathScope::Subtree
                     && **lane != root.path
                     && lane.starts_with(&root.path)
+                    && !self
+                        .credential_roots
+                        .refuses(lane, CredentialScope::Subtree, false)
             })
             .map(|lane| PathGrant {
                 path: lane.clone(),
