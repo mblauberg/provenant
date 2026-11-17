@@ -60,6 +60,141 @@ fn stored_fixture() -> StoredCheckpoint {
     decode_checkpoint_in(&journal.directory, &bytes, "g-test").unwrap()
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+// Check every intermediate publication, not just the final advance result.
+struct ReadableJournal(FileJournal);
+
+impl GraphJournal for ReadableJournal {
+    type Error = JournalError;
+
+    fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+        self.0.load(id)
+    }
+
+    fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+        self.0.save(checkpoint)?;
+        let bytes = self
+            .0
+            .directory
+            .read_stable(&self.0.checkpoint_name(), MAX_CHECKPOINT_BYTES)
+            .unwrap();
+        let stored = decode_checkpoint_in(&self.0.directory, &bytes, &checkpoint.graph_id).unwrap();
+        assert_eq!(stored.checkpoint, *checkpoint);
+        let document = &stored.execution.document;
+        let limits = plans::generous();
+        let (base, _) = validate_replay_plan(document, &limits).unwrap();
+        let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+            .unwrap()
+            .to_string();
+        let expanded = plans::expand(
+            document,
+            &checkpoint.extensions,
+            &checkpoint.expansions,
+            &limits,
+        )
+        .unwrap();
+        let (plan, _) = validate_flat_plan(&expanded, &limits).unwrap();
+        validate_checkpoint::<Infallible, JournalError>(document, checkpoint, &plan, &digest)
+            .unwrap();
+        Ok(())
+    }
+}
+
+fn advance_reopened_prompt(prompt: &str) {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "normalised",
+        "provenance": {"parameters": {"brief": prompt}},
+        "nodes": [{
+            "id": "reader", "prompt": prompt, "acceptance_checks": [prompt],
+            "access": "read_only", "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))
+    .unwrap();
+    let first = {
+        let mut journal = ReadableJournal(
+            FileJournal::open(&root, project, "normalised", budget, &cancel, &clock).unwrap(),
+        );
+        journal
+            .0
+            .bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+                requester_path: None,
+                extra: Default::default(),
+                bases: None,
+                directory: inputs.checkout.clone(),
+                document: document.clone(),
+            })
+            .unwrap();
+        advance(&document, &mut Owner, &mut journal)
+            .unwrap()
+            .checkpoint
+    };
+    assert_eq!(first.nodes[0].state, NodeState::Running);
+    let execution = FileJournal::pending_execution(&root, project, "normalised")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        execution.document,
+        prompt_text::normalise(&document).unwrap()
+    );
+    let mut journal = ReadableJournal(
+        FileJournal::open(&root, project, "normalised", budget, &cancel, &clock).unwrap(),
+    );
+    let second = advance(&execution.document, &mut Owner, &mut journal)
+        .unwrap()
+        .checkpoint;
+    assert_eq!(first.plan_digest, second.plan_digest);
+    // Replaying the original submission also uses the same normal form.
+    advance(&document, &mut Owner, &mut journal).unwrap();
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn credential_prompt_pending_graph_reopens_and_advances() {
+    advance_reopened_prompt(
+        "Investigate AKIAIOSFODNN7EXAMPLE and ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    );
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn checkpoint_external_text_round_trips_for_generated_prompts() {
+    // A bounded generative property over UTF-8, JSON escapes, text-store size
+    // boundaries and credential shapes. Deterministic seeds keep failures reproducible.
+    let atoms = [
+        "",
+        "token=supersecretvalue123456789",
+        "plain",
+        "\n\"\\",
+        "\u{0}",
+        "é🦀",
+        "AKIAIOSFODNN7EXAMPLE",
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "https://name:password@example.com",
+    ];
+    for seed in 0..48_usize {
+        let mut state = seed + 1;
+        let mut prompt = String::new();
+        for _ in 0..(seed % 7 + 1) {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            prompt.push_str(atoms[state % atoms.len()]);
+            prompt.push(' ');
+        }
+        prompt.push_str(&"x".repeat([0, 4095, 4096, 4097][seed % 4]));
+        advance_reopened_prompt(&prompt);
+    }
+}
+
 #[test]
 fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let temp = crate::test_support::tempdir().unwrap();
@@ -108,46 +243,6 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
             .reviews
             .is_empty()
     );
-}
-
-// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
-#[test]
-fn checkpoint_external_text_round_trips_for_generated_prompts() {
-    let samples = [
-        "",
-        "plain",
-        "秘密 🦀 café",
-        "AKIAIOSFODNN7EXAMPLE",
-        "token=supersecretvalue123456789",
-        "line\n\"escaped\"",
-        "long ordinary prompt",
-    ]
-    .map(str::to_owned);
-    for (index, prefix) in samples.iter().enumerate() {
-        for suffix in &samples {
-            let temp = crate::test_support::tempdir().unwrap();
-            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-            let base = std::fs::canonicalize(temp.path()).unwrap();
-            let inputs = provenant_test_support::root_inputs(&base).unwrap();
-            let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
-            let project = ProjectId::from_bytes([1; 16]);
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-            let mut fixture = stored_fixture();
-            fixture.execution.document.nodes[0].prompt = format!("{prefix} {suffix} {index}");
-            let mut journal =
-                FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-            journal.bind(fixture.execution).unwrap();
-            journal.save(&fixture.checkpoint).unwrap();
-            assert!(
-                FileJournal::read_checkpoint(&root, project, "g-test")
-                    .unwrap()
-                    .is_some()
-            );
-            journal.save(&fixture.checkpoint).unwrap();
-        }
-    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

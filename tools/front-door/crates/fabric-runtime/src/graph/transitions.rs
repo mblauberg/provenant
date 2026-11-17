@@ -301,6 +301,11 @@ pub(super) fn apply_attempt_observation(
                 stop,
                 settlement_reason,
             } => {
+                let result = result
+                    .as_deref()
+                    .map(prompt_text::capture)
+                    .transpose()?
+                    .map(Box::new);
                 progress.review_settlement = None;
                 settled_result = result.clone();
                 attempt.usage = usage;
@@ -618,7 +623,7 @@ pub(super) fn apply_attempt_observation(
                         .cloned();
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
-                progress.outputs = Some(outputs);
+                progress.outputs = Some(prompt_text::normalise(&outputs)?);
                 let node_outcome = settlement_reason
                     .map(|reason| reason.node_outcome(attempt.stop))
                     .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);

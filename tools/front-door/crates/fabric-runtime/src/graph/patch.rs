@@ -303,6 +303,9 @@ fn admit_patch_for_retry(
     context: &PatchContext<'_>,
     retry: Option<&str>,
 ) -> Result<Admitted, PatchError> {
+    scan(patch, context)?;
+    let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
+    let patch = &normalised;
     // Initial nodes live in the immutable source, rather than being copied
     // into an expansion. They still enter through the same admission gate.
     if parent.is_none() && graph.document.submission_patch.as_ref() == Some(patch) {
@@ -525,6 +528,14 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
+    if let Some(brief) = brief {
+        (context.scan)(brief).map_err(|reason| PatchError::new("secret", reason))?;
+    }
+    let normalised_brief = brief
+        .map(prompt_text::text)
+        .transpose()
+        .map_err(PatchError::invalid)?;
+    let brief = normalised_brief.as_deref();
     let expanded = plans::expand(
         graph.document,
         &graph.checkpoint.extensions,
@@ -1009,6 +1020,9 @@ pub fn submit(
     context: &PatchContext<'_>,
     integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
+    scan(patch, context)?;
+    let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
+    let patch = &normalised;
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"
@@ -1056,7 +1070,8 @@ pub fn submit(
         library: &library,
         resolvers: context.resolvers,
     };
-    let nodes = compiler.compile_all(&patch.nodes)?;
+    let nodes = prompt_text::normalise(&compiler.compile_all(&patch.nodes)?)
+        .map_err(PatchError::invalid)?;
     if nodes.is_empty() {
         return Err(PatchError::invalid("patch adds no nodes"));
     }
@@ -1145,6 +1160,9 @@ pub(super) fn prepare(
         Preparation::Live { retry } => retry,
         Preparation::FinalFragment => None,
     };
+    scan(patch, context)?;
+    let normalised = prompt_text::normalise(patch).map_err(PatchError::invalid)?;
+    let patch = &normalised;
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"
@@ -1225,7 +1243,8 @@ pub(super) fn prepare(
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
     for raw in &patch.nodes {
-        let mut node = compiler.compile(raw)?;
+        let mut node =
+            prompt_text::normalise(&compiler.compile(raw)?).map_err(PatchError::invalid)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
             (catalogue.contains_key(name) || context.library.layer(name).is_some())
@@ -1366,7 +1385,8 @@ pub(super) fn prepare(
     }
     let mut replaced = Vec::with_capacity(patch.replace.len());
     for raw in &patch.replace {
-        let mut node = compiler.compile(raw)?;
+        let mut node =
+            prompt_text::normalise(&compiler.compile(raw)?).map_err(PatchError::invalid)?;
         let id = node.id.clone();
         unstarted(&id)?;
         if !edited.insert(id.clone()) {

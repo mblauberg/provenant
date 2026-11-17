@@ -110,7 +110,10 @@ impl JournalError {
     }
 
     pub fn is_lock_timeout(&self) -> bool {
-        matches!(self.root_cause(), Self::Filesystem(FsError::LockTimeout { .. }))
+        matches!(
+            self.root_cause(),
+            Self::Filesystem(FsError::LockTimeout { .. })
+        )
     }
 
     /// Stable identifier independent of the displayed explanation.
@@ -400,7 +403,7 @@ impl FileJournal {
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
-    pub fn bind(&mut self, execution: GraphExecution) -> Result<(), JournalError> {
+    pub fn bind(&mut self, mut execution: GraphExecution) -> Result<(), JournalError> {
         let error_graph_id = self.graph_id.clone();
         (|| {
             if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
@@ -421,6 +424,8 @@ impl FileJournal {
                 // or discard fields retained by a newer writer.
                 return Ok(());
             }
+            execution.document = prompt_text::normalise(&execution.document)
+                .map_err(|_| JournalError::BadEnvelope)?;
             self.execution = Some(execution);
             Ok(())
         })()
@@ -1301,19 +1306,6 @@ impl GraphJournal for FileJournal {
             let mut compact = serde_json::to_value(&stored)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             prompt_store::externalise(&self.directory, &self.graph_id, &mut compact)?;
-            // Hash the same typed values a reader reconstructs from the durable blobs.
-            let compact_bytes = CanonicalV1::bytes(&compact)?;
-            let rehydrated =
-                prompt_store::rehydrate(&self.directory, &self.graph_id, compact_bytes.as_bytes())?;
-            let persisted: StoredCheckpoint = serde_json::from_slice(&rehydrated)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            let digest = CanonicalV1::record_digest(
-                "fabric-graph-checkpoint",
-                2,
-                &(&persisted.checkpoint, &persisted.execution),
-            )?
-            .to_string();
-            compact["digest"] = serde_json::Value::String(digest);
             let bytes = CanonicalV1::bytes(&compact)?;
             decode_checkpoint_in(&self.directory, bytes.as_bytes(), &self.graph_id)?;
             if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {

@@ -75,9 +75,10 @@ collected name is not allocated to a later graph.
 
 ### Graph checkpoints cover persisted text
 
-`FileJournal` hashes the typed checkpoint and execution reconstructed from the
-persisted prompt blobs after redaction, and validates the result before atomic
-publication. Landing review queries retain valid settlements while reporting
+Graph admission normalises prompt text before planning or digesting; result
+and patch ingress use the same normal form. `FileJournal` hashes that typed
+checkpoint and execution, externalises text without changing its bytes, and
+validates the reconstructed result before atomic publication. Landing review queries retain valid settlements while reporting
 unreadable graph sources by graph ID. Readers of an atomic checkpoint see one
 complete published record.
 - Why: stored text must verify on reload, and one damaged graph must not hide

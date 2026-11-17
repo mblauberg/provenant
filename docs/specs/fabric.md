@@ -403,6 +403,15 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 Admission bounds the worst-case checkpoint before saving the plan.
+Graph input text is normalised with the capture credential-shape redactor at
+admission, including nested template parameters and acceptance checks. Live
+patches and retry briefs use the same representation before planning or
+hashing; their disclosure checks remain in force. Captured findings, handoffs
+and result excerpts are normalised before becoming graph outputs or subsequent
+prompts. The immutable result artifact keeps its original digest. Planning,
+execution and persistence share the normalised text: content-addressed storage
+only externalises bytes and never rewrites digested content. The journal
+strictly validates the stored representation before publishing it.
 
 - Why: an accepted graph must be able to save its checkpoint.
 

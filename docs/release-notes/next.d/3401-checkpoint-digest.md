@@ -2,4 +2,4 @@
 
 ### Pipelines and graphs
 
-- Checkpoints with redacted prompts now verify on reload. (#3401)
+- Credential-shaped graph text is normalised before planning, so saved graphs verify on reload and advance with matching plan digests. (#3401)
