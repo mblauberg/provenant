@@ -12,6 +12,8 @@ const RECORD: &str = "project.json";
 const STAGE_PREFIX: &str = ".project-stage-";
 const RECORD_LIMIT: u64 = 20 * 1024;
 const MAX_PROJECTS: usize = 16_384;
+/// Reads of one name that may each meet a concurrent atomic replacement.
+const REPLACEMENT_READS: usize = 16;
 
 /// A canonical Git common directory, or the canonical directory for a
 /// non-Git workspace. Discovery and canonicalisation belong to confinement.
@@ -138,6 +140,9 @@ pub fn bind_project(
         )?,
     };
     match location.canonical_primary_checkout_hint {
+        // Simultaneous launches from one checkout agree on the hint: only a
+        // change takes the record lock and replaces the record.
+        Some(root) if binding.primary_checkout_hint() == Some(root.as_path()) => Ok(binding),
         Some(root) => update_primary_checkout_hint(&projects, &projects_path, binding, root),
         None => Ok(binding),
     }
@@ -337,15 +342,13 @@ fn bindings(
             .map_err(|_| ConfigError::InvalidProjectBinding)?;
         let directory = projects.open_verified_directory(&entry)?;
         verify_directory(&directory, &projects_path.join(name))?;
-        let entry = match directory.metadata_at(OsStr::new(RECORD), false) {
-            Ok(entry) => entry,
-            // A concurrent first binding may have made the directory but not
-            // yet atomically published its record. Its deterministic owner
-            // can finish publication; readers leave it alone.
-            Err(error) if error.is_not_found() => continue,
-            Err(error) => return Err(error.into()),
+        // A concurrent first binding may have made the directory but not yet
+        // atomically published its record. Its deterministic owner can finish
+        // publication; readers leave it alone.
+        let Some(bytes) = read_record(&directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
+        else {
+            continue;
         };
-        let bytes = read_record(&directory, OsStr::new(RECORD), &entry, RECORD_LIMIT)?;
         let record = decode_binding_record(&bytes)?;
         if record.schema_version != 1 || record.project != project {
             return Err(ConfigError::InvalidProjectBinding);
@@ -389,13 +392,7 @@ fn update_primary_checkout_hint(
         &provenant_core::CancelToken::new(),
         &clock,
     )?;
-    let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
-    let mut record = decode_binding_record(&read_record(
-        &directory,
-        OsStr::new(RECORD),
-        &entry,
-        RECORD_LIMIT,
-    )?)?;
+    let mut record = decode_binding_record(&published_record(&directory)?)?;
     if record.schema_version != 1
         || record.project != binding.project_id()
         || decode_location(&record.canonical_common_dir)? != binding.canonical_common_dir
@@ -420,13 +417,7 @@ fn update_primary_checkout_hint(
             .map_err(|_| ConfigError::InvalidProjectBinding)?;
         directory.sync()?;
     }
-    let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
-    let stored = decode_binding_record(&read_record(
-        &directory,
-        OsStr::new(RECORD),
-        &entry,
-        RECORD_LIMIT,
-    )?)?;
+    let stored = decode_binding_record(&published_record(&directory)?)?;
     let stored = binding_from_record(stored)?;
     if stored.project_id() != binding.project_id()
         || stored.common_dir() != binding.common_dir()
@@ -475,13 +466,7 @@ fn create_binding(
         Err(error) => return Err(error.into()),
     }
     directory.sync()?;
-    let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
-    let stored = decode_binding_record(&read_record(
-        &directory,
-        OsStr::new(RECORD),
-        &entry,
-        RECORD_LIMIT,
-    )?)?;
+    let stored = decode_binding_record(&published_record(&directory)?)?;
     if stored.schema_version != 1
         || stored.project != project
         || decode_location(&stored.canonical_common_dir)? != canonical_common_dir
@@ -536,27 +521,60 @@ fn verify_directory(directory: &Directory, path: &Path) -> Result<(), ConfigErro
     Ok(())
 }
 
+/// A binding record that must already be published in this directory.
+fn published_record(directory: &Directory) -> Result<Vec<u8>, ConfigError> {
+    read_record(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
+        .ok_or(ConfigError::InvalidProjectBinding)
+}
+
+/// Read one private record, or `None` when it is not published. Records are
+/// only ever published by atomic rename, so a name whose identity changes
+/// during the read, or that resolves to an inode the rename just unlinked, was
+/// replaced by another complete record: resolve it again. A shape the caller
+/// refuses, or a name that keeps changing, is invalid.
 fn read_record(
     directory: &Directory,
     name: &OsStr,
-    entry: &Metadata,
     limit: u64,
-) -> Result<Vec<u8>, ConfigError> {
-    if entry.kind != FileKind::Regular || entry.links != 1 || entry.size > limit {
-        return Err(ConfigError::InvalidProjectBinding);
+    accept: impl Fn(&Metadata) -> bool,
+) -> Result<Option<Vec<u8>>, ConfigError> {
+    for _ in 0..REPLACEMENT_READS {
+        let entry = match directory.metadata_at(name, false) {
+            Ok(entry) => entry,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        // A stat that resolves the name while a rename replaces it can report
+        // the old inode already unlinked. The name now holds the new record.
+        if entry.links == 0 {
+            continue;
+        }
+        if entry.kind != FileKind::Regular
+            || entry.links != 1
+            || entry.size > limit
+            || !accept(&entry)
+        {
+            return Err(ConfigError::InvalidProjectBinding);
+        }
+        let bytes = match directory.read_stable(name, limit) {
+            Ok(bytes) => bytes,
+            Err(provenant_os::fs::FsError::RaceRefused { .. }) => continue,
+            // Replaced by a rename after the stat: the next read resolves it.
+            Err(error) if error.is_not_found() => continue,
+            Err(
+                provenant_os::fs::FsError::TooLarge { .. }
+                | provenant_os::fs::FsError::ReadIo { .. },
+            ) => return Err(ConfigError::InvalidProjectBinding),
+            Err(other) => return Err(other.into()),
+        };
+        match directory.metadata_at(name, false) {
+            Ok(after) if entry.unchanged(&after) => return Ok(Some(bytes)),
+            Ok(_) => continue,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
+        }
     }
-    let bytes = directory
-        .read_stable(name, limit)
-        .map_err(|error| match error {
-            provenant_os::fs::FsError::RaceRefused { .. }
-            | provenant_os::fs::FsError::TooLarge { .. }
-            | provenant_os::fs::FsError::ReadIo { .. } => ConfigError::InvalidProjectBinding,
-            other => other.into(),
-        })?;
-    if !entry.unchanged(&directory.metadata_at(name, false)?) {
-        return Err(ConfigError::InvalidProjectBinding);
-    }
-    Ok(bytes)
+    Err(ConfigError::InvalidProjectBinding)
 }
 
 fn validate_location(path: &Path) -> Result<(), ConfigError> {
@@ -631,29 +649,18 @@ fn read_host(
     state: &Directory,
     name: &OsStr,
 ) -> Result<Option<provenant_core::HostId>, ConfigError> {
-    match state.metadata_at(name, false) {
-        Ok(meta) => {
-            if meta.kind != FileKind::Regular
-                || meta.links != 1
-                || meta.uid != effective_uid()
-                || meta.mode & 0o077 != 0
-                || meta.size != 32
-            {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-            let bytes = read_record(state, name, &meta, 32)?;
-            if bytes.len() != 32 {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-            let text =
-                std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
-            text.parse()
-                .map(Some)
-                .map_err(|_| ConfigError::InvalidProjectBinding)
-        }
-        Err(error) if error.is_not_found() => Ok(None),
-        Err(error) => Err(error.into()),
+    let private =
+        |meta: &Metadata| meta.uid == effective_uid() && meta.mode & 0o077 == 0 && meta.size == 32;
+    let Some(bytes) = read_record(state, name, 32, private)? else {
+        return Ok(None);
+    };
+    if bytes.len() != 32 {
+        return Err(ConfigError::InvalidProjectBinding);
     }
+    let text = std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    text.parse()
+        .map(Some)
+        .map_err(|_| ConfigError::InvalidProjectBinding)
 }
 
 #[cfg(test)]
@@ -856,6 +863,70 @@ mod tests {
             registered_projects(&roots).unwrap(),
             vec![results[0].clone()]
         );
+    }
+
+    // Spec: docs/specs/state.md#configuration
+    // Writers bind with a primary checkout hint, and a hint update replaces
+    // the record by rename while others read it. No reader or binder may see
+    // that replacement as invalid state.
+    #[test]
+    fn concurrent_first_bindings_with_hints_never_read_invalid_state() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        let common = base.join("repo/.git");
+        fs::create_dir_all(&common).unwrap();
+        let checkouts = [base.join("repo"), base.join("moved")];
+        let plain = ProjectLocation::new(&common).unwrap();
+        let threads = 12;
+        let rounds = 40;
+        let barrier = std::sync::Barrier::new(threads);
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|worker| {
+                    let (roots, plain, barrier) = (&roots, &plain, &barrier);
+                    let checkouts = &checkouts;
+                    let common = &common;
+                    scope.spawn(move || -> Result<Vec<ProjectId>, ConfigError> {
+                        barrier.wait();
+                        let mut seen = Vec::new();
+                        for round in 0..rounds {
+                            let binding = match (worker + round) % 4 {
+                                // The hint moves every few rounds, so binders
+                                // replace the record while others read it.
+                                0 | 1 => bind_project(
+                                    roots,
+                                    ProjectLocation::from_verified_primary_checkout(
+                                        common,
+                                        &checkouts[(round / 4 + worker % 2) % 2],
+                                    )?,
+                                )?,
+                                2 => bind_project(roots, plain.clone())?,
+                                _ => match lookup_project(roots, plain)? {
+                                    Some(binding) => binding,
+                                    None => continue,
+                                },
+                            };
+                            seen.push(binding.project_id());
+                            for listed in registered_projects(roots)? {
+                                seen.push(listed.project_id());
+                            }
+                        }
+                        Ok(seen)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let expected = bind_project(&roots, plain.clone()).unwrap().project_id();
+        for result in results {
+            let seen = result.expect("a concurrent binder or reader saw invalid state");
+            assert!(seen.iter().all(|project| *project == expected));
+        }
+        assert_eq!(registered_projects(&roots).unwrap().len(), 1);
     }
 
     #[test]
