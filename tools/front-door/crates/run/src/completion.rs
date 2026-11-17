@@ -16,7 +16,7 @@ use std::{
 };
 
 pub(crate) fn guidance() -> &'static str {
-    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence and keep it inside the approved write scope. Use done only when the brief is finished. Use blocked when you need an owner decision, lack a capability required by the brief, or need an external change you cannot make yourself. These cases must not use stopped_early. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement. Use blocked only for a real boundary such as credentials, another repository or shared Git history. Use done only when the brief is finished. Use blocked when you need an owner decision, lack a capability required by the brief, or need an external change you cannot make yourself. These cases must not use stopped_early. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
 }
 
 impl RunStore {
@@ -394,6 +394,15 @@ mod tests {
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
     use provenant_records::AbsolutePath;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn guidance_treats_write_scope_as_advisory_outside_strict_policy() {
+        let text = guidance();
+        assert!(text.contains("not a fence"));
+        assert!(text.contains("list each such path in decisions"));
+        assert!(text.contains("strict WRITE_SCOPE lane policy"));
+        assert!(!text.contains("keep it inside the approved write scope"));
+    }
 
     #[test]
     fn writer_preamble_states_advisory_build_policy_and_read_only_does_not() {

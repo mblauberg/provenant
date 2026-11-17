@@ -36,7 +36,9 @@ is never replayed over its edits. A terminal attempt has at most one successor.
 Launch policy defaults to refusal only at credentials, Git isolation, data
 integrity and authority boundaries. Other checks allow or warn unless configured
 otherwise. A write-scope refusal happens before publication and retains private
-work.
+work. The lane instructions say the same: a write scope lists the expected files,
+so a writer edits another file when the fix needs it and lists it in its
+handoff; only a strict `WRITE_SCOPE` policy refuses it.
 - Why: advisory checks must not become accidental authority boundaries.
 
 Every provider lane has its native tool and shell surface. Read-only mode
