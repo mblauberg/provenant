@@ -1813,13 +1813,7 @@ mod tests {
         review.floors.clear();
         assert_eq!(
             resolved_names(&review, "standard", None, &[], false, &[]),
-            [
-                "correctness-spec",
-                "tests",
-                "design-fit-reuse",
-                "simplicity",
-                "reliability"
-            ]
+            ["correctness-spec", "tests", "reliability"]
         );
         assert_eq!(
             resolved_names(&review, "quick", Some("refactor"), &[], false, &[]),
@@ -1942,7 +1936,7 @@ mod tests {
         review.shapes.insert("custom".into(), shape);
         assert_eq!(
             resolved_names(&review, "custom", None, &[], false, &[]),
-            ["tests", "correctness-spec", "design-fit-reuse"]
+            ["tests", "correctness-spec", "reliability"]
         );
     }
 
