@@ -2814,8 +2814,12 @@ impl Factory {
                         extra: Default::default(),
                         document: document.to_owned(),
                     },
-                    wait,
-                    cancel,
+                    WaitBudget::cli(
+                        self.clock.mono_now(),
+                        self.context.config.graph.launch_wait_seconds,
+                    )
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+                    &CancelToken::new(),
                     Some(scratch),
                     None,
                     None,
@@ -3824,6 +3828,9 @@ mod tests {
                     reason: Some("repository contention".into()),
                 });
             }
+            // The graph's indexed wake is derived from node launch wakes.
+            // Keep this hand-built checkpoint valid under the persisted invariant.
+            checkpoint.wake_at = node.launch_retry.as_ref().and_then(|retry| retry.wake_at);
             checkpoint.cancelled = cancelled;
             if multiple {
                 let mut second = checkpoint.nodes[0].clone();
@@ -3884,7 +3891,7 @@ mod tests {
                     checkpoint.nodes[0].attempts.len()
                 );
             } else {
-                assert!(result.is_ok(), "{result:?}");
+                assert!(result.is_ok(), "{state:?}: {result:?}");
                 assert_eq!(after.nodes[0].retry_generation, None);
                 assert_eq!(
                     after.nodes[0].previous_attempts,

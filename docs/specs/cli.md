@@ -83,7 +83,7 @@ disclosed; unclassified graph input errors keep their generic message.
 
 ### Waits are readers
 
-Waiting observes work; timeout or cancellation does not stop it. A host waiter also asks the graph scheduler to advance a due persisted launch retry for its selected local graphs, rechecking under the journal lock. Retry execution has a scheduler-owned lifetime governed by explicit graph cancellation and the attempt’s persisted launch deadline. Ending observation leaves admitted preparation running or durably queued. Lane and remote observations remain readers. `wait` defaults
+Waiting observes work; timeout or cancellation does not stop it. A host waiter also asks the graph scheduler to advance a due persisted launch retry for its selected local graphs, rechecking under the journal lock. Retry execution has a scheduler-owned lifetime governed by explicit graph cancellation and the attempt’s persisted launch deadline. Due retries advance inline in the waiter or ticker using a token independent of observation. If observation ends during preparation, the waiter finishes that step before returning; its persisted launch deadline bounds the delay. Observation ending never cancels or withdraws work. Process exit leaves Starting state, deadline and wake for the next wait or tick to recover. Lane and remote observations remain readers. `wait` defaults
 to `--all`, which waits for every target and returns the worst final result.
 `--any` returns at the first target that settles or needs input.
 `--fail-fast` returns at the first unsuccessful target, or after every target
@@ -107,8 +107,8 @@ waits, relay child waits and CI cadence). A configuration file that cannot be
 read leaves the compiled defaults in force with a warning, and every reported
 source names the reason; a file that is present but malformed is a typed
 error. Reports name each setting with its source.
-- Why: a wait must not outlive its budget in a transport it can no longer
-  interrupt, and one setting must not fail three different ways.
+- Why: observation bounds its transports while an admitted launch step retains
+  its own bounded execution allowance; settings resolve consistently.
 
 Wait budgets clamp to `domains.wait.max_timeout_seconds`, warning once with
 the effective limit and source when exceeded. A larger request remains a

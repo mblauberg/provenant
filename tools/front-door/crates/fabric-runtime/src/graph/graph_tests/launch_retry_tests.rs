@@ -405,14 +405,10 @@ fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let accepted = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(accepted.checkpoint.nodes[0].attempts[0].attempt_ref.as_deref(), Some("host/queued"));
-    assert_eq!(owner.calls.len(), 1);
-
-    owner.now = Some(at(5));
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(retry_of(&waiting.checkpoint).wake_at, Some(at(10)));
-    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(waiting.checkpoint.nodes[0].attempts[0].attempt_ref.as_deref(), Some("host/queued"));
+    assert_eq!(retry_of(&waiting.checkpoint).wake_at, Some(at(5)));
+    assert_eq!(owner.calls.len(), 2, "newly queued work gets one inline retry");
 
     // Cancellation wins before the retry wake and settles the retained run
     // reference. The launch owner is not called again after the wake time.
@@ -625,7 +621,7 @@ fn expired_launch_replays_an_accepted_operation() {
     owner.now = Some(at(3600));
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.len(), 3);
     assert_eq!(owner.calls[0], owner.calls[1]);
 }
 
@@ -858,8 +854,14 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
         now: Some(at(0)),
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
-        errors: [(2, repository_lock_busy())].into(),
+        errors: [(4, repository_lock_busy())].into(),
         observations: VecDeque::from([
+            AttemptObservation::Queued {
+                attempt_ref: Some("host/queued".into()),
+            },
+            AttemptObservation::Queued {
+                attempt_ref: Some("host/queued".into()),
+            },
             AttemptObservation::Queued {
                 attempt_ref: Some("host/queued".into()),
             },
@@ -877,10 +879,6 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
 
     assert_eq!(first.checkpoint.wake_at, Some(at(5)));
     // A second queued observation must retain the wake and the same attempt.
-    owner.errors = [(3, repository_lock_busy())].into();
-    owner.observations.push_front(AttemptObservation::Queued {
-        attempt_ref: Some("host/queued".into()),
-    });
     owner.now = Some(at(5));
     let queued = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retry_of(&queued.checkpoint).wake_at, Some(at(10)));
@@ -891,7 +889,7 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
     assert_eq!(queued.checkpoint.nodes[0].attempts[0].attempt_ref, first_attempt.attempt_ref);
     owner.now = Some(at(9));
     advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 2, "no launch before the saved wake");
+    assert_eq!(owner.calls.len(), 3, "no launch before the saved wake");
 
     owner.now = Some(at(10));
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
@@ -911,13 +909,14 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
     assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
     assert_eq!(done.checkpoint.nodes[0].attempts[0].key, first_attempt.key);
     assert_eq!(done.checkpoint.nodes[0].attempts[0].attempt_ref, first_attempt.attempt_ref);
-    assert_eq!(owner.calls.len(), 4);
+    assert_eq!(owner.calls.len(), 5);
     assert_eq!(owner.calls[0], owner.calls[1]);
     assert_eq!(owner.calls[1], owner.calls[2]);
     assert_eq!(owner.calls[2], owner.calls[3]);
+    assert_eq!(owner.calls[3], owner.calls[4]);
     assert_eq!(
         owner.stored_refs,
-        vec![None, Some("host/queued".into()), Some("host/queued".into()), Some("host/queued".into())]
+        vec![None, Some("host/queued".into()), Some("host/queued".into()), Some("host/queued".into()), Some("host/queued".into())]
     );
 }
 
@@ -930,10 +929,15 @@ fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_i
         now_after_error: Some(at(60)),
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
-        errors: [(2, repository_lock_busy())].into(),
-        observations: VecDeque::from([AttemptObservation::Queued {
-            attempt_ref: Some("host/queued".into()),
-        }]),
+        errors: [(3, repository_lock_busy())].into(),
+        observations: VecDeque::from([
+            AttemptObservation::Queued {
+                attempt_ref: Some("host/queued".into()),
+            },
+            AttemptObservation::Queued {
+                attempt_ref: Some("host/queued".into()),
+            },
+        ]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -970,7 +974,7 @@ fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_i
     // the retained run attempt on later graph advances.
     let replayed = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(replayed.checkpoint, exhausted.checkpoint);
-    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.len(), 3);
 }
 
 // Spec: docs/specs/run-launch.md#admission-and-custody
@@ -982,10 +986,15 @@ fn retry_after_repository_lock_exhaustion_releases_the_queued_attempt_and_relaun
         now_after_error: Some(at(60)),
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
-        errors: [(2, repository_lock_busy())].into(),
-        observations: VecDeque::from([AttemptObservation::Queued {
-            attempt_ref: Some("host/queued".into()),
-        }]),
+        errors: [(3, repository_lock_busy())].into(),
+        observations: VecDeque::from([
+            AttemptObservation::Queued {
+                attempt_ref: Some("host/queued".into()),
+            },
+            AttemptObservation::Queued {
+                attempt_ref: Some("host/queued".into()),
+            },
+        ]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -1036,7 +1045,7 @@ fn retry_after_repository_lock_exhaustion_releases_the_queued_attempt_and_relaun
     let attempt = &launched.checkpoint.nodes[0].attempts[0];
     assert_ne!(attempt.key.attempt, exhausted.checkpoint.nodes[0].attempts[0].key.attempt);
     assert_ne!(attempt.attempt_ref.as_deref(), Some("host/queued"));
-    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.calls.len(), 4);
     assert_eq!(owner.stored_refs.last().map(Option::as_deref), Some(None));
 }
 

@@ -567,6 +567,7 @@ fn submit_with_host_context(
                     Some(host),
                     None,
                     deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
+                    None,
                 )
             } else if let Some(deadline) = deadline {
                 launch_with_deadline(

@@ -1134,7 +1134,7 @@ fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (Stri
     if checkpoint.wake_at != saved_wake {
         return Err((
             String::new(),
-            "graph wake time disagrees with its pending asks",
+            "graph wake time disagrees with its pending work",
         ));
     }
     for node in &mut checkpoint.nodes {
@@ -3096,6 +3096,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                // First admission may yield a queued reference solely so it can
+                // be saved before relaunch. Finish that step inline after saving;
+                // subsequent queued observations retain the bounded backoff.
+                let newly_queued = stored_ref.is_none()
+                    && matches!(
+                        &observation,
+                        AttemptObservation::Queued {
+                            attempt_ref: Some(_)
+                        }
+                    );
                 // The owner can be launching a process while a stop arrives.
                 // Persist its reference before any later owner query can fail;
                 // leave the intent pending until the full observation saves.
@@ -3111,6 +3121,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     && last.attempt_ref.as_deref() != Some(reference.as_str())
                 {
                     last.attempt_ref = Some(reference);
+                    if newly_queued {
+                        last.launched = false;
+                        if let Some(retry) = checkpoint.nodes[node_index].launch_retry.as_mut() {
+                            retry.wake_at = owner
+                                .wall_now()
+                                .map(|now| retry.deadline.map_or(now, |end| now.min(end)));
+                        }
+                        asks::refresh_wake(&mut checkpoint);
+                    }
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
                 let warnings = owner.take_launch_warnings();
@@ -3323,6 +3342,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     node: node.id.clone(),
                     invariant,
                 })?;
+                if newly_queued
+                    && let Some(retry) = checkpoint.nodes[node_index].launch_retry.as_mut()
+                {
+                    retry.wake_at = owner
+                        .wall_now()
+                        .map(|now| retry.deadline.map_or(now, |end| now.min(end)));
+                }
                 transitions::record_observation(
                     &mut checkpoint,
                     node,
@@ -3413,7 +3439,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     resume = false;
                     continue 'schedule;
                 }
-                if !should_continue {
+                if !should_continue && !newly_queued {
                     break;
                 }
             }

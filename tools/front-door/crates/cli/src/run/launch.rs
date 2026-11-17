@@ -179,7 +179,7 @@ pub fn launch_budget_wrap_up(
     call: &run::Request<'_>,
     host: &run::HostLaunchContext,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
+    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None, None)
 }
 
 /// Relaunch the same admitted graph attempt after a transient preparation
@@ -200,6 +200,12 @@ pub fn relaunch_queued_on_host(
         Some(host),
         None,
         Some(remaining.as_secs()),
+        Some(provenant_core::WaitBudget::up_to(
+            call.clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(
+                remaining.as_micros().min(u64::MAX as u128) as u64,
+            ),
+        )),
     )
 }
 
@@ -212,7 +218,7 @@ pub fn launch_graph_continuation(
     call: &run::Request<'_>,
     host: &run::HostLaunchContext,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
+    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None, None)
 }
 
 /// The detached launcher's entry point. It reopens the admitted run and uses
@@ -338,6 +344,7 @@ pub(super) fn launch_prepared_with_wait(
         None,
         ready,
         provider_lease_wait,
+        None,
     )
 }
 
@@ -534,15 +541,11 @@ pub(super) fn launch_on_host_with_wait(
     host: Option<&run::HostLaunchContext>,
     ready: Option<&run::PreparedStart>,
     provider_lease_wait: Option<u64>,
+    preparation_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<Vec<run::Started>, Fail> {
-    // Capture once before admission/preparation work. In particular, an
-    // expired ordinary allowance must never become a nonblocking sentinel.
-    let preparation_budget = provider_lease_wait.map(|seconds| {
-        provenant_core::WaitBudget::up_to(
-            call.clock.mono_now(),
-            provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
-        )
-    });
+    // Provider fence waiting has its own budget. Its allowance only bounds
+    // writer repository inspection when the caller supplies that separate
+    // launch-preparation deadline.
     let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
@@ -577,6 +580,23 @@ pub(super) fn launch_on_host_with_wait(
         ));
     }
     let read = session.store.request(attempt, call)?;
+    // Detached launchers reconstruct the execution token from durable intent;
+    // an observer's token cannot cross a process boundary or own preparation.
+    let key = session.store.work_key(attempt, call)?;
+    let root = session.context.state_root.clone();
+    let project = session.context.project_id;
+    let (graph, node) = (key.graph().to_owned(), key.node().to_owned());
+    let launch_cancel = call.cancel.linked(move || {
+        provenant_fabric_runtime::graph::FileJournal::launch_cancellation_requested(
+            &root, project, &graph, &node,
+        )
+        .unwrap_or(true)
+    });
+    let call = &run::Request {
+        clock: call.clock,
+        cancel: &launch_cancel,
+    };
+
     let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
 

@@ -1656,14 +1656,6 @@ fn prepare_inner(
     wait: Option<u64>,
     preparation_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
-    let preparation_budget = preparation_budget.or_else(|| {
-        wait.map(|seconds| {
-            provenant_core::WaitBudget::up_to(
-                provenant_core::Clock::mono_now(&provenant_os::clock::SystemClock),
-                provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
-            )
-        })
-    });
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && AdapterSpec::get(provider)
             .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)

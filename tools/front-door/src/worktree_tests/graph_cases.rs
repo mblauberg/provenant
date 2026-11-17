@@ -336,3 +336,139 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
     }
     Ok(())
 }
+
+/// Spec: docs/specs/cli.md#waits-are-readers
+/// A persisted graph stop reaches a retry already in provider preparation.
+pub(super) fn graph_stop_cancels_retry_during_seed_preparation() -> Result {
+    use provenant_os::fs::{Directory, LockMode};
+    use std::os::unix::fs::PermissionsExt;
+
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    let mut rig = repository()?;
+    let _cleanup = rig.process_cleanup();
+    let gate = rig.root.join("retry-seed-gate");
+    fs::create_dir(&gate)?;
+    fs::write(gate.join("hold"), b"hold")?;
+    let provider_log = rig.root.join("provider-launched");
+    let worktree = rig.project.join(".worktrees/retry-cancel");
+    ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "retry-cancel",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+
+    let bin = rig.root.join("provider-bin");
+    fs::create_dir(&bin)?;
+    let codex = bin.join("codex");
+    fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in --version) printf 'codex-cli 1.0.0\\n';; login) printf 'Logged in using ChatGPT\\n';; *) printf 'launched\\n' > '{}'; printf '{{\"type\":\"thread.started\",\"thread_id\":\"fixture-retry\"}}\\n';; esac\n",
+            provider_log.display()
+        ),
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\ncase \"$*\" in *token*) printf 'fixture-token\\n';; *) printf 'gh version 2.0.0\\n';; esac\n",
+    )?;
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    rig.env.push((
+        "PROVENANT_FIXTURE_HOLD_SEED".into(),
+        gate.clone().into_os_string(),
+    ));
+    let auth = br#"{"tokens":{"account_id":"fixture-retry"}}"#;
+    let account = rig.root.join("codex");
+    fs::write(account.join("auth.json"), auth)?;
+    let account_key =
+        provenant_providers::identity::codex_account(auth).ok_or("Codex fixture key")?;
+    support::register_account(&rig, "codex", "preparation", &account_key, &account)?;
+
+    let repository = Directory::open_anchor(&rig.project.join(".git"))?;
+    let lock = repository.try_lock(
+        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
+        LockMode::Exclusive,
+    )?;
+    let first = spawn_graph_command(&rig, "retry-cancel", &worktree, "none")?;
+    let first = finish_graph_command(first, "initial repository contention")?;
+    let initial_node = &first["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(initial_node["state"], "running", "{first}");
+    assert!(
+        initial_node["launch_retry"]["wake_at"].is_string(),
+        "{first}"
+    );
+    drop(lock);
+
+    let wait_stdout = rig.root.join("retry-wait.stdout");
+    let wait_stderr = rig.root.join("retry-wait.stderr");
+    let wait_child = rig.with_process_spawn_lock(|| {
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .arg("--state-dir")
+            .arg(&rig.state)
+            .args(["wait", "retry-cancel", "--timeout", "30s", "--json"])
+            .current_dir(&rig.project)
+            .env_clear()
+            .envs(rig.env.iter().cloned())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(fs::File::create(&wait_stdout)?))
+            .stderr(std::process::Stdio::from(fs::File::create(&wait_stderr)?));
+        Ok(provenant_supervisor::fixture::ChildGuard::new(
+            command.spawn()?,
+        ))
+    })?;
+    let mut retry = PendingGraphCommand {
+        child: wait_child,
+        stdout: wait_stdout,
+        stderr: wait_stderr,
+    };
+    wait_graph_gate(
+        &mut retry,
+        &gate.join("entered"),
+        "persisted retry entered seed preparation",
+    )?;
+    let checkpoint = rig.checkpoint("retry-cancel")?;
+    assert!(
+        checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+        "retry was not admitted before cancellation: {checkpoint}"
+    );
+
+    let stop = ok(&rig, &["stop", "retry-cancel", "--json"])?;
+    assert_eq!(
+        stop["data"]["cancellation_requested"]["pending_acknowledgement"], true,
+        "stop should be recorded while retry preparation holds the graph journal: {stop}"
+    );
+    let exited = provenant_test_support::wait_for(
+        "retry preparation observes graph cancellation",
+        Duration::from_secs(5),
+        || retry.child.try_wait(),
+        |status| matches!(status, Ok(Some(_)) | Err(_)),
+    )?;
+    assert!(
+        exited?.is_some(),
+        "wait did not leave preparation after graph cancellation; stderr={}",
+        String::from_utf8_lossy(&fs::read(&retry.stderr)?)
+    );
+    let checkpoint = rig.checkpoint("retry-cancel")?;
+    assert_eq!(checkpoint["cancelled"], true, "{checkpoint}");
+    assert!(
+        !provider_log.exists(),
+        "provider launched after graph cancellation: {}",
+        String::from_utf8_lossy(&fs::read(&provider_log)?)
+    );
+    Ok(())
+}

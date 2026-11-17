@@ -258,6 +258,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
         args,
         &[
             "graph_stop_cancels_live_delivery_fetch_and_seed_preparation",
+            "graph_stop_cancels_retry_during_seed_preparation",
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_collects_a_settled_lane_whose_completion_attempt_failed",
@@ -340,6 +341,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
                 "graph_stop_cancels_live_delivery_fetch_and_seed_preparation" => graph_stop_cancels_live_delivery_fetch_and_seed_preparation(),
+                "graph_stop_cancels_retry_during_seed_preparation" => graph_stop_cancels_retry_during_seed_preparation(),
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_collects_a_settled_lane_whose_completion_attempt_failed" => gc_collects_a_settled_lane_whose_completion_attempt_failed(),

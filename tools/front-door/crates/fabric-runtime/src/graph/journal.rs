@@ -169,6 +169,16 @@ impl FileJournal {
         super::cancellation_intent::record(root, project, target, budget, cancel, clock)
     }
 
+    /// Whether durable graph or subtree intent fences this provider launch.
+    pub fn launch_cancellation_requested(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        node_id: &str,
+    ) -> Result<bool, JournalError> {
+        super::cancellation_intent::launch_requested(root, project, graph_id, node_id)
+    }
+
     /// Whether one particular stop request still awaits graph-lock acknowledgement.
     pub fn cancellation_request_pending(
         root: &StateRoot,

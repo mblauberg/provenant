@@ -95,39 +95,20 @@ pub(crate) fn tick_graphs(
     tick_graphs_selected(resolved, now, workers, None, &CancelToken::new())
 }
 
-/// Run a scheduler operation independently of an observing command. Dropping
-/// its receipt neither cancels the operation nor lends it observation authority.
-pub(crate) fn scheduler_task<T: Send + 'static>(
-    work: impl FnOnce(&CancelToken) -> T + Send + 'static,
-) -> std::io::Result<std::sync::mpsc::Receiver<T>> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("graph-retry-scheduler".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let cancel = CancelToken::new();
-            let _ = sender.send(work(&cancel));
-        })?;
-    Ok(receiver)
-}
-
-/// Advance a due retry on an in-process scheduler thread. The observer may
-/// end without cancelling it; process exit leaves the persisted wake for recovery.
+/// Advance a due retry inline. Observation owns neither this token nor the
+/// persisted launch deadline, and waits for the bounded preparation to finish.
 pub(crate) fn tick_launch_retry(
     resolved: &crate::roots::Resolved,
     project: provenant_core::ProjectId,
     graph: &str,
     workers: &'static dyn WorkerObserver,
-) -> std::io::Result<std::sync::mpsc::Receiver<Result<crate::tick::Graphs, String>>> {
-    let resolved = resolved.clone();
-    let graph = graph.to_owned();
-    scheduler_task(move |cancel| {
-        let now = SystemClock::new()
-            .wall_now()
-            .map_err(|error| error.to_string())?;
-        tick_graphs_selected(&resolved, now, workers, Some((project, &graph)), cancel)
-            .map_err(|error| error.to_string())
-    })
+) -> Result<crate::tick::Graphs, String> {
+    let cancel = CancelToken::new();
+    let now = SystemClock::new()
+        .wall_now()
+        .map_err(|error| error.to_string())?;
+    tick_graphs_selected(resolved, now, workers, Some((project, graph)), &cancel)
+        .map_err(|error| error.to_string())
 }
 
 fn tick_graphs_selected(

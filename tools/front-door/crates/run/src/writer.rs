@@ -59,10 +59,27 @@ fn utility_error(
     path: Option<&Path>,
 ) -> impl FnOnce(provenant_confinement::utility::UtilityError) -> RunError {
     let path = path.map(Path::to_path_buf);
-    move |source| RunError::OperationIo {
-        operation,
-        path,
-        source: crate::CausedSource::io(source.to_string(), source.safe_cause()),
+    move |source| match source {
+        // Repository verification refusals are confinement decisions, not
+        // transport failures. Keep their typed source so the public boundary
+        // renders the refusal code without disclosing the selected path.
+        provenant_confinement::utility::UtilityError::Repo(
+            error @ (provenant_confinement::repo::RepoError::InvalidPath
+            | provenant_confinement::repo::RepoError::InvalidRoot
+            | provenant_confinement::repo::RepoError::InvalidGitMarker
+            | provenant_confinement::repo::RepoError::InvalidRegistration
+            | provenant_confinement::repo::RepoError::InvalidGitDirectory
+            | provenant_confinement::repo::RepoError::AlternateObjects
+            | provenant_confinement::repo::RepoError::MetadataTooLarge
+            | provenant_confinement::repo::RepoError::Unprobed),
+        ) => RunError::Writer(worktrees::WorktreeError::Utility(
+            provenant_confinement::utility::UtilityError::Repo(error),
+        )),
+        source => RunError::OperationIo {
+            operation,
+            path,
+            source: crate::CausedSource::io(source.to_string(), source.safe_cause()),
+        },
     }
 }
 /// Held-directory errors name paths relative to their anchor. Retain a known

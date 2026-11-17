@@ -395,8 +395,13 @@ impl RunStore {
         }
         // A cancel that lands during preparation must reach this launcher, or
         // it keeps waiting on locks while holding the writer.
-        let cancel_requested =
-            || directory().map(|attempt| crate::store::cancel_requested(&attempt, scope));
+        let cancel_requested = || {
+            directory().map(|attempt| {
+                call.cancel.is_cancelled()
+                    || setup_cancel.is_cancelled()
+                    || crate::store::cancel_requested(&attempt, scope)
+            })
+        };
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }

@@ -217,22 +217,6 @@ fn read(
     }
 }
 
-struct RetryTick {
-    wake: provenant_core::WallTime,
-    receipt: mpsc::Receiver<Result<crate::tick::Graphs, String>>,
-}
-impl RetryTick {
-    fn poll(&self) -> Option<Result<crate::tick::Graphs, String>> {
-        match self.receipt.try_recv() {
-            Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some(Err("scheduler receipt disconnected".into()))
-            }
-        }
-    }
-}
-
 /// Cancellation wakes source pauses and interrupts in-flight GitHub reads.
 #[derive(Default)]
 struct Stop {
@@ -1219,175 +1203,12 @@ pub(crate) fn run(
                 .name("graph-wait-owner".into())
                 .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(scope, move || {
-                let mut session = None;
-                let mut retry_ticks = std::collections::BTreeMap::<String, RetryTick>::new();
-                let mut observation_history = observation_history;
-                let mut pending = pending;
-                // Read once for rows that arrived after preflight or were not
-                // represented in its sample before waiting for an event.
-                for index in initial_reads {
-                    let Some((_, source)) = graph_sources
-                        .iter()
-                        .find(|(candidate, _)| *candidate == index)
-                    else {
-                        continue;
-                    };
-                    let reading = read(
-                        source,
-                        edge,
-                        &mut session,
-                        deadline,
-                        pr_read_timeout,
-                        &stop.cancel,
-                    );
-                    observation_history.record(&reading, local_host.as_ref());
-                    let locally_represented =
-                        reading_locally_represented(&reading, local_host.as_ref());
-                    if locally_represented {
-                        remote_indices.remove(&index);
-                    } else {
-                        remote_indices.insert(index);
-                    }
-                    let finished = reading.done();
-                    if finished {
-                        remote_indices.remove(&index);
-                        pending.retain(|candidate| *candidate != index);
-                    }
-                    if let Ok(mut current) = observation.lock() {
-                        *current = observation_history.render(
-                            watcher.as_ref(),
-                            cadence,
-                            fallback_reason.as_deref(),
-                        );
-                    }
-                    if sender
-                        .send(Update {
-                            target: index,
-                            reading,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                let mut next_remote_poll = Instant::now() + interval;
-                while !pending.is_empty() && !stop.cancel.is_cancelled() {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        break;
-                    }
-                    // Assist due retries for selected local graphs. The scheduler
-                    // rechecks the checkpoint under its journal lock.
-                    let clock = provenant_os::clock::SystemClock::new();
-                    let mut until_retry = left;
-                    if let Ok(now) = clock.wall_now() {
-                        for index in &pending {
-                            let Some((_, Source::Graph(target))) = graph_sources.iter().find(|(candidate, _)| candidate == index) else {
-                                continue;
-                            };
-                            let Ok(Some((project, graph, wake))) = crate::fabric::local_launch_retry(target, edge, &mut session) else {
-                                continue;
-                            };
-                            let delay = Duration::from_micros(wake.as_micros().saturating_sub(now.as_micros()).max(0) as u64);
-                            if delay.is_zero() {
-                                // Each selected graph owns its in-flight receipt, so
-                                // one preparation cannot starve another graph's retry.
-                                let retry_key = format!("{project}/{graph}");
-                                if retry_ticks.get(&retry_key).is_some_and(|tick| tick.wake != wake) {
-                                    retry_ticks.remove(&retry_key);
-                                }
-                                if let Some(result) = retry_ticks.get(&retry_key).and_then(RetryTick::poll) {
-                                    retry_ticks.remove(&retry_key);
-                                    if let Ok(mut warnings) = warnings.lock() {
-                                        match result {
-                                            Ok(report) => {
-                                                warnings.extend(report.warnings);
-                                                warnings.extend(report.errors.into_iter().map(|error| format!("launch retry could not advance: {error}")));
-                                            }
-                                            Err(error) => warnings.push(format!("launch retry could not advance: {error}")),
-                                        }
-                                    }
-                                }
-                                if let std::collections::btree_map::Entry::Vacant(entry) = retry_ticks.entry(retry_key) {
-                                    match crate::fabric::tick_launch_retry(resolved, project, &graph, workers) {
-                                        Ok(receipt) => { entry.insert(RetryTick { wake, receipt }); },
-                                        Err(error) => if let Ok(mut warnings) = warnings.lock() {
-                                            warnings.push(format!("launch retry for {graph} could not start: {error}"));
-                                        },
-                                    }
-                                }
-                                // A concurrent owner may hold the journal. Retry promptly without spinning.
-                                until_retry = until_retry.min(Duration::from_millis(250));
-                            } else {
-                                until_retry = until_retry.min(delay);
-                            }
-                        }
-                    }
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() || stop.cancel.is_cancelled() {
-                        break;
-                    }
-                    let wake = if let Some(source) = watcher.as_mut() {
-                        let until_remote = if remote_indices.is_empty() {
-                            left
-                        } else {
-                            next_remote_poll.saturating_duration_since(Instant::now())
-                        };
-                        let wait_for = left.min(until_remote).min(until_retry);
-                        match source.wait(wait_for) {
-                            Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
-                                Some(GraphWake::Event)
-                            }
-                            Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
-                                if deadline.saturating_duration_since(Instant::now()).is_zero() {
-                                    break;
-                                }
-                                Some(GraphWake::NativeTimeout)
-                            }
-                            Ok(provenant_os::changes::watch::WaitOutcome::Woken) => break,
-                            Err(error) => {
-                                watcher = None;
-                                fallback_reason = Some(format!("event source failed: {error}"));
-                                if let Ok(mut current) = observation.lock() {
-                                    *current = observation_history.render(
-                                        None,
-                                        cadence,
-                                        fallback_reason.as_deref(),
-                                    );
-                                }
-                                let left = deadline.saturating_duration_since(Instant::now());
-                                if !stop.pause(interval.min(left)) {
-                                    break;
-                                }
-                                Some(GraphWake::PacedFallback)
-                            }
-                        }
-                    } else {
-                        if !stop.pause(interval.min(left).min(until_retry)) {
-                            break;
-                        }
-                        Some(GraphWake::PacedFallback)
-                    };
-                    let Some(wake) = wake else {
-                        continue;
-                    };
-                    // A local event may race with the remote cadence boundary.
-                    // Include remote targets whenever that absolute deadline has
-                    // elapsed, regardless of how often local events arrive.
-                    let remote_poll_due =
-                        !remote_indices.is_empty() && Instant::now() >= next_remote_poll;
-                    let mut reads = graph_reads_for_wake(&pending, &remote_indices, wake);
-                    include_due_remote_reads(
-                        &mut reads,
-                        &pending,
-                        &remote_indices,
-                        remote_poll_due,
-                    );
-                    let polled_remote = reads.iter().any(|index| remote_indices.contains(index));
-                    for index in reads {
-                        if stop.cancel.is_cancelled() {
-                            break;
-                        }
+                    let mut session = None;
+                    let mut observation_history = observation_history;
+                    let mut pending = pending;
+                    // Read once for rows that arrived after preflight or were not
+                    // represented in its sample before waiting for an event.
+                    for index in initial_reads {
                         let Some((_, source)) = graph_sources
                             .iter()
                             .find(|(candidate, _)| *candidate == index)
@@ -1432,11 +1253,175 @@ pub(crate) fn run(
                             return;
                         }
                     }
-                    if polled_remote {
-                        next_remote_poll = Instant::now() + interval;
+                    let mut next_remote_poll = Instant::now() + interval;
+                    while !pending.is_empty() && !stop.cancel.is_cancelled() {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        // Assist due retries for selected local graphs. The scheduler
+                        // rechecks the checkpoint under its journal lock.
+                        let clock = provenant_os::clock::SystemClock::new();
+                        let mut until_retry = left;
+                        if let Ok(now) = clock.wall_now() {
+                            for index in &pending {
+                                let Some((_, Source::Graph(target))) = graph_sources
+                                    .iter()
+                                    .find(|(candidate, _)| candidate == index)
+                                else {
+                                    continue;
+                                };
+                                let Ok(Some((project, graph, wake))) =
+                                    crate::fabric::local_launch_retry(target, edge, &mut session)
+                                else {
+                                    continue;
+                                };
+                                let delay = Duration::from_micros(
+                                    wake.as_micros().saturating_sub(now.as_micros()).max(0) as u64,
+                                );
+                                if delay.is_zero() {
+                                    let result = crate::fabric::tick_launch_retry(
+                                        resolved, project, &graph, workers,
+                                    );
+                                    if let Ok(mut warnings) = warnings.lock() {
+                                        match result {
+                                            Ok(report) => {
+                                                warnings.extend(report.warnings);
+                                                warnings
+                                                    .extend(report.errors.into_iter().map(|error| {
+                                                    format!(
+                                                        "launch retry could not advance: {error}"
+                                                    )
+                                                }));
+                                            }
+                                            Err(error) => warnings.push(format!(
+                                                "launch retry could not advance: {error}"
+                                            )),
+                                        }
+                                    }
+                                    // A concurrent owner may hold the journal. Retry promptly without spinning.
+                                    until_retry = until_retry.min(Duration::from_millis(250));
+                                } else {
+                                    until_retry = until_retry.min(delay);
+                                }
+                            }
+                        }
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() || stop.cancel.is_cancelled() {
+                            break;
+                        }
+                        let wake = if let Some(source) = watcher.as_mut() {
+                            let until_remote = if remote_indices.is_empty() {
+                                left
+                            } else {
+                                next_remote_poll.saturating_duration_since(Instant::now())
+                            };
+                            let wait_for = left.min(until_remote).min(until_retry);
+                            match source.wait(wait_for) {
+                                Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                                    Some(GraphWake::Event)
+                                }
+                                Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                                    if deadline.saturating_duration_since(Instant::now()).is_zero()
+                                    {
+                                        break;
+                                    }
+                                    Some(GraphWake::NativeTimeout)
+                                }
+                                Ok(provenant_os::changes::watch::WaitOutcome::Woken) => break,
+                                Err(error) => {
+                                    watcher = None;
+                                    fallback_reason = Some(format!("event source failed: {error}"));
+                                    if let Ok(mut current) = observation.lock() {
+                                        *current = observation_history.render(
+                                            None,
+                                            cadence,
+                                            fallback_reason.as_deref(),
+                                        );
+                                    }
+                                    let left = deadline.saturating_duration_since(Instant::now());
+                                    if !stop.pause(interval.min(left)) {
+                                        break;
+                                    }
+                                    Some(GraphWake::PacedFallback)
+                                }
+                            }
+                        } else {
+                            if !stop.pause(interval.min(left).min(until_retry)) {
+                                break;
+                            }
+                            Some(GraphWake::PacedFallback)
+                        };
+                        let Some(wake) = wake else {
+                            continue;
+                        };
+                        // A local event may race with the remote cadence boundary.
+                        // Include remote targets whenever that absolute deadline has
+                        // elapsed, regardless of how often local events arrive.
+                        let remote_poll_due =
+                            !remote_indices.is_empty() && Instant::now() >= next_remote_poll;
+                        let mut reads = graph_reads_for_wake(&pending, &remote_indices, wake);
+                        include_due_remote_reads(
+                            &mut reads,
+                            &pending,
+                            &remote_indices,
+                            remote_poll_due,
+                        );
+                        let polled_remote =
+                            reads.iter().any(|index| remote_indices.contains(index));
+                        for index in reads {
+                            if stop.cancel.is_cancelled() {
+                                break;
+                            }
+                            let Some((_, source)) = graph_sources
+                                .iter()
+                                .find(|(candidate, _)| *candidate == index)
+                            else {
+                                continue;
+                            };
+                            let reading = read(
+                                source,
+                                edge,
+                                &mut session,
+                                deadline,
+                                pr_read_timeout,
+                                &stop.cancel,
+                            );
+                            observation_history.record(&reading, local_host.as_ref());
+                            let locally_represented =
+                                reading_locally_represented(&reading, local_host.as_ref());
+                            if locally_represented {
+                                remote_indices.remove(&index);
+                            } else {
+                                remote_indices.insert(index);
+                            }
+                            let finished = reading.done();
+                            if finished {
+                                remote_indices.remove(&index);
+                                pending.retain(|candidate| *candidate != index);
+                            }
+                            if let Ok(mut current) = observation.lock() {
+                                *current = observation_history.render(
+                                    watcher.as_ref(),
+                                    cadence,
+                                    fallback_reason.as_deref(),
+                                );
+                            }
+                            if sender
+                                .send(Update {
+                                    target: index,
+                                    reading,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        if polled_remote {
+                            next_remote_poll = Instant::now() + interval;
+                        }
                     }
-                }
-            })?;
+                })?;
         }
         for (index, source) in sources.iter().enumerate() {
             if !matches!(source, Source::Pr { .. })
@@ -1785,61 +1770,6 @@ mod tests {
     }
 
     // Spec: docs/specs/cli.md#waits-are-readers
-    #[test]
-    fn ending_observation_leaves_scheduler_preparation_running()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for mode in [WaitMode::All, WaitMode::Any] {
-            let stop = Stop::default();
-            let (preparing, entered) = mpsc::channel();
-            let (release, resume) = mpsc::channel();
-            // Hold the execution at preparation, using the exact scheduler
-            // lifetime factory used by tick_launch_retry, until observation ends.
-            let receipt = crate::fabric::graph_execution::scheduler_task(move |cancel| {
-                preparing.send(()).unwrap();
-                resume.recv_timeout(Duration::from_secs(5)).unwrap();
-                assert!(
-                    !cancel.is_cancelled(),
-                    "observation cannot withdraw preparation"
-                );
-                "launch accepted"
-            })?;
-            entered.recv_timeout(Duration::from_secs(5))?;
-            let (sender, receiver) = mpsc::channel();
-            let mut latest = vec![Some(reading(Settle::Pending)); 2];
-            let deadline = if mode == WaitMode::Any {
-                // Another target settles while this one is still preparing.
-                sender.send(Update {
-                    target: 1,
-                    reading: reading(Settle::Succeeded),
-                })?;
-                Instant::now() + Duration::from_secs(5)
-            } else {
-                Instant::now()
-            };
-            let mut settled = Vec::new();
-            let done = collect(
-                &receiver,
-                &mut latest,
-                &mut settled,
-                deadline,
-                mode,
-                &mut |_, _| {},
-            );
-            assert_eq!(done, mode == WaitMode::Any);
-            stop.stop();
-            assert!(stop.cancel.is_cancelled());
-            assert!(!latest[0].as_ref().unwrap().done());
-            // Preparation is not joined by observation, and still completes
-            // after timeout or --any has stopped the observing workers.
-            release.send(())?;
-            assert_eq!(
-                receipt.recv_timeout(Duration::from_secs(5))?,
-                "launch accepted"
-            );
-        }
-        Ok(())
-    }
-
     #[test]
     fn failed_reread_retains_the_last_snapshot_as_stale() {
         for failure_delivered in [false, true] {

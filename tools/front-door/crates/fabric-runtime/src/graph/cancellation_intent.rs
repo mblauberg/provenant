@@ -173,6 +173,45 @@ pub(super) fn pending(
         .any(|request| request.id == request_id))
 }
 
+/// Read the independent intent sidecar while preparation holds the journal lock.
+/// Match the saved graph incarnation so an obsolete request cannot stop new work.
+pub(super) fn launch_requested(
+    root: &StateRoot,
+    project: ProjectId,
+    graph_id: &str,
+    node_id: &str,
+) -> Result<bool, JournalError> {
+    let Some(checkpoint) = FileJournal::read_checkpoint(root, project, graph_id)? else {
+        return Ok(false);
+    };
+    let Some(node) = checkpoint.nodes.iter().find(|node| node.id == node_id) else {
+        return Ok(false);
+    };
+    if checkpoint.cancelled && !node.detached_from_graph_cancel || node.stop_fence {
+        return Ok(true);
+    }
+    let directory = graph_directory(root, project)?;
+    let requests = read(&directory, graph_id)?;
+    Ok(requests.requests.iter().any(|request| {
+        if request.graph_id != graph_id
+            || request.plan_digest != checkpoint.plan_digest
+            || request.instance_id != checkpoint.instance_id
+        {
+            return false;
+        }
+        let Some(target) = request.node.as_deref() else {
+            return !node.detached_from_graph_cancel;
+        };
+        // Expanded subtree ids use the same separator as cancel_subtree.
+        // Detached descendants are excluded by their persisted graph fence.
+        node_id == target
+            || (!node.detached_from_graph_cancel
+                && node_id
+                    .strip_prefix(target)
+                    .is_some_and(|rest| rest.starts_with("--")))
+    }))
+}
+
 /// Apply matching requests and remove them only after the checkpoint save is
 /// durable. The caller already holds the graph lock; this control lock is never
 /// held while a provider or other external owner is called.

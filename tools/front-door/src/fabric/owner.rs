@@ -2567,7 +2567,16 @@ impl BoundGraphOwner<'_> {
             chair: None,
         };
         let operation_id = graph_operation("graph-attempt-operation", key)?;
-        let cancel = self.cancel;
+        let root = self.factory.context.roots.state.clone();
+        let project = self.factory.context.identity.project;
+        let (graph, node_id) = (key.graph_id.clone(), key.node_id.clone());
+        let launch_cancel = self.cancel.linked(move || {
+            provenant_fabric_runtime::graph::FileJournal::launch_cancellation_requested(
+                &root, project, &graph, &node_id,
+            )
+            .unwrap_or(true)
+        });
+        let cancel = &launch_cancel;
         let blocked = |owner: &BinaryRunOwner<'_>| -> Result<Option<String>, FacadeError> {
             let store = owner.store_with_facts(cancel, &self.repo_facts)?;
             Ok(store
@@ -2641,8 +2650,8 @@ impl BoundGraphOwner<'_> {
                 });
             }
             let operation_id = graph_operation("graph-attempt-operation", key)?;
-            let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
-            let call = owner.call(self.cancel);
+            let store = owner.store_with_facts(cancel, &self.repo_facts)?;
+            let call = owner.call(cancel);
             let operation = store.operation(&operation_id, &call).map_err(run_error)?;
             let accepted = operation.as_ref().is_some_and(|operation| {
                 !matches!(
@@ -2763,7 +2772,7 @@ impl BoundGraphOwner<'_> {
                     Ok((admitted, request)) => {
                         let task = &request.task;
                         if accepted {
-                            let session = owner.session(self.cancel)?;
+                            let session = owner.session(cancel)?;
                             let record =
                                 session.store.record(admitted, &call).map_err(run_error)?;
                             if record.prompt.bytes > provenant_records::run::RECORD_LIMIT {
@@ -2897,7 +2906,7 @@ impl BoundGraphOwner<'_> {
                         self.factory.context.identity.project,
                         &self.repo_facts,
                         self.writer_launch_budget.unwrap_or(self.budget),
-                        self.cancel,
+                        cancel,
                         &self.factory.clock,
                     ).map_err(|error| match error {
                         provenant_run::RunError::Validation("writer needs a branch") => FacadeError::DispatchRefused {
@@ -2927,15 +2936,10 @@ impl BoundGraphOwner<'_> {
                     &self.factory.home,
                     &self.factory.cwd,
                     &self.factory.clock,
-                    self.cancel,
+                    cancel,
                     &self.repo_facts,
                     |context| {
-                        provenant_confinement::worktrees::is_ancestor(
-                            context,
-                            base,
-                            head,
-                            self.cancel,
-                        )
+                        provenant_confinement::worktrees::is_ancestor(context, base, head, cancel)
                     },
                 )
                 .map_err(|error| {
@@ -3017,7 +3021,7 @@ impl BoundGraphOwner<'_> {
                         self.factory.context.identity.project,
                         &self.repo_facts,
                         self.writer_launch_budget.unwrap_or(self.budget),
-                        self.cancel,
+                        cancel,
                         &self.factory.clock,
                     )
                     .map_err(run_error)?
@@ -3534,7 +3538,7 @@ impl BoundGraphOwner<'_> {
             let receipt = owner.submit_with_access(
                 input,
                 self.writer_launch_budget.unwrap_or(self.budget),
-                self.cancel,
+                cancel,
                 grants,
                 retry_limit,
                 Some(attempt),
@@ -3603,8 +3607,8 @@ impl BoundGraphOwner<'_> {
             let remaining = budget.remaining(self.factory.clock.mono_now());
             // The worker lease protocol carries whole seconds. Defer the
             // final subsecond slice rather than round it into a new allowance.
-            if remaining.as_micros() < 1_000_000 || self.cancel.is_cancelled() {
-                return Err(if self.cancel.is_cancelled() {
+            if remaining.as_micros() < 1_000_000 || cancel.is_cancelled() {
+                return Err(if cancel.is_cancelled() {
                     FacadeError::Cancelled
                 } else {
                     FacadeError::RepositoryLockBusy {
@@ -3613,8 +3617,8 @@ impl BoundGraphOwner<'_> {
                     }
                 });
             }
-            let session = owner.session_with_facts(self.cancel, &self.repo_facts)?;
-            let call = owner.call(self.cancel);
+            let session = owner.session_with_facts(cancel, &self.repo_facts)?;
+            let call = owner.call(cancel);
             let mut host = match &self.factory.host_launch {
                 Some(host) => host.clone(),
                 None => super::settlement::recovery_launch(
@@ -3647,7 +3651,7 @@ impl BoundGraphOwner<'_> {
             if let Some(refusal) = super::run_owner::launch_refusal(&started, &[]) {
                 return Err(refusal);
             }
-            attempt = owner.snapshot(target.clone(), budget, self.cancel)?;
+            attempt = owner.snapshot(target.clone(), budget, cancel)?;
             if matches!(
                 attempt.state,
                 provenant_records::run::AttemptState::Queued { .. }
