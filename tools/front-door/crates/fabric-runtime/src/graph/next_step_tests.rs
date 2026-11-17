@@ -234,6 +234,58 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
     }
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn retry_of_a_declared_stop_preserves_a_valid_checkpoint() {
+    for status in ["blocked", "stopped_early"] {
+        let document = document("worktree_write", json!({"stopped_early":"chair"}));
+        let text = format!(
+            "```handoff\n{}\n```",
+            json!({
+                "schema_version": 2, "status": status, "note": "Work remains",
+                "remaining": ["Finish"], "decisions": [], "verify": []
+            })
+        );
+        let mut owner = Owner {
+            observations: [terminal(
+                "a/1",
+                AttemptOutcome::Succeeded,
+                None,
+                Some(&text),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = journal(&document);
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let mut checkpoint = run.checkpoint;
+        assert_eq!(
+            checkpoint.nodes[0].attempts[0].state,
+            AttemptState::Terminal
+        );
+        patch::retry_node(
+            &mut patch::LiveGraph {
+                document: &document,
+                checkpoint: &mut checkpoint,
+            },
+            &document.nodes[0].id,
+            None,
+            &patch::PatchContext {
+                library: &template::TemplateLibrary::bundled(),
+                resolvers: &Default::default(),
+                scan: &|_| Ok(()),
+                journal: None,
+                limits: &plans::generous(),
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            },
+        )
+        .unwrap();
+        assert!(checkpoint.pause.is_none());
+        journal.saved = Some(checkpoint);
+        resume(&document, &mut Owner::default(), &mut journal).unwrap();
+    }
+}
+
 /// Small: a settled review-required lane remains visible as such while its
 /// dependent starts, without an acknowledgement or a synthetic retry.
 #[test]
