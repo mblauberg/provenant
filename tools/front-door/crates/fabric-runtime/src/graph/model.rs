@@ -765,7 +765,7 @@ pub enum GraphLimitKey {
     ExpansionDepth,
 }
 impl GraphLimitKey {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Nodes => "nodes",
             Self::Edges => "edges",
@@ -788,10 +788,8 @@ impl std::fmt::Display for GraphStructuralLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "limits.{}={} reached ({}); set by domains.fabric.graph.limits",
-            self.key.name(),
-            self.max,
-            self.actual
+            "limits.{} reached; set by domains.fabric.graph.limits",
+            self.key.name()
         )
     }
 }

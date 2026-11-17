@@ -2,4 +2,4 @@
 
 ### Pipelines and graphs
 
-- Refused retries leave graph state intact and report credential-shaped input without revealing it. Graph launches also report the secret refusal cause.
+- Refused launches, retries and graph edits preserve the checkpoint and requester PATH. Graph admission checks the full prospective loop expansion before saving. Credential refusals retain safe schema positions through the lane relay without echoing caller keys or extension values. (#3391)

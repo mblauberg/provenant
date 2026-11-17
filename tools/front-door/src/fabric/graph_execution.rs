@@ -958,6 +958,20 @@ impl Factory {
                     return Ok(run);
                 }
             }
+            let requester_path = self.requester_lane_path()?;
+            let extensions = match &input {
+                GraphInput::Resume { extend, .. } => extend.as_slice(),
+                _ => &[],
+            };
+            provenant_fabric_runtime::graph::admit_candidate(
+                document,
+                checkpoint.as_ref(),
+                extensions,
+                &self.context.config.graph.limits,
+                &self.context.config.graph.budget,
+                Some(&requester_path),
+            )
+            .map_err(FacadeError::graph_candidate)?;
             let mut ledger_warning = None;
             let integration_base = if existing {
                 checkpoint
@@ -1029,7 +1043,7 @@ impl Factory {
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
                     peer_origin_context: None,
                     peer_submission_digest: None,
-                    requester_path: Some(self.requester_lane_path()?),
+                    requester_path: Some(requester_path),
                     extra: Default::default(),
                     bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
@@ -1105,8 +1119,8 @@ impl Factory {
                     }
                     _ => FacadeError::InvalidInput { detail: None },
                 },
-                provenant_fabric_runtime::graph::GraphError::Extension(reason)
-                | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
+                provenant_fabric_runtime::graph::GraphError::Candidate(error) => FacadeError::graph_candidate(error),
+                provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
                     FacadeError::DispatchRefused {
                         reason,
                         disk: None,

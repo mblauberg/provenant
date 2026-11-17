@@ -93,20 +93,17 @@ pub(super) fn structural_limit(
         })
 }
 
-#[derive(Debug, Error)]
-#[error("{message}")]
-pub(super) struct BudgetExtensionError {
-    code: &'static str,
-    message: String,
-}
+pub(super) type BudgetExtensionError = refusal::ExtensionCause;
 
 impl BudgetExtensionError {
-    pub(super) fn new(code: &'static str, message: String) -> Self {
-        Self { code, message }
-    }
-
     pub(super) fn code(&self) -> &'static str {
-        self.code
+        use refusal::ExtensionRule;
+        match self.rule {
+            ExtensionRule::Syntax => "budget_extension_syntax",
+            ExtensionRule::Key => "budget_extension_key",
+            ExtensionRule::Value => "budget_extension_value",
+            _ => "budget_extension_unconfigured",
+        }
     }
 }
 
@@ -115,36 +112,37 @@ pub(super) fn apply_extension(
     extension: &str,
     replay: bool,
 ) -> Result<(), BudgetExtensionError> {
-    let (key, value) = extension.split_once('=').ok_or_else(|| {
-        BudgetExtensionError::new(
-            "budget_extension_syntax",
-            format!("{extension}: expected KEY=VALUE"),
-        )
-    })?;
+    let limit = refusal::ExtensionLimit::parse(extension);
+    let (key, value) = extension
+        .split_once('=')
+        .ok_or_else(|| BudgetExtensionError {
+            kind: refusal::ExtensionKind::Budget,
+            limit,
+            rule: refusal::ExtensionRule::Syntax,
+        })?;
     let key = key.strip_prefix("budget.").unwrap_or(key);
-    let (scope, field) = key.split_once('.').ok_or_else(|| {
-        BudgetExtensionError::new(
-            "budget_extension_key",
-            format!("{extension}: unknown budget key"),
-        )
+    let (scope, field) = key.split_once('.').ok_or_else(|| BudgetExtensionError {
+        kind: refusal::ExtensionKind::Budget,
+        limit,
+        rule: refusal::ExtensionRule::Key,
     })?;
     let target = match scope {
         "per_node" => &mut budget.per_node,
         "per_graph" => &mut budget.per_graph,
         _ => {
-            return Err(BudgetExtensionError::new(
-                "budget_extension_key",
-                format!("{extension}: unknown budget key"),
-            ));
+            return Err(BudgetExtensionError {
+                kind: refusal::ExtensionKind::Budget,
+                limit,
+                rule: refusal::ExtensionRule::Key,
+            });
         }
     };
     match field {
         "tokens" | "wall_time_seconds" => {
-            let number: u64 = value.parse().map_err(|_| {
-                BudgetExtensionError::new(
-                    "budget_extension_value",
-                    format!("{extension}: invalid budget value"),
-                )
+            let number: u64 = value.parse().map_err(|_| BudgetExtensionError {
+                kind: refusal::ExtensionKind::Budget,
+                limit,
+                rule: refusal::ExtensionRule::Value,
             })?;
             let slot = if field == "tokens" {
                 &mut target.tokens
@@ -152,47 +150,51 @@ pub(super) fn apply_extension(
                 &mut target.wall_time_seconds
             };
             if number == 0 {
-                return Err(BudgetExtensionError::new(
-                    "budget_extension_value",
-                    format!("{extension}: budget must be positive"),
-                ));
+                return Err(BudgetExtensionError {
+                    kind: refusal::ExtensionKind::Budget,
+                    limit,
+                    rule: refusal::ExtensionRule::Value,
+                });
             }
             if let Some(old) = slot.as_mut() {
                 *old = (*old).max(number);
             } else if !replay {
-                return Err(BudgetExtensionError::new(
-                    "budget_extension_unconfigured",
-                    format!("{key} is not configured"),
-                ));
+                return Err(BudgetExtensionError {
+                    kind: refusal::ExtensionKind::Budget,
+                    limit,
+                    rule: refusal::ExtensionRule::Unconfigured,
+                });
             }
         }
         "cost_usd" => {
-            let number: f64 = value.parse().map_err(|_| {
-                BudgetExtensionError::new(
-                    "budget_extension_value",
-                    format!("{extension}: invalid budget value"),
-                )
+            let number: f64 = value.parse().map_err(|_| BudgetExtensionError {
+                kind: refusal::ExtensionKind::Budget,
+                limit,
+                rule: refusal::ExtensionRule::Value,
             })?;
             if !number.is_finite() || number <= 0.0 {
-                return Err(BudgetExtensionError::new(
-                    "budget_extension_value",
-                    format!("{extension}: budget must be finite and positive"),
-                ));
+                return Err(BudgetExtensionError {
+                    kind: refusal::ExtensionKind::Budget,
+                    limit,
+                    rule: refusal::ExtensionRule::Value,
+                });
             }
             if let Some(old) = target.cost_usd.as_mut() {
                 *old = old.max(number);
             } else if !replay {
-                return Err(BudgetExtensionError::new(
-                    "budget_extension_unconfigured",
-                    format!("{key} is not configured"),
-                ));
+                return Err(BudgetExtensionError {
+                    kind: refusal::ExtensionKind::Budget,
+                    limit,
+                    rule: refusal::ExtensionRule::Unconfigured,
+                });
             }
         }
         _ => {
-            return Err(BudgetExtensionError::new(
-                "budget_extension_key",
-                format!("{extension}: unknown budget key"),
-            ));
+            return Err(BudgetExtensionError {
+                kind: refusal::ExtensionKind::Budget,
+                limit,
+                rule: refusal::ExtensionRule::Key,
+            });
         }
     }
     Ok(())

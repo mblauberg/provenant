@@ -304,19 +304,10 @@ fn loop_admission_counts_every_round_before_any_launch() {
         nodes: 6,
         ..Default::default()
     };
-    let run = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
-    );
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
+    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
 
@@ -1070,6 +1061,7 @@ fn loop_default_host_allows_one_to_two_round_extension() {
 
 #[test]
 fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let document = fixture("exhaust");
     let limits = tight_limits();
     let mut journal = MemoryJournal::default();
@@ -1081,22 +1073,13 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
         &Default::default(),
     )
     .unwrap();
-    let rejected = extension(
-        &document,
-        &mut reviews(&[]),
-        &mut journal,
-        &["loop.revise.rounds=3".into()],
-    );
-    assert_eq!(rejected.status, GraphStatus::Paused);
-    assert_eq!(
-        rejected.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
-    );
-    assert_eq!(
-        rejected.checkpoint.nodes.len(),
-        paused.checkpoint.nodes.len()
-    );
-    assert!(rejected.checkpoint.extensions.is_empty());
+    let before = journal.0.clone();
+    let rejected = resume_with_budget(
+        &document, &mut reviews(&[]), &mut journal, &limits,
+        &Default::default(), &["loop.revise.rounds=3".into()],
+    ).unwrap_err();
+    assert!(matches!(rejected, GraphError::Candidate(CandidateError::Structural(_))));
+    assert_eq!(journal.0, before);
     let accepted = extension(
         &document,
         &mut reviews(&[]),

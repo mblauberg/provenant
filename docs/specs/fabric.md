@@ -171,6 +171,27 @@ input, write scope or explicit plan parameter emits the advisory
   when planning adds value.
 - Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
 
+### Graph admission and refusal causes
+
+Launch, retry, edit and relay add/edit build the complete candidate in memory.
+Requester binding and PATH, extensions, `GraphInput::validate_input` count and
+byte limits, prospective loop expansion, structural host limits, the checkpoint
+envelope and the secret scan must all pass before publishing anything. The
+journal lock covers reading the original state through publication. A refused
+candidate leaves the checkpoint and execution binding unchanged. The pure
+`admit_candidate` gate owns admission; entry points do not maintain separate
+resume validators.
+
+Admission refusals disclose host-owned rule identifiers and schema positions,
+never caller text. `SchemaPath` and `SecretRule` are closed types. Arbitrary
+map keys become `[<key>]`; array positions may use indices. Both original
+strings and object keys are scanned. Extension causes carry a closed extension
+kind and rule; limit causes name the host limit, never the supplied value.
+CLI stderr, diagnostic JSON and relay wire details project the same cause.
+
+- Why: a refusal must neither publish rejected input nor copy it into diagnostics.
+- Owner: `crates/fabric-runtime/src/graph/candidate.rs`, `crates/fabric-runtime/src/graph/refusal.rs`, `src/fabric/interface.rs`, `src/fabric/graph_execution.rs`, `crates/cli/src/fabric/graph_relay.rs`
+
 ### Composite settlement
 
 A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. An explicit `GraphPatch` skip of a composite remains authoritative until a later replacement or retry supersedes it; reconciliation still recomputes the other active composite boundaries in the same checkpoint. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.

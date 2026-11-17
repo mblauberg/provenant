@@ -726,7 +726,7 @@ fn an_oversized_graph_is_refused_before_its_first_save_naming_the_size() {
 }
 
 #[test]
-fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
+fn a_loop_extension_past_the_envelope_refuses_without_saving() {
     let body = (0..18)
         .map(|index| json!({"id":format!("review{index}"), "access":"read_only", "prompt":"review", "routes":routes(16)}))
         .chain([json!({"id":"approved", "kind":"gate", "access":"read_only",
@@ -769,42 +769,13 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
     )
     .unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
-    let refused = resume_with_budget(
-        &document,
-        &mut owner,
-        &mut cancelled_journal,
-        &limits,
-        &Default::default(),
-        &["loop.revise.rounds=25".into()],
-    )
-    .unwrap();
-    assert_eq!(refused.status, GraphStatus::Cancelled);
-    assert!(
-        refused
-            .checkpoint
-            .nodes
-            .iter()
-            .all(|node| !matches!(node.state, NodeState::Pending | NodeState::Running))
-    );
-    assert_eq!(
-        cancelled_journal.0.as_ref().unwrap().nodes,
-        refused.checkpoint.nodes
-    );
-    let run = resume_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-        &["loop.revise.rounds=25".into()],
-    )
-    .unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
-    );
-    assert!(run.checkpoint.extensions.is_empty());
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    for journal in [&mut cancelled_journal, &mut journal] {
+        let before = journal.0.clone();
+        let error = resume_with_budget(&document, &mut owner, journal, &limits, &Default::default(), &["loop.revise.rounds=25".into()]).unwrap_err();
+        assert!(matches!(error, GraphError::Candidate(CandidateError::Envelope(_))));
+        assert_eq!(journal.0, before);
+    }
     assert_eq!(owner.calls.len(), 18);
 }
 

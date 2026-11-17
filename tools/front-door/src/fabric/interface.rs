@@ -1,6 +1,7 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::*;
 use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
+use provenant_fabric_runtime::graph::refusal::{SchemaField, SchemaPath, SecretRule};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
@@ -114,7 +115,11 @@ fn decode_input<T: serde::de::DeserializeOwned>(
 
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
-    if error.parameter.is_some() || error.admission.is_some() || error.code != "invalid" {
+    if error.parameter.is_some()
+        || error.admission.is_some()
+        || error.candidate.is_some()
+        || error.code != "invalid"
+    {
         return graph_patch_error(error);
     }
     let cause = if error.message.starts_with("unknown node ") {
@@ -146,6 +151,9 @@ fn compile_error(error: provenant_fabric_runtime::graph::template::CompileError)
 /// Failures before admission stay a redacted graph-input reason.
 fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    if let Some(candidate) = error.candidate.clone() {
+        return FacadeError::graph_candidate(*candidate);
+    }
     if let Some(admission) = error.admission.clone() {
         return FacadeError::graph_admission(admission);
     }
@@ -154,8 +162,11 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     }
     let cause = match error.code {
         "secret" => {
-            let field = error.field.clone().unwrap_or_else(|| "brief".to_string());
-            let rule = error.rule.clone().unwrap_or_else(|| "secret".to_string());
+            let field = error
+                .field
+                .clone()
+                .unwrap_or_else(|| SchemaPath::root(SchemaField::Patch));
+            let rule = error.rule.unwrap_or_default();
             Some(GraphRelayCause::Secret { field, rule })
         }
         "cycle" => Some(GraphRelayCause::Cycle),
@@ -1621,8 +1632,8 @@ impl Factory {
             if patch::scan_for_secrets(brief).is_err() {
                 return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
                     provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                        field: "brief".to_string(),
-                        rule: "secret".to_string(),
+                        field: SchemaPath::root(SchemaField::Brief),
+                        rule: SecretRule::Secret,
                     },
                 )));
             }
@@ -1630,8 +1641,8 @@ impl Factory {
         if patch::scan_for_secrets(template_name).is_err() {
             return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
                 provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                    field: "template".to_string(),
-                    rule: "secret".to_string(),
+                    field: SchemaPath::root(SchemaField::Template),
+                    rule: SecretRule::Secret,
                 },
             )));
         }
@@ -2005,60 +2016,15 @@ impl Factory {
             self.context.port_table.worktree_layout.clone(),
         )
         .map_err(graph_patch_error)?;
-        // Patch admission scans nodes and parameters. Graph-wide metadata is
-        // retained separately, so scan the complete bound record before any
-        // preview or publication can expose or persist it.
-        let bound_value = serde_json::to_value(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        let bound_document =
-            serde_json::to_string(&bound_value).map_err(|_| FacadeError::StateCorrupt)?;
-        if patch::scan_for_secrets(&bound_document).is_err() {
-            fn find_secret_field(path: &str, val: &Value) -> Option<String> {
-                match val {
-                    Value::String(text) => {
-                        if patch::scan_for_secrets(text).is_err() {
-                            Some(path.to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    Value::Array(items) => {
-                        for (i, item) in items.iter().enumerate() {
-                            let p = if path.is_empty() {
-                                format!("[{i}]")
-                            } else {
-                                format!("{path}[{i}]")
-                            };
-                            if let Some(f) = find_secret_field(&p, item) {
-                                return Some(f);
-                            }
-                        }
-                        None
-                    }
-                    Value::Object(map) => {
-                        for (k, v) in map {
-                            let p = if path.is_empty() {
-                                k.clone()
-                            } else {
-                                format!("{path}.{k}")
-                            };
-                            if let Some(f) = find_secret_field(&p, v) {
-                                return Some(f);
-                            }
-                        }
-                        None
-                    }
-                    _ => None,
-                }
-            }
-            let field =
-                find_secret_field("", &bound_value).unwrap_or_else(|| "document".to_string());
-            return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                    field,
-                    rule: "secret".to_string(),
-                },
-            )));
-        }
+        provenant_fabric_runtime::graph::admit_candidate(
+            &document,
+            None,
+            &[],
+            &self.context.config.graph.limits,
+            &self.context.config.graph.budget,
+            Some(&self.requester_lane_path()?),
+        )
+        .map_err(FacadeError::graph_candidate)?;
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {
@@ -2438,6 +2404,15 @@ impl Factory {
                 bind_read_roots(node, &value)?;
             }
         }
+        provenant_fabric_runtime::graph::admit_candidate(
+            &execution.document,
+            Some(&checkpoint),
+            &[],
+            &self.context.config.graph.limits,
+            &self.context.config.graph.budget,
+            execution.requester_path.as_deref(),
+        )
+        .map_err(FacadeError::graph_candidate)?;
         // save writes patch events before publishing the checkpoint, under this lock.
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         Ok(
@@ -2574,20 +2549,15 @@ impl Factory {
             }
             target.node = Some(node);
         }
-        if !extend.is_empty() {
-            provenant_fabric_runtime::graph::validate_resume_extensions(
-                &execution.document,
-                &checkpoint,
-                &extend,
-                &self.context.config.graph.limits,
-                &self.context.config.graph.budget,
-            )
-            .map_err(|reason| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason,
-            })?;
-        }
+        provenant_fabric_runtime::graph::admit_candidate(
+            &execution.document,
+            Some(&checkpoint),
+            &extend,
+            &self.context.config.graph.limits,
+            &self.context.config.graph.budget,
+            Some(&requester_path),
+        )
+        .map_err(FacadeError::graph_candidate)?;
         // Publish the requester's PATH with any retry patch under the same
         // journal lock, including graph-wide retries with no node patch. A
         // concurrent tick cannot launch pending work with stale PATH.
@@ -3663,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_retry_leaves_the_persisted_graph_readable_and_unchanged() -> Result {
+    fn admission_refusals_disclose_no_caller_text_and_preserve_publication() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
         let project = factory.context.identity.project;
@@ -3705,15 +3675,76 @@ mod tests {
         let path = directory.join("graph-g-test.json");
         let before = std::fs::read(&path)?;
 
-        let error = factory
-            .graph_document(
-                json!({"op":"retry","id":"g-test/reader","brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
-                budget,
-                &cancel,
-            )
-            .expect_err("secret replacement brief must be refused");
-        assert!(matches!(error, FacadeError::InvalidInput { .. }));
-        assert_eq!(std::fs::read(&path)?, before);
+        let marker = "REFUSAL_MARKER_3391";
+        let secret = format!("sk-abcdefghijklmnopqrstuvwx {marker}");
+        let mut keyed = json!({"id":"reader", "prompt":"safe", "route":{"alias":"senior"}});
+        keyed[marker] = json!(secret);
+        // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+        for (path_name, request) in [
+            (
+                "launch",
+                json!({"op":"run", "document":{
+                    "schema_version":2, "graph_id":"refused-launch",
+                    "context":{marker:secret},
+                    "nodes":[{"id":"inspect", "prompt":"safe", "access":"read_only", "route":{"alias":"senior"}}]
+                }}),
+            ),
+            (
+                "retry",
+                json!({"op":"retry", "id":"g-test/reader", "brief":secret}),
+            ),
+            (
+                "edit",
+                json!({"op":"edit", "id":"g-test", "patch":{"schema_version":1, "replace":[keyed]}}),
+            ),
+            (
+                "extension",
+                json!({"op":"retry", "id":"g-test", "extend":[format!("per_graph.tokens={secret}")]}),
+            ),
+            (
+                "limit",
+                json!({"op":"retry", "id":"g-test", "extend":[format!("limits.nodes={secret}")]}),
+            ),
+            (
+                "input_count",
+                json!({"op":"retry", "id":"g-test", "extend":vec!["loop.none.rounds=2";65]}),
+            ),
+            (
+                "input_bytes",
+                json!({"op":"retry", "id":"g-test", "extend":[format!("loop.{}.rounds=2", "x".repeat(257))]}),
+            ),
+        ] {
+            let error = factory
+                .graph_document(request, budget, &cancel)
+                .expect_err(path_name);
+            for projection in [
+                error.to_string(),
+                serde_json::to_string(&error)?,
+                serde_json::to_string(&error.diagnostic())?,
+            ] {
+                assert!(!projection.contains(marker), "{path_name}: {projection}");
+                assert!(
+                    !projection.contains("sk-abcdefghijklmnopqrstuvwx"),
+                    "{path_name}: {projection}"
+                );
+            }
+            if path_name == "extension" {
+                assert!(error.to_string().contains("per_graph.tokens"));
+            }
+            if path_name == "limit" {
+                assert!(error.to_string().contains("limits.nodes"));
+            }
+            // Check the complete envelope, including the requester's PATH, byte for byte.
+            assert_eq!(std::fs::read(&path)?, before, "{path_name}");
+            assert!(
+                FileJournal::read_checkpoint(
+                    &factory.context.roots.state,
+                    project,
+                    "refused-launch"
+                )?
+                .is_none()
+            );
+        }
         assert_eq!(
             FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?,
             Some(checkpoint)

@@ -1,0 +1,140 @@
+//! Pure graph admission shared by every publisher. No journal writes here.
+use super::refusal::{ExtensionCause, ExtensionRule, SecretCause};
+use super::*;
+use crate::coordination::{facade::GraphInput, input::ValidateInput};
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CandidateError {
+    #[error("invalid input field `extend`: extension count, size or syntax limit")]
+    Input,
+    #[error("graph candidate schema or topology is invalid")]
+    Plan,
+    #[error("graph candidate checkpoint is invalid")]
+    Checkpoint,
+    #[error("{0}")]
+    Secret(SecretCause),
+    #[error("{0}")]
+    Extension(ExtensionCause),
+    #[error("{0}")]
+    Structural(GraphStructuralLimit),
+    #[error("{0}")]
+    Envelope(GraphEnvelopeLimit),
+}
+
+pub struct AdmittedCandidate {
+    pub(super) expanded: GraphDocument,
+    pub(super) plan: PlannedGraph,
+    pub(super) effective_budget: crate::config::GraphBudget,
+}
+
+/// Build and check the complete prospective view before publishing bindings or state.
+/// The caller holds the journal lock from reading the checkpoint through publication.
+pub fn admit_candidate(
+    document: &GraphDocument,
+    checkpoint: Option<&GraphCheckpoint>,
+    extensions: &[String],
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    requester_path: Option<&[u8]>,
+) -> Result<AdmittedCandidate, CandidateError> {
+    GraphInput::Resume {
+        extra: Default::default(),
+        document: document.graph_id.clone().into(),
+        extend: extensions.to_vec(),
+    }
+    .validate_input(provenant_core::WaitTransport::Cli)
+    .map_err(|_| CandidateError::Input)?;
+    if let Some(path) = requester_path {
+        patch::scan_for_secrets(&String::from_utf8_lossy(path)).map_err(|_| {
+            CandidateError::Secret(SecretCause {
+                field: refusal::SchemaPath::root(refusal::SchemaField::RequesterPath),
+                rule: refusal::SecretRule::Secret,
+            })
+        })?;
+    }
+    let scan = |value: &serde_json::Value| {
+        refusal::scan_value(value, &patch::scan_for_secrets).map_err(CandidateError::Secret)
+    };
+    scan(&serde_json::to_value(document).map_err(|_| CandidateError::Plan)?)?;
+    let generous = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..limits.clone()
+    };
+    let saved = checkpoint.map_or(&[][..], |c| c.extensions.as_slice());
+    let expansions = checkpoint.map_or(&[][..], |c| c.expansions.as_slice());
+    scan(&serde_json::to_value(expansions).map_err(|_| CandidateError::Plan)?)?;
+    let mut all = saved.to_vec();
+    let mut effective_budget = budget.clone();
+    for (extension, replay) in saved.iter().map(|e| (e, true)).chain(
+        extensions
+            .iter()
+            .map(|e| (e, e.starts_with("limits.") && saved.contains(e))),
+    ) {
+        if extension.starts_with("loop.") {
+            loops::validate_extension(document, extension, &generous).map_err(|_| {
+                CandidateError::Extension(ExtensionCause::loop_rule(
+                    extension,
+                    ExtensionRule::Value,
+                ))
+            })?;
+        } else if extension.starts_with("limits.") {
+            if !replay {
+                return Err(CandidateError::Extension(ExtensionCause::host_limits(
+                    extension,
+                )));
+            }
+        } else {
+            apply_extension(&mut effective_budget, extension, replay)
+                .map_err(CandidateError::Extension)?;
+        }
+        if !all.contains(extension) {
+            all.push(extension.clone());
+        }
+    }
+    if let Some(checkpoint) = checkpoint {
+        let mut restored = checkpoint.clone();
+        restore_cancelled_nodes(&mut restored).map_err(|_| CandidateError::Checkpoint)?;
+        let mut prospective = restored.clone();
+        for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
+            for view in [&restored, &prospective] {
+                loops::validate_resume_extension(document, view, extension, &generous).map_err(
+                    |_| {
+                        CandidateError::Extension(ExtensionCause::loop_rule(
+                            extension,
+                            ExtensionRule::Exhaustion,
+                        ))
+                    },
+                )?;
+            }
+            if !prospective.extensions.contains(extension) {
+                prospective.extensions.push(extension.clone());
+            }
+        }
+    }
+    let expanded =
+        plans::expand(document, &all, expansions, &generous).map_err(|_| CandidateError::Plan)?;
+    validate_schema(&expanded).map_err(|_| CandidateError::Plan)?;
+    let (plan, _) = validate_flat_plan(&expanded, &generous).map_err(|_| CandidateError::Plan)?;
+    validate_output_kinds(&expanded).map_err(|_| CandidateError::Plan)?;
+    scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
+    if let Some(limit) = structural_limit(&expanded, &plan, limits) {
+        return Err(CandidateError::Structural(limit));
+    }
+    let bound = graph_envelope_bound(document, expansions, &all, &plan).saturating_add(
+        requester_path.map_or(0, |path| path.len().saturating_mul(4).saturating_add(2)),
+    );
+    if bound > MAX_CHECKPOINT_BYTES as usize {
+        return Err(CandidateError::Envelope(GraphEnvelopeLimit { bound }));
+    }
+    Ok(AdmittedCandidate {
+        expanded,
+        plan,
+        effective_budget,
+    })
+}

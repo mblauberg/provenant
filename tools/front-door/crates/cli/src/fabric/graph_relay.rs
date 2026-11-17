@@ -40,11 +40,13 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         "invalid_config" => Some(Cause::InvalidConfig),
         "invalid_review" => Some(Cause::InvalidReview),
         "secret" => Some(Cause::Secret {
-            field: "brief".to_string(),
-            rule: "secret".to_string(),
+            field: provenant_fabric_runtime::graph::refusal::SchemaPath::root(
+                provenant_fabric_runtime::graph::refusal::SchemaField::Patch,
+            ),
+            rule: provenant_fabric_runtime::graph::refusal::SecretRule::Secret,
         }),
         "cycle" => Some(Cause::Cycle),
-        "conflict" => Some(Cause::Conflict),
+        "conflict" | "stale_revision" | "idempotency_conflict" => Some(Cause::Conflict),
         "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),
         "invalid"
             if message == "writer composite children require explicit per-node work bindings" =>
@@ -68,6 +70,21 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
 }
 
 fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> ServiceError {
+    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
+    if let Some(candidate) = error.candidate.clone() {
+        return ServiceError::Facade(FacadeError::graph_candidate(*candidate));
+    }
+    if let (Some(field), Some(rule)) = (error.field.clone(), error.rule) {
+        return ServiceError::Facade(FacadeError::GraphRelayRefused {
+            refusal_code: error.code.into(),
+            detail: Some(InvalidInputDetail::GraphRelayCause(
+                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                    field,
+                    rule,
+                },
+            )),
+        });
+    }
     match error.admission {
         Some(admission) => ServiceError::Facade(FacadeError::graph_admission(admission)),
         None => refused(error.code, error.message),
@@ -2670,6 +2687,113 @@ mod provisioning_tests {
             )?
             .ok_or("missing checkpoint")?;
             assert_eq!(saved, checkpoint);
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn relay_secret_refusals_preserve_schema_cause_and_checkpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"edit-scope",
+            "nodes":[
+                {"id":"writer","access":"read_only","prompt":"Write","route":{"alias":"senior"}},
+                {"id":"review","access":"read_only","prompt":"Review","route":{"alias":"senior"}}
+            ]
+        }))?;
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"edit-scope","plan_digest":"fixture",
+            "nodes":[
+                {"id":"writer","state":"running","worktree":null,"attempts":[{
+                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0, "attempt": 1},
+                    "route":{"alias":"senior"},"state":"running",
+                    "attempt_ref":format!("{}/caller",context.identity.host),"outcome":null,"launch_actor":"fixture"
+                }]},
+                {"id":"review","state":"pending","worktree":null,"attempts":[]}
+            ]
+        }))?;
+        {
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "edit-scope",
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+                requester_path: None,
+                extra: Default::default(),
+                bases: None,
+                directory: project.clone(),
+                document,
+            })?;
+            journal.save(&checkpoint)?;
+        }
+        let before = FileJournal::read_checkpoint(
+            &context.roots.state,
+            context.identity.project,
+            "edit-scope",
+        )?;
+        let marker = "RELAY_MARKER_3391";
+        let secret = format!("sk-abcdefghijklmnopqrstuvwx {marker}");
+        let mut keyed = json!({"id":"writer--child", "prompt":"safe", "route":{"alias":"senior"}});
+        keyed[marker] = json!(secret);
+        for (request, field) in [
+            (
+                json!({"op":"add", "id":"child", "use":"task", "prompt":secret}),
+                "nodes[0].prompt",
+            ),
+            (
+                json!({"op":"edit", "id":"edit-scope", "patch":{"schema_version":1, "nodes":[keyed.clone()]}}),
+                "nodes[0][<key>]",
+            ),
+            (
+                json!({"op":"edit", "id":"edit-scope", "patch":{"schema_version":1, "replace":[keyed]}}),
+                "replace[0][<key>]",
+            ),
+        ] {
+            let error = serve(&context, "caller", request, budget, &cancel, &clock)
+                .expect_err("secret must be refused");
+            assert_eq!(error.code(), "secret");
+            assert!(
+                error.structured_error().to_string().contains(field),
+                "{}",
+                error.structured_error()
+            );
+            for projection in [error.to_string(), error.structured_error().to_string()] {
+                assert!(!projection.contains(marker), "{projection}");
+                assert!(
+                    !projection.contains("sk-abcdefghijklmnopqrstuvwx"),
+                    "{projection}"
+                );
+            }
+            assert_eq!(
+                FileJournal::read_checkpoint(
+                    &context.roots.state,
+                    context.identity.project,
+                    "edit-scope"
+                )?,
+                before
+            );
         }
         Ok(())
     }

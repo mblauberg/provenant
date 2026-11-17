@@ -1021,15 +1021,11 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
     assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
     let mut owner = FakeOwner::default();
-    let run = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut MemoryJournal::default(),
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(run.checkpoint.pause_reason(), Some(reason.as_str()));
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let mut journal = MemoryJournal::default();
+    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
+    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
 

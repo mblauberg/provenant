@@ -711,7 +711,7 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
         "{reason}"
     );
     assert!(
-        reason.contains("fallback expansion paused: limits.nodes=3"),
+        reason.contains("fallback expansion paused: limits.nodes"),
         "{reason}"
     );
     assert!(reason.find("fragment block missing") < reason.find("fallback expansion paused"));

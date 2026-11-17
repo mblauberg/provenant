@@ -979,10 +979,7 @@ fn pause_action(
         if !extension.starts_with("budget.") {
             return Err((
                 "invalid_pause_answer",
-                format!(
-                    "{}: a pause answer extends budgets only; use graph resume for other extensions",
-                    bounded(extension, 128)
-                ),
+                "a pause answer extends budgets only; use graph resume for other extensions".into(),
             ));
         }
         apply_extension(&mut trial, extension, false)

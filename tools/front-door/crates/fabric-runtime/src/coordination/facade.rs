@@ -224,10 +224,8 @@ pub enum GraphRelayCause {
     InvalidConfig,
     InvalidReview,
     Secret {
-        #[serde(default)]
-        field: String,
-        #[serde(default)]
-        rule: String,
+        field: crate::graph::refusal::SchemaPath,
+        rule: crate::graph::refusal::SecretRule,
     },
     Cycle,
     Conflict,
@@ -293,17 +291,7 @@ impl GraphRelayCause {
                 "the review panel could not be resolved; check the review routing configuration".into()
             }
             Self::Secret { field, rule } => {
-                let clean_field = if field.is_empty() {
-                    "input"
-                } else {
-                    field.as_str()
-                };
-                let clean_rule = if rule.is_empty() {
-                    "secret"
-                } else {
-                    rule.as_str()
-                };
-                format!("the {clean_field} contains a credential-shaped value (rule {clean_rule}); remove credential material before retrying")
+                format!("the {field} contains a credential-shaped value (rule {rule}); remove credential material before retrying")
             }
             Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency".into(),
             Self::Conflict => {
@@ -370,14 +358,6 @@ impl InvalidInputDetail {
             },
             Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
             Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.redacted())),
-            Self::GraphRelayCause(GraphRelayCause::Secret { field, rule }) => {
-                let clean_field = safe_input_field(field).unwrap_or_else(|| "input".to_string());
-                let clean_rule = provenant_records::diagnostic::safe_text(rule);
-                Self::GraphRelayCause(GraphRelayCause::Secret {
-                    field: clean_field,
-                    rule: clean_rule,
-                })
-            }
             other => other.clone(),
         }
     }
@@ -892,6 +872,29 @@ impl FacadeError {
         )
     }
 
+    pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
+        use crate::graph::CandidateError;
+        match error {
+            CandidateError::Secret(cause) => Self::invalid(InvalidInputDetail::GraphRelayCause(
+                GraphRelayCause::Secret {
+                    field: cause.field,
+                    rule: cause.rule,
+                },
+            )),
+            CandidateError::Structural(limit) => {
+                Self::graph_admission(crate::graph::AdmissionError::StructuralLimit(limit))
+            }
+            CandidateError::Envelope(limit) => {
+                Self::graph_admission(crate::graph::AdmissionError::Envelope(limit))
+            }
+            other => Self::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: other.to_string(),
+            },
+        }
+    }
+
     /// Retain the typed admission stage while keeping its original refusal text.
     pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
         use crate::graph::AdmissionError;
@@ -908,7 +911,22 @@ impl FacadeError {
             }
         };
         Self::DispatchRefused {
-            reason: error.to_string(),
+            reason: match fact {
+                DispatchRefusalFact::GraphStructuralLimit(limit) => limit.to_string(),
+                DispatchRefusalFact::GraphEnvelope => {
+                    "graph checkpoint would exceed its size limit".into()
+                }
+                DispatchRefusalFact::GraphSchema => {
+                    "graph document schema_version is invalid".into()
+                }
+                DispatchRefusalFact::GraphOutputKind(_) => {
+                    "graph outputs select an unavailable output kind".into()
+                }
+                DispatchRefusalFact::GraphComposite => {
+                    "graph composite or loop expansion is invalid".into()
+                }
+                _ => "graph plan schema or topology is invalid".into(),
+            },
             disk: None,
             fact: Some(fact),
         }
@@ -975,14 +993,9 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
-            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
-                let reason = safe_graph_plan_reason(&provenant_confinement::redact::bounded_line(reason, 4096));
-                let next = if reason.contains("writer worktree") {
-                    "provide --worktree PATH, or --branch B --base REF"
-                } else {
-                    "fix the named graph node and validator reason, then retry"
-                };
-                projected = projected.detail(reason).next(next);
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), .. } => {
+                projected = projected.detail("graph plan schema or topology is invalid")
+                    .next("inspect the graph schema and dependencies, then retry");
             }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
                 projected = fact.project(projected);
@@ -1105,24 +1118,6 @@ impl FacadeError {
             Self::Timeout => "timeout",
             Self::GitMutationFailed { .. } | Self::Io { .. } => "io",
         }
-    }
-}
-
-/// Graph validator reasons are static contract text. Keep their useful words
-/// while refusing control characters and bounding malformed remote values.
-fn safe_graph_plan_reason(reason: &str) -> String {
-    let safe: String = reason
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, ' ' | '_' | '-' | '.' | ':' | '[' | ']' | '`')
-        })
-        .take(1024)
-        .collect();
-    if safe.is_empty() {
-        "graph plan validator refused the named node".into()
-    } else {
-        safe
     }
 }
 
@@ -1582,8 +1577,10 @@ mod diagnostic_tests {
             super::GraphRelayCause::ChildDepth,
             super::GraphRelayCause::TargetOutsideGraph,
             super::GraphRelayCause::Secret {
-                field: "brief".into(),
-                rule: "secret".into(),
+                field: crate::graph::refusal::SchemaPath::root(
+                    crate::graph::refusal::SchemaField::Brief,
+                ),
+                rule: crate::graph::refusal::SecretRule::Secret,
             },
         ] {
             let error = FacadeError::GraphRelayRefused {
@@ -2076,12 +2073,9 @@ mod diagnostic_tests {
         let wire = serde_json::to_string(&error).unwrap();
         assert!(!wire.contains(secret));
         let received: FacadeError = serde_json::from_str(&wire).unwrap();
-        assert!(
-            received
-                .diagnostic()
-                .detail
-                .unwrap()
-                .contains("writer worktree")
+        assert_eq!(
+            received.diagnostic().detail.as_deref(),
+            Some("graph plan schema or topology is invalid")
         );
     }
 
