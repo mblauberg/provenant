@@ -44,13 +44,6 @@ owner = "chair"
 expires = 2026-12-14
 
 [[test]]
-package = "provenant-cli"
-name = "run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory"
-issue = "#3300"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
 package = "provenant"
 name = "release_checks_legal_private_symlink_and_bounded_evidence"
 issue = "#3304"
@@ -208,20 +201,6 @@ expires = 2026-12-14
 package = "provenant"
 name = "pr_land_refuses_each_unsafe_step_and_reports_the_rest"
 issue = "#3297"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "read_only_lane_builds_and_tests_swift_in_scratch"
-issue = "#3300"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "read_only_lane_builds_and_tests_cargo_in_scratch"
-issue = "#3300"
 owner = "chair"
 expires = 2026-12-14
 
