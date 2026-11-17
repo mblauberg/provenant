@@ -13,6 +13,17 @@ pub fn is_review_verdict(verdict: &str) -> bool {
     )
 }
 
+/// Whether one line is, alone, a review verdict in any form the result's
+/// verdict scan accepts, such as `**VERDICT: FAIL**`. The handoff parser uses
+/// this so the line it tolerates after a handoff is the line the result
+/// counts as the verdict.
+pub(crate) fn is_standalone_verdict(line: &str) -> bool {
+    let mut capture = VerdictCapture::default();
+    capture.push(line.as_bytes());
+    let (verdict, invalid, declarations, _) = capture.finish();
+    declarations == 1 && !invalid && verdict.as_deref().is_some_and(is_review_verdict)
+}
+
 /// A streaming accumulator. Display windows and verdict proof are bounded;
 /// structured findings are transient parsing input from the sealed artifact.
 pub struct ResultCapture {

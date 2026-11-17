@@ -511,8 +511,7 @@ impl HandoffCapture {
         let marker = text.trim_end_matches('\r');
         if self.declaration.is_some() {
             if !marker.trim().is_empty() {
-                if self.trailing_verdict || !crate::result_capture::is_review_verdict(marker.trim())
-                {
+                if self.trailing_verdict || !crate::result_capture::is_standalone_verdict(marker) {
                     self.error = Some(HandoffError::new("$", "handoff must end the answer"));
                 } else {
                     self.trailing_verdict = true;
@@ -777,11 +776,34 @@ mod tests {
         assert_eq!(parsed.handoff, Ok(None));
         assert!(!parsed.trailing_verdict_tolerated);
 
+        // The tolerated line is any form the result's verdict scan accepts,
+        // and the result then reads that one line as its verdict.
+        for line in [
+            "VERDICT: FAIL",
+            "**VERDICT: FAIL**",
+            "- VERDICT: FAIL",
+            "VERDICT:FAIL",
+        ] {
+            let result = format!("Findings.\n\n{STOP}\n{line}\n");
+            let parsed = Handoff::from_result_report(&result);
+            assert_eq!(parsed.handoff, Ok(stopped.clone()), "{line}");
+            assert!(parsed.trailing_verdict_tolerated, "{line}");
+            let mut capture = crate::result_capture::ResultCapture::new(None);
+            capture.push(result.as_bytes());
+            let captured = capture.finish();
+            assert_eq!(captured.verdict.as_deref(), Some("VERDICT: FAIL"), "{line}");
+            assert_eq!(captured.declarations, 1, "{line}");
+            assert!(!captured.verdict_invalid, "{line}");
+        }
+
         for suffix in [
             "VERDICT: MAYBE",
             "Review complete.",
             "Review complete.\nVERDICT: PASS",
+            "VERDICT: PASS\nReview complete.",
             "VERDICT: PASS\nVERDICT: PASS",
+            "VERDICT: PASS\nVERDICT: FAIL",
+            "> VERDICT: PASS",
             "VERDICT: PASS\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Again\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```",
         ] {
             let result = format!("{STOP}\n{suffix}\n");
