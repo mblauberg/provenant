@@ -161,7 +161,7 @@ impl ProviderOutcome {
     }
 }
 pub(crate) type Decoder = fn(&[u8]) -> Result<Vec<ProviderEvent>, ProviderError>;
-const MAX_LINE_BYTES: usize = 1_048_576;
+const MAX_LINE_BYTES: usize = provenant_os::exec::PROVIDER_LINE_LIMIT;
 /// Bounded incremental framing and evidence reduction. Only decoded protocol
 /// positions can affect identity or completion; prose is never searched.
 pub struct StreamState {

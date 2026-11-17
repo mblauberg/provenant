@@ -3,7 +3,7 @@ use super::{
     ASSIGNMENT_KEYS, ASSIGNMENT_RUN, FrameEmitter, MAX_SECRET_LENGTH, REDACTED, Redactor,
     RedactorError,
 };
-use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
+use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError, PROVIDER_LINE_LIMIT};
 
 const STRING_PIECE: usize = 4096;
 const MAX_DEPTH: usize = 128;
@@ -100,6 +100,9 @@ pub struct JsonlRedactor {
     scalar: Option<Scalar>,
     started: bool,
     plain: bool,
+    discard: bool,
+    source_line_bytes: usize,
+    provider_limit: bool,
     mask_value: bool,
     scalar_secret: bool,
     has_redaction: bool,
@@ -108,6 +111,12 @@ pub struct JsonlRedactor {
 impl JsonlRedactor {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
         let secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
+        if secrets
+            .iter()
+            .any(|secret| std::str::from_utf8(secret).is_err())
+        {
+            return Err(RedactorError::InvalidUtf8Secret);
+        }
         let inner = Redactor::new(secrets.clone())?;
         // Long numeric scalars cannot be retracted after their prefix streams.
         // Conservatively mask them if a literal could occur in a JSON scalar.
@@ -125,10 +134,20 @@ impl JsonlRedactor {
             scalar: None,
             started: false,
             plain: false,
+            discard: false,
+            source_line_bytes: 0,
+            provider_limit: false,
             mask_value: false,
             scalar_secret,
             has_redaction: false,
         })
+    }
+
+    /// Apply the provider protocol's source-line limit before redaction can shrink it.
+    pub fn provider(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
+        let mut redactor = Self::new(secrets)?;
+        redactor.provider_limit = true;
+        Ok(redactor)
     }
 
     pub fn has_redaction(&self) -> bool {
@@ -184,13 +203,27 @@ impl JsonlRedactor {
         sensitive: bool,
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
-        // A mask must never accidentally repair bad syntax into evidence.
-        out.push_bytes(b"\0");
-        self.plain = true;
-        if sensitive {
-            self.inner.mask_line_remainder();
+        // The remainder may contain escaped keys and literals. Mask it all,
+        // including across chunks, rather than guessing how invalid JSON decodes.
+        let _ = (remainder, sensitive);
+        out.push_bytes(b"\0[REDACTED]");
+        self.discard = true;
+        self.has_redaction = true;
+        Ok(())
+    }
+
+    fn plain_bytes(&mut self, bytes: &[u8], out: &mut FrameEmitter<'_>) -> Result<(), FilterError> {
+        let end = bytes
+            .iter()
+            .position(|b| *b == b'\\')
+            .unwrap_or(bytes.len());
+        self.inner
+            .filter(&bytes[..end], &mut |b| out.push_bytes(b))?;
+        if end < bytes.len() {
+            // A JSON escape can hide a credential or literal in plain output.
+            self.malformed(&[], true, out)?;
         }
-        self.inner.filter(remainder, &mut |b| out.push_bytes(b))
+        Ok(())
     }
 
     fn string_byte(
@@ -293,7 +326,7 @@ impl JsonlRedactor {
                 && !scalar.streamed
             {
                 self.plain = true;
-                return self.inner.filter(&scalar.bytes, &mut |b| out.push_bytes(b));
+                return self.plain_bytes(&scalar.bytes, out);
             }
             return self.malformed(&scalar.bytes, scalar.masked, out);
         }
@@ -315,7 +348,7 @@ impl JsonlRedactor {
 
     fn byte(&mut self, b: u8, out: &mut FrameEmitter<'_>) -> Result<(), FilterError> {
         if self.plain {
-            return self.inner.filter(&[b], &mut |bytes| out.push_bytes(bytes));
+            return self.plain_bytes(&[b], out);
         }
         if let Some(token) = self.string.take() {
             return self.string_byte(b, token, out);
@@ -338,7 +371,7 @@ impl JsonlRedactor {
                 remainder.push(b);
                 if self.positions.len() == 1 && !scalar.streamed {
                     self.plain = true;
-                    return self.inner.filter(&remainder, &mut |b| out.push_bytes(b));
+                    return self.plain_bytes(&remainder, out);
                 }
                 return self.malformed(&remainder, scalar.masked, out);
             }
@@ -374,7 +407,7 @@ impl JsonlRedactor {
                 b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n'
             ) {
                 self.plain = true;
-                return self.inner.filter(&[b], &mut |bytes| out.push_bytes(bytes));
+                return self.plain_bytes(&[b], out);
             }
         }
         let context = self.positions.last().ok_or(FilterError)?;
@@ -425,8 +458,8 @@ impl JsonlRedactor {
                 };
                 match b {
                     b'{' | b'[' => {
-                        if self.positions.len() >= MAX_DEPTH {
-                            return Err(FilterError);
+                        if self.positions.len() > MAX_DEPTH {
+                            return self.malformed(&[b], true, out);
                         }
                         self.positions.push(Context {
                             position: if b == b'{' {
@@ -489,6 +522,8 @@ impl JsonlRedactor {
         });
         self.started = false;
         self.plain = false;
+        self.discard = false;
+        self.source_line_bytes = 0;
         self.mask_value = false;
         Ok(())
     }
@@ -523,25 +558,48 @@ impl CaptureFilter for JsonlRedactor {
         let mut out = FrameEmitter::new(sink);
         let mut remaining = bytes;
         while !remaining.is_empty() {
-            if self.plain {
-                let n = remaining
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .unwrap_or(remaining.len());
-                self.inner
-                    .filter(&remaining[..n], &mut |b| out.push_bytes(b))?;
-                remaining = &remaining[n..];
-                if remaining.is_empty() {
-                    break;
-                }
-            }
-            let b = remaining[0];
-            remaining = &remaining[1..];
-            if b == b'\n' {
+            if remaining[0] == b'\n' {
+                remaining = &remaining[1..];
                 self.end_line(&mut out)?;
                 out.push_bytes(b"\n");
+                continue;
+            }
+            let line_part = remaining
+                .iter()
+                .position(|b| *b == b'\n')
+                .unwrap_or(remaining.len());
+            let allowed = if self.provider_limit {
+                PROVIDER_LINE_LIMIT.saturating_sub(self.source_line_bytes)
             } else {
-                self.byte(b, &mut out)?;
+                usize::MAX
+            };
+            if allowed == 0 && !self.discard {
+                // Preserve the source-size failure in the retained, redacted
+                // frame, so replay reports the correct line even if it shrank.
+                self.malformed(&[], true, &mut out)?;
+            }
+            let n = if self.discard {
+                line_part
+            } else {
+                line_part.min(allowed)
+            };
+            self.source_line_bytes = self.source_line_bytes.saturating_add(n);
+            let part = &remaining[..n];
+            remaining = &remaining[n..];
+            if self.discard {
+                continue;
+            }
+            let mut index = 0;
+            while index < part.len() {
+                if self.discard {
+                    break;
+                }
+                if self.plain {
+                    self.plain_bytes(&part[index..], &mut out)?;
+                    break;
+                }
+                self.byte(part[index], &mut out)?;
+                index += 1;
             }
         }
         out.flush();
@@ -655,6 +713,77 @@ mod tests {
             filter.finish(&mut sink).unwrap();
             assert_eq!(output, expected);
         }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn malformed_remainder_masks_escaped_secrets_across_chunks() {
+        for input in [
+            br#"{"ok":true,!"pass\u0077ord":"unshaped-value","x":"literal-\u0073ecret"}"#
+                .as_slice(),
+            br#"broken pass\u0077ord=unshaped-value literal-\u0073ecret"#,
+            br#"\u0070assword=unshaped-value literal-\u0073ecret"#,
+            br#"true\u0070assword=unshaped-value literal-\u0073ecret"#,
+        ] {
+            let expected = filtered(input, 1).0;
+            for seed in 2..20 {
+                let output = filtered(input, seed).0;
+                assert_eq!(output, expected);
+                assert!(
+                    !output
+                        .windows(b"unshaped-value".len())
+                        .any(|w| w == b"unshaped-value")
+                );
+                assert!(!output.windows(b"literal-".len()).any(|w| w == b"literal-"));
+                assert!(serde_json::from_slice::<Value>(&output).is_err());
+            }
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn nesting_limit_excludes_root_and_masks_excess() {
+        let valid = format!("{}0{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        let output = filtered(valid.as_bytes(), 1).0;
+        assert_eq!(output, valid.as_bytes());
+        let excess = format!(
+            "{}\"unshaped-value\"{}\n{{\"ok\":true}}\n",
+            "[".repeat(MAX_DEPTH + 1),
+            "]".repeat(MAX_DEPTH + 1)
+        );
+        let output = filtered(excess.as_bytes(), 1).0;
+        let lines: Vec<_> = output.split(|b| *b == b'\n').collect();
+        assert!(serde_json::from_slice::<Value>(lines[0]).is_err());
+        assert!(
+            !output
+                .windows(b"unshaped-value".len())
+                .any(|w| w == b"unshaped-value")
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(lines[1]).unwrap(),
+            json!({"ok": true})
+        );
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn jsonl_rejects_non_utf8_secret_literals() {
+        assert!(matches!(
+            JsonlRedactor::new([vec![0xa9]]),
+            Err(RedactorError::InvalidUtf8Secret)
+        ));
+        let mut filter = JsonlRedactor::new(["é".as_bytes().to_vec()]).unwrap();
+        let mut output = Vec::new();
+        filter
+            .filter("{\"x\":\"café\"}".as_bytes(), &mut |b| {
+                output.extend_from_slice(b)
+            })
+            .unwrap();
+        filter.finish(&mut |b| output.extend_from_slice(b)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).unwrap(),
+            json!({"x":"caf[REDACTED]"})
+        );
     }
 
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence

@@ -28,6 +28,8 @@ pub enum RedactorError {
     SecretSetTooLarge,
     #[error("a secret value exceeds its byte bound")]
     SecretTooLong,
+    #[error("JSONL secret value must be valid UTF-8")]
+    InvalidUtf8Secret,
 }
 
 #[derive(Default)]
@@ -1001,18 +1003,6 @@ impl Redactor {
             insertions: VecDeque::new(),
             has_redacted: false,
         })
-    }
-
-    // Preserve a JSON credential field's context when syntax fails part-way
-    // through it. The fallback masks to the raw line boundary conservatively.
-    fn mask_line_remainder(&mut self) {
-        self.assignments.state = Assignment::Value {
-            quote: None,
-            quote_slashes: 0,
-            backslashes: 0,
-            pending_slashes: 0,
-            line: true,
-        };
     }
 
     pub fn has_redaction(&self) -> bool {

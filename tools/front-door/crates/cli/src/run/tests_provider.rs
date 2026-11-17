@@ -872,8 +872,72 @@ fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done
     let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
         .expect("handoff parses")
         .expect("handoff found");
-    assert_eq!(declared.status, provenant_records::handoff::Status::Done);
+    assert_eq!(
+        declared.status,
+        provenant_records::handoff::HandoffStatus::Done
+    );
     assert_eq!(declared.note, "n");
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn oversized_source_frame_remains_malformed_after_redaction() {
+    use provenant_os::exec::CaptureFilter;
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        ..Default::default()
+    };
+    let source = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\n{{\"type\":\"item.started\",\"item\":{{\"id\":\"i\",\"type\":\"command_execution\",\"command\":\"password={}\"}}}}\n{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}\n",
+        "x".repeat(provenant_os::exec::PROVIDER_LINE_LIMIT)
+    );
+    let mut filter = provenant_confinement::redact::JsonlRedactor::provider([]).unwrap();
+    let mut output = Vec::new();
+    for chunk in source.as_bytes().chunks(4096) {
+        filter
+            .filter(chunk, &mut |b| output.extend_from_slice(b))
+            .unwrap();
+    }
+    filter.finish(&mut |b| output.extend_from_slice(b)).unwrap();
+    let decoded = Registry::default()
+        .decode(&route, &output, &clean_exit(), Path::new("/unused"))
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    assert_eq!(
+        decoded.reason.as_deref(),
+        Some("evidence defect: provider protocol frame on line 2 is malformed")
+    );
+}
+
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+#[test]
+fn excessive_nesting_is_a_line_numbered_malformed_frame() {
+    use provenant_os::exec::CaptureFilter;
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        ..Default::default()
+    };
+    let input = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\n{}0{}\n",
+        "[".repeat(129),
+        "]".repeat(129)
+    );
+    let mut filter = provenant_confinement::redact::JsonlRedactor::provider([]).unwrap();
+    let mut output = Vec::new();
+    filter
+        .filter(input.as_bytes(), &mut |b| output.extend_from_slice(b))
+        .unwrap();
+    filter.finish(&mut |b| output.extend_from_slice(b)).unwrap();
+    let decoded = Registry::default()
+        .decode(&route, &output, &clean_exit(), Path::new("/unused"))
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    assert_eq!(
+        decoded.reason.as_deref(),
+        Some("evidence defect: provider protocol frame on line 2 is malformed")
+    );
 }
 
 #[test]
