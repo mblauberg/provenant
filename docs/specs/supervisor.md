@@ -197,15 +197,26 @@ credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
-files. The core root table owns these declarations; state-root selection and
-lane grant validation consume it. Dedicated credential directories retain
-subtree protection. A declared directory equal to HOME or containing or equal to a lane
-root uses exact adapter-declared and Provenant-owned account files instead,
-including Claude lane tokens and refresh locks; sibling profiles remain exact
-stores. File declarations retain exact scope.
-Credential directories are denied after every grant. The standalone Codex
-release package read exception is relative to its declared Codex home; it
-confers no writes and never exempts another overlapping credential declaration.
+files. Built-in, provider, host-variable and account declarations pass through
+one shared/dedicated classifier before entering the core root table; state-root
+selection and lane grant validation consume that table. Dedicated credential
+directories retain subtree protection. A declared directory equal to HOME or
+containing or equal to a lane root uses its known file inventory instead,
+including adapter-declared files, Claude lane tokens and refresh locks, and
+host-variable inventories such as GitHub CLI configuration files. A shared
+declaration without a precise inventory refuses, naming its source. Sibling
+profiles and file declarations retain exact scope.
+
+No lane grant may cover a declared credential file or a dedicated credential
+store. Undeclared files in a shared store are outside this guarantee: a lane
+may read them inside a granted lane root by design. Shared-store narrowing
+does not add a deny rule for undeclared files outside that root; their access
+follows the ambient permission policy above, which currently allows by default.
+Declared credential denials follow grants in the rendered profile. The
+standalone Codex release package read exception belongs only to the built-in
+default Codex home; relocated and registered stores retain whole-store
+protection. The exception confers no writes and never exempts another
+overlapping credential declaration.
 Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.

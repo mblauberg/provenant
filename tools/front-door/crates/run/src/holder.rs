@@ -161,7 +161,7 @@ pub struct HostLaunchContext {
     /// Host-resolved relocated credential stores, inherited unchanged by children.
     /// Required on the handoff pipe: an older host must not silently omit the
     /// inventory needed by the ambient renderer.
-    pub credential_roots: Vec<provenant_core::CredentialRoot>,
+    pub credential_roots: Vec<provenant_core::CredentialDeclaration>,
     pub github_roots: Vec<PathBuf>,
     /// Trusted path overrides needed to select the same host authentication
     /// mechanism after the guardian clears its process environment.
@@ -201,8 +201,10 @@ impl HostLaunchContext {
     pub fn github_roots() -> Vec<PathBuf> {
         provenant_confinement::permissions::host_github_roots(|name| std::env::var_os(name))
     }
-    pub fn credential_roots() -> Vec<provenant_core::CredentialRoot> {
-        provenant_confinement::permissions::host_credential_roots(|name| std::env::var_os(name))
+    pub fn credential_roots() -> Vec<provenant_core::CredentialDeclaration> {
+        provenant_confinement::permissions::host_credential_declarations(|name| {
+            std::env::var_os(name)
+        })
     }
     pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
         account_directories(provenant_records::ADAPTER_SPECS, |name| {

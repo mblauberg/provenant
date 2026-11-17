@@ -754,17 +754,23 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         "/usr/bin/git".into(),
     );
     host.credential_roots = vec![
-        provenant_core::CredentialRoot {
-            path: root.join("relocated-xdg/opencode"),
-            scope: provenant_core::CredentialScope::Subtree,
-            source: "fixture XDG_DATA_HOME".into(),
-            kind: provenant_core::CredentialKind::Store,
+        provenant_core::CredentialDeclaration {
+            inventory: provenant_core::CredentialInventory::Unknown,
+            root: provenant_core::CredentialRoot {
+                path: root.join("relocated-xdg/opencode"),
+                scope: provenant_core::CredentialScope::Subtree,
+                source: "fixture XDG_DATA_HOME".into(),
+                kind: provenant_core::CredentialKind::Store,
+            },
         },
-        provenant_core::CredentialRoot {
-            path: root.join("agent/socket"),
-            scope: provenant_core::CredentialScope::Exact,
-            source: "fixture SSH_AUTH_SOCK".into(),
-            kind: provenant_core::CredentialKind::Store,
+        provenant_core::CredentialDeclaration {
+            inventory: provenant_core::CredentialInventory::Unknown,
+            root: provenant_core::CredentialRoot {
+                path: root.join("agent/socket"),
+                scope: provenant_core::CredentialScope::Exact,
+                source: "fixture SSH_AUTH_SOCK".into(),
+                kind: provenant_core::CredentialKind::Store,
+            },
         },
     ];
     host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
@@ -1192,10 +1198,14 @@ fn launch_inventory_protects_each_registered_project_allocation_root()
         &protected,
     )?;
     for allocation in allocations {
-        assert!(!allocation.exists(), "protection precedes the first checkout");
         assert!(
-            protected.iter().any(|grant| grant.path == allocation
-                && grant.scope == PathScope::Subtree),
+            !allocation.exists(),
+            "protection precedes the first checkout"
+        );
+        assert!(
+            protected
+                .iter()
+                .any(|grant| grant.path == allocation && grant.scope == PathScope::Subtree),
             "{} is not protected",
             allocation.display()
         );

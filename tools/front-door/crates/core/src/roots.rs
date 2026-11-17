@@ -301,78 +301,9 @@ pub struct CredentialRoots {
 
 impl CredentialRoots {
     pub fn for_home(home: &Path) -> Self {
-        use CredentialKind::{CodexHome, Store};
-        use CredentialScope::{Exact, Subtree};
-
         let mut roots = Self::default();
-        for name in [".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets"] {
-            roots.add(home.join(name), Subtree, "built-in secret store", Store);
-        }
-        roots.add(
-            home.join(".claude"),
-            Subtree,
-            "provider declaration: claude default home",
-            Store,
-        );
-        roots.add(
-            home.join(".claude.json"),
-            Exact,
-            "provider declaration: claude credentials file",
-            Store,
-        );
-        roots.add(
-            home.join(CODEX_ACCOUNT_DIRECTORY.1),
-            Subtree,
-            "provider declaration: codex default home",
-            CodexHome,
-        );
-        roots.add(
-            home.join(".cursor"),
-            Subtree,
-            "provider declaration: cursor default home",
-            Store,
-        );
-        roots.add(
-            home.join(".gemini"),
-            Subtree,
-            "provider declaration: gemini default home",
-            Store,
-        );
-        roots.add(
-            home.join(".agents"),
-            Subtree,
-            "built-in agent credential home",
-            Store,
-        );
-        for (relative, source) in [
-            (".config/cursor", "provider declaration: cursor config"),
-            (".config/opencode", "provider declaration: opencode config"),
-            (
-                ".local/share/opencode",
-                "provider declaration: opencode data",
-            ),
-            (".config/gh", "built-in GitHub CLI credentials"),
-            (".config/gcloud", "built-in Google Cloud credentials"),
-            ("Library/Keychains", "built-in platform keychain"),
-            (
-                "Library/Application Support/GitHub CLI",
-                "built-in GitHub CLI support files",
-            ),
-            (
-                "Archives/git-preservation",
-                "built-in Git preservation archive",
-            ),
-            ("Monero", "built-in Monero credentials"),
-        ] {
-            roots.add(home.join(relative), Subtree, source, Store);
-        }
-        for &name in CARGO_CREDENTIAL_FILES {
-            roots.add(
-                home.join(".cargo").join(name),
-                Exact,
-                "built-in Cargo credential file",
-                Store,
-            );
+        for declaration in crate::CredentialDeclaration::for_home(home) {
+            roots.add_entry(declaration.root);
         }
         roots
     }

@@ -3,7 +3,10 @@ use super::{
     MandatoryRoots, PathGrant, PathScope, PermissionError, profile_path_representable,
     resolve_boundary_path,
 };
-use provenant_core::{CredentialKind, CredentialRoot, CredentialScope, Roots};
+use provenant_core::{
+    CredentialDeclaration, CredentialInventory, CredentialKind, CredentialRoot, CredentialScope,
+    Roots,
+};
 use provenant_os::fs::Directory;
 use std::{
     ffi::{OsStr, OsString},
@@ -11,58 +14,99 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Concrete dedicated roots for host callers that do not narrow shared stores.
 pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<CredentialRoot> {
+    host_credential_declarations(lookup)
+        .into_iter()
+        .map(|declaration| declaration.root)
+        .collect()
+}
+
+pub fn host_credential_declarations(
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Vec<CredentialDeclaration> {
     let mut roots = Vec::new();
-    for name in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"] {
+    for (name, inventory) in [
+        ("CODEX_HOME", CredentialInventory::Adapter("codex".into())),
+        (
+            "CLAUDE_CONFIG_DIR",
+            CredentialInventory::Adapter("claude".into()),
+        ),
+        ("GH_CONFIG_DIR", CredentialDeclaration::github_inventory()),
+    ] {
         if let Some(path) = lookup(name) {
-            roots.push(CredentialRoot {
-                path: PathBuf::from(path),
-                scope: CredentialScope::Subtree,
-                source: format!("provider environment: {name}"),
-                kind: CredentialKind::Store,
+            roots.push(CredentialDeclaration {
+                inventory,
+                root: CredentialRoot {
+                    path: PathBuf::from(path),
+                    scope: CredentialScope::Subtree,
+                    source: format!("provider environment: {name}"),
+                    kind: CredentialKind::Store,
+                },
             });
         }
     }
     if let Some(directory) = lookup("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
-        roots.push(CredentialRoot {
-            path: directory.with_extension("json"),
-            scope: CredentialScope::Exact,
-            source: "provider environment: CLAUDE_CONFIG_DIR credential file".into(),
-            kind: CredentialKind::Store,
+        roots.push(CredentialDeclaration {
+            inventory: CredentialInventory::Unknown,
+            root: CredentialRoot {
+                path: directory.with_extension("json"),
+                scope: CredentialScope::Exact,
+                source: "provider environment: CLAUDE_CONFIG_DIR credential file".into(),
+                kind: CredentialKind::Store,
+            },
         });
     }
     if let Some(config) = lookup("XDG_CONFIG_HOME").map(PathBuf::from) {
         roots.extend(
-            ["gh", "gcloud", "cursor", "opencode"].map(|name| CredentialRoot {
-                path: config.join(name),
-                scope: CredentialScope::Subtree,
-                source: format!("provider environment: XDG_CONFIG_HOME/{name}"),
-                kind: CredentialKind::Store,
+            [
+                ("gh", CredentialDeclaration::github_inventory()),
+                ("gcloud", CredentialInventory::Unknown),
+                ("cursor", CredentialInventory::Adapter("cursor".into())),
+                ("opencode", CredentialInventory::Adapter("opencode".into())),
+            ]
+            .map(|(name, inventory)| CredentialDeclaration {
+                inventory,
+                root: CredentialRoot {
+                    path: config.join(name),
+                    scope: CredentialScope::Subtree,
+                    source: format!("provider environment: XDG_CONFIG_HOME/{name}"),
+                    kind: CredentialKind::Store,
+                },
             }),
         );
     }
     if let Some(data) = lookup("XDG_DATA_HOME").map(PathBuf::from) {
-        roots.push(CredentialRoot {
-            path: data.join("opencode"),
-            scope: CredentialScope::Subtree,
-            source: "provider environment: XDG_DATA_HOME/opencode".into(),
-            kind: CredentialKind::Store,
+        roots.push(CredentialDeclaration {
+            inventory: CredentialInventory::Adapter("opencode".into()),
+            root: CredentialRoot {
+                path: data.join("opencode"),
+                scope: CredentialScope::Subtree,
+                source: "provider environment: XDG_DATA_HOME/opencode".into(),
+                kind: CredentialKind::Store,
+            },
         });
     }
     if let Some(directory) = lookup("ZDOTDIR").map(PathBuf::from) {
-        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| CredentialRoot {
-            path: directory.join(name),
-            scope: CredentialScope::Exact,
-            source: "host environment: ZDOTDIR shell startup".into(),
-            kind: CredentialKind::Store,
+        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| CredentialDeclaration {
+            inventory: CredentialInventory::Unknown,
+            root: CredentialRoot {
+                path: directory.join(name),
+                scope: CredentialScope::Exact,
+                source: "host environment: ZDOTDIR shell startup".into(),
+                kind: CredentialKind::Store,
+            },
         }));
     }
     if let Some(socket) = lookup("SSH_AUTH_SOCK").map(PathBuf::from) {
-        roots.push(CredentialRoot {
-            path: socket,
-            scope: CredentialScope::Exact,
-            source: "host environment: SSH_AUTH_SOCK".into(),
-            kind: CredentialKind::Store,
+        roots.push(CredentialDeclaration {
+            inventory: CredentialInventory::Unknown,
+            root: CredentialRoot {
+                path: socket,
+                scope: CredentialScope::Exact,
+                source: "host environment: SSH_AUTH_SOCK".into(),
+                kind: CredentialKind::Store,
+            },
         });
     }
     // A relative CARGO_HOME resolves against the host cwd, as Cargo does.
@@ -70,18 +114,19 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<C
         .filter(|value| !value.is_empty())
         .and_then(|value| std::path::absolute(PathBuf::from(value)).ok())
     {
-        roots.extend(
-            provenant_core::CARGO_CREDENTIAL_FILES
-                .iter()
-                .map(|name| CredentialRoot {
+        roots.extend(provenant_core::CARGO_CREDENTIAL_FILES.iter().map(|name| {
+            CredentialDeclaration {
+                inventory: CredentialInventory::Unknown,
+                root: CredentialRoot {
                     path: path.join(name),
                     scope: CredentialScope::Exact,
                     source: "host environment: CARGO_HOME credentials".into(),
                     kind: CredentialKind::Store,
-                }),
-        );
+                },
+            }
+        }));
     }
-    roots.retain(|root| root.path.is_absolute());
+    roots.retain(|root| root.root.path.is_absolute());
     roots
 }
 

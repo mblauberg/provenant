@@ -5,7 +5,7 @@
 mod host;
 use super::validation::{profile_path_representable, validate_absolute};
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
-pub use host::{host_credential_roots, host_github_roots};
+pub use host::{host_credential_declarations, host_credential_roots, host_github_roots};
 use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
