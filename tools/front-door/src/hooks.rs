@@ -1211,14 +1211,18 @@ fn push_policy(
                 .flatten()
         })
         .map(|binding| binding.project_id().to_string());
-    // Without a registered project, the hook has only host policy. The hook
-    // keeps its contract of no output for unreadable configuration, as the
-    // local gate does; the PUSH_* row slice decides whether to warn.
+    // Without a registered project, the hook has only host policy. Unreadable
+    // policy falls back to compiled defaults with a warning, so a configured
+    // strict rule is never lost silently.
     provenant_config::policy::read_reporting(
         roots.state.as_path(),
         project_id.as_deref().unwrap_or(""),
         &Default::default(),
-        |_| {},
+        |error| {
+            diagnostic(&format!(
+                "pre-push: warning: policy settings unavailable ({error}); using compiled defaults"
+            ));
+        },
     )
 }
 

@@ -188,20 +188,6 @@ pub enum ReviewRange {
     Resolved { base: String, head: String },
 }
 
-fn node_admission_policy(
-    project: &provenant_records::policy::Policy,
-    attempt: Option<&AttemptSpec>,
-) -> provenant_records::policy::Policy {
-    let mut policy = project.clone();
-    if let Some(attempt) = attempt {
-        policy.overlay(
-            &attempt.policy_overrides,
-            provenant_records::policy::Source::Dispatch,
-        );
-    }
-    policy
-}
-
 fn recover_minima(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) -> bool {
     let mut recovered = false;
     for (progress, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
@@ -2592,8 +2578,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let mut prepared_inputs = None;
                 if needs_record {
                     let cap = limits.node_prompt_bytes;
-                    let node_policy =
-                        node_admission_policy(&admission_policy, node.attempt.as_ref());
                     match transitions::admit_attempt(
                         node_index,
                         &plan,
@@ -2601,7 +2585,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &positions,
                         limits,
                         &effective_budget,
-                        &node_policy,
+                        // Admission checks are graph-wide, so a node's dispatch
+                        // overrides never apply to them.
+                        &admission_policy,
                     ) {
                         transitions::Admission::Ready => {}
                         transitions::Admission::WriterBusy => break,
