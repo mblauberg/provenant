@@ -62,7 +62,7 @@ pub enum LandingError {
     RefusedWith {
         cause: &'static str,
         message: String,
-        repair: &'static str,
+        repair: String,
     },
     #[error("publication outcome is unknown")]
     PublicationUnknown,
@@ -94,6 +94,22 @@ impl LandingError {
     pub(crate) fn is_refusal(&self) -> bool {
         matches!(self, Self::Refused(_) | Self::RefusedWith { .. })
     }
+}
+
+/// Refresh readiness at every boundary that can gate or publish a member.
+fn ready_pull_request(
+    forge: &mut dyn ports::Forge,
+    number: u64,
+) -> Result<ports::PullRequestInfo, LandingError> {
+    let info = forge.pull_request(number)?;
+    if info.draft {
+        return Err(LandingError::RefusedWith {
+            cause: "PR_DRAFT",
+            message: format!("pull request #{number} is a draft"),
+            repair: format!("gh pr ready {number}"),
+        });
+    }
+    Ok(info)
 }
 
 use provenant_confinement::review_exempt::ReviewExempt;
@@ -250,7 +266,9 @@ fn batch_response(
         None => (Outcome::Failed, ""),
     };
     let (cause, repair) = match failure.as_ref() {
-        Some(LandingError::RefusedWith { cause, repair, .. }) => (Some(*cause), Some(*repair)),
+        Some(LandingError::RefusedWith { cause, repair, .. }) => {
+            (Some(*cause), Some(repair.clone()))
+        }
         _ => (None, None),
     };
     let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps, "steps": []});
@@ -291,7 +309,7 @@ fn batch_response(
             code: code.into(),
             message: error.to_string(),
             cause: cause.map(str::to_owned),
-            repair: repair.map(str::to_owned),
+            repair,
             diagnostic: None,
         });
     }

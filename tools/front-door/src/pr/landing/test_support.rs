@@ -186,6 +186,7 @@ impl LandingFixture {
                     state: PullRequestState::Open,
                     merged_commit: None,
                     stack: None,
+                    draft: false,
                 },
             );
             forge.heads.insert(number, head.clone());

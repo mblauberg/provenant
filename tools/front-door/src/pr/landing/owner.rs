@@ -396,11 +396,9 @@ impl Owner<'_> {
     /// Fill each member's unset head and base from the forge.
     fn pin(&mut self, members: &mut [LandMember]) -> Result<(), LandingError> {
         for member in members.iter_mut() {
-            if member.head.is_none() || member.base.is_none() {
-                let info = self.forge.pull_request(member.pr)?;
-                member.head.get_or_insert(info.head);
-                member.base.get_or_insert(info.base_branch);
-            }
+            let info = self.forge.pull_request(member.pr)?;
+            member.head.get_or_insert(info.head);
+            member.base.get_or_insert(info.base_branch);
         }
         Ok(())
     }
@@ -1510,6 +1508,49 @@ mod tests {
         assert_eq!(replayed.passes, record.passes);
         assert_eq!(world.forge.merges.len(), merges);
         assert_eq!(world.repo.push_attempts.len(), pushes);
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#merge-guard
+    #[test]
+    fn rerun_recovers_ambiguous_publication_after_draft_conversion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = world(1)?;
+        world.forge.direct_push = false;
+        world.forge.lose_merge_response_at = Some(1);
+        world.forge.hide_merge_commit_at = Some(1);
+        let request = LandRequest {
+            members: members(&[1]),
+            ..Default::default()
+        };
+        let (_, first) = submit(&mut world, request.clone())?;
+        assert!(matches!(first.outcomes[&1], MemberOutcome::Unknown { .. }));
+        assert_eq!(
+            receipt::pending(world.state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        let pr = world.forge.pull_requests.get_mut(&1).unwrap();
+        pr.draft = true;
+        pr.state = super::super::ports::PullRequestState::Open;
+        let (_, unresolved) = submit(&mut world, request.clone())?;
+        assert!(matches!(
+            unresolved.outcomes[&1],
+            MemberOutcome::Unknown { .. }
+        ));
+        assert_eq!(world.forge.merge_attempts, vec![1]);
+        let pr = world.forge.pull_requests.get_mut(&1).unwrap();
+        pr.state = super::super::ports::PullRequestState::Merged;
+        pr.merged_commit = Some("landed-1".into());
+        // The forge's merge commit carries the gated candidate's tree.
+        let candidate_tree = receipt::pending(world.state.path(), "fake-repository", "main")?[0]
+            .candidate
+            .tree
+            .clone();
+        world.repo.trees.insert("landed-1".into(), candidate_tree);
+        let (_, recovered) = submit(&mut world, request)?;
+        assert!(recovered.outcomes[&1].landed());
+        assert!(receipt::pending(world.state.path(), "fake-repository", "main")?.is_empty());
+        assert_eq!(world.forge.merge_attempts, vec![1]);
         Ok(())
     }
 
