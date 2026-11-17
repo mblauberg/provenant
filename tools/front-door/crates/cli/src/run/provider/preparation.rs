@@ -3547,7 +3547,8 @@ pub(super) fn prepare_candidates(
             reasons.push(name_skipped_accounts(skipped, &route, &entries));
             continue;
         }
-        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
+        if let Err(error) =
+            crate::route::check_dispatch_candidate(roots, &route, provider_registry, &launch_policy)
         {
             // Admission refuses an account whose allowance is spent. Another
             // account may still serve the same model, so move on to it once per

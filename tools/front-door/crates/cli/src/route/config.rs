@@ -904,6 +904,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     std::slice::from_ref(&model),
                 )?;
                 let admission = provenant_quota::Admission {
+                    policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds: now.unix_seconds(),
                     records,

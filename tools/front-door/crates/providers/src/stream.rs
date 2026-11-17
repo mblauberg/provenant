@@ -166,6 +166,8 @@ const MAX_LINE_BYTES: usize = provenant_os::exec::PROVIDER_LINE_LIMIT;
 /// positions can affect identity or completion; prose is never searched.
 pub struct StreamState {
     adapter: &'static str,
+    /// Immutable operation policy, retained for the lifetime of the stream.
+    pub policy: std::sync::Arc<provenant_records::policy::Policy>,
     decoder: Decoder,
     pending: Vec<u8>,
     line_limit: usize,
@@ -192,9 +194,14 @@ pub struct StreamState {
     turn_tool_activity: bool,
 }
 impl StreamState {
-    pub(crate) fn new(adapter: &'static str, decoder: Decoder) -> Self {
+    pub(crate) fn new(
+        adapter: &'static str,
+        decoder: Decoder,
+        policy: &provenant_records::policy::Policy,
+    ) -> Self {
         Self {
             adapter,
+            policy: std::sync::Arc::new(policy.clone()),
             decoder,
             pending: Vec::new(),
             line_limit: MAX_LINE_BYTES,

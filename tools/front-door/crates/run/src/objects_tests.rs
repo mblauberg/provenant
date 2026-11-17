@@ -113,6 +113,7 @@ fn private_view_restarts_import_and_publication_in_shallow_repositories() -> Tes
                     fixture.base,
                     None,
                     head,
+                    &provenant_records::policy::Policy::default(),
                 )?;
             }
             let expected = if checkpoint >= 2 { head } else { fixture.base };
@@ -190,7 +191,8 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
                 "refs/heads/lane",
                 fixture.base,
                 None,
-                fixture.head
+                fixture.head,
+                &provenant_records::policy::Policy::default(),
             )
             .is_err()
         );
@@ -209,6 +211,7 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
             fixture.base,
             None,
             fixture.head,
+            &provenant_records::policy::Policy::default(),
         )?;
         assert!(super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage).is_err());
     }
@@ -542,6 +545,7 @@ fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -
             fixture.base,
             None,
             head,
+            &provenant_records::policy::Policy::default(),
         )?;
         let content = git(
             &fixture.git,
@@ -745,6 +749,7 @@ fn private_ref_overlay_keeps_host_and_sibling_fetch_usable_until_verified_public
         fixture.base,
         None,
         fixture.head,
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(shared_tip()?, fixture.head);
     Ok(())
@@ -813,6 +818,7 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
             fixture.base,
             None,
             fixture.head,
+            &provenant_records::policy::Policy::default(),
         )?;
     }
     let published = oid(git(
@@ -865,6 +871,7 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
             fixture.base,
             None,
             fixture.head,
+            &provenant_records::policy::Policy::default(),
         )
         .is_err()
     );
@@ -1538,6 +1545,7 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         fixture.base,
         None,
         fixture.head,
+        &provenant_records::policy::Policy::default(),
     )?;
     super::restore_index(&source, fixture.worktree.repo())?;
     let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
@@ -1627,6 +1635,7 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         fixture.head,
         None,
         tip,
+        &provenant_records::policy::Policy::default(),
     )?;
     super::restore_index(&next, fixture.worktree.repo())?;
     assert!(
@@ -1668,6 +1677,7 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
             fixture.base,
             None,
             fixture.head,
+            &provenant_records::policy::Policy::default(),
         )?;
         super::restore_index(&source, fixture.worktree.repo())?;
         fs::write(fixture.lane.join("file"), "hidden uncommitted edit\n")?;
@@ -1728,7 +1738,8 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
             "refs/heads/lane",
             fixture.base,
             None,
-            fixture.head
+            fixture.head,
+            &provenant_records::policy::Policy::default(),
         )
         .is_err()
     );
@@ -1765,17 +1776,19 @@ fn publication_refuses_orphan_history() -> TestResult {
         &["commit-tree", &tree.to_string(), "-m", "orphan"],
     )?)?;
     assert!(matches!(
-        super::publish_branch(
-            &fixture.git,
-            fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            orphan
-        ),
-        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
-            if tip == orphan && base == fixture.base
-    ));
+            super::publish_branch(
+                &fixture.git,
+                fixture.worktree.repo(),
+                "refs/heads/lane",
+                fixture.base,
+                None,
+                orphan
+            ,
+     &provenant_records::policy::Policy::default(),
+    ),
+            Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
+                if tip == orphan && base == fixture.base
+        ));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         fixture.base
@@ -1843,6 +1856,7 @@ fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestRe
         fixture.base,
         Some("integration"),
         orphan,
+        &provenant_records::policy::Policy::default(),
     )
     .expect_err("an unrooted tip is refused");
     assert!(error.import_refusal_is_final());
@@ -1871,6 +1885,7 @@ fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult
         lane_base,
         None,
         rebased,
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(
         ancestor,
@@ -1919,6 +1934,7 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
         lane_base,
         Some("integration"),
         rebased,
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(
         ancestor,
@@ -1937,6 +1953,7 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
             lane_base,
             None,
             rebased,
+            &provenant_records::policy::Policy::default(),
         ),
         Err(crate::RunError::LaneTipUnrooted { .. })
     ));
@@ -1954,6 +1971,7 @@ fn publication_from_the_launch_base_reports_no_ancestor_warning() -> TestResult 
         fixture.base,
         None,
         tip,
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(ancestor, super::Ancestor::LaunchBase);
     assert_eq!(ancestor.warning("refs/heads/lane", fixture.base, tip), None);
@@ -2019,6 +2037,7 @@ fn publication_accepts_a_rebase_onto_the_current_origin_default() -> TestResult 
         lane_base,
         None,
         rebased,
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,

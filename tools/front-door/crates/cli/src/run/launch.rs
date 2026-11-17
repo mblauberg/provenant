@@ -42,7 +42,10 @@ pub(super) fn project_id_for_lane_gitdir(
     matches.next().is_none().then_some(project)
 }
 
-pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
+pub fn nested_dispatch_context(
+    roots: &Roots,
+    policy: &provenant_records::policy::Policy,
+) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(provenant_core::consumer_env::LANE_DEPTH)?;
     let parent_attempt = environment_text(provenant_core::consumer_env::PARENT_ATTEMPT_ID)?;
     let config = crate::config_reads::read_for(roots, "knobs")
@@ -62,6 +65,7 @@ pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>)
         parent_depth.as_deref(),
         parent_attempt.as_deref(),
         max_depth,
+        policy,
         roots.state.as_path(),
         std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
             .as_deref()
@@ -95,6 +99,7 @@ pub(super) fn lane_dispatch_values(
     parent_depth: Option<&str>,
     parent_attempt: Option<&str>,
     max_depth: u64,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     run_state: Option<&Path>,
 ) -> Result<(u64, Option<AttemptId>), Fail> {
@@ -150,7 +155,7 @@ pub(super) fn lane_dispatch_values(
             ));
         }
     };
-    let lane_depth = run::next_lane_depth(parent_depth, max_depth)?;
+    let lane_depth = run::next_lane_depth(parent_depth, max_depth, policy)?;
     Ok((lane_depth, parent_attempt))
 }
 

@@ -1773,7 +1773,7 @@ pub(super) fn writer_source_context(
                 ))
             })?;
             writer
-                .require_source(head)
+                .require_source(head, policy)
                 .map_err(|error| boundary_error(error.into()))?;
         }
         return Ok(None);
@@ -1802,9 +1802,7 @@ pub(super) fn writer_source_context(
             "invalid pinned writer source".into(),
         ))
     })?;
-    if let Err(error) =
-        writer.require_continuation_source_with_policy(git, source, predecessor, policy)
-    {
+    if let Err(error) = writer.require_continuation_source(git, source, predecessor, policy) {
         return Err(boundary_error(PrepareError::WriterContinuation(
             if uncommitted.is_empty() {
                 error.to_string()

@@ -486,6 +486,7 @@ struct AssignmentScanner {
     after_backslash: bool,
     matched: bool,
     insertions: Vec<usize>,
+    container_start: bool,
 }
 
 impl AssignmentScanner {
@@ -612,6 +613,9 @@ impl AssignmentScanner {
                             backslashes: 0,
                         };
                         return;
+                    }
+                    if quote.is_none() && matches!(byte, b'{' | b'[') {
+                        self.container_start = true;
                     }
                     if quote.is_none() && is_delimiter(byte) {
                         continue;
@@ -1411,14 +1415,13 @@ fn filter_pass(
 struct HistoryScanner {
     plain: Redactor,
     unescape: source::Unescape,
-    tail: Vec<u8>,
-    in_string: bool,
-    escaped: bool,
-    candidate: u8, // 1: string closed, 2: credential key and colon seen
-    credential: bool,
+    raw_assignments: AssignmentScanner,
+    decoded_assignments: AssignmentScanner,
     depth: usize,
     closes: [u8; 128],
     overflow: bool,
+    in_string: bool,
+    escaped: bool,
     matched: bool,
 }
 impl HistoryScanner {
@@ -1426,27 +1429,71 @@ impl HistoryScanner {
         Ok(Self {
             plain: Redactor::new([])?,
             unescape: source::Unescape::default(),
-            tail: Vec::new(),
-            in_string: false,
-            escaped: false,
-            candidate: 0,
-            credential: false,
+            raw_assignments: AssignmentScanner::default(),
+            decoded_assignments: AssignmentScanner::default(),
             depth: 0,
             closes: [0; 128],
             overflow: false,
+            in_string: false,
+            escaped: false,
             matched: false,
         })
     }
     fn has_redaction(&self) -> bool {
         self.matched || self.plain.has_redaction()
     }
-    fn step(&mut self, b: u8, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        if self.depth != 0 {
-            if b == b'\n' {
-                self.depth = 0;
+    // Reuse the detector's assignment transitions on both source and decoded
+    // bytes. The unescaper supplies complete source spans, so an opener encoded
+    // as an escape is never partially emitted before the container is hidden.
+    fn assignment_step(scanner: &mut AssignmentScanner, bytes: &[u8]) -> Option<u8> {
+        let mut output = DecisionQueue::default();
+        for &b in bytes {
+            scanner.step(b, &mut output);
+            scanner.insertions.clear();
+            if std::mem::take(&mut scanner.container_start) {
+                return Some(b);
+            }
+        }
+        None
+    }
+    fn span(
+        &mut self,
+        source: &[u8],
+        decoded: &[u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), FilterError> {
+        if self.depth == 0 {
+            let raw = Self::assignment_step(&mut self.raw_assignments, source);
+            let decoded_start = Self::assignment_step(&mut self.decoded_assignments, decoded);
+            if let Some(opener) = decoded_start.or(raw) {
+                self.plain.finish(sink)?;
+                self.plain = Redactor::new([]).map_err(|_| FilterError)?;
+                self.matched = true;
+                sink(REDACTED);
+                self.depth = 1;
+                self.closes[0] = if opener == b'{' { b'}' } else { b']' };
+                self.overflow = false;
                 self.in_string = false;
-                sink(&[b]);
+                self.escaped = false;
                 return Ok(());
+            }
+            return self.plain.filter(source, sink);
+        }
+        // Ambiguous nested escape layers cannot safely prove a matching close.
+        // Keep masking to the physical line end instead of exposing a suffix.
+        if source == br#"\""# || source == br"\\" {
+            self.overflow = true;
+        }
+        for &b in decoded {
+            if b == b'\n' || b == b'\r' {
+                // Only a physical line ending ends a malformed record.
+                if source == [b] {
+                    self.depth = 0;
+                    self.raw_assignments = AssignmentScanner::default();
+                    self.decoded_assignments = AssignmentScanner::default();
+                    sink(source);
+                }
+                continue;
             }
             if self.in_string {
                 if self.escaped {
@@ -1467,61 +1514,22 @@ impl HistoryScanner {
                 }
             } else if !self.overflow && b == self.closes[self.depth - 1] {
                 self.depth -= 1;
-            }
-            return Ok(());
-        }
-        if !self.in_string && self.candidate == 2 && (b == b'{' || b == b'[') {
-            self.plain.finish(sink)?;
-            self.matched = true;
-            sink(REDACTED);
-            self.plain = Redactor::new([]).map_err(|_| FilterError)?;
-            self.candidate = 0;
-            self.depth = 1;
-            self.closes[0] = if b == b'{' { b'}' } else { b']' };
-            self.overflow = false;
-            return Ok(());
-        }
-        self.plain.filter(&[b], sink)?;
-        if self.in_string {
-            if !self.escaped && b == b'"' {
-                self.unescape.drain(true, &mut |_, decoded| {
-                    for &byte in decoded {
-                        if self.tail.len() == ASSIGNMENT_RUN {
-                            self.tail.remove(0);
-                        }
-                        self.tail.push(byte.to_ascii_lowercase());
-                    }
-                    Ok(())
-                })?;
-                self.credential = jsonl::credential_key(&self.tail);
-                self.in_string = false;
-                self.candidate = 1;
-            } else {
-                self.unescape.push(b, &mut |_, decoded| {
-                    for &byte in decoded {
-                        if self.tail.len() == ASSIGNMENT_RUN {
-                            self.tail.remove(0);
-                        }
-                        self.tail.push(byte.to_ascii_lowercase());
-                    }
-                    Ok(())
-                })?;
-                if self.escaped {
-                    self.escaped = false;
-                } else if b == b'\\' {
-                    self.escaped = true;
+                if self.depth == 0 {
+                    self.raw_assignments = AssignmentScanner::default();
+                    self.decoded_assignments = AssignmentScanner::default();
                 }
             }
-        } else if b == b'"' {
-            self.in_string = true;
-            self.escaped = false;
-            self.tail.clear();
-            self.unescape = source::Unescape::default();
-            self.candidate = 0;
-        } else if self.candidate == 1 && b == b':' && self.credential {
-            self.candidate = 2;
-        } else if !b.is_ascii_whitespace() {
-            self.candidate = 0;
+        }
+        Ok(())
+    }
+    fn drain(&mut self, eof: bool, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        let mut spans = Vec::new();
+        self.unescape.drain(eof, &mut |source, decoded| {
+            spans.push((source.to_vec(), decoded.to_vec()));
+            Ok(())
+        })?;
+        for (source, decoded) in spans {
+            self.span(&source, &decoded, sink)?;
         }
         Ok(())
     }
@@ -1529,11 +1537,19 @@ impl HistoryScanner {
 impl CaptureFilter for HistoryScanner {
     fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
         for &b in bytes {
-            self.step(b, sink)?;
+            let mut spans = Vec::new();
+            self.unescape.push(b, &mut |source, decoded| {
+                spans.push((source.to_vec(), decoded.to_vec()));
+                Ok(())
+            })?;
+            for (source, decoded) in spans {
+                self.span(&source, &decoded, sink)?;
+            }
         }
         Ok(())
     }
     fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        self.drain(true, sink)?;
         self.plain.finish(sink)
     }
 }
@@ -2809,6 +2825,46 @@ mod tests {
         );
         assert_eq!(result.lines().count(), 4);
         assert!(result.contains("! tail"));
+        Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn history_scrubs_long_escaped_keys_and_malformed_assignment_containers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("candidate-0/sessions");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("history.jsonl");
+        let key = format!(
+            r"{}-\u0067hp_abcdefghijklmnopqrst",
+            "x".repeat(MAX_SECRET_LENGTH + 1)
+        );
+        let valid = format!("{{\"{key}\":1}}\n");
+        let malformed = [
+            r#"password={"inner":"secret-equals"}! tail"#,
+            r#""password"\u003a{"inner":"secret-colon"}! tail"#,
+            r#""password":\u007b"inner":"secret-open"\u007d! tail"#,
+        ];
+        std::fs::write(&path, format!("{}{}\n", valid, malformed.join("\n")))?;
+        assert_eq!(scrub_session_history(temp.path())?, 1);
+        let output = std::fs::read_to_string(&path)?;
+        let mut lines = output.lines();
+        let parsed: serde_json::Value = serde_json::from_str(lines.next().unwrap())?;
+        assert!(
+            !parsed
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .contains("ghp_")
+        );
+        for line in lines {
+            assert!(!line.contains("secret-"), "{line}");
+            assert!(line.contains("[REDACTED]"));
+            assert!(line.ends_with("! tail"), "{line}");
+        }
         Ok(())
     }
 

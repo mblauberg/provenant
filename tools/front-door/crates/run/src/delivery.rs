@@ -606,8 +606,15 @@ impl HostDeliveryContext {
             .map_or(cwd, |bound| bound.host_cwd.as_path());
         let table = PortTable::read_for(Some(project), &state)
             .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
-        let mut forge = ForgePort::new(table.forge, "forge", project, &state)
-            .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
+        let mut forge = ForgePort::new(
+            table.forge,
+            "forge",
+            project,
+            &state,
+            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        )
+        .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
         if let Some(cancel) = &self.cancellation {
             forge.set_cancel(cancel.clone());
         }

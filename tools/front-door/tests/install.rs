@@ -128,8 +128,12 @@ fn tick_upgrade_keeps_stable_program_path_and_valid_signature() -> Result {
     let rig = TestRig::new()?;
     let roots = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone())
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let mut targets =
-        provenant_config::Targets::new(roots, &rig.home, &[provenant_records::Harness::Codex]);
+    let mut targets = provenant_config::Targets::new(
+        roots,
+        &rig.home,
+        &[provenant_records::Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     let program = targets.bin_dir.join("provenant");
     targets.tick_agent = Some(tick_agent::render(
         &program,
@@ -216,8 +220,12 @@ fn inspect_installed(rig: &TestRig, stage: &Path) -> Result<provenant_config::In
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.environment_state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let targets =
-        provenant_config::Targets::new(roots, &rig.home, &[provenant_records::Harness::Claude]);
+    let targets = provenant_config::Targets::new(
+        roots,
+        &rig.home,
+        &[provenant_records::Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     let release = Release::read(stage, env!("PROVENANT_TARGET_TRIPLE"))?;
     let manifest = release.manifest();
     let smoke = FixtureSmoke(VersionInfo {

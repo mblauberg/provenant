@@ -44,8 +44,6 @@ struct StringToken {
     decoded: Vec<u8>,
     escape: Vec<u8>,
     utf8: Vec<u8>,
-    key_source: Vec<u8>,
-    key_overflow: bool,
     source: SourceMap,
     redaction_run: bool,
 }
@@ -96,7 +94,7 @@ impl Number {
 
 /// A bounded streaming tokenizer. Sink frames, not total output per call, are
 /// bounded by CaptureFilter. Values stream independently of provider line size.
-/// Keys are scanned as decoded strings and masked as a whole when sensitive.
+/// Keys and values share decoded detection and source-span masking.
 pub struct JsonlRedactor {
     secrets: Vec<Vec<u8>>,
     inner: Redactor,
@@ -180,7 +178,7 @@ impl JsonlRedactor {
         token: &mut StringToken,
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
-        if token.key || token.masked {
+        if token.masked && !token.key {
             token.decoded.clear();
             return Ok(());
         }
@@ -203,9 +201,7 @@ impl JsonlRedactor {
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
         self.flush_string(token, out)?;
-        if token.key && token.key_overflow {
-            self.inner.finish(&mut |bytes| out.push_bytes(bytes))?;
-        } else if !token.key && !token.masked {
+        if !token.masked || token.key {
             self.inner.finish_decisions(&mut |_, count, masked| {
                 token
                     .source
@@ -233,16 +229,14 @@ impl JsonlRedactor {
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
         if token.key {
-            if !token.key_overflow {
-                token.decoded.extend_from_slice(bytes);
-            }
             for &b in bytes {
                 if token.tail.len() == ASSIGNMENT_RUN {
                     token.tail.remove(0);
                 }
                 token.tail.push(b.to_ascii_lowercase());
             }
-        } else if !token.masked {
+        }
+        if !token.masked || token.key {
             token.source.push(original, bytes.len())?;
             token.decoded.extend_from_slice(bytes);
             if token.decoded.len() >= STRING_PIECE {
@@ -279,21 +273,6 @@ impl JsonlRedactor {
         mut token: StringToken,
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
-        if token.key && !(token.escape.is_empty() && b == b'"') {
-            if !token.key_overflow && token.key_source.len() == MAX_SECRET_LENGTH {
-                token.key_overflow = true;
-                token.decoded.clear();
-                self.inner
-                    .filter(&token.key_source, &mut |bytes| out.push_bytes(bytes))?;
-                token.key_source.clear();
-            }
-            if token.key_overflow {
-                self.inner
-                    .filter(&[b], &mut |bytes| out.push_bytes(bytes))?;
-            } else {
-                token.key_source.push(b);
-            }
-        }
         if token.escape.is_empty() && (b >= 0x80 || !token.utf8.is_empty()) {
             token.utf8.push(b);
             match std::str::from_utf8(&token.utf8) {
@@ -350,18 +329,7 @@ impl JsonlRedactor {
         } else if b == b'"' {
             if token.key {
                 self.mask_value = credential_key(&token.tail);
-                if token.key_overflow {
-                    self.inner.finish(&mut |bytes| out.push_bytes(bytes))?;
-                } else {
-                    self.inner.filter(&token.decoded, &mut |_| {})?;
-                    self.inner.finish(&mut |_| {})?;
-                    if self.inner.has_redaction() {
-                        out.push_bytes(REDACTED);
-                        self.has_redaction = true;
-                    } else {
-                        out.push_bytes(&token.key_source);
-                    }
-                }
+                self.finish_string(&mut token, out)?;
                 self.reset_inner()?;
                 out.push_bytes(b"\"");
                 self.positions.last_mut().ok_or(FilterError)?.position = Position::ObjectColon;
@@ -519,8 +487,6 @@ impl JsonlRedactor {
                     decoded: Vec::new(),
                     escape: Vec::new(),
                     utf8: Vec::new(),
-                    key_source: Vec::new(),
-                    key_overflow: false,
                     source: SourceMap::default(),
                     redaction_run: false,
                 });
@@ -567,8 +533,6 @@ impl JsonlRedactor {
                             decoded: Vec::new(),
                             escape: Vec::new(),
                             utf8: Vec::new(),
-                            key_source: Vec::new(),
-                            key_overflow: false,
                             source: SourceMap::default(),
                             redaction_run: false,
                         });
@@ -836,6 +800,43 @@ mod tests {
             let parsed: Value = serde_json::from_slice(&output).unwrap();
             assert_eq!(parsed["[REDACTED]"], "safe");
             assert_eq!(parsed["ordinary"], "value");
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn long_keys_use_atomic_decoded_source_spans_at_every_chunk_size() {
+        for padding in [
+            MAX_SECRET_LENGTH - 1,
+            MAX_SECRET_LENGTH,
+            MAX_SECRET_LENGTH + 1,
+        ] {
+            for escape in [r"\u0067hp_abcdefghijklmnopqrst", r"\t", r"\r"] {
+                let input = format!("{{\"{}-{}\":1}}\n", "x".repeat(padding), escape);
+                for width in [1, 2, 7, 4096, 65536] {
+                    let mut redactor =
+                        JsonlRedactor::new([b"u0067".to_vec(), b"t".to_vec(), b"r".to_vec()])
+                            .unwrap();
+                    let mut output = Vec::new();
+                    for chunk in input.as_bytes().chunks(width) {
+                        redactor
+                            .filter(chunk, &mut |bytes| output.extend_from_slice(bytes))
+                            .unwrap();
+                    }
+                    redactor
+                        .finish(&mut |bytes| output.extend_from_slice(bytes))
+                        .unwrap();
+                    let value: Value = serde_json::from_slice(&output).unwrap();
+                    let key = value.as_object().unwrap().keys().next().unwrap();
+                    assert!(!key.contains("ghp_abcdefghijklmnopqrst"));
+                    if escape == r"\t" {
+                        assert!(key.ends_with('\t'));
+                    }
+                    if escape == r"\r" {
+                        assert!(key.ends_with('\r'));
+                    }
+                }
+            }
         }
     }
 

@@ -243,7 +243,7 @@ fn terminal_answer_and_nonzero_exit_remain_separate_facts() -> Result<(), Box<dy
 }
 #[test]
 fn refusal_does_not_claim_authentication_required() -> Result<(), ProviderError> {
-    let mut stream = StreamState::new("claude", |_| Ok(vec![ProviderEvent::Refusal]));
+    let mut stream = StreamState::new("claude", |_| Ok(vec![ProviderEvent::Refusal]), &provenant_records::policy::Policy::default());
     claude::Claude.observe(&mut stream, b"refusal\n")?;
     assert_eq!(claude::Claude.account(&stream)?, AccountDetection::Unknown);
     assert_eq!(
@@ -254,7 +254,7 @@ fn refusal_does_not_claim_authentication_required() -> Result<(), ProviderError>
 }
 #[test]
 fn failed_chunk_retains_earlier_decoded_events_for_finish() -> Result<(), ProviderError> {
-    let mut stream = codex::Codex.stream(None)?;
+    let mut stream = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     let raw = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"kept\"}}\ninvalid\n";
     assert!(matches!(
         codex::Codex.observe(&mut stream, raw),
@@ -273,7 +273,7 @@ fn failed_chunk_retains_earlier_decoded_events_for_finish() -> Result<(), Provid
 }
 #[test]
 fn observe_bounds_pending_lines_instead_of_whole_chunks() -> Result<(), ProviderError> {
-    let mut stream = codex::Codex.stream(None)?;
+    let mut stream = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     let raw = "{\"type\":\"turn.started\"}\n".repeat(50_000);
     assert!(raw.len() > 1_048_576);
     assert!(
@@ -612,7 +612,7 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
 fn expected_continuation_session_is_not_observed_without_a_provider_frame()
 -> Result<(), ProviderError> {
     let mut matching =
-        codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+        codex::Codex.stream_for_continuation("retained-thread", "requested-model", &provenant_records::policy::Policy::default())?;
     codex::Codex.observe(
         &mut matching,
         b"{\"type\":\"thread.started\",\"thread_id\":\"retained-thread\"}\n",
@@ -622,14 +622,14 @@ fn expected_continuation_session_is_not_observed_without_a_provider_frame()
         Some("retained-thread")
     );
 
-    let fresh = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    let fresh = codex::Codex.stream_for_continuation("retained-thread", "requested-model", &provenant_records::policy::Policy::default())?;
     assert_eq!(
         codex::Codex.finish(fresh, EXIT)?.session(),
         None,
         "the expectation must not be returned as child evidence"
     );
 
-    let mut wrong = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    let mut wrong = codex::Codex.stream_for_continuation("retained-thread", "requested-model", &provenant_records::policy::Policy::default())?;
     assert!(matches!(
         codex::Codex.observe(
             &mut wrong,
@@ -646,7 +646,7 @@ fn final_incomplete_and_invalid_frames_keep_their_line_number() -> Result<(), Pr
     for eof_hook in [false, true] {
         for fragment in [b"{\"type\":".as_slice(), b"{broken}".as_slice()] {
             for width in 1..=fragment.len() {
-                let mut state = codex::Codex.stream(None)?;
+                let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
                 codex::Codex.observe(&mut state, b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n")?;
                 for chunk in fragment.chunks(width) { codex::Codex.observe(&mut state, chunk)?; }
                 if eof_hook {
@@ -693,7 +693,7 @@ fn filtered_frames_preserve_dense_escapes_and_allow_bounded_mask_growth()
         } else {
             assert_eq!(filtered, raw.as_bytes());
         }
-        let mut stream = codex::Codex.stream(None)?;
+        let mut stream = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
         stream.filtered_capture();
         for chunk in filtered.chunks(8191) {
             codex::Codex.observe(&mut stream, chunk)?;
@@ -714,7 +714,7 @@ fn oversized_frames_are_line_numbered_and_never_success() -> Result<(), Provider
             );
             if terminated { raw.push_str("\"}}\n"); }
             for width in [1, 65_536] {
-                let mut state = codex::Codex.stream(None)?;
+                let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
                 codex::Codex.observe(&mut state, b"{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n")?;
                 let mut error = None;
                 for chunk in raw.as_bytes().chunks(width) {
@@ -730,6 +730,37 @@ fn oversized_frames_are_line_numbered_and_never_success() -> Result<(), Provider
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn codex_oversized_command_output_and_other_oversize_fail_closed()
+-> Result<(), ProviderError> {
+    // Shape of run 358cbf47 (#1514): a 1.17 MB command_execution item.
+    let filler = "x".repeat(1_200_000);
+    let big = format!(
+        "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"item_20\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'cat src/main.rs'\",\"aggregated_output\":\"{filler}\",\"exit_code\":0,\"status\":\"completed\"}}}}\n"
+    );
+    let stream = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}\n{big}{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":2}}}}\n"
+    );
+    let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
+    let mut error = None;
+    for chunk in stream.as_bytes().chunks(65_536) {
+        if let Err(e) = codex::Codex.observe(&mut state, chunk) { error = Some(e); break; }
+    }
+    assert!(matches!(error, Some(ProviderError::MalformedFrame { line: 2 })));
+    assert_eq!(codex::Codex.finish(state, EXIT)?.status(), OutcomeStatus::Malformed);
+    // An oversized agent_message still fails closed.
+    let answer = format!(
+        "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i\",\"type\":\"agent_message\",\"text\":\"{filler}\"}}}}\n"
+    );
+    let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
+    assert!(matches!(
+        codex::Codex.observe(&mut state, answer.as_bytes()),
+        Err(ProviderError::MalformedFrame { line: 1 })
+    ));
+    Ok(())
+}
+
 #[test]
 fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 -> Result<(), ProviderError> {
@@ -740,7 +771,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         r#"{"type":"turn.completed","type":"turn.started"}"#,
         "\u{fffd}",
     ] {
-        let mut state = codex::Codex.stream(None)?;
+        let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
         let observed = codex::Codex.observe(&mut state, format!("{raw}\n").as_bytes());
         assert!(matches!(
             observed,
@@ -757,7 +788,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         incomplete.1.protocol_error(),
         Some(ProviderError::MalformedFrame { line: 1 }.to_string().as_str())
     );
-    let mut complete_partial = codex::Codex.stream(None)?;
+    let mut complete_partial = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     assert!(matches!(
         codex::Codex.observe(&mut complete_partial, b"{\n"),
         Err(ProviderError::MalformedFrame { line: 1 })
@@ -766,7 +797,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         codex::Codex.finish(complete_partial, EXIT)?.status(),
         OutcomeStatus::Malformed
     );
-    let mut state = codex::Codex.stream(None)?;
+    let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     assert!(matches!(
         codex::Codex.observe(&mut state, &vec![b'x'; 1_048_577]),
         Err(ProviderError::MalformedFrame { line: 1 })
@@ -775,7 +806,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         codex::Codex.finish(state, EXIT)?.status(),
         OutcomeStatus::Malformed
     );
-    let mut state = codex::Codex.stream(None)?;
+    let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     codex::Codex.observe(
         &mut state,
         b"{\"type\":\"thread.started\",\"thread_id\":\"a\"}\n",
@@ -788,7 +819,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         Err(ProviderError::IdentityMismatch)
     ));
 
-    let mut state = claude::Claude.stream(None)?;
+    let mut state = claude::Claude.stream(None, &provenant_records::policy::Policy::default())?;
     state.expect_model("expected-model");
     let assistant: &[u8] = br#"{"type":"assistant","message":{"role":"assistant","model":"other-model","content":[{"type":"text","text":"answer"}]},"session_id":"s","parent_tool_use_id":null}"#;
     claude::Claude.observe(&mut state, &[assistant, b"\n"].concat())?;
@@ -1036,7 +1067,7 @@ fn cursor_answer_is_recorded_once() -> Result<(), ProviderError> {
 #[test]
 fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result<(), ProviderError>
 {
-    let mut state = claude::Claude.stream(None)?;
+    let mut state = claude::Claude.stream(None, &provenant_records::policy::Policy::default())?;
     claude::Claude.observe(
         &mut state,
         fixture!("claude/structured-error.jsonl").as_bytes(),
@@ -1058,7 +1089,7 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
             .any(|event| matches!(event, ProviderEvent::Text(_)))
     );
     assert_eq!(outcome.status(), OutcomeStatus::Partial);
-    let mut state = cursor::Cursor.stream(None)?;
+    let mut state = cursor::Cursor.stream(None, &provenant_records::policy::Policy::default())?;
     cursor::Cursor.observe(&mut state, fixture!("cursor/fresh.jsonl").as_bytes())?;
     // apiKeySource=login identifies a mechanism, not a non-secret account.
     assert_eq!(cursor::Cursor.account(&state)?, AccountDetection::Unknown);
@@ -1379,5 +1410,18 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "{adapter} {access:?}: repository execution grant missing"
         );
     }
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+#[test]
+fn continuation_stream_keeps_the_supplied_policy_snapshot() -> Result<(), ProviderError> {
+    use provenant_records::policy::{Policy, Source, Strength};
+    let mut policy = Policy::default();
+    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(), Source::Project);
+    let stream = codex::Codex.stream_for_continuation("session", "model", &policy)?;
+    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Warn)].into(), Source::Project);
+    assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").rule.strength, Strength::Refuse);
+    assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").source, Source::Project);
     Ok(())
 }

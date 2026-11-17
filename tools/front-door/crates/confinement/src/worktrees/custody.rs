@@ -83,11 +83,11 @@ fn check_writer_terminal_with_expected_merge(
     for marker in [
         "CHERRY_PICK_HEAD",
         "REVERT_HEAD",
-        "REBASE_HEAD",
         "rebase-merge",
         "rebase-apply",
         "MERGE_HEAD",
         "sequencer",
+        "BISECT_START",
     ] {
         if marker == "MERGE_HEAD"
             && let Some(expected) = expected_merge

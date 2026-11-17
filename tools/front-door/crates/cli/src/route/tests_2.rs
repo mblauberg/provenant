@@ -351,7 +351,7 @@
             ] {
                 let selected = resolve(&query)?;
                 assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
-                assert!(super::check_dispatch_candidate(&roots, &selected, super::REGISTRY).is_ok());
+                assert!(super::check_dispatch_candidate(&roots, &selected, super::REGISTRY, &provenant_records::policy::Policy::default()).is_ok());
                 let warnings = &selected.diagnostics.account_load.as_ref().ok_or("load")?.warnings;
                 assert!(!warnings.is_empty());
                 assert!(warnings.iter().any(|warning| warning.contains("source=config")));
@@ -659,7 +659,7 @@
         };
         let drawn = resolve(None)?;
         let spent = drawn.account_key.clone().ok_or("account")?;
-        assert!(super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).is_ok());
+        assert!(super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY, &provenant_records::policy::Policy::default()).is_ok());
         // The provider refused the drawn account: the next dispatch keeps the
         // model and takes the other account instead of failing.
         crate::quota::persist_provider_refusal(
@@ -695,10 +695,10 @@
         };
         assert!(preview.provider_refusals.iter().any(|reason| reason.contains(&spent) && reason.contains("scoped provider refusal")), "{:?}", preview.provider_refusals);
         // A refusal written after resolution still stops the launch.
-        let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
+        let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY, &provenant_records::policy::Policy::default()).unwrap_err();
         assert!(matches!(error, super::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))));
         let redrawn = resolve(None)?;
-        assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY).is_ok());
+        assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY, &provenant_records::policy::Policy::default()).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
         assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));
