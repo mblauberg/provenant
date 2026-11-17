@@ -427,6 +427,17 @@ impl ReadinessFile {
         self.records
             .retain(|r| !published.iter().any(|new| new.scope.same_scope(&r.scope)));
         self.records.extend(published);
+        // Held refusals outrank the informational "probed, no figures" note.
+        while self.records.len() > MAX_READINESS_RECORDS {
+            let Some(index) = self
+                .records
+                .iter()
+                .position(|r| r.reason == Some(ReadinessReason::ProbedNoFigures))
+            else {
+                break;
+            };
+            self.records.remove(index);
+        }
         self.check_bound()
     }
 
@@ -480,11 +491,14 @@ impl ReadinessFile {
                 reset_unix_seconds: None,
                 evidence_ref: Some(QUOTA_PROBE.into()),
             });
-        } else if account
-            .snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.windows.is_empty())
+        } else if self.records.len() < MAX_READINESS_RECORDS
+            && account
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.windows.is_empty())
         {
+            // Informational only: a full file keeps its refusals and skips this
+            // note rather than failing a successful probe.
             let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
             let expires = now.saturating_add(interval.max(1));
             self.records.push(RouteReadiness {
@@ -644,11 +658,13 @@ mod tests {
             file.get(&account_scope, 160).reason,
             Some(ReadinessReason::Stale)
         );
+        // #3342: a successful probe with no figures reads as probed, not as
+        // "not probed", so the hint to run `quota tick` is not repeated.
         file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
             .unwrap();
         assert_eq!(
             file.get(&scope, 501).reason,
-            Some(ReadinessReason::NotProbed)
+            Some(ReadinessReason::ProbedNoFigures)
         );
     }
     #[test]
