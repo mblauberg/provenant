@@ -47,6 +47,8 @@ Modeling = "Modeling"
 "standardized" = "standardized"
 "fulfillment" = "fulfillment"
 "canceled" = "canceled"
+# The HTTP Authorization header name, which redaction matches verbatim.
+"authorization" = "authorization"
 # GitHub Actions event activity types.
 "labeled" = "labeled"
 "synchronize" = "synchronize"
