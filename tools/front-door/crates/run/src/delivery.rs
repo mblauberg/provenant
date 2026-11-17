@@ -30,6 +30,10 @@ pub struct HostDeliveryContext {
     /// the task's explicit delivery target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_publish_bound: Option<BoundDelivery>,
+    /// Tools and environment that stop publication prepared for itself. The
+    /// launch delivery fields above stay exactly as the launch prepared them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_publish_host: Option<StopPublishHost>,
     #[serde(skip)]
     lane_path: Option<FilteredLanePath>,
     /// Where the lane can write: its worktree and the project's lane areas.
@@ -121,6 +125,24 @@ impl PartialEq for LaunchBinding {
     }
 }
 impl Eq for LaunchBinding {}
+/// Host state prepared only for stop publication.
+#[derive(Clone, Serialize, Deserialize)]
+struct StopPublishHost {
+    environment: Vec<(Vec<u8>, Vec<u8>)>,
+    tools: Option<HostTools>,
+    #[serde(default)]
+    lane_roots: Vec<PathBuf>,
+    #[serde(skip)]
+    lane_path: Option<FilteredLanePath>,
+}
+impl PartialEq for StopPublishHost {
+    fn eq(&self, other: &Self) -> bool {
+        self.environment == other.environment
+            && self.tools == other.tools
+            && self.lane_roots == other.lane_roots
+    }
+}
+impl Eq for StopPublishHost {}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HostTools {
     git: PathBuf,
@@ -284,6 +306,7 @@ impl Clone for HostDeliveryContext {
             tools: self.tools.clone(),
             bound: self.bound.clone(),
             stop_publish_bound: self.stop_publish_bound.clone(),
+            stop_publish_host: self.stop_publish_host.clone(),
             lane_path: self.lane_path.clone(),
             lane_roots: self.lane_roots.clone(),
             cancellation: self.cancellation.clone(),
@@ -298,6 +321,7 @@ impl PartialEq for HostDeliveryContext {
             && self.tools == other.tools
             && self.bound == other.bound
             && self.stop_publish_bound == other.stop_publish_bound
+            && self.stop_publish_host == other.stop_publish_host
     }
 }
 impl Eq for HostDeliveryContext {}
@@ -346,20 +370,51 @@ impl HostDeliveryContext {
                 "stop publishing requires a branch push",
             ));
         }
-        let launch_bound = self.bound.take();
-        self.stop_publish_bound = None;
-        // The prepared context carries the validated host tools and
-        // environment that stop publication needs. Its binding moves to the
-        // stop-publish slot so it never doubles as a launch binding, and the
-        // task's own launch binding stays in place.
-        let mut prepared = self.prepare(writer, request)?;
-        prepared.stop_publish_bound = prepared.bound.take();
-        prepared.bound = launch_bound;
-        Ok(prepared)
+        // Preparation runs on a copy: only its sealed binding and the tools it
+        // validated are kept, in stop-only fields. The launch binding, host
+        // tools and environment stay as the launch prepared them.
+        let prepared = self.clone().prepare(writer, request)?;
+        self.attach_stop_publish(prepared);
+        Ok(self)
+    }
+    #[cfg(test)]
+    pub(crate) fn launch_state_for_test(
+        &self,
+    ) -> (
+        Option<PathBuf>,
+        Option<PathBuf>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
+        let scope = provenant_records::custody::Scope {
+            attempt: provenant_core::AttemptId::from_bytes([0x54; 16]),
+            generation: 1,
+        };
+        (
+            self.tools.as_ref().map(|tools| tools.git.clone()),
+            self.tools.as_ref().and_then(|tools| tools.gh.clone()),
+            self.bound
+                .as_ref()
+                .and_then(|bound| crate::db::bytes(&LaunchBinding::new(scope, bound)).ok()),
+            self.stop_publish_bound
+                .as_ref()
+                .and_then(|bound| crate::db::bytes(&LaunchBinding::new(scope, bound)).ok()),
+            self.environment.clone(),
+        )
+    }
+    fn attach_stop_publish(&mut self, prepared: Self) {
+        self.stop_publish_bound = prepared.bound;
+        self.stop_publish_host = Some(StopPublishHost {
+            environment: prepared.environment,
+            tools: prepared.tools,
+            lane_roots: prepared.lane_roots,
+            lane_path: prepared.lane_path,
+        });
     }
     /// Rebuild stop-publish transport from its immutable launch binding.
     pub(crate) fn prepare_stop_publish_recovery(
-        self,
+        mut self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         attempt: &Directory,
@@ -367,7 +422,7 @@ impl HostDeliveryContext {
         head: GitOid,
         base: GitOid,
     ) -> Result<Self> {
-        let mut prepared = self.prepare(writer, request)?;
+        let mut prepared = self.clone().prepare(writer, request)?;
         let bound = prepared
             .bound
             .as_ref()
@@ -376,13 +431,13 @@ impl HostDeliveryContext {
         if prepared.head(writer)? != head {
             return Err(RunError::Validation(HEAD_MISMATCH));
         }
-        let mut bound = prepared
+        prepared
             .bound
-            .take()
-            .ok_or(RunError::Validation("stop publish binding missing"))?;
-        bound.base_head = base;
-        prepared.stop_publish_bound = Some(bound);
-        Ok(prepared)
+            .as_mut()
+            .ok_or(RunError::Validation("stop publish binding missing"))?
+            .base_head = base;
+        self.attach_stop_publish(prepared);
+        Ok(self)
     }
     pub(crate) fn push_stopped_head(
         &self,
@@ -396,14 +451,23 @@ impl HostDeliveryContext {
             .stop_publish_bound
             .as_ref()
             .ok_or(RunError::Validation("stop publish binding missing"))?;
+        let stop = self
+            .stop_publish_host
+            .as_ref()
+            .ok_or(RunError::Validation("stop publish tools missing"))?;
+        // Push with the stop-prepared tools and environment, not the launch's.
+        let mut host = self.clone();
+        host.environment = stop.environment.clone();
+        host.tools = stop.tools.clone();
+        host.lane_roots = stop.lane_roots.clone();
+        host.lane_path = stop.lane_path.clone();
         if bound.destination.mode != crate::DeliveryMode::Push
             || bound.destination.open_pr
             || bound.destination.branch != bound.lane_branch
-            || self.head(writer)? != head
+            || host.head(writer)? != head
         {
             return Err(RunError::Validation(HEAD_MISMATCH));
         }
-        let mut host = self.clone();
         host.bound = Some(bound.clone());
         host.push_with_clean(writer, &bound.destination, head, "", false)
             .map(|_| ())
@@ -980,6 +1044,7 @@ impl HostDeliveryContext {
                 .collect(),
             bound: None,
             stop_publish_bound: None,
+            stop_publish_host: None,
             tools: None,
             lane_path: None,
             lane_roots: Vec::new(),

@@ -1536,9 +1536,8 @@ impl RunStore {
             record.project_id,
             &self.repo_facts,
         )?;
-        let run_config = provenant_confinement::run_config::RunConfig::read(
-            self.context.state_root.as_path(),
-        )?;
+        let run_config =
+            provenant_confinement::run_config::RunConfig::read(self.context.state_root.as_path())?;
         let custody_project = crate::writer::writer_project_id(writer)?;
         let review_exempt = run_config.review_exempt(&custody_project.to_string());
         crate::settlement::with_cancellation(attempt, scope, &cancel, || {

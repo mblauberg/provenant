@@ -22,7 +22,7 @@ fn stopped_head_push_uses_launch_binding_and_keeps_dirty_paths()
     std::fs::write(fixture.writer.worktree.join("committed.txt"), "committed\n")?;
     fixture.lane_git(&["add", "committed.txt"])?;
     fixture.commit(&fixture.writer.worktree, "stopped writer commit")?;
-    let head = host.head(&fixture.writer)?;
+    let head = fixture.prepare()?.head(&fixture.writer)?;
     std::fs::write(
         fixture.writer.worktree.join("unfinished.txt"),
         "keep dirty\n",
@@ -51,6 +51,52 @@ fn stopped_head_push_uses_launch_binding_and_keeps_dirty_paths()
         &["status", "--porcelain", "--untracked-files=all"],
     )?)?;
     assert!(status.contains("unfinished.txt"), "{status}");
+    Ok(())
+}
+
+// Spec: docs/specs/run.md#stop-intent
+#[test]
+fn stop_publish_preparation_leaves_the_launch_pr_delivery_untouched()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request.open_pr = true;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    fixture.executable(&fixture.root.join("gh"), "#!/bin/sh\nexit 0\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    let launch = fixture.prepare()?;
+    let (git_before, gh_before, binding_before, stop_before, environment_before) =
+        launch.launch_state_for_test();
+    assert!(gh_before.is_some(), "an open_pr launch prepares gh");
+    assert!(binding_before.is_some() && stop_before.is_none());
+
+    let request = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
+        .ok_or("stop-publish destination")?;
+    let stopped = launch
+        .clone()
+        .prepare_stop_publish(&fixture.writer, &request)?;
+    let (git_after, gh_after, binding_after, stop_after, environment_after) =
+        stopped.launch_state_for_test();
+    assert_eq!(gh_after, gh_before, "launch gh unchanged");
+    assert_eq!(git_after, git_before);
+    assert!(binding_after == binding_before, "launch binding unchanged");
+    assert_eq!(environment_after, environment_before);
+    let stop_after = stop_after.ok_or("stop-publish binding present")?;
+    assert!(Some(stop_after) != binding_after, "bindings are distinct");
     Ok(())
 }
 
