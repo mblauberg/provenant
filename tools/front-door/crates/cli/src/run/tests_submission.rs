@@ -43,9 +43,9 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
         ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
             let guard = provenant_records::diagnostic::ContinuationGuard {
-                rule: provenant_records::diagnostic::ContinuationRule::RetainedRoute,
-                field: provenant_records::diagnostic::ContinuationField::Effort,
-                issue: provenant_records::diagnostic::ContinuationIssue::Mismatch,
+                rule: provenant_records::diagnostic::ContinuationRule::NativeSession,
+                field: provenant_records::diagnostic::ContinuationField::Rollout,
+                issue: provenant_records::diagnostic::ContinuationIssue::Unavailable,
             };
             let mut skipped = run::SkippedRoute {
                 route: "codex/gpt-6-luna".into(),
@@ -117,7 +117,11 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
         .ok_or("persisted continuation fact")?;
     assert_eq!(
         guard.field,
-        provenant_records::diagnostic::ContinuationField::Effort
+        provenant_records::diagnostic::ContinuationField::Rollout
+    );
+    assert_eq!(
+        guard.issue,
+        provenant_records::diagnostic::ContinuationIssue::Unavailable
     );
     let run::AttemptState::Terminal {
         outcome: run::Outcome::Rejected,

@@ -10,6 +10,8 @@ use std::{
 
 /// Bound on one retained rollout line; longer lines are drained and skipped.
 const LINE_LIMIT: u64 = 1024 * 1024;
+/// Largest retained rollout read for session identity verification.
+pub const MAX_ROLLOUT_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum entries traversed during a bounded full scan for a rollout.
 pub(crate) const MAX_ROLLOUT_SCAN_DIRECTORIES: usize = 4096;
 
@@ -162,10 +164,10 @@ fn scan_day(
         let file = day
             .open_read(&name)
             .map_err(|_| ProviderError::UnknownIdentity)?;
-        if file.metadata().map_err(|_| ProviderError::Malformed)?.size > 32 * 1024 * 1024 {
+        if file.metadata().map_err(|_| ProviderError::Malformed)?.size > MAX_ROLLOUT_BYTES {
             return Err(ProviderError::Overflow);
         }
-        let mut reader = BufReader::new(file.take(32 * 1024 * 1024 + 1));
+        let mut reader = BufReader::new(file.take(MAX_ROLLOUT_BYTES + 1));
         let mut line = Vec::new();
         let mut session = false;
         let mut turn = None;

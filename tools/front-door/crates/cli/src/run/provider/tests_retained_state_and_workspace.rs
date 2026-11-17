@@ -520,6 +520,16 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
         assert_eq!(guard.field, F::Rollout);
         assert_eq!(guard.issue, issue);
     }
+    // A large retained rollout is unavailable for verification, not evidence
+    // that a particular session or model field changed. Sparse allocation
+    // reaches the reader's size boundary without a large fixture payload.
+    std::fs::File::create(&rollout)?
+        .set_len(provenant_providers::codex_rollout::MAX_ROLLOUT_BYTES + 1)?;
+    let oversized = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
+    let guard = oversized.guard().ok_or("typed oversized rollout refusal")?;
+    assert_eq!(guard.rule, R::NativeSession);
+    assert_eq!(guard.field, F::Rollout);
+    assert_eq!(guard.issue, I::Unavailable);
     std::fs::write(
         &rollout,
         format!(

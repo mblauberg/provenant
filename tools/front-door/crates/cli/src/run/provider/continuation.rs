@@ -459,7 +459,10 @@ pub(super) fn verify_native_continuation(
     {
         let observed = match provenant_providers::codex_rollout::observe(&prior_root, session) {
             Ok(observed) => observed,
-            Err(provenant_providers::ProviderError::UnknownIdentity) => {
+            Err(
+                provenant_providers::ProviderError::UnknownIdentity
+                | provenant_providers::ProviderError::Overflow,
+            ) => {
                 return Err(ContinuationError::NativeSessionUnavailable);
             }
             Err(
