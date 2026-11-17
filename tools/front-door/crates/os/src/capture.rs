@@ -343,24 +343,26 @@ impl Frames {
         if self.filter_disabled {
             return;
         }
-        let filtered;
-        let bytes = if let Some(filter) = filter.as_deref_mut() {
-            match filter.filter(chunk) {
-                Ok(value) if value.len() <= FRAME_LIMIT => {
-                    filtered = value;
-                    &filtered
-                }
-                Err(_) | Ok(_) => {
-                    self.filter_disabled = true;
-                    out.filter_failed = true;
-                    return;
-                }
-            }
-        } else {
-            chunk
+        let Some(filter) = filter.as_deref_mut() else {
+            Self::retain_filtered(policy, chunk, out);
+            return;
         };
-
-        self.retain_filtered(policy, bytes, out);
+        let disabled = &mut self.filter_disabled;
+        let mut sink = |frame: &[u8]| {
+            if *disabled {
+                return;
+            }
+            if frame.len() > FRAME_LIMIT {
+                *disabled = true;
+                out.filter_failed = true;
+                return;
+            }
+            Self::retain_filtered(policy, frame, out);
+        };
+        if filter.filter(chunk, &mut sink).is_err() {
+            *disabled = true;
+            out.filter_failed = true;
+        }
     }
 
     fn finish_filter(
@@ -372,19 +374,27 @@ impl Frames {
         if self.filter_disabled {
             return;
         }
-        let Some(filter) = filter.as_deref_mut() else {
-            return;
-        };
-        match filter.finish() {
-            Ok(bytes) if bytes.len() <= FRAME_LIMIT => self.retain_filtered(policy, &bytes, out),
-            Err(_) | Ok(_) => {
-                self.filter_disabled = true;
+        if let Some(filter) = filter.as_deref_mut() {
+            let disabled = &mut self.filter_disabled;
+            let mut sink = |frame: &[u8]| {
+                if *disabled {
+                    return;
+                }
+                if frame.len() > FRAME_LIMIT {
+                    *disabled = true;
+                    out.filter_failed = true;
+                    return;
+                }
+                Self::retain_filtered(policy, frame, out);
+            };
+            if filter.finish(&mut sink).is_err() {
+                *disabled = true;
                 out.filter_failed = true;
             }
         }
     }
 
-    fn retain_filtered(&self, policy: &StreamPolicy<'_>, bytes: &[u8], out: &mut CapturedStream) {
+    fn retain_filtered(policy: &StreamPolicy<'_>, bytes: &[u8], out: &mut CapturedStream) {
         if bytes.is_empty() {
             return;
         }
@@ -556,18 +566,23 @@ mod tests {
 
     struct ReplacingFilter;
     impl CaptureFilter for ReplacingFilter {
-        fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+        fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
             if bytes == b"secret" {
-                Ok(b"[redacted]".to_vec())
+                sink(b"[redacted]");
             } else {
-                Ok(bytes.to_vec())
+                sink(bytes);
             }
+            Ok(())
         }
     }
 
     struct FailingFilter;
     impl CaptureFilter for FailingFilter {
-        fn filter(&mut self, _bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+        fn filter(
+            &mut self,
+            _bytes: &[u8],
+            _sink: &mut dyn FnMut(&[u8]),
+        ) -> Result<(), FilterError> {
             Err(FilterError)
         }
     }
@@ -576,13 +591,18 @@ mod tests {
         pending: Vec<u8>,
     }
     impl CaptureFilter for FinishingFilter {
-        fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+        fn filter(
+            &mut self,
+            bytes: &[u8],
+            _sink: &mut dyn FnMut(&[u8]),
+        ) -> Result<(), FilterError> {
             self.pending.extend_from_slice(bytes);
-            Ok(Vec::new())
+            Ok(())
         }
 
-        fn finish(&mut self) -> Result<Vec<u8>, FilterError> {
-            Ok(std::mem::take(&mut self.pending))
+        fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+            sink(&std::mem::take(&mut self.pending));
+            Ok(())
         }
     }
 
@@ -833,6 +853,47 @@ mod tests {
         assert!(capture.push(b"secret").is_ok());
         assert!(capture.outcome().filter_failed);
         assert!(capture.outcome().bytes.is_empty());
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn filter_frames_are_all_retained_including_finish() {
+        struct MultiFrame;
+        impl CaptureFilter for MultiFrame {
+            fn filter(&mut self, _: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+                sink(&vec![b'a'; FRAME_LIMIT]);
+                sink(&vec![b'b'; FRAME_LIMIT]);
+                Ok(())
+            }
+            fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+                sink(&vec![b'c'; FRAME_LIMIT]);
+                sink(b"d");
+                Ok(())
+            }
+        }
+        let mut filter = MultiFrame;
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Capture {
+                limit: FRAME_LIMIT * 3 + 1,
+            },
+            None,
+            Some(&mut filter),
+        )
+        .expect("valid capture");
+        capture.push(b"input").expect("capture input");
+        capture.finish();
+        let outcome = capture.outcome();
+        assert!(!outcome.filter_failed);
+        assert_eq!(
+            outcome.bytes,
+            [
+                vec![b'a'; FRAME_LIMIT],
+                vec![b'b'; FRAME_LIMIT],
+                vec![b'c'; FRAME_LIMIT],
+                vec![b'd']
+            ]
+            .concat()
+        );
     }
 
     #[test]
