@@ -2656,9 +2656,16 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
         observation.cancel_delivered_before_exit = Some(false);
         seal_observation(&store, &input, &observation)?;
         let dir = store.attempt_dir(id, false)?;
+        // Only an explicit cancellation lives in `cancel.json`; any other host
+        // stop, such as the wall deadline, is a `stop-intent.json`
+        // (`read_stop_intent`, b290fda595).
         crate::artifacts::seal(
             &dir,
-            "cancel.json",
+            if prelaunch {
+                "cancel.json"
+            } else {
+                "stop-intent.json"
+            },
             &serde_json::to_vec(
                 &serde_json::json!({"schema_version":1,"scope":observation.scope,"requester":context.actor_id,"request_id":"stop-test","reason":observation.stop_reason}),
             )?,
