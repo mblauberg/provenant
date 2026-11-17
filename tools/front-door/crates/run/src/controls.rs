@@ -4687,7 +4687,7 @@ impl RunStore {
         )
         .map(|(run, _)| run)
     }
-    fn resume_policy(
+    pub(crate) fn resume_policy(
         &self,
         prior: AttemptId,
         call: &Request<'_>,
