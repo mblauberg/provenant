@@ -492,6 +492,8 @@ impl ReadinessFile {
                 evidence_ref: Some(QUOTA_PROBE.into()),
             });
         } else if self.records.len() < MAX_READINESS_RECORDS
+            // A deferred refresh completed no probe, so it reports nothing.
+            && account.last_error.is_none()
             && account
                 .snapshot
                 .as_ref()
