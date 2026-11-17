@@ -105,8 +105,8 @@ State the acceptance criteria, the literal write scope, the checks that prove
 completion and the authority the implementer holds. Decide engineering
 questions yourself: pick the reversible option, state it as an assumption and
 record it under DECISIONS. Raise NEEDS-USER only for an owner decision or a
-need to expand authority, and finish with VERDICT: FAIL; otherwise finish with
-VERDICT: PASS.
+need to expand authority, and write VERDICT: FAIL; otherwise write VERDICT: PASS.
+Put that verdict line before the closing handoff block, which comes last.
 """
 
 [roles."plan.slices"]
@@ -160,7 +160,7 @@ Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
 ${local_check_policy}
-End with a findings block (schema_version 1) whose findings are a JSON array,
+Write a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
 summary to one line and include the evidence and proposed fix as structured
 fields. Use this canonical array form:
@@ -335,8 +335,8 @@ upstream findings; descriptive fields are inherited. New findings require
 severity, file, summary, status, evidence and proposed_fix as structured fields as well. After all findings and prose, write
 exactly one standalone verdict line: VERDICT: PASS only when no
 accepted finding remains, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
-when the evidence cannot support a decision. Finish with the shared result
-contract in reviewer context.
+when the evidence cannot support a decision. Then put the closing handoff block
+last, as the shared result contract in reviewer context states.
 """
 
 [roles."write.implement"]

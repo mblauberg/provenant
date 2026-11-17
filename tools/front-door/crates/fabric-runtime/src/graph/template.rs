@@ -737,7 +737,7 @@ impl ReviewBehaviour {
         }
         let prompt = node.entry("prompt").or_insert_with(|| "".into());
         let brief = prompt.as_str().unwrap_or_default();
-        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. End with exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow. PASS requires complete acceptance evidence and no repair-eligible findings; missing evidence is INCONCLUSIVE.").into();
+        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. PASS requires complete acceptance evidence and no repair-eligible findings; missing evidence is INCONCLUSIVE. {}", super::review::VERDICT_THEN_HANDOFF).into();
     }
 }
 

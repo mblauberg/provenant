@@ -36,10 +36,13 @@ handoff evidence still survives in their sealed stop.
 - Why: unfinished work must not appear complete or lose its handoff.
 
 The canonical review result order is a standalone verdict followed by the
-final handoff. As a narrow provider-order tolerance, a valid closed final
+final handoff. Every review prompt, including synthesis and the one automatic
+verdict correction, states that order and never invites text after the
+handoff. As a narrow provider-order tolerance, a valid closed final
 handoff may be followed by exactly one recognised standalone verdict, and
-nothing else. ResultCapture owns verdict recognition and requires exactly one
-canonical verdict outside fenced blocks. In turn-aware settlement, a later
+nothing else. ResultCapture owns verdict recognition, so the tolerated line is
+any form it counts, and it requires exactly one canonical verdict outside
+fenced blocks. In turn-aware settlement, a later
 text-only acknowledgement may preserve an earlier handoff only when no verdict
 follows it. Once a verdict follows a handoff, the entire suffix from that
 handoff must be the sole recognised verdict: prose before or after it, another

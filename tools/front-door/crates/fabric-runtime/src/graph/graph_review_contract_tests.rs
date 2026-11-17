@@ -751,6 +751,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
     }
 }
 
+// Spec: docs/specs/run-settlement.md#settlement
 #[test]
 fn malformed_lens_is_corrected_once_without_repeating_siblings() {
     for corrected in [true, false] {
@@ -820,6 +821,16 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
             .position(|prompt| prompt.contains("only automatic verdict correction"))
             .unwrap();
         assert_eq!(correction, 1);
+        // Every review prompt, the correction and the synthesis alike, asks for
+        // the verdict line first and the closed handoff as the very last thing.
+        assert_eq!(owner.prompts.len(), 3);
+        for prompt in &owner.prompts {
+            assert!(
+                prompt.contains(super::review::VERDICT_THEN_HANDOFF),
+                "{prompt}"
+            );
+            assert!(!prompt.contains("may follow"), "{prompt}");
+        }
         assert_eq!(owner.calls[correction].0.node_id, retried.id);
         assert_eq!(
             owner
