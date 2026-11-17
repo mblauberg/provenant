@@ -1384,9 +1384,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     extensions: &[String],
     observed_ci: &mut std::collections::BTreeSet<String>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    let normalised =
-        prompt_text::normalise(document).map_err(|reason| GraphError::Invalid(reason.into()))?;
-    let document = &normalised;
     let worktree_layout = owner.worktree_layout();
     let mut admission_policy = None::<provenant_records::policy::Policy>;
     let unbounded = crate::config::GraphLimits {

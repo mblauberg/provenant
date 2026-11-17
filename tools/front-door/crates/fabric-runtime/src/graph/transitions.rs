@@ -323,6 +323,7 @@ pub(super) fn apply_attempt_observation(
                     commit.clone(),
                     &upstream_findings,
                 );
+                outputs = prompt_text::normalise(&outputs)?;
                 if !repair::may_report_items(node, plan) {
                     outputs.repair_items = None;
                 }

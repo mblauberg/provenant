@@ -284,6 +284,80 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     assert!(found.unusable.iter().any(|error| error.contains("g-test")));
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let graph_id = "g-test";
+    let credential = "AKIAIOSFODNN7EXAMPLE";
+    // In round-2 normal form, identity-like keys inside parameters retained their
+    // value unredacted. Round 3 normalises all descendants of parameters as content.
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": graph_id,
+        "provenance": {"parameters": {"source": credential}},
+        "nodes": [{
+            "id": "reader",
+            "prompt": "safe prompt",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))
+    .unwrap();
+    let limits = plans::generous();
+    let (base_plan, _) = validate_replay_plan(&document, &limits).unwrap();
+    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base_plan)
+        .unwrap()
+        .to_string();
+
+    let mut fixture: StoredCheckpoint = stored_fixture();
+    fixture.schema_version = 2;
+    fixture.execution.document = document.clone();
+    fixture.checkpoint.graph_id = graph_id.into();
+    fixture.checkpoint.plan_digest = plan_digest;
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    let head = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+    let review = ReviewSettlement {
+        attempt_id: provenant_core::AttemptId::from_bytes([7; 16]),
+        head,
+        base: None,
+        verdict: provenant_records::workflow::ReviewVerdict::Approve,
+        independent: true,
+    };
+    fixture.checkpoint.nodes[0].review_settlement = Some(review.clone());
+    fixture.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&fixture.checkpoint, &fixture.execution),
+    )
+    .unwrap()
+    .to_string();
+
+    let path = root
+        .as_path()
+        .join(format!("fabric/graphs/{project}/graph-{graph_id}.json"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, CanonicalV1::bytes(&fixture).unwrap().as_bytes()).unwrap();
+
+    let mut journal = FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap();
+    // Stored checkpoint in round-2 normal form must resume without BadCheckpoint/BadDigest.
+    let run = resume(&document, &mut Owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+
+    // And verify it lands.
+    let found = landing_reviews(&root, project, head).unwrap();
+    assert_eq!(found.reviews, vec![review]);
+    assert!(found.unusable.is_empty());
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn watching_the_checkpoint_observes_publication_after_the_precommit_event_log() {

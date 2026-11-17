@@ -207,7 +207,7 @@ impl FileJournal {
         clock: &dyn Clock,
     ) -> Result<String, JournalError> {
         let error_graph_id = target.graph_id.to_owned();
-        (|| super::cancellation_intent::record(root, project, target, budget, cancel, clock))()
+        super::cancellation_intent::record(root, project, target, budget, cancel, clock)
             .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
@@ -219,7 +219,7 @@ impl FileJournal {
         request_id: &str,
     ) -> Result<bool, JournalError> {
         let error_graph_id = graph_id.to_owned();
-        (|| super::cancellation_intent::pending(root, project, graph_id, request_id))()
+        super::cancellation_intent::pending(root, project, graph_id, request_id)
             .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 
@@ -1239,7 +1239,7 @@ impl GraphJournal for FileJournal {
         checkpoint: &mut GraphCheckpoint,
     ) -> Result<bool, Self::Error> {
         let error_graph_id = self.graph_id.clone();
-        (|| super::cancellation_intent::acknowledge(self, document, checkpoint))()
+        super::cancellation_intent::acknowledge(self, document, checkpoint)
             .map_err(|error: JournalError| error.for_graph(&error_graph_id))
     }
 

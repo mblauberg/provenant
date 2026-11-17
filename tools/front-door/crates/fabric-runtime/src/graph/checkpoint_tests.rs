@@ -90,39 +90,48 @@ fn review_schema_versions_and_stored_digests() {
     );
 }
 
+fn sealed(mut record: StoredCheckpoint) -> Vec<u8> {
+    if let Ok((base, _)) = validate_replay_plan(&record.execution.document, &plans::generous())
+        && let Ok(plan_digest) = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+    {
+        record.checkpoint.plan_digest = plan_digest.to_string();
+    }
+    record.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&record.checkpoint, &record.execution),
+    )
+    .unwrap()
+    .to_string();
+    serde_json::to_vec(&record).unwrap()
+}
+
 #[test]
 fn journal_requires_and_projects_execution_bases_for_review_documents() {
-    let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
-    record.execution.document.review_base = Some("base".into());
-    record.execution.document.schema_version = 2;
-    record.execution.bases = GraphBaseBinding::new(
+    let make_record = || -> StoredCheckpoint {
+        let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
+        record.execution.document.review_base = Some("base".into());
+        record.execution.document.schema_version = 2;
+        record
+    };
+    let mut record = make_record();
+    let expected_bases = GraphBaseBinding::new(
         Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
         None,
     );
-    record.digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&record.checkpoint, &record.execution),
-    )
-    .unwrap()
-    .to_string();
-    let bytes = serde_json::to_vec(&record).unwrap();
+    record.execution.bases = expected_bases.clone();
+    let bytes = sealed(record);
     let decoded = decode_checkpoint(&bytes, "g-test").unwrap();
-    assert_eq!(decoded.checkpoint.bases, record.execution.bases);
+    assert_eq!(decoded.checkpoint.bases, expected_bases);
+    let mut record = make_record();
     record.execution.bases = None;
-    record.digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&record.checkpoint, &record.execution),
-    )
-    .unwrap()
-    .to_string();
     assert!(matches!(
-        decode_checkpoint(&serde_json::to_vec(&record).unwrap(), "g-test"),
+        decode_checkpoint(&sealed(record), "g-test"),
         Err(JournalError::BadEnvelope)
     ));
+    let mut record = make_record();
     record.execution.document.schema_version = 1;
-    let bytes = serde_json::to_vec(&record).unwrap();
+    let bytes = sealed(record);
     assert!(matches!(
         decode_checkpoint(&bytes, "g-test"),
         Err(JournalError::BadEnvelope)
@@ -131,16 +140,6 @@ fn journal_requires_and_projects_execution_bases_for_review_documents() {
 
 #[test]
 fn admission_recovery_capability() {
-    fn bytes(mut record: StoredCheckpoint) -> Vec<u8> {
-        record.digest = CanonicalV1::record_digest(
-            "fabric-graph-checkpoint",
-            2,
-            &(&record.checkpoint, &record.execution),
-        )
-        .unwrap()
-        .to_string();
-        serde_json::to_vec(&record).unwrap()
-    }
     let seed = || -> StoredCheckpoint { serde_json::from_value(stored()).unwrap() };
 
     let mut execution_base = seed();
@@ -149,7 +148,7 @@ fn admission_recovery_capability() {
         None,
     );
     assert!(matches!(
-        decode_checkpoint(&bytes(execution_base), "g-test"),
+        decode_checkpoint(&sealed(execution_base), "g-test"),
         Err(JournalError::BadEnvelope)
     ));
 
@@ -162,25 +161,25 @@ fn admission_recovery_capability() {
         .unwrap(),
     );
     assert!(matches!(
-        decode_checkpoint(&bytes(expansion), "g-test"),
+        decode_checkpoint(&sealed(expansion), "g-test"),
         Err(JournalError::BadEnvelope)
     ));
 
     let mut node = seed();
     node.execution.document.nodes[0].family_group = Some("group".into());
     assert!(matches!(
-        decode_checkpoint(&bytes(node), "g-test"),
+        decode_checkpoint(&sealed(node), "g-test"),
         Err(JournalError::BadEnvelope)
     ));
 
     let mut plain_v2 = seed();
     plain_v2.execution.document.schema_version = 2;
-    assert!(decode_checkpoint(&bytes(plain_v2), "g-test").is_ok());
+    assert!(decode_checkpoint(&sealed(plain_v2), "g-test").is_ok());
 
     let mut unsupported = seed();
     unsupported.execution.document.schema_version = 3;
     assert!(matches!(
-        decode_checkpoint(&bytes(unsupported), "g-test"),
+        decode_checkpoint(&sealed(unsupported), "g-test"),
         Err(JournalError::Decode(DecodeError::UnsupportedVersion {
             found: 3,
             ..

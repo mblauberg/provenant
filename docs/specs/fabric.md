@@ -403,19 +403,21 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 Admission bounds the worst-case checkpoint before saving the plan.
-Graph input text is normalised with the capture credential-shape redactor at
-admission, including nested template parameters and acceptance checks. Live
-patches and retry briefs use the same representation before planning or
-hashing; their disclosure checks remain in force. Captured findings, handoffs
-and result excerpts are normalised before becoming graph outputs or subsequent
-prompts. The immutable result artifact keeps its original digest. Planning,
-execution and persistence share the normalised text: content-addressed storage
-only externalises bytes and never rewrites digested content. The journal
-strictly validates the stored representation before publishing it. The strict
-checkpoint decoder verifies both the envelope digest and the base plan digest,
-so publication and landing review reads reject the same corrupt state.
-Identity exclusions apply only to schema fields; every value inside a parameter
-map is prompt content, including parameters named `source`, `path` or `template`.
+Graph text is normalised exactly once, at ingress, by field type. Each schema
+field is either an identity (IDs, file paths, repair item IDs, propagation
+markers, template and source names at their schema paths) or content (prose, and
+every value inside a parameter map). Live patches, retry briefs and CI
+observations use the same representation at ingress before planning or hashing.
+Captured findings, handoffs and result excerpts are parsed and normalised
+through the field-typed walker before becoming graph outputs or subsequent
+prompts; propagation markers are preserved as identities. Checkpoints persist
+the normalised form. Every strict read and every digest check verifies the
+stored bytes as stored and never normalises again. Normalising is idempotent.
+Content-addressed storage only externalises bytes and never rewrites digested
+content. The journal strictly validates the stored representation before
+publishing it. The strict checkpoint decoder verifies both the envelope digest
+and the base plan digest, so publication and landing review reads reject the same
+corrupt state.
 
 - Why: an accepted graph must be able to save its checkpoint.
 

@@ -2,4 +2,4 @@
 
 ### Pipelines and graphs
 
-- Credential-shaped graph text is normalised before planning, so saved graphs verify on reload and advance with matching plan digests. Template parameters are normalised even when their names match identity fields, and strict checkpoint reads reject incorrect plan digests before publication or landing. (#3401)
+- Graph text is normalised exactly once, at ingress, by field type, preserving schema identities while normalising parameter and prompt content. Stored bytes are verified directly on strict reads and digest checks without re-normalising, so saved graphs and deployed checkpoints verify on reload, resume and advance with matching plan digests. (#3401)

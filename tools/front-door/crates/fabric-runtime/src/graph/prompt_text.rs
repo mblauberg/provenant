@@ -44,7 +44,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
                     // This context is entered only at the schema findings field,
                     // never at a similarly named key inside parameter content.
                     if matches!(context, Context::Finding) {
-                        if !matches!(key.as_str(), "id" | "file" | "path" | "lens") {
+                        if !matches!(key.as_str(), "id" | "file" | "path" | "lens" | "propagates") {
                             visit(value, Context::Content)?;
                         }
                         continue;
@@ -70,6 +70,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
                             | "lens"
                             | "template"
                             | "use"
+                            | "propagates"
                     );
                     if identity {
                         continue;
@@ -136,11 +137,6 @@ pub(super) fn capture(
     let mut capture = input.clone();
     capture.excerpt = normalise_prompt_text(&capture.excerpt)?;
     capture.tail = normalise_prompt_text(&capture.tail)?;
-    capture.findings = capture
-        .findings
-        .as_deref()
-        .map(normalise_prompt_text)
-        .transpose()?;
     capture.verdict = capture
         .verdict
         .as_deref()
@@ -176,7 +172,7 @@ mod tests {
             "graph_id": identity,
             "nodes": [{"id": identity, "prompt": identity,
                 "depends_on": [identity], "route": {"alias": identity}}],
-            "findings": [{"id": identity, "file": identity, "summary": identity}],
+            "findings": [{"id": identity, "file": identity, "propagates": identity, "summary": identity}],
             "provenance": {"parameters": {"source": identity,
                 "nested": {"file": identity, "findings": [{"id": identity}]}}},
             "with": {"source": identity, "path": [identity], "template": identity},
@@ -189,6 +185,7 @@ mod tests {
         assert_eq!(safe["nodes"][0]["route"]["alias"], identity);
         assert_eq!(safe["findings"][0]["id"], identity);
         assert_eq!(safe["findings"][0]["file"], identity);
+        assert_eq!(safe["findings"][0]["propagates"], identity);
         assert_ne!(safe["nodes"][0]["prompt"], identity);
         assert_ne!(safe["findings"][0]["summary"], identity);
         assert_eq!(safe["repair_items"][0]["id"], identity);
@@ -211,9 +208,12 @@ mod tests {
     fn captured_findings_and_handoff_use_the_same_normal_form() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let mut input = crate::result_capture::ResultCapture::new(None);
-        input.push(format!("VERDICT: {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"file.rs\",\"summary\":\"{secret}\",\"status\":\"open\"}}]}}\n```\n").as_bytes());
+        input.push(format!("VERDICT: {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"{secret}\",\"severity\":\"high\",\"file\":\"{secret}\",\"propagates\":\"{secret}\",\"summary\":\"{secret}\",\"status\":\"open\"}}]}}\n```\n").as_bytes());
         let mut input = input.finish();
-        assert_eq!(input.verdict.as_deref(), Some(secret));
+        assert_eq!(
+            input.verdict.as_deref(),
+            Some(format!("VERDICT: {secret}").as_str())
+        );
         input.verdict_cause = Some(format!("untrusted verdict diagnostic {secret}"));
         input.handoff = Ok(Some(
             serde_json::from_value(serde_json::json!({
@@ -233,9 +233,13 @@ mod tests {
         );
         assert!(!safe.excerpt.contains(secret));
         assert!(!safe.tail.contains(secret));
-        assert!(!safe.findings.as_deref().unwrap().contains(secret));
+        // Transient findings JSON is parsed first, not prematurely normalised as prose.
         let outputs = outputs::make_outputs(Some(&safe), None, None, None, None);
-        assert!(!serde_json::to_string(&outputs).unwrap().contains(secret));
+        let outputs = normalise(&outputs).unwrap();
+        assert_eq!(outputs.findings[0].id, secret);
+        assert_eq!(outputs.findings[0].file, secret);
+        assert_eq!(outputs.findings[0].propagates.as_deref(), Some(secret));
+        assert!(!outputs.findings[0].summary.contains(secret));
         assert_eq!(safe, capture(&safe).unwrap());
     }
 }
