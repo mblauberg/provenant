@@ -73,15 +73,8 @@ impl DeliveredSteerStop {
             }
     }
 
-    fn matches_marker(self, raw: &[u8]) -> bool {
-        self.matches(CancelMarker::classify(raw, self.scope))
-    }
-
     pub(crate) fn marker_vetoes(self, attempt: &Directory) -> Result<bool> {
-        let Some(raw) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? else {
-            return Ok(true);
-        };
-        Ok(!self.matches_marker(&raw))
+        Ok(!self.matches(CancelMarker::read(attempt, self.scope)?))
     }
 }
 
@@ -651,10 +644,10 @@ fn with_cancellation_policy<T>(
     std::thread::scope(|threads| {
         threads.spawn(move || {
             loop {
-                let cancelled = match read_sealed(&directory, "cancel.json", RECORD_LIMIT) {
-                    Ok(raw) => match delivered_steer {
-                        Some(stop) => raw.is_none_or(|raw| !stop.matches_marker(&raw)),
-                        None => raw.is_some_and(|raw| CancelMarker::classify(&raw, scope).stops()),
+                let cancelled = match CancelMarker::read(&directory, scope) {
+                    Ok(marker) => match delivered_steer {
+                        Some(stop) => !stop.matches(marker),
+                        None => marker.stops(),
                     },
                     Err(_) => true,
                 };
