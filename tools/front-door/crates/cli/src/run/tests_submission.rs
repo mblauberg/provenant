@@ -48,7 +48,12 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
                 issue: provenant_records::diagnostic::ContinuationIssue::Unavailable,
             };
             let mut skipped = run::SkippedRoute {
-                route: "codex/gpt-6-luna".into(),
+                route: "private-adapter/private-model".into(),
+                skipped_accounts: vec![provenant_records::SkippedAccount {
+                    account: "private-account".into(),
+                    reason: provenant_records::RouteExclusionReason::AccountPinned,
+                    extra: Default::default(),
+                }],
                 kind: run::SkipKind::Refused,
                 ..Default::default()
             };
@@ -135,6 +140,10 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
     for text in [&reason, &note] {
         assert!(text.contains(guard.rule.code()));
         assert!(text.contains(guard.field.name()));
+        assert!(text.contains("unavailable"));
+        for secret in ["private-adapter", "private-model", "private-account"] {
+            assert!(!text.contains(secret), "{text}");
+        }
     }
     Ok(())
 }

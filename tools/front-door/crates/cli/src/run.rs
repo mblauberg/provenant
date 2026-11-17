@@ -1390,10 +1390,16 @@ impl Registry<'_> {
             _ => None,
         }) {
             decoded.outcome = run::Outcome::Unclassified;
-            // The provider's text is untrusted: redact known credential shapes
-            // and bound it before it reaches status or output. A diagnostic
-            // note, when one applies, is appended after this reason.
-            decoded.reason = Some(if message.is_empty() {
+            // A diagnostic replaces the provider's untrusted text.
+            let diagnosed = provenant_records::AdapterSpec::get(adapter.id())
+                .is_some_and(|spec| spec.stdout_error_diagnostic)
+                && provenant_providers::opencode::stdout_error_diagnostic(
+                    stdout,
+                    route.model.as_deref(),
+                    route.effort.as_deref(),
+                )
+                .is_some();
+            decoded.reason = Some(if message.is_empty() || diagnosed {
                 "unclassified provider error".into()
             } else {
                 format!(

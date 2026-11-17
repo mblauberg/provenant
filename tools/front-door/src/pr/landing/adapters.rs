@@ -995,6 +995,9 @@ impl<'a> GitRepo<'a> {
         }
         Ok(format!("refs/heads/{name}"))
     }
+    fn branch_pattern(prefix: &str) -> Result<String, LandingError> {
+        Ok(format!("{}*", Self::branch_ref(prefix)?))
+    }
     fn lease_push(
         &mut self,
         full: &str,
@@ -1305,7 +1308,7 @@ impl Repo for GitRepo<'_> {
     }
     fn list_refs(&mut self, prefix: &str) -> Result<Vec<(String, String)>, LandingError> {
         let remote = self.remote("")?;
-        let pattern = Self::branch_ref(&format!("{prefix}*"))?;
+        let pattern = Self::branch_pattern(prefix)?;
         let out = self.ok(&["ls-remote", "--heads", &remote, &pattern])?;
         Ok(out
             .lines()
@@ -1555,26 +1558,6 @@ pub(super) fn observe_checks_reporting(
     )
 }
 
-/// Prints one progress line per `interval` of elapsed wait.
-fn throttled_progress(
-    candidate: &Candidate,
-    interval: Duration,
-) -> impl FnMut(Duration, &GateResult) + '_ {
-    let mut last = Duration::ZERO;
-    move |elapsed, state| {
-        if elapsed >= last + interval {
-            last = elapsed;
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "land: waiting on {} for {}s, state {state:?}",
-                candidate.ref_name,
-                elapsed.as_secs()
-            );
-        }
-    }
-}
-
 struct CheckObservation {
     checks: Result<Vec<GateEvidence>, LandingError>,
     next_interval: Option<Duration>,
@@ -1646,6 +1629,13 @@ impl GateRunner for CheckGate {
     ) -> Result<GateEvidence, LandingError> {
         match definition.kind {
             provenant_cli::domains::GateKind::Checks => {
+                let progress = super::gate::ProgressReporter::new(
+                    format!(
+                        "candidate {} ({}) checks",
+                        candidate.ref_name, candidate.commit
+                    ),
+                    self.progress,
+                );
                 {
                     use std::io::Write;
                     let url = self
@@ -1654,19 +1644,18 @@ impl GateRunner for CheckGate {
                         .unwrap_or_else(|| "(check URL unavailable)".into());
                     let _ = writeln!(
                         std::io::stderr().lock(),
-                        "land: gate on candidate {} ({}), checks {url}, state pending",
+                        "land: gate on candidate {} ({}), checks {url}",
                         candidate.ref_name,
                         candidate.commit
                     );
                 }
-                let mut report = throttled_progress(candidate, self.progress);
                 observe_checks_reporting(
                     &mut self.forge,
                     candidate,
                     definition,
                     poll_seconds,
                     &mut std::thread::sleep,
-                    &mut report,
+                    &mut |_, state| progress.set_state(state),
                 )
             }
             provenant_cli::domains::GateKind::Commands => {
@@ -1758,6 +1747,18 @@ fn deliver_alarm(
 )]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn candidate_ref_prefix_builds_safe_remote_pattern() {
+        assert_eq!(
+            GitRepo::branch_pattern("land/candidate-").unwrap(),
+            "refs/heads/land/candidate-*"
+        );
+        for invalid in ["refs/heads/main", "bad*", "-option", ""] {
+            assert!(GitRepo::branch_pattern(invalid).is_err());
+        }
+    }
 
     #[test]
     fn explicit_poll_override_precedes_adaptive_interval_and_gate_forwards_it() {

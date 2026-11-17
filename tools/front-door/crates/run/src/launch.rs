@@ -320,14 +320,16 @@ impl PrepareRefusal {
     /// Public continuation errors use typed candidate projections, never the
     /// raw preparation message, which may include paths or provider output.
     pub(crate) fn safe_reason(&self) -> String {
-        if self.skipped_routes.is_empty() {
+        let facts: Vec<_> = self
+            .skipped_routes
+            .iter()
+            .filter_map(|route| route.continuation_guard)
+            .map(|guard| guard.to_string())
+            .collect();
+        if facts.is_empty() {
             self.terminal_cause.detail().into()
         } else {
-            self.skipped_routes
-                .iter()
-                .map(SkippedRoute::describe)
-                .collect::<Vec<_>>()
-                .join("; ")
+            facts.join("; ")
         }
     }
 
@@ -2142,6 +2144,7 @@ impl RunStore {
                         Outcome::Rejected
                     };
                     let terminal_cause = Some(refusal.terminal_cause);
+                    let continuation_reason = resume.as_ref().map(|_| refusal.safe_reason());
                     let terminal_note = match (kind.terminal_note(), refusal.terminal_note) {
                         (Some(guidance), Some(note)) if guidance != note => {
                             Some(format!("{note}; {guidance}"))
@@ -2163,7 +2166,12 @@ impl RunStore {
                             )),
                         },
                     };
-                    let reason = refusal.message;
+                    let terminal_note = if continuation_reason.is_some() {
+                        continuation_reason.clone()
+                    } else {
+                        terminal_note
+                    };
+                    let reason = continuation_reason.unwrap_or(refusal.message);
                     match self.withdraw_with_preparation_failure(
                         id,
                         crate::store::Withdrawal {
