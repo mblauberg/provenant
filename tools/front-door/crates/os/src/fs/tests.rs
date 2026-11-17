@@ -703,6 +703,24 @@ fn existing_read_lock_waits_for_writer_and_respects_timeout() {
     ));
 }
 
+// Spec: docs/specs/supervisor.md#stable-locks-and-atomic-writes
+#[test]
+fn verified_owner_lock_carries_permission_observations() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let guard = directory
+        .try_lock(OsStr::new("facts.lock"), LockMode::Exclusive)
+        .unwrap();
+    let facts = guard.permission_facts().unwrap();
+    assert_eq!(facts.directory_mode & 0o777, 0o700);
+    assert_eq!(
+        facts.opened_mode & 0o777,
+        guard.metadata().unwrap().mode & 0o777
+    );
+    assert_eq!(facts.opened_mode, facts.after_mode);
+}
+
 #[test]
 fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
     let temp = tempfile::tempdir().unwrap();

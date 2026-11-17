@@ -265,14 +265,29 @@ enum AtomicWritePhase {
     DirectorySync,
 }
 
+/// Permission observations made while verifying an owner lock's descriptor.
+/// These are acquisition-time facts, not a promise that modes cannot change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LockPermissionFacts {
+    pub directory_mode: u32,
+    pub before_mode: Option<u32>,
+    pub opened_mode: u32,
+    pub after_mode: u32,
+}
+
 /// Owning, non-cloneable flock lease. Closing the last owner releases the lock;
 /// the API intentionally has no explicit unlock or descriptor duplication.
 #[derive(Debug)]
 pub struct LockGuard {
     _file: File,
     exclusive: bool,
+    permission_facts: Option<LockPermissionFacts>,
 }
 impl LockGuard {
+    /// Facts are available for verified owner locks, not foreign probes or handoffs.
+    pub fn permission_facts(&self) -> Option<LockPermissionFacts> {
+        self.permission_facts
+    }
     /// Identity of the locked file, to compare with its directory entry: a
     /// lock taken on an inode that was unlinked meanwhile excludes nobody.
     pub fn metadata(&self) -> Result<Metadata> {
@@ -291,6 +306,7 @@ impl LockGuard {
         Self {
             _file: file,
             exclusive: false,
+            permission_facts: None,
         }
     }
 }
@@ -829,6 +845,7 @@ impl Directory {
                     return Ok(ForeignLock::Acquired(LockGuard {
                         _file: file,
                         exclusive: false,
+                        permission_facts: None,
                     }));
                 }
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
@@ -875,7 +892,8 @@ impl Directory {
             .checked_add(timeout)
             .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
         let owner_uid = os::effective_uid();
-        verify_lock_directory(name, self.metadata()?, owner_uid)?;
+        let directory_metadata = self.metadata()?;
+        verify_lock_directory(name, directory_metadata, owner_uid)?;
         let before = self.metadata_at(name, false)?;
         let file = os::open_read(&self.file, name).map_err(error("open existing lock", &path))?;
         let opened = file
@@ -893,6 +911,12 @@ impl Directory {
                     let guard = LockGuard {
                         _file: file,
                         exclusive: mode == LockMode::Exclusive,
+                        permission_facts: Some(LockPermissionFacts {
+                            directory_mode: directory_metadata.mode,
+                            before_mode: Some(before.mode),
+                            opened_mode: opened.mode,
+                            after_mode: after.mode,
+                        }),
                     };
                     self.verify_held_lock(name, &guard)?;
                     return Ok(guard);
@@ -958,6 +982,12 @@ impl Directory {
                     let guard = LockGuard {
                         _file: file,
                         exclusive: mode == LockMode::Exclusive,
+                        permission_facts: Some(LockPermissionFacts {
+                            directory_mode: directory_metadata.mode,
+                            before_mode: before.map(|metadata| metadata.mode),
+                            opened_mode: opened.mode,
+                            after_mode: after.mode,
+                        }),
                     };
                     self.verify_held_lock(name, &guard)?;
                     return Ok(guard);

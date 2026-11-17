@@ -222,6 +222,8 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             "forge",
             &project,
             resolved.roots.state.as_path(),
+            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )?;
         Ok(forge
             .request(
