@@ -70,13 +70,6 @@ pub fn select_batch_with_reasons(
                 continue;
             }
             let info = forge.pull_request(number)?;
-            if info.draft {
-                return Err(LandingError::RefusedWith {
-                    cause: "PR_DRAFT",
-                    message: format!("pull request #{number} is a draft"),
-                    repair: format!("gh pr ready {number}"),
-                });
-            }
             if let Some(stack) = &info.stack {
                 if stack.base_branch != target {
                     reasons.insert(

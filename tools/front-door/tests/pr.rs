@@ -286,7 +286,11 @@ fn land_refuses_a_draft_pull_request_before_gate_step() -> Result {
     assert!(!gh_calls.contains("/statuses"));
 
     let output_human = rig.command(&["land", "1668", "--head", &head])?;
-    let text = String::from_utf8_lossy(&output_human.stdout.bytes);
+    let text = String::from_utf8_lossy(&output_human.stderr.bytes);
+    assert!(
+        text.contains("draft"),
+        "expected draft diagnostic on stderr: {text}"
+    );
     assert!(
         text.contains("next: gh pr ready 1668"),
         "expected next-step line in output: {text}"

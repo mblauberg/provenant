@@ -96,6 +96,22 @@ impl LandingError {
     }
 }
 
+/// Refresh readiness at every boundary that can gate or publish a member.
+fn ready_pull_request(
+    forge: &mut dyn ports::Forge,
+    number: u64,
+) -> Result<ports::PullRequestInfo, LandingError> {
+    let info = forge.pull_request(number)?;
+    if info.draft {
+        return Err(LandingError::RefusedWith {
+            cause: "PR_DRAFT",
+            message: format!("pull request #{number} is a draft"),
+            repair: format!("gh pr ready {number}"),
+        });
+    }
+    Ok(info)
+}
+
 use provenant_confinement::review_exempt::ReviewExempt;
 pub mod adapters;
 pub mod approval;

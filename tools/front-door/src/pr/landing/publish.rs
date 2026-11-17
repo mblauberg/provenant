@@ -116,7 +116,7 @@ pub fn decide_strategy(
     )
 }
 
-/// Return PRs whose pinned head or approval changed immediately before publication.
+/// Return PRs no longer ready or whose pinned head or approval changed before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
     approver: &mut Approver<'_, '_>,
@@ -139,7 +139,18 @@ pub fn revalidate_with_reasons(
     for step in &mut candidate.steps {
         let pr = &mut step.pr;
         let head = forge.head(pr.number)?;
-        let info = forge.pull_request(pr.number)?;
+        let info = match super::ready_pull_request(forge, pr.number) {
+            Ok(info) => info,
+            Err(LandingError::RefusedWith {
+                cause: "PR_DRAFT",
+                message,
+                ..
+            }) => {
+                excluded.push((pr.clone(), message));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let reason = if info.base_branch != pr.base_branch {
             Some("base branch changed".to_owned())
         } else if head != pr.head {

@@ -269,14 +269,7 @@ fn run_inner(
         .collect();
     let mut open = Vec::new();
     for number in unique {
-        let info = forge.pull_request(number)?;
-        if info.draft {
-            return Err(LandingError::RefusedWith {
-                cause: "PR_DRAFT",
-                message: format!("pull request #{number} is a draft"),
-                repair: format!("gh pr ready {number}"),
-            });
-        }
+        let info = super::ready_pull_request(forge, number)?;
         if let Some(reason) = request
             .pins
             .get(&number)
@@ -380,6 +373,13 @@ fn run_inner(
                 }
                 Err(error) => return Err(error),
             };
+            for step in &candidate.steps {
+                cleanup_unpublished(
+                    super::ready_pull_request(forge, step.pr.number),
+                    repo,
+                    &candidate,
+                )?;
+            }
             let reused = if request.settings.reuse_tested_tree {
                 gate::reusable_evidence(forge, &candidate, request.gate)
             } else {
@@ -2146,6 +2146,7 @@ pub(super) mod tests {
         Approval,
         Base,
         Closed,
+        Draft,
     }
     fn recovery_does_not_retry_changed_pr(
         mode: PublishMode,
@@ -2199,6 +2200,7 @@ pub(super) mod tests {
                 forge.pull_requests.get_mut(&1).unwrap().state =
                     super::super::ports::PullRequestState::Closed;
             }
+            RecoveryChange::Draft => forge.pull_requests.get_mut(&1).unwrap().draft = true,
         }
         receipt::record_pending(
             state.path(),
@@ -2262,6 +2264,7 @@ pub(super) mod tests {
                 RecoveryChange::Approval,
                 RecoveryChange::Base,
                 RecoveryChange::Closed,
+                RecoveryChange::Draft,
             ] {
                 recovery_does_not_retry_changed_pr(mode, change)?;
             }
@@ -3783,6 +3786,64 @@ pub(super) mod tests {
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
             1
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#merge-guard
+    #[test]
+    fn draft_conversion_between_batches_never_reaches_the_next_gate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.batch_size = 1;
+        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        forge.draft_after_gate = Some((2, flag.clone()));
+        gate.set_draft_on_gate = Some(flag);
+        let state = tempfile::tempdir()?;
+        let result = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::RefusedWith {
+                cause: "PR_DRAFT",
+                ..
+            })
+        ));
+        assert_eq!(gate.observed.len(), 1);
+        assert!(!forge.merge_attempts.contains(&2));
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#merge-guard
+    #[test]
+    fn draft_conversion_during_gate_prevents_publication() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        forge.draft_after_gate = Some((1, flag.clone()));
+        gate.set_draft_on_gate = Some(flag);
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(gate.observed.len(), 1);
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
+        assert!(forge.merge_attempts.is_empty());
+        assert!(!repo.push_attempts.contains(&repo.target_ref));
         Ok(())
     }
 
