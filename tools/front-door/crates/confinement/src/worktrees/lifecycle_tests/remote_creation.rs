@@ -470,7 +470,7 @@ fn streaming_inventory_reports_the_total_before_checked_rows() -> Result<(), Box
 }
 
 #[test]
-fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error>> {
+fn gc_preview_reports_many_worktrees_or_explicit_kept_outcomes() -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
     struct Counting {
         current: ProcessFact,

@@ -576,6 +576,21 @@ pub(crate) mod peer_tests {
         }
     }
 
+    /// `--exact` matching nothing (a renamed test) exits 0; that must fail.
+    pub(crate) fn assert_one_test_ran(name: &str, stdout: &[u8]) {
+        let stdout = String::from_utf8_lossy(stdout);
+        assert!(
+            stdout.lines().any(|line| line == "running 1 test"),
+            "no test matched `{name}`:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn exact_host_dispatch_rejects_zero_matches() {
+        assert_one_test_ran("case", b"running 1 test\n");
+        assert!(std::panic::catch_unwind(|| assert_one_test_ran("case", b"running 0 tests\n")).is_err());
+    }
+
     pub(crate) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);
@@ -622,6 +637,7 @@ pub(crate) mod peer_tests {
             String::from_utf8_lossy(&output.stdout.bytes),
             String::from_utf8_lossy(&output.stderr.bytes)
         );
+        assert_one_test_ran(name, &output.stdout.bytes);
         Ok(true)
     }
 

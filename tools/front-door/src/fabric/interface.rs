@@ -3919,6 +3919,10 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr.bytes)
             );
             assert!(!output.timed_out, "{output:?}");
+            super::super::peer_tests::assert_one_test_ran(
+                "replay_digest_tracks_launch_input_and_source_commit",
+                &output.stdout.bytes,
+            );
             return Ok(());
         }
         let rig = crate::worktree_tests::repository()?;
