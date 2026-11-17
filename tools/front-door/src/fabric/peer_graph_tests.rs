@@ -121,7 +121,7 @@ fn add_child(
     Ok(provenant_cli::fabric::graph_relay::serve(
         &factory.context,
         &parent.to_string(),
-        json!({"op":"add","id":"child","use":"task","brief":"Return the child result",
+        json!({"op":"add","id":"child","use":"task","prompt":"Return the child result",
             "idempotency_key":idempotency,"launch":{"node":{"id":"child","access":"read_only",
                 "prompt":"Return the child result","route":{"adapter":"fixture","model":"fixture/model"}},"templates":{}}}),
         WaitBudget::cli(factory.clock.mono_now(), 30)?,
