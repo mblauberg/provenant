@@ -1489,7 +1489,7 @@ fn filter_pass(
         } else {
             redactor_plain
                 .as_mut()
-                .unwrap()
+                .ok_or(FilterError)?
                 .filter(&buffer[..read], &mut sink)?;
         }
         write_err?;
@@ -1506,7 +1506,10 @@ fn filter_pass(
     if let Some(r) = &mut redactor_jsonl {
         r.finish(&mut sink)?;
     } else {
-        redactor_plain.as_mut().unwrap().finish(&mut sink)?;
+        redactor_plain
+            .as_mut()
+            .ok_or(FilterError)?
+            .finish(&mut sink)?;
     }
     write_err?;
     let after = source.metadata().map_err(|_| FilterError)?;
@@ -1516,7 +1519,7 @@ fn filter_pass(
     let has_redaction = if let Some(r) = &redactor_jsonl {
         r.has_redaction()
     } else {
-        redactor_plain.as_ref().unwrap().has_redaction()
+        redactor_plain.as_ref().ok_or(FilterError)?.has_redaction()
     };
     Ok(has_redaction)
 }

@@ -248,8 +248,12 @@ impl StreamState {
     pub(crate) fn authentication_required(&self) -> bool {
         self.auth_required
     }
+    fn raw_stream(&self) -> bool {
+        provenant_records::AdapterSpec::get(self.adapter)
+            .is_some_and(|spec| spec.stdout == provenant_records::StreamContract::Raw)
+    }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
-        if self.adapter == "command" {
+        if self.raw_stream() {
             const TAIL_BYTES: usize = provenant_records::COMMAND_OUTPUT_TAIL_BYTES;
             let total = self.pending.len().saturating_add(bytes.len());
             self.tail_truncated |= total > TAIL_BYTES;
@@ -316,7 +320,7 @@ impl StreamState {
         bytes: &[u8],
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
         let mut events = self.observe(bytes)?;
-        if self.adapter == "command" || self.pending.is_empty() {
+        if self.raw_stream() || self.pending.is_empty() {
             return Ok(events);
         }
         let line = std::mem::take(&mut self.pending);
@@ -461,7 +465,7 @@ impl StreamState {
     ) -> Result<ProviderOutcome, ProviderError> {
         let mut final_events = std::mem::take(&mut self.retained_events);
         let mut protocol_error = self.protocol_error.take();
-        if self.adapter == "command" {
+        if self.raw_stream() {
             let mut text = String::new();
             if self.tail_truncated {
                 text.push_str("[output truncated; retained tail]\n");

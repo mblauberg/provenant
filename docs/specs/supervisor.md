@@ -317,16 +317,21 @@ structure and are never redacted, even when a configured literal matches a key.
 Strings stream in bounded pieces; no line-size fallback changes their grammar.
 Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece,
 a 16 KiB scalar prefix, and the plain redactor's existing detector bounds.
-Excess nesting fails capture closed. A scalar longer than its prefix buffer is
-conservatively masked if a configured literal could occur in a JSON scalar,
+Excess nesting emits an invalid-JSON marker on the same line and discards the
+remainder, becoming a line-numbered `MalformedFrame`. A scalar longer than its
+prefix buffer is conservatively masked if a configured literal could occur in a JSON scalar,
 even if that literal does not actually occur. Without such a literal the scalar
 streams unchanged. This avoids either retaining unbounded numbers or leaking a
 prefix that cannot be retracted when a later literal matches. Masking may
 change lengths: source-aligned detector decisions are internal to the plain
 redactor, not a constraint on the push-based capture interface. Malformed JSON
-switches to plain redaction for the remainder and retains invalid syntax (with
-an invalid-JSON sentinel where masking could repair it), so it cannot become
-successful protocol evidence. Non-JSON lines use the plain redactor.
+discards and masks the remainder through the raw line boundary, retaining an
+invalid-JSON sentinel so it cannot become successful protocol evidence.
+Non-JSON lines use the plain redactor. The adapter spec declares the stdout
+stream contract: provider JSONL has a 1 MiB source-line cap, with oversized and
+incomplete frames becoming line-numbered `MalformedFrame`; raw command output
+uses streaming line redaction without a line-length cap, preserving bounded
+tail diagnostics. In both cases filter memory and emitted frames stay bounded.
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

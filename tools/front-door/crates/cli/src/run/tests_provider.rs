@@ -912,6 +912,51 @@ fn oversized_source_frame_remains_malformed_after_redaction() {
 
 // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
+fn declared_stream_contract_preserves_long_command_tail_but_rejects_provider_line() {
+    use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, PROVIDER_LINE_LIMIT};
+    let diagnostic = "tail diagnostic: command completed";
+    let source = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\n{}{diagnostic}\n",
+        "x".repeat(PROVIDER_LINE_LIMIT + 1),
+    );
+    for provider in ["command", "codex"] {
+        let spec = provenant_records::AdapterSpec::get(provider).unwrap();
+        // Exercise the same contract-to-filter selection as admitted capture.
+        let mut filter = holder::stdout_filter(spec.stdout).unwrap();
+        let mut output = Vec::new();
+        let mut sink = |frame: &[u8]| {
+            assert!(frame.len() <= FRAME_LIMIT);
+            output.extend_from_slice(frame);
+        };
+        for chunk in source.as_bytes().chunks(4096) {
+            filter.filter(chunk, &mut sink).unwrap();
+        }
+        filter.finish(&mut sink).unwrap();
+        let route = run::RouteRecord {
+            provider: Some(provider.into()),
+            model: (provider == "codex").then(|| "codex/gpt-6.1-terra".into()),
+            ..Default::default()
+        };
+        let decoded = Registry::default()
+            .decode(&route, &output, &clean_exit(), Path::new("/unused"))
+            .unwrap();
+        if provider == "command" {
+            assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+            assert!(decoded.result.contains(diagnostic));
+            assert!(decoded.result.contains("[output truncated; retained tail]"));
+            assert!(decoded.result.len() <= provenant_records::COMMAND_OUTPUT_TAIL_BYTES + 128);
+        } else {
+            assert_eq!(decoded.outcome, run::Outcome::Failed);
+            assert_eq!(
+                decoded.reason.as_deref(),
+                Some("evidence defect: provider protocol frame on line 2 is malformed")
+            );
+        }
+    }
+}
+
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+#[test]
 fn excessive_nesting_is_a_line_numbered_malformed_frame() {
     use provenant_os::exec::CaptureFilter;
     let route = run::RouteRecord {

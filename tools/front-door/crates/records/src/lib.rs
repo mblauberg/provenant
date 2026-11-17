@@ -7,7 +7,7 @@ pub use adapters::{
     CapabilitySupport, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
     HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities, LaunchField, LaunchRequest,
     LoginObservation, LoginReprobe, ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot,
-    SkillLocation, UnsupportedLaunch,
+    SkillLocation, StreamContract, UnsupportedLaunch,
 };
 
 /// The instruction content bound into this product build and projected into

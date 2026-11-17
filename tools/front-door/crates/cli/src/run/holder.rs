@@ -18,6 +18,60 @@ struct QuotaFrames {
     eof_fragment_in_progress: std::sync::atomic::AtomicBool,
     stderr: bool,
 }
+/// Admission binds the adapter before capture first asks for filtered bytes.
+struct StdoutFilter {
+    evidence: Arc<Mutex<Option<QuotaCapture>>>,
+    inner: Option<provenant_confinement::redact::JsonlRedactor>,
+}
+
+pub(super) fn stdout_filter(
+    contract: provenant_records::StreamContract,
+) -> Result<provenant_confinement::redact::JsonlRedactor, provenant_os::exec::FilterError> {
+    use provenant_confinement::redact::JsonlRedactor;
+    use provenant_records::StreamContract;
+    match contract {
+        StreamContract::ProviderJsonl => JsonlRedactor::provider([]),
+        StreamContract::Raw => JsonlRedactor::new([]),
+    }
+    .map_err(|_| provenant_os::exec::FilterError)
+}
+
+impl StdoutFilter {
+    fn inner(
+        &mut self,
+    ) -> Result<&mut provenant_confinement::redact::JsonlRedactor, provenant_os::exec::FilterError>
+    {
+        use provenant_os::exec::FilterError;
+        if self.inner.is_none() {
+            let evidence = self.evidence.lock().map_err(|_| FilterError)?;
+            let capture = evidence.as_ref().ok_or(FilterError)?;
+            let spec =
+                provenant_records::AdapterSpec::get(capture.adapter.id()).ok_or(FilterError)?;
+            self.inner = Some(stdout_filter(spec.stdout)?);
+        }
+        match self.inner.as_mut() {
+            Some(filter) => Ok(filter),
+            None => Err(FilterError),
+        }
+    }
+}
+
+impl provenant_os::exec::CaptureFilter for StdoutFilter {
+    fn filter(
+        &mut self,
+        bytes: &[u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), provenant_os::exec::FilterError> {
+        self.inner()?.filter(bytes, sink)
+    }
+    fn finish(
+        &mut self,
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), provenant_os::exec::FilterError> {
+        self.inner()?.finish(sink)
+    }
+}
+
 struct QuotaCapture {
     adapter: &'static dyn provenant_providers::Adapter,
     stream: provenant_providers::StreamState,
@@ -389,6 +443,13 @@ impl<'a> HostHolder<'a> {
     ) -> Self {
         self.graph_read = Some(Arc::new(read));
         self
+    }
+    /// Select framing from the adapter bound during admission, before capture.
+    pub fn stdout_filter(&self) -> impl provenant_os::exec::CaptureFilter + use<> {
+        StdoutFilter {
+            evidence: Arc::clone(&self.stdout_frames.evidence),
+            inner: None,
+        }
     }
     /// Live stdout lifecycle evidence, bound during admission before spawn.
     pub fn stdout_decoder(&self) -> &dyn provenant_os::capture::FrameDecoder {
