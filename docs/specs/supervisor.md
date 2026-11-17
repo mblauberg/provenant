@@ -300,7 +300,9 @@ available from `provenant config show`.
 ### Disclosure and safe Git evidence
 
 A prompt snapshot with a known secret is refused before sealing, and output is
-redacted across chunk boundaries before it reaches disk. Host Git runs with
+redacted across chunk boundaries before it reaches disk. Quoted credential values
+are masked through ambiguous closing quotes, at most to the end of their raw line.
+Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and
 refuses credential-bearing URLs.
