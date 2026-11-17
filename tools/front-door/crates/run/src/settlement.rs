@@ -622,7 +622,8 @@ pub(crate) fn with_cancellation<T>(
 }
 
 /// Run writer settlement while accepting only its already delivered Steered
-/// request. A replacement explicit cancellation still cancels the import.
+/// request. A replacement explicit cancellation still cancels the import, and
+/// so does a marker that disappears.
 pub(crate) fn with_cancellation_for_delivered_steer<T>(
     attempt: &Directory,
     scope: Scope,
@@ -633,6 +634,10 @@ pub(crate) fn with_cancellation_for_delivered_steer<T>(
     with_cancellation_policy(attempt, scope, cancel, Some(stop), action)
 }
 
+/// The watcher reads `cancel.json` as [`CancelMarker`] does: only this scope's
+/// own Steered request continues, and any other marker, including a foreign
+/// or undecodable one, or one that cannot be read, cancels. A delivered steer
+/// adds one rule: its own marker must remain, from its own requester.
 fn with_cancellation_policy<T>(
     attempt: &Directory,
     scope: Scope,
@@ -640,34 +645,22 @@ fn with_cancellation_policy<T>(
     delivered_steer: Option<DeliveredSteerStop>,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    #[derive(Deserialize)]
-    struct Cancellation {
-        scope: Scope,
-    }
     let directory = attempt.try_clone()?;
     let token = cancel.clone();
     let (done, stopped) = mpsc::channel();
     std::thread::scope(|threads| {
         threads.spawn(move || {
             loop {
-                match read_sealed(&directory, "cancel.json", RECORD_LIMIT) {
-                    Ok(Some(raw)) => {
-                        let should_cancel = if let Some(stop) = delivered_steer {
-                            !stop.matches_marker(&raw)
-                        } else {
-                            serde_json::from_slice::<Cancellation>(&raw)
-                                .is_ok_and(|request| request.scope == scope)
-                        };
-                        if should_cancel {
-                            token.cancel();
-                            break;
-                        }
-                    }
-                    Ok(None) | Err(_) if delivered_steer.is_some() => {
-                        token.cancel();
-                        break;
-                    }
-                    Ok(None) | Err(_) => {}
+                let cancelled = match read_sealed(&directory, "cancel.json", RECORD_LIMIT) {
+                    Ok(raw) => match delivered_steer {
+                        Some(stop) => raw.is_none_or(|raw| !stop.matches_marker(&raw)),
+                        None => raw.is_some_and(|raw| CancelMarker::classify(&raw, scope).stops()),
+                    },
+                    Err(_) => true,
+                };
+                if cancelled {
+                    token.cancel();
+                    break;
                 }
                 match stopped.recv_timeout(Duration::from_millis(50)) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -700,6 +693,69 @@ mod tests {
     }
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn running_git_continues_only_under_its_own_steer_marker() -> TestResult {
+        use provenant_supervisor::machine::StopReason;
+        let scope = crate::tests::exit().scope;
+        let marker = |reason: StopReason| {
+            crate::db::bytes(&serde_json::json!({
+                "schema_version": 1,
+                "scope": scope,
+                "requester": ActorId::from_bytes([7; 16]),
+                "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+                "reason": reason,
+            }))
+        };
+        let steered = marker(StopReason::Steered)?;
+        for (name, replacement) in [
+            ("undecodable", b"{not json".to_vec()),
+            ("explicit stop", marker(StopReason::ExplicitCancellation)?),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let attempt = Directory::open_anchor(temp.path())?;
+            crate::artifacts::seal(&attempt, "cancel.json", &steered, RECORD_LIMIT)?;
+            let cancel = CancelToken::new();
+            let (continued, cancelled) = with_cancellation(&attempt, scope, &cancel, || {
+                // Several watcher polls read this scope's own Steered marker
+                // and none of them cancels.
+                let continued = provenant_test_support::wait_for(
+                    "the steer marker to cancel the operation",
+                    Duration::from_millis(250),
+                    || cancel.is_cancelled(),
+                    |cancelled| *cancelled,
+                )
+                .is_err();
+                attempt
+                    .atomic_write(
+                        OsStr::new("cancel.json"),
+                        ".run-",
+                        &replacement,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()
+                    .map_err(RunError::Publication)?;
+                let cancelled = provenant_test_support::wait_for(
+                    "the replaced marker to cancel the operation",
+                    Duration::from_secs(5),
+                    || cancel.is_cancelled(),
+                    |cancelled| *cancelled,
+                )
+                .is_ok();
+                Ok((continued, cancelled))
+            })?;
+            assert!(
+                continued,
+                "{name}: the steer marker cancelled the operation"
+            );
+            assert!(
+                cancelled,
+                "{name}: the replacement did not cancel the operation"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn stalled_probe_requires_matching_identity_before_and_after() {
