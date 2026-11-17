@@ -148,6 +148,21 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
         b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"changed\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"parent_tool_use_id\":null}\n{\"type\":\"result\",\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"answer\"}\n".as_slice(),
     ] {
         let mut stream = claude::Claude.stream(Some(&continuation))?;
+        assert!(claude::Claude.observe(&mut stream, changed).is_ok());
+        let outcome = claude::Claude.finish(stream, EXIT)?;
+        assert!(outcome.session().is_none() || outcome.model().is_none());
+
+        let mut strict_policy = Policy::default();
+        strict_policy.overlay(
+            &[(
+                "STREAM_IDENTITY_MISMATCH".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into_iter()
+            .collect(),
+            provenant_records::policy::Source::Project,
+        );
+        let mut stream = claude::Claude.stream(Some(&continuation))?.with_policy(strict_policy);
         assert!(matches!(claude::Claude.observe(&mut stream, changed), Err(ProviderError::IdentityMismatch)));
         assert_eq!(claude::Claude.finish(stream, EXIT)?.status(), OutcomeStatus::Malformed);
     }

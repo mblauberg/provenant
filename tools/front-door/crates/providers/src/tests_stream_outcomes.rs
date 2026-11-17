@@ -629,10 +629,27 @@ fn expected_continuation_session_is_not_observed_without_a_provider_frame()
     );
 
     let mut wrong = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    assert!(codex::Codex.observe(
+        &mut wrong,
+        b"{\"type\":\"thread.started\",\"thread_id\":\"fresh-thread\"}\n"
+    ).is_ok());
+    assert!(wrong.session_conflict());
+
+    let mut strict_policy = provenant_records::Policy::default();
+    strict_policy.overlay(
+        &[(
+            "STREAM_IDENTITY_MISMATCH".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]
+        .into_iter()
+        .collect(),
+        provenant_records::policy::Source::Project,
+    );
+    wrong.set_policy(strict_policy);
     assert!(matches!(
         codex::Codex.observe(
             &mut wrong,
-            b"{\"type\":\"thread.started\",\"thread_id\":\"fresh-thread\"}\n"
+            b"{\"type\":\"thread.started\",\"thread_id\":\"another-thread\"}\n"
         ),
         Err(ProviderError::IdentityMismatch)
     ));
@@ -717,13 +734,11 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         &mut state,
         b"{\"type\":\"thread.started\",\"thread_id\":\"a\"}\n",
     )?;
-    assert!(matches!(
-        codex::Codex.observe(
-            &mut state,
-            b"{\"type\":\"thread.started\",\"thread_id\":\"b\"}\n"
-        ),
-        Err(ProviderError::IdentityMismatch)
-    ));
+    assert!(codex::Codex.observe(
+        &mut state,
+        b"{\"type\":\"thread.started\",\"thread_id\":\"b\"}\n"
+    ).is_ok());
+    assert!(state.session_conflict());
 
     let mut state = claude::Claude.stream(None)?;
     state.expect_model("expected-model");
@@ -731,6 +746,20 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
     claude::Claude.observe(&mut state, &[assistant, b"\n"].concat())?;
     let result: &[u8] =
         br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"answer"}"#;
+    assert!(claude::Claude.observe(&mut state, &[result, b"\n"].concat()).is_ok());
+    assert!(state.model_conflict());
+
+    let mut strict_policy = provenant_records::Policy::default();
+    strict_policy.overlay(
+        &[(
+            "STREAM_IDENTITY_MISMATCH".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]
+        .into_iter()
+        .collect(),
+        provenant_records::policy::Source::Project,
+    );
+    state.set_policy(strict_policy);
     assert!(matches!(
         claude::Claude.observe(&mut state, &[result, b"\n"].concat()),
         Err(ProviderError::IdentityMismatch)

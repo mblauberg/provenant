@@ -1662,6 +1662,27 @@ mod overload_tests {
         let mut stream = StreamState::new("claude", decode);
         stream.bind_identity("s", "other");
         stream.observe(input.as_bytes()).unwrap();
+        let outcome = stream
+            .finish(crate::ExitObservation {
+                code: Some(0),
+                timed_out: false,
+            })
+            .unwrap();
+        assert_eq!(outcome.model(), None);
+
+        let mut strict_policy = provenant_records::Policy::default();
+        strict_policy.overlay(
+            &[(
+                "STREAM_IDENTITY_MISMATCH".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into_iter()
+            .collect(),
+            provenant_records::policy::Source::Project,
+        );
+        let mut stream = StreamState::new("claude", decode).with_policy(strict_policy);
+        stream.bind_identity("s", "other");
+        stream.observe(input.as_bytes()).unwrap();
         assert!(matches!(
             stream.finish(crate::ExitObservation {
                 code: Some(0),
@@ -1733,13 +1754,34 @@ mod overload_tests {
 
     #[test]
     fn resumed_answer_rejects_substitution_after_a_helper() {
-        let mut stream = StreamState::new("claude", decode);
-        stream.bind_identity("s", "requested");
         let input = concat!(
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"helper\",\"content\":[{\"type\":\"text\",\"text\":\"helper\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"substitute\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
             "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"answer\"}\n"
         );
+        let mut stream = StreamState::new("claude", decode);
+        stream.bind_identity("s", "requested");
+        assert!(stream.observe(input.as_bytes()).is_ok());
+        let outcome = stream
+            .finish(crate::ExitObservation {
+                code: Some(0),
+                timed_out: false,
+            })
+            .unwrap();
+        assert_eq!(outcome.model(), None);
+
+        let mut strict_policy = provenant_records::Policy::default();
+        strict_policy.overlay(
+            &[(
+                "STREAM_IDENTITY_MISMATCH".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into_iter()
+            .collect(),
+            provenant_records::policy::Source::Project,
+        );
+        let mut stream = StreamState::new("claude", decode).with_policy(strict_policy);
+        stream.bind_identity("s", "requested");
         assert!(matches!(
             stream.observe(input.as_bytes()),
             Err(ProviderError::IdentityMismatch)

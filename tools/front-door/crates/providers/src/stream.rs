@@ -1,4 +1,5 @@
 use crate::ProviderError;
+use provenant_records::policy::Policy;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ProviderEvent {
@@ -183,10 +184,12 @@ pub struct StreamState {
     retained_events: Vec<ProviderEvent>,
     session: Option<String>,
     expected_session: Option<String>,
+    session_conflict: bool,
     model: Option<String>,
     model_conflict: bool,
     expected_model: Option<String>,
     answer_models: Vec<(String, [u8; 32])>,
+    policy: Policy,
     terminal: bool,
     error: bool,
     transient_error: bool,
@@ -209,10 +212,12 @@ impl StreamState {
             retained_events: Vec::new(),
             session: None,
             expected_session: None,
+            session_conflict: false,
             model: None,
             model_conflict: false,
             expected_model: None,
             answer_models: Vec::new(),
+            policy: Policy::default(),
             terminal: false,
             error: false,
             transient_error: false,
@@ -244,6 +249,22 @@ impl StreamState {
     /// begins. A mismatch is an identity conflict, not a replacement model.
     pub fn expect_model(&mut self, model: &str) {
         self.expected_model = Some(model.into());
+    }
+    pub fn session_conflict(&self) -> bool {
+        self.session_conflict
+    }
+    pub fn model_conflict(&self) -> bool {
+        self.model_conflict
+    }
+    pub fn policy(&self) -> &Policy {
+        &self.policy
+    }
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.policy = policy;
+    }
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
     pub(crate) fn check_adapter(&self, adapter: &str) -> Result<(), ProviderError> {
         if self.adapter == adapter {
@@ -343,27 +364,50 @@ impl StreamState {
         for event in &events {
             match event {
                 ProviderEvent::Session(session) => {
-                    if session.is_empty()
-                        || self
-                            .expected_session
-                            .as_ref()
-                            .is_some_and(|expected| expected != session)
-                        || self.session.as_ref().is_some_and(|old| old != session)
-                    {
+                    if session.is_empty() {
                         return Err(ProviderError::IdentityMismatch);
+                    }
+                    if let Some(expected) = &self.expected_session
+                        && expected != session
+                    {
+                        self.policy.warn_or(
+                            "STREAM_IDENTITY_MISMATCH",
+                            provenant_records::policy::Facts::violation(format!(
+                                "stream reported {session}, expected {expected}; recorded as conflict"
+                            )),
+                            |_| ProviderError::IdentityMismatch,
+                        )?;
+                        self.session_conflict = true;
+                    }
+                    if let Some(old) = &self.session
+                        && old != session
+                    {
+                        self.policy.warn_or(
+                            "STREAM_IDENTITY_MISMATCH",
+                            provenant_records::policy::Facts::violation(format!(
+                                "stream reported {session}, expected {old}; recorded as conflict"
+                            )),
+                            |_| ProviderError::IdentityMismatch,
+                        )?;
+                        self.session_conflict = true;
                     }
                     self.session = Some(session.clone());
                 }
                 ProviderEvent::Model(model) => {
-                    if self
-                        .expected_model
-                        .as_ref()
-                        .is_some_and(|expected| expected != model)
-                    {
-                        return Err(ProviderError::IdentityMismatch);
-                    }
                     if model.is_empty() {
                         return Err(ProviderError::Malformed);
+                    }
+                    if let Some(expected) = &self.expected_model
+                        && expected != model
+                    {
+                        self.policy.warn_or(
+                            "STREAM_IDENTITY_MISMATCH",
+                            provenant_records::policy::Facts::violation(format!(
+                                "stream reported {model}, expected {expected}; recorded as conflict"
+                            )),
+                            |_| ProviderError::IdentityMismatch,
+                        )?;
+                        self.model_conflict = true;
                     }
                     if self.model.as_ref().is_some_and(|old| old != model) {
                         self.model_conflict = true;
@@ -438,12 +482,18 @@ impl StreamState {
             if models.any(|other| other != model) {
                 self.model_conflict = true;
             } else {
-                if self
-                    .expected_model
-                    .as_ref()
-                    .is_some_and(|expected| expected != model)
+                if let Some(expected) = &self.expected_model
+                    && expected != model
                 {
-                    return Err(ProviderError::IdentityMismatch);
+                    self.policy.warn_or(
+                        "STREAM_IDENTITY_MISMATCH",
+                        provenant_records::policy::Facts::violation(format!(
+                            "stream reported {model}, expected {expected}; recorded as conflict"
+                        )),
+                        |_| ProviderError::IdentityMismatch,
+                    )?;
+                    self.model_conflict = true;
+                    return Ok(None);
                 }
                 self.model = Some(model.clone());
                 return Ok(Some(model.clone()));
@@ -540,7 +590,11 @@ impl StreamState {
         }
         Ok(ProviderOutcome {
             adapter: self.adapter,
-            session: self.session,
+            session: if self.session_conflict {
+                None
+            } else {
+                self.session
+            },
             model: if self.model_conflict || self.malformed {
                 None
             } else {
@@ -569,4 +623,137 @@ pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Pr
             ProviderError::Malformed
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strict_policy() -> Policy {
+        let mut policy = Policy::default();
+        policy.overlay(
+            &[(
+                "STREAM_IDENTITY_MISMATCH".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into_iter()
+            .collect(),
+            provenant_records::policy::Source::Project,
+        );
+        policy
+    }
+
+    #[test]
+    fn stream_identity_mismatch_warns_and_records_conflict_or_refuses_in_strict_mode() {
+        let exit = ExitObservation {
+            code: Some(0),
+            timed_out: false,
+        };
+
+        // 1. Session mismatch against expected_session
+        {
+            let mut stream = StreamState::new("test", |_| {
+                Ok(vec![ProviderEvent::Session("reported-s".into())])
+            });
+            stream.expect_session("expected-s");
+            assert!(stream.observe(b"line\n").is_ok());
+            assert!(stream.session_conflict());
+            let outcome = stream.finish(exit).unwrap();
+            assert_eq!(outcome.session(), None);
+
+            let mut strict = StreamState::new("test", |_| {
+                Ok(vec![ProviderEvent::Session("reported-s".into())])
+            })
+            .with_policy(strict_policy());
+            strict.expect_session("expected-s");
+            assert!(matches!(
+                strict.observe(b"line\n"),
+                Err(ProviderError::IdentityMismatch)
+            ));
+        }
+
+        // 2. Session report changing mid-stream
+        {
+            let mut stream = StreamState::new("test", |bytes| {
+                if bytes == b"first\n" {
+                    Ok(vec![ProviderEvent::Session("s1".into())])
+                } else {
+                    Ok(vec![ProviderEvent::Session("s2".into())])
+                }
+            });
+            assert!(stream.observe(b"first\n").is_ok());
+            assert!(!stream.session_conflict());
+            assert!(stream.observe(b"second\n").is_ok());
+            assert!(stream.session_conflict());
+            let outcome = stream.finish(exit).unwrap();
+            assert_eq!(outcome.session(), None);
+
+            let mut strict = StreamState::new("test", |bytes| {
+                if bytes == b"first\n" {
+                    Ok(vec![ProviderEvent::Session("s1".into())])
+                } else {
+                    Ok(vec![ProviderEvent::Session("s2".into())])
+                }
+            })
+            .with_policy(strict_policy());
+            assert!(strict.observe(b"first\n").is_ok());
+            assert!(matches!(
+                strict.observe(b"second\n"),
+                Err(ProviderError::IdentityMismatch)
+            ));
+        }
+
+        // 3. Model mismatch against expected_model
+        {
+            let mut stream = StreamState::new("test", |_| {
+                Ok(vec![ProviderEvent::Model("reported-m".into())])
+            });
+            stream.expect_model("expected-m");
+            assert!(stream.observe(b"line\n").is_ok());
+            assert!(stream.model_conflict());
+            let outcome = stream.finish(exit).unwrap();
+            assert_eq!(outcome.model(), None);
+
+            let mut strict = StreamState::new("test", |_| {
+                Ok(vec![ProviderEvent::Model("reported-m".into())])
+            })
+            .with_policy(strict_policy());
+            strict.expect_model("expected-m");
+            assert!(matches!(
+                strict.observe(b"line\n"),
+                Err(ProviderError::IdentityMismatch)
+            ));
+        }
+
+        // 4. Answer model mismatch against expected_model
+        {
+            let answer_text = "final answer";
+            let digest =
+                *provenant_records::CanonicalV1::file_digest(answer_text.as_bytes()).bytes();
+            let mut stream = StreamState::new("claude", move |_| {
+                Ok(vec![ProviderEvent::AnswerModel {
+                    model: "reported-m".into(),
+                    digest,
+                }])
+            });
+            stream.expect_model("expected-m");
+            assert!(stream.observe(b"answer\n").is_ok());
+            assert_eq!(stream.resolve_answer_model(answer_text).unwrap(), None);
+            assert!(stream.model_conflict());
+
+            let mut strict = StreamState::new("claude", move |_| {
+                Ok(vec![ProviderEvent::AnswerModel {
+                    model: "reported-m".into(),
+                    digest,
+                }])
+            })
+            .with_policy(strict_policy());
+            strict.expect_model("expected-m");
+            assert!(strict.observe(b"answer\n").is_ok());
+            assert!(matches!(
+                strict.resolve_answer_model(answer_text),
+                Err(ProviderError::IdentityMismatch)
+            ));
+        }
+    }
 }

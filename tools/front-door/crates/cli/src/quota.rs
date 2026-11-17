@@ -183,14 +183,37 @@ fn create_path(path: &Path) -> Result<Directory, EdgeError> {
     Ok(dir)
 }
 pub(crate) fn private(path: &Path) -> Result<Directory, EdgeError> {
+    private_with_policy(path, &provenant_records::policy::Policy::default())
+}
+pub(crate) fn private_with_policy(
+    path: &Path,
+    policy: &provenant_records::policy::Policy,
+) -> Result<Directory, EdgeError> {
     let dir = create_path(path)?;
     let meta = dir.metadata()?;
-    if meta.mode & 0o077 != 0 || meta.uid != provenant_os::fs::effective_uid() {
+    if meta.uid != provenant_os::fs::effective_uid() {
         return Err(EdgeError::Permissions);
+    }
+    if meta.mode & 0o077 != 0 {
+        dir.make_private().map_err(|_| EdgeError::Permissions)?;
+        policy.warn_or(
+            "STATE_DIR_MODE",
+            provenant_records::policy::Facts::violation(
+                "state directory mode is not 0700; chmod 0700",
+            ),
+            |_| EdgeError::Permissions,
+        )?;
     }
     Ok(dir)
 }
 pub(crate) fn child(parent: &Directory, name: &OsStr) -> Result<Directory, EdgeError> {
+    child_with_policy(parent, name, &provenant_records::policy::Policy::default())
+}
+pub(crate) fn child_with_policy(
+    parent: &Directory,
+    name: &OsStr,
+    policy: &provenant_records::policy::Policy,
+) -> Result<Directory, EdgeError> {
     match parent.mkdir(name, 0o700) {
         Ok(()) => parent.sync()?,
         Err(e) if e.is_exists() => {}
@@ -198,15 +221,41 @@ pub(crate) fn child(parent: &Directory, name: &OsStr) -> Result<Directory, EdgeE
     }
     let dir = parent.open_verified_directory(name)?;
     let meta = dir.metadata()?;
-    if meta.mode & 0o077 != 0 || meta.uid != provenant_os::fs::effective_uid() {
+    if meta.uid != provenant_os::fs::effective_uid() {
         return Err(EdgeError::Permissions);
+    }
+    if meta.mode & 0o077 != 0 {
+        dir.make_private().map_err(|_| EdgeError::Permissions)?;
+        policy.warn_or(
+            "STATE_DIR_MODE",
+            provenant_records::policy::Facts::violation(
+                "state directory mode is not 0700; chmod 0700",
+            ),
+            |_| EdgeError::Permissions,
+        )?;
     }
     Ok(dir)
 }
 fn check_private(dir: &Directory) -> Result<(), EdgeError> {
+    check_private_with_policy(dir, &provenant_records::policy::Policy::default())
+}
+fn check_private_with_policy(
+    dir: &Directory,
+    policy: &provenant_records::policy::Policy,
+) -> Result<(), EdgeError> {
     let meta = dir.metadata()?;
-    if meta.mode & 0o777 != 0o700 || meta.uid != provenant_os::fs::effective_uid() {
+    if meta.uid != provenant_os::fs::effective_uid() {
         return Err(EdgeError::Permissions);
+    }
+    if meta.mode & 0o777 != 0o700 {
+        dir.make_private().map_err(|_| EdgeError::Permissions)?;
+        policy.warn_or(
+            "STATE_DIR_MODE",
+            provenant_records::policy::Facts::violation(
+                "state directory mode is not 0700; chmod 0700",
+            ),
+            |_| EdgeError::Permissions,
+        )?;
     }
     Ok(())
 }
@@ -2523,6 +2572,43 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_dir_mode_tightens_and_warns_or_refuses() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("state");
+        std::fs::create_dir(&path)?;
+        // Set loose mode: 0o755
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+
+        // 1. Default mode: chmods to 0700 and warns, succeeds:
+        let dir = private(&path)?;
+        let meta = dir.metadata()?;
+        assert_eq!(meta.mode & 0o777, 0o700);
+
+        // 2. Strict mode: returns EdgeError::Permissions on loose mode:
+        let path_strict = temp.path().join("state_strict");
+        std::fs::create_dir(&path_strict)?;
+        std::fs::set_permissions(&path_strict, std::fs::Permissions::from_mode(0o755))?;
+
+        let mut strict_policy = provenant_records::policy::Policy::default();
+        strict_policy.overlay(
+            &[(
+                "STATE_DIR_MODE".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into_iter()
+            .collect(),
+            provenant_records::policy::Source::Project,
+        );
+        assert!(matches!(
+            private_with_policy(&path_strict, &strict_policy),
+            Err(EdgeError::Permissions)
+        ));
+        Ok(())
+    }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]

@@ -102,6 +102,14 @@ impl crate::LaunchSpec {
                 )?;
                 Ok(BuildSlotSetupOutcome::Skipped)
             }
+            Err(ProviderError::Malformed) => {
+                crate::launch::policy_warning(
+                    &self.policy,
+                    "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE",
+                    "build-slot settings invalid; launch ungated",
+                )?;
+                Ok(BuildSlotSetupOutcome::Skipped)
+            }
             Err(error) => Err(error),
         }
     }
@@ -2624,6 +2632,24 @@ mod tests {
                 backend: provenant_config::PortBackend::Builtin,
                 source: provenant_config::PortSource::Builtin,
             };
+            assert!(matches!(
+                spec.configure_build_slots(Path::new("/scratch"), &gate),
+                Ok(BuildSlotSetupOutcome::Skipped)
+            ));
+            assert!(spec.setup.is_empty());
+
+            // Under strict mode, the invalid slot setting refuses launch.
+            let mut strict_policy = Policy::default();
+            strict_policy.overlay(
+                &[(
+                    "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE".into(),
+                    provenant_records::policy::Strength::Refuse,
+                )]
+                .into_iter()
+                .collect(),
+                provenant_records::policy::Source::Project,
+            );
+            spec.policy = strict_policy;
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
                     .is_err(),
