@@ -895,10 +895,11 @@ impl DecisionQueue {
         }
     }
     fn consume(&mut self, count: usize) {
-        let first = self.runs.front_mut().expect("nonempty");
-        first.count -= count;
-        if first.count == 0 {
-            self.runs.pop_front();
+        if let Some(first) = self.runs.front_mut() {
+            first.count -= count;
+            if first.count == 0 {
+                self.runs.pop_front();
+            }
         }
     }
 }
@@ -1107,8 +1108,11 @@ impl Redactor {
                     for queue in &mut self.decisions {
                         let mut left = len;
                         while left > 0 {
-                            let count =
-                                left.min(queue.runs.front().expect("marker decisions").count);
+                            let Some(run) = queue.runs.front() else {
+                                self.failed = true;
+                                return Err(FilterError);
+                            };
+                            let count = left.min(run.count);
                             queue.consume(count);
                             left -= count;
                         }
@@ -1119,31 +1123,31 @@ impl Redactor {
                     continue;
                 }
             }
-            let first = self.decisions[0].runs.front().expect("nonempty");
-            let byte = first.byte;
-            let mut count = self
-                .decisions
-                .iter()
-                .map(|queue| queue.runs.front().expect("nonempty").count)
-                .min()
-                .expect("three queues");
+            // Every decision queue must hold a run for the same source byte;
+            // anything else is a broken invariant and fails the filter closed.
+            let mut fronts = self.decisions.iter().map(|queue| queue.runs.front());
+            let Some(Some(first)) = fronts.next() else {
+                self.failed = true;
+                return Err(FilterError);
+            };
+            let (byte, mut count, mut masked) = (first.byte, first.count, first.masked);
+            for run in fronts {
+                match run {
+                    Some(run) if run.byte == byte => {
+                        count = count.min(run.count);
+                        masked |= run.masked;
+                    }
+                    _ => {
+                        self.failed = true;
+                        return Err(FilterError);
+                    }
+                }
+            }
             if let Some(&(start, _)) = self.replacements.front() {
                 count = count.min(start - self.emitted_source);
             }
             if let Some(&start) = self.insertions.front() {
                 count = count.min(start - self.emitted_source);
-            }
-            let masked = self
-                .decisions
-                .iter()
-                .any(|queue| queue.runs.front().expect("nonempty").masked);
-            if !self
-                .decisions
-                .iter()
-                .all(|queue| queue.runs.front().expect("nonempty").byte == byte)
-            {
-                self.failed = true;
-                return Err(FilterError);
             }
             if masked {
                 if !self.redaction_run {
