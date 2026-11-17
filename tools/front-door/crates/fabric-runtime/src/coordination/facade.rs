@@ -1594,6 +1594,23 @@ mod diagnostic_tests {
                 .unwrap_or_default()
                 .contains("review.reliability")
         );
+
+        let library = crate::graph::template::TemplateLibrary::bundled();
+        let distant = library
+            .resolve("a-distant-but-valid-template-name")
+            .unwrap_err();
+        assert!(
+            distant.starts_with(
+                "unknown template a-distant-but-valid-template-name; known templates: "
+            )
+        );
+        let projected = FacadeError::invalid(super::InvalidInputDetail::graph_reason(format!(
+            "node task: {distant}"
+        )));
+        assert_eq!(
+            projected.diagnostic().detail.as_deref(),
+            Some(distant.as_str())
+        );
         Ok(())
     }
 

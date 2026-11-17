@@ -562,11 +562,7 @@ fn nearest_name<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> O
 fn nearest_names<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
     let mut matches = accepted
         .into_iter()
-        .filter_map(|name| {
-            let distance = edit_distance(key, name);
-            let limit = (key.len().max(name.len()) / 2).max(1);
-            (distance <= limit).then_some((distance, name))
-        })
+        .map(|name| (edit_distance(key, name), name))
         .collect::<Vec<_>>();
     matches.sort_unstable();
     matches.into_iter().take(3).map(|(_, name)| name).collect()
