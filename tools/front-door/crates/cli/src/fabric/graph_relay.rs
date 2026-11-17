@@ -2784,7 +2784,7 @@ mod provisioning_tests {
         keyed[marker] = json!(secret);
         for (request, field) in [
             (
-                json!({"op":"add", "id":"child", "use":"task", "prompt":secret}),
+                json!({"op":"add", "id":"child", "use":"task", "prompt":secret, "idempotency_key":"secret-add"}),
                 "nodes[0].prompt",
             ),
             (
@@ -2798,7 +2798,12 @@ mod provisioning_tests {
         ] {
             let error = serve(&context, "caller", request, budget, &cancel, &clock)
                 .expect_err("secret must be refused");
-            assert_eq!(error.code(), "secret");
+            assert_eq!(
+                error.code(),
+                "secret",
+                "{field}: {}",
+                error.structured_error()
+            );
             assert!(
                 error.structured_error().to_string().contains(field),
                 "{}",
