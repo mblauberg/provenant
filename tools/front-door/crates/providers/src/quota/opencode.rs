@@ -10,10 +10,18 @@ pub(crate) fn decode_source(
         capture,
         |payload, windows, details| {
             let quota = provenant_records::AdapterSpec::get(&plan.account.adapter)
-                .and_then(|spec| {
-                    spec.account_plan(details.as_ref().and_then(|details| details.plan.as_deref()))
-                })
-                .map(|plan| plan.quota);
+                .map(|spec| {
+                    let p = details.as_ref().and_then(|details| details.plan.as_deref());
+                    spec.account_plan(p)
+                        .map(|plan| plan.quota)
+                        .unwrap_or_else(|| {
+                            if spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger {
+                                provenant_records::AccountQuota::LocalLedger
+                            } else {
+                                provenant_records::AccountQuota::ObservedRefusals
+                            }
+                        })
+                });
             match quota {
                 Some(provenant_records::AccountQuota::LocalLedger) => {
                     decode_opencode(payload, windows);
@@ -44,8 +52,13 @@ fn status(
     details: Option<&QuotaDetails>,
 ) -> QuotaStatus {
     let ledger = provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.account_plan(details.and_then(|details| details.plan.as_deref())))
-        .is_some_and(|plan| plan.quota == provenant_records::AccountQuota::LocalLedger);
+        .is_some_and(|spec| {
+            let p = details.and_then(|details| details.plan.as_deref());
+            spec.account_plan(p).map_or(
+                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger,
+                |plan| plan.quota == provenant_records::AccountQuota::LocalLedger,
+            )
+        });
     if !ledger {
         return QuotaStatus::Unknown;
     }

@@ -31,20 +31,6 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant-cli"
-name = "run::provider::tests::opencode_stale_auth_prepares_with_an_unverified_warning"
-issue = "#3293"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant-cli"
-name = "run::provider::tests::partial_account_estimates_allow_launch_without_swapping_a_pinned_account"
-issue = "#3293"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant-cli"
 name = "run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory"
 issue = "#3300"
 owner = "chair"

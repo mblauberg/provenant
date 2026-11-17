@@ -2940,6 +2940,8 @@ pub(super) fn prepare_candidates(
                         if strategy == provenant_records::LoginReprobe::ExecutableOnly {
                             // The version probe established executable availability,
                             // not login health. Let the selected launch check auth.
+                            record.fixture_ref =
+                                format!("installed/{}/login-unverified", entry.adapter);
                             login_unverified.insert((entry.adapter.clone(), entry.key.clone()));
                         } else {
                             let healthy = match strategy {
