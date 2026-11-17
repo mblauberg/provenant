@@ -187,6 +187,7 @@ pub struct StreamState {
     line_count: usize,
     malformed_line: Option<usize>,
     protocol_error: Option<String>,
+    incomplete_eof_fragment: bool,
     tail_truncated: bool,
     last_assistant_text: Option<String>,
     result_text_seen: bool,
@@ -221,6 +222,7 @@ impl StreamState {
             line_count: 0,
             malformed_line: None,
             protocol_error: None,
+            incomplete_eof_fragment: false,
             tail_truncated: false,
             last_assistant_text: None,
             result_text_seen: false,
@@ -234,6 +236,10 @@ impl StreamState {
     /// provider observations retain the strict source-line bound.
     pub fn filtered_capture(&mut self) {
         self.line_limit = provenant_confinement::redact::JsonlRedactor::OUTPUT_LINE_LIMIT;
+    }
+    /// Whether the actual EOF record ended before its JSON value was complete.
+    pub fn incomplete_eof_fragment(&self) -> bool {
+        self.incomplete_eof_fragment
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
         self.expect_session(session);
@@ -348,6 +354,7 @@ impl StreamState {
             Err(error) => {
                 self.malformed = true;
                 self.retained_events = events;
+                self.incomplete_eof_fragment = matches!(error, ProviderError::IncompleteFrame);
                 let error = match error {
                     ProviderError::IncompleteFrame | ProviderError::Malformed => {
                         let line = self.line_count + 1;

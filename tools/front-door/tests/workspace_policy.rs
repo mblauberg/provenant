@@ -162,13 +162,14 @@ fn rust_tokens(source: &str) -> Vec<&str> {
             }
             continue;
         }
-        if bytes[i] == b'r' {
-            let mut quote = i + 1;
+        if bytes[i] == b'r' || bytes[i..].starts_with(b"br") {
+            let raw_start = i + usize::from(bytes[i] == b'b');
+            let mut quote = raw_start + 1;
             while bytes.get(quote) == Some(&b'#') {
                 quote += 1;
             }
             if bytes.get(quote) == Some(&b'"') {
-                let hashes = quote - i - 1;
+                let hashes = quote - raw_start - 1;
                 i = quote + 1;
                 while i < bytes.len() {
                     if bytes[i] == b'"'
@@ -530,6 +531,11 @@ fn executor_git_violation(source: &str, test_file: bool) -> bool {
 
 #[test]
 fn executor_git_policy_flags_only_inherited_env() {
+    // Raw byte literals may contain arbitrary delimiter and Git-like text.
+    let raw_bytes =
+        r##"#[cfg(test)] mod t { let b = br#"\") ] git_executable() ExecOptions::new("#; }"##;
+    assert!(!executor_git_violation(raw_bytes, false));
+    assert_eq!(test_scopes(raw_bytes, false), vec![raw_bytes]);
     let offending = concat!(
         "let git = provenant_os::git::git_executable().ok_or(\"git\")?;\n",
         "let options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));"
