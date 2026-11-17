@@ -249,19 +249,21 @@ impl Recovery {
             .chain(self.reservation.provider.iter())
             .chain(self.reservation.descendants.iter())
             .collect();
-        if identities.iter().any(|identity| {
-            matches!(
-                census.process(identity.pid),
-                crate::census::ProcessLookup::Unknown
-            )
-        }) || census.facts().any(|fact| {
-            !fact.zombie
-                && identities.iter().any(|identity| {
-                    fact.identity == **identity
-                        || fact.identity.session_id == identity.session_id
-                        || fact.identity.group_id == identity.group_id
-                })
-        }) || !worktree_is_free()?
+        // A complete census lists every live process, so a recorded pid that is
+        // not listed is absent; only a pid the census names as undescribable is
+        // unknown (`Census::process` also reports unlisted pids as unknown).
+        if identities
+            .iter()
+            .any(|identity| census.unknown_pids().contains_key(&identity.pid))
+            || census.facts().any(|fact| {
+                !fact.zombie
+                    && identities.iter().any(|identity| {
+                        fact.identity == **identity
+                            || fact.identity.session_id == identity.session_id
+                            || fact.identity.group_id == identity.group_id
+                    })
+            })
+            || !worktree_is_free()?
         {
             return Ok(None);
         }

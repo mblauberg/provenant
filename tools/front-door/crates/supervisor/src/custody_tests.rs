@@ -1577,7 +1577,9 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         let replace_lock = |directory: &Directory, name: &str| -> Result<()> {
             // Retain the old inode while creating its replacement.
             let _old = directory.open_read(OsStr::new(name))?;
-            directory.unlink(OsStr::new(name))?;
+            // `Directory::unlink` refuses lock names by design, so the test
+            // simulates an external replacement through the filesystem path.
+            std::fs::remove_file(directory.current_path()?.join(name))?;
             drop(directory.try_lock(OsStr::new(name), LockMode::Exclusive)?);
             Ok(())
         };
