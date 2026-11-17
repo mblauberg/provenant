@@ -596,10 +596,11 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
         EXIT,
     )?
     .1;
+    // The auth-required stream names a session but no answering model.
     assert!(matches!(
         claude::Claude.continuation(&unanswered, &route, "grants"),
         Err(ProviderError::ContinuationRefused(ContinuationGuard {
-            field: F::Session,
+            field: F::Model,
             issue: I::Missing,
             ..
         }))

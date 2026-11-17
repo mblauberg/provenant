@@ -160,9 +160,17 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
         claude::Claude.finish(stream, EXIT)?.status(),
         OutcomeStatus::Success
     );
+    // A continuation bound to another adapter refuses with the typed guard.
+    use provenant_records::diagnostic::{
+        ContinuationField, ContinuationGuard, ContinuationIssue, ContinuationRule,
+    };
     assert!(matches!(
         cursor::Cursor.stream(Some(&continuation)),
-        Err(ProviderError::IdentityMismatch)
+        Err(ProviderError::ContinuationRefused(ContinuationGuard {
+            rule: ContinuationRule::Contract,
+            field: ContinuationField::Provider,
+            issue: ContinuationIssue::Mismatch,
+        }))
     ));
     Ok(())
 }
