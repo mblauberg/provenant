@@ -378,10 +378,29 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
                 &provenant_os::fs::Directory::open_anchor(&root)?,
             )?;
             let result = executor.execute(command.options(&cwd, Duration::from_secs(5))?)?;
-            assert!(
-                successful_probe(&result),
-                "default={default}, store={store:?}: {result:?}"
-            );
+            if !successful_probe(&result) {
+                // A kill leaves no output; the kernel log names the denied
+                // operation (Sandbox) or the code-signing refusal (AMFI).
+                let query = [
+                    OsString::from("/usr/bin/log"),
+                    "show".into(),
+                    "--style".into(),
+                    "compact".into(),
+                    "--last".into(),
+                    "2m".into(),
+                    "--predicate".into(),
+                    "sender == \"Sandbox\" OR sender == \"AppleMobileFileIntegrity\" OR eventMessage CONTAINS \"AMFI\"".into(),
+                ];
+                let log = executor
+                    .execute(ExecOptions::new(&query, &root, Duration::from_secs(30)))
+                    .map(|outcome| String::from_utf8_lossy(&outcome.stdout.bytes).into_owned())
+                    .unwrap_or_else(|error| error.to_string());
+                let tail: Vec<&str> = log.lines().rev().take(40).collect();
+                panic!(
+                    "default={default}, store={store:?}: {result:?}\nkernel log:\n{}",
+                    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+                );
+            }
         }
         // Runtime authority cannot reopen an inventoried external subtree.
         // An enclosed exact endpoint instead keeps its independent denial.
