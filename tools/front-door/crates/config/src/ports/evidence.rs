@@ -3,7 +3,7 @@ use super::{PortCommandDisposition, PortCommandExecution, PortSource, PortTable}
 use provenant_core::SweepControl;
 use provenant_os::{
     exec::{ExecOutcome, Termination},
-    fs::{Directory, FileKind, LockGuard, LockMode, Publication, PublishMode},
+    fs::{Directory, DirectoryPosition, FileKind, LockGuard, LockMode, Publication, PublishMode},
 };
 use provenant_records::{CanonicalV1, FileDigest, Limits, PortCommandReceipt, PortReceiptLifetime};
 use serde::{Deserialize, Serialize};
@@ -351,7 +351,7 @@ pub fn port_command_receipts(
                         inventory.complete = false;
                         inventory.interrupted_at = Some(path);
                         inventory.continuation =
-                            Some(ReceiptCursor::root(before.unwrap_or(0), visited).encode());
+                            Some(ReceiptCursor::root(before.unwrap_or_default(), visited).encode());
                         return Ok(inventory);
                     }
                     continue;
@@ -362,7 +362,7 @@ pub fn port_command_receipts(
                 inventory.complete = false;
                 inventory.interrupted_at = Some(path);
                 inventory.continuation =
-                    Some(ReceiptCursor::root(before.unwrap_or(0), visited).encode());
+                    Some(ReceiptCursor::root(before.unwrap_or_default(), visited).encode());
                 return Ok(inventory);
             }
             if item.as_os_str() == OsStr::new(RECEIPT_LOCK)
@@ -380,12 +380,12 @@ pub fn port_command_receipts(
 struct ReceiptCursor {
     phase: String,
     owner: Option<String>,
-    cookie: i64,
+    cookie: DirectoryPosition,
     visited: usize,
 }
 
 impl ReceiptCursor {
-    fn files(owner: &str, cookie: i64, visited: usize) -> Self {
+    fn files(owner: &str, cookie: DirectoryPosition, visited: usize) -> Self {
         Self {
             phase: "files".into(),
             owner: Some(owner.into()),
@@ -394,7 +394,7 @@ impl ReceiptCursor {
         }
     }
 
-    fn root(cookie: i64, visited: usize) -> Self {
+    fn root(cookie: DirectoryPosition, visited: usize) -> Self {
         Self {
             phase: "root".into(),
             owner: None,
@@ -405,10 +405,11 @@ impl ReceiptCursor {
 
     fn encode(&self) -> String {
         format!(
-            "port-receipts-v1|{}|{}|{}|{}",
+            "port-receipts-v1|{}|{}|{}|{}|{}",
             self.phase,
             self.owner.as_deref().unwrap_or("-"),
-            self.cookie,
+            self.cookie.block,
+            self.cookie.offset,
             self.visited
         )
     }
@@ -426,7 +427,9 @@ impl ReceiptCursor {
             "-" => None,
             owner => Some(owner.to_owned()),
         };
-        let cookie = fields.next()?.parse().ok()?;
+        let block = fields.next()?.parse().ok()?;
+        let offset = fields.next()?.parse().ok()?;
+        let cookie = DirectoryPosition { block, offset };
         let visited = fields.next()?.parse().ok()?;
         if fields.next().is_some() {
             return None;
@@ -471,8 +474,9 @@ fn scan_receipt_owner(
                 if !control.should_continue() {
                     inventory.complete = false;
                     inventory.interrupted_at = Some(path);
-                    inventory.continuation =
-                        Some(ReceiptCursor::files(owner, before.unwrap_or(0), *visited).encode());
+                    inventory.continuation = Some(
+                        ReceiptCursor::files(owner, before.unwrap_or_default(), *visited).encode(),
+                    );
                     return Ok(());
                 }
                 continue;
@@ -483,7 +487,7 @@ fn scan_receipt_owner(
             inventory.complete = false;
             inventory.interrupted_at = Some(path);
             inventory.continuation =
-                Some(ReceiptCursor::files(owner, before.unwrap_or(0), *visited).encode());
+                Some(ReceiptCursor::files(owner, before.unwrap_or_default(), *visited).encode());
             return Ok(());
         }
         if file_entry.as_os_str() == OsStr::new(RECEIPT_LOCK) {
@@ -553,7 +557,8 @@ fn scan_receipt_owner(
         }
         let mut entry = PortCommandReceiptEntry::new(receipt, metadata.size, path);
         entry.cursor = Some(
-            ReceiptCursor::files(owner, before.unwrap_or(0), visited.saturating_sub(1)).encode(),
+            ReceiptCursor::files(owner, before.unwrap_or_default(), visited.saturating_sub(1))
+                .encode(),
         );
         inventory.entries.push(entry);
     }
