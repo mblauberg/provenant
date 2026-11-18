@@ -1351,7 +1351,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
-    let prepared = prepare_with(
+    let prepare = || prepare_with(
         &registry,
         &task,
         prompt,
@@ -1365,11 +1365,19 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
             }
         },
         None,
-    )?;
+    );
+    let refused = prepare().err().ok_or("expired sign-out was accepted")?;
+    assert!(matches!(
+        refused,
+        super::preparation::PrepareError::Candidates { skipped_routes, .. }
+            if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::AuthRequired))
+    ));
+    std::fs::remove_file(readiness_path)?;
+    let prepared = prepare()?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
     assert!(prepared.route.launch_warnings.iter().any(|warning| {
-        warning.contains("OpenCode login status is unverified")
+        warning.contains("login status is unverified")
     }));
     Ok(())
 }

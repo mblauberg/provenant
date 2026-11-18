@@ -85,7 +85,10 @@ pub(super) fn custody_release_pending(
         Some(evidence)
             if evidence.handoff == provenant_routing::FallbackHandoff::Local
                 && !evidence.custody_released
-                && expected_preparation_failure(outcome) == Some(evidence.failure) =>
+                && (expected_preparation_failure(outcome) == Some(evidence.failure)
+                    || (matches!(outcome, AttemptOutcome::PreparationRefused(_))
+                        && evidence.failure
+                            == provenant_records::run::PreparationFailure::AdapterUnavailable)) =>
         {
             Some(evidence)
         }
@@ -115,7 +118,8 @@ fn expected_preparation_failure(
     match outcome {
         AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
         AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
-        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+        AttemptOutcome::AdapterUnavailable
+        | AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure) => {
             Some(PreparationFailure::AdapterUnavailable)
         }
         _ => None,

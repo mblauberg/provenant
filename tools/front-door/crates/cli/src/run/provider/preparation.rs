@@ -4085,6 +4085,10 @@ pub(super) fn prepare_candidates_inner(
                 Ok(authority) => authority,
                 Err(error) => {
                     previous_outcome = provenant_routing::FallbackOutcome::Other;
+                    reason_boundaries.insert(
+                        reasons.len(),
+                        provenant_records::diagnostic::BoundaryClass::Credentials,
+                    );
                     reasons.push(skip(&label, SkipKind::Refused, error));
                     continue;
                 }
@@ -4113,6 +4117,10 @@ pub(super) fn prepare_candidates_inner(
                         clock.unix_seconds(),
                     );
                     previous_outcome = provider_preparation_fallback(&error);
+                    let class = error.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
                     reasons.push(credential_failure_skip(
                         &label,
                         &error,
@@ -4612,6 +4620,15 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
+        if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
+            spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
+        }) {
+            let warning = format!(
+                "{} login status is unverified; the selected launch will check authentication",
+                route.adapter
+            );
+            push_launch_warning(&mut route, warning);
+        }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
         }
@@ -5009,8 +5026,7 @@ mod receipt_tests {
             provenant_routing::RoutingError::NoEligiblePoolMember {
                 exclusions: vec![message.into()],
                 cause: None,
-                preparation_failure:
-                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
             },
         );
         let refusal = PrepareError::RouteResolution {

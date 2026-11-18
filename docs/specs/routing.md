@@ -184,9 +184,10 @@ renew the refusal. One function,
 `Admission::account_block`, decides account blocks for both resolution and
 the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
-A pool cannot draw an unresolved account or a current login-required account,
-even when every other member is unavailable. Dispatch requires a resolved account;
-preview can explain an unprobed model without selecting a launch account.
+A pool cannot draw a current login-required account, even when every other
+member is unavailable. A missing availability observation reaches preparation
+for its typed cause and cannot itself launch an account. An observed account
+with unknown identity follows the identity policy below.
 Account-wide sign-out and login-expiry failures remain unavailable after their
 observation interval, including across quota publication and independent dispatches.
 Only a strictly newer successful login observation or explicit sign-in clears them;

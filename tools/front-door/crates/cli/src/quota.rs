@@ -4356,7 +4356,9 @@ mod tests {
     #[test]
     fn preparation_login_failure_is_account_wide_and_survives_independent_dispatch_reads()
     -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let account = AccountScope {
             extra: Default::default(),
             adapter: "opencode".into(),
@@ -4635,6 +4637,7 @@ mod tests {
                 .reason,
             Some(ReadinessReason::AccountMismatch)
         );
+        file = ReadinessFile::default();
         file.sync_probe_result(
             &account,
             LOCAL_HOST,

@@ -921,23 +921,9 @@ pub(super) fn resolve_dispatch_excluding_family(
                     records,
                     pools: &pools,
                 };
-                // Preview may explain an unprobed model, but dispatch cannot
-                // select it without a resolved account. Redraw through the same
-                // admission path used for other unavailable pool members.
-                let gate = if resolved.account_key.is_none() {
-                    Err(EdgeError::Routing(RoutingError::NoEligiblePoolMember {
-                        cause: Some(provenant_records::RouteExclusionReason::UnknownAccount),
-                        preparation_failure:
-                            provenant_records::run::PreparationFailure::AdapterUnavailable,
-                        exclusions: vec![format!(
-                            "{}: {}",
-                            model.as_str(),
-                            provenant_records::RouteExclusionReason::UnknownAccount
-                                .diagnostic_parts()
-                                .0,
-                        )],
-                    }))
-                } else if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                // Preparation owns unresolved observations and their typed causes;
+                // a missing identity on an observed account follows policy.
+                let gate = if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
                     admission.check(&resolved).map_err(EdgeError::from)
                 } else {
                     Ok(())
