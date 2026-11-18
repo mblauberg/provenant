@@ -68,13 +68,16 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     # Spec: docs/specs/ci.md#pull-requests-start-from-green-evidence
     docs = commit('notes.md', 'docs')
     covered = {n: ('run' if n == 'checks' else 'covered') for n in names}
-    run(docs, covered)
+    # Main evidence comes from full runs, so coverage from it defers no tests.
+    assert run(docs, covered)['deferred_tests'] == {}
     code = commit('tools/front-door/crates/workflow/src/x.rs', 'code')
-    normal = {'checks': 'run', 'rust': 'run', 'macos_lint': 'run', 'macos_native': 'deferred', 'macos_release': 'deferred'}
-    run(code, normal)
+    normal = {'checks': 'run', 'rust': 'run', 'macos_lint': 'deferred', 'macos_native': 'deferred', 'macos_release': 'deferred'}
+    sel = run(code, normal)
+    assert sel['deferred_tests'] == {'rust': config['suite'][1]['main_tests']}, sel
+    assert 'deferred to main' in summary.read_text()
     os_change = commit('tools/front-door/crates/os/x.rs', 'native')
-    run(os_change, {**normal, 'macos_native': 'run'})
-    run(code, all_run, {'PR_LABELS': '["ci:full"]'})
+    run(os_change, {**normal, 'macos_lint': 'run', 'macos_native': 'run'})
+    assert run(code, all_run, {'PR_LABELS': '["ci:full"]'})['deferred_tests'] == {}
     run(code, all_run, {'DISPATCH_TIER': 'full'})
     # A dispatch renders absent labels as null; auto tier still selects from evidence.
     run(code, all_run, {'EVENT_NAME': 'workflow_dispatch', 'REF': 'refs/heads/topic', 'PR_LABELS': 'null', 'DISPATCH_TIER': 'auto', 'PR_NUMBER': ''},
@@ -99,7 +102,9 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     sync = {'PR_ACTION': 'synchronize', 'PR_BEFORE': code}
     first = run(code, normal, pr(base, code))
     assert (first['base'], first['tree']) == (artifact['base'], artifact['tree']), first
-    run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, {**sync, **pr(base, doc_after)}, state_override=pstate)
+    carried = run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, {**sync, **pr(base, doc_after)}, state_override=pstate)
+    # Coverage carried from a pull-request run keeps that run's deferred tests named.
+    assert 'rust' in carried['deferred_tests'] and 'deferred to main' in summary.read_text(), carried
     code_after = commit('another.rs', 'new')
     run(code_after, normal, {**sync, **pr(base, code_after)}, state_override=pstate)
     run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={'main': [mainrun(base)], 'pr': [prrun]})

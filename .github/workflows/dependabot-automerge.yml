@@ -40,15 +40,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
           DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          # fetch-metadata reports the toolchain ecosystem as rust_toolchain (seen on #3479).
           ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
         run: |
           eligible=false
           files=$(gh api --paginate --slurp "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100")
-          if jq -e --arg ecosystem "$ECOSYSTEM" 'length > 0 and all(.[]; (.prevVersion | length > 0) and (.newVersion | length > 0) and (.updateType == "version-update:semver-patch" or .updateType == "version-update:semver-minor" or ($ecosystem == "rust-toolchain" and (.updateType == null or .updateType == ""))))' <<< "$DEPENDENCIES" >/dev/null; then
+          if jq -e --arg ecosystem "$ECOSYSTEM" 'length > 0 and all(.[]; (.prevVersion | length > 0) and (.newVersion | length > 0) and (.updateType == "version-update:semver-patch" or .updateType == "version-update:semver-minor" or ($ecosystem == "rust_toolchain" and (.updateType == null or .updateType == ""))))' <<< "$DEPENDENCIES" >/dev/null; then
             if jq -e --argjson count "$CHANGED_FILES" --arg ecosystem "$ECOSYSTEM" '
               [ .[][] | .filename ] as $paths |
               ($paths | length) == $count and $count > 0 and
-              (if $ecosystem == "rust-toolchain" then
+              (if $ecosystem == "rust_toolchain" then
                 all($paths[]; test("(^|/)rust-toolchain\\.toml$"))
               else
                 all($paths[]; test("(^|/)(Cargo\\.toml|Cargo\\.lock|package\\.json|package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml)$"))
