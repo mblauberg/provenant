@@ -264,11 +264,11 @@ pub(super) fn select_subtree(tree: &mut Value, root: &str, max_depth: u64) -> Re
                 .copied()
             {
                 let key = (project.to_owned(), child.to_owned());
-                if !selected.contains_key(&key) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = selected.entry(key) {
                     if depth + 1 >= max_depth {
                         cut = true;
                     } else {
-                        selected.insert(key, depth + 1);
+                        entry.insert(depth + 1);
                         changed = true;
                     }
                 }

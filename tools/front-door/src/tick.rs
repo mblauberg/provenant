@@ -220,7 +220,14 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         let collected = (|| -> Result<(), String> {
             let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")
                 .map_err(|error| error.to_string())?;
-            crate::worktrees::scheduled_gc(globals, config.gc.idle_days, workers)
+            crate::worktrees::scheduled_gc(
+                globals,
+                config
+                    .gc
+                    .idle_seconds()
+                    .map_err(|error| error.to_string())?,
+                workers,
+            )
         })();
         write_gc_result(
             &directory,

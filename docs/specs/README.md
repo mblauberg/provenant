@@ -39,6 +39,7 @@ them as Markdown under the untracked `<repository>/docs/reference/`.
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, lane relay, graphs and peer hosts
 - [Telemetry](telemetry.md): usage ledger, cost and outcomes
+- [CI](ci.md): the required check, suite tiers and green evidence
 - [Workflow](workflow.md): review coverage, receipts and sessions
 - [Rust workspace rules](rust-workspace.md): layering, dependencies,
   errors, unsafe and tests

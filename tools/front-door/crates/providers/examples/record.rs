@@ -819,9 +819,11 @@ fn main() -> Result<()> {
     credentials.extend(accounts.entries.values().flat_map(|entry| {
         std::iter::once(&entry.directory)
             .chain(&entry.directories)
-            .filter(|path| path.as_path() != home)
+            .flat_map(|path| {
+                provenant_providers::identity::account_state_paths(&entry.adapter, path)
+            })
             .map(|path| CredentialRoot {
-                path: path.clone(),
+                path,
                 scope: CredentialScope::Subtree,
                 source: format!("account registry: {}", entry.label),
                 kind: CredentialKind::Store,

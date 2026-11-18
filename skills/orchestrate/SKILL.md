@@ -5,37 +5,27 @@ description: "Use to delegate or parallelise work: lanes, graphs, templates, rev
 
 # Orchestrate
 
-Templates: `task` for one bounded assignment, `plan` to shape open work,
-`implement` for one writer slice, `batch` for disjoint slices into one
-integration branch, `deliver` through CI, review and landing, `explore` over
-areas, `research` for dated primary sources, `design` for options, `review`
-for a pinned head, `verify` to falsify claims and `synthesise` to reconcile
-returns. Dotted names select flavours (`review.security`, `implement.fix`).
-Layers are bundled, user, repository (`.provenant/templates/`) and inline;
-`provenant templates NAME --json` shows one.
+Use `provenant templates NAME --json` to inspect bundled, user, repository
+and inline templates. Dotted names select flavours such as `review.security`.
 
 ## Commands
 
 Use `provenant help --all` for commands and options. Explain a graph before
 submitting it; check its authority, write scope and gates first.
 
-## Shape the work
+## Divide the work
 
-Slice into bounded lanes with disjoint write scopes,
-merged into one integration branch. Settle shared contracts first; use waves
-only for real dependencies. Default slices to junior, contained design to
-senior and root constraints to principal; consult recorded cost per template.
-`implement` starts a junior writer directly; use `--plan` when the brief
-needs sizing. A junior writer with no plan input, write scope or explicit plan
-parameter emits an advisory warning. A long writer is for
-coupled work that cannot split. Review each slice lightly and the integrated
-head with the full panel. For a complete configured review, use:
+Delegate decoupled, context-heavy or cross-family work, or to use another
+subscription; keep small, coupled and user-facing steps with the chair. Split
+by context and dependency, settle shared interfaces first, and budget roughly
+1.4–3.3 times the tokens for concurrent work. Integrate each return as it
+finishes and land ready work independently. Any lane may launch child lanes.
+`implement` starts a junior writer directly; `--plan` sizes the brief first.
 
-```sh
-provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
-```
-
-A leaf such as `review.security` runs one lens.
+Sources: [dynamic concurrency](https://arxiv.org/abs/2610.10263),
+[agent loop](https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop),
+[coordination](https://arxiv.org/abs/2608.16801) and
+[coordination study](https://arxiv.org/abs/2607.27877).
 
 `run implement --branch NAME --base REF` creates a single writer's worktree. Register one
 by hand (`provenant worktree create BRANCH`) only to share it: `batch` gives every
@@ -70,9 +60,8 @@ at least once: reconcile the result and deduplicate by event identity.
 
 Check commits, paths, acceptance evidence, review subject and the resolved
 `adapter/model@effort` against the output, not the requested tier. A failed
-child blocks dependent work, and a synthesis cannot waive a gate. Integrate
-disjoint heads in dependency order, run the affected checks and review the
-combined head.
+child blocks dependent work, and a synthesis cannot waive a gate. Integrate each
+ready head in dependency order; run affected checks and use proportionate review.
 
 [Lanes and panels](references/lanes.md) covers briefs, confinement and review
 independence. [Herdr](references/herdr.md) covers watching panes and peers.

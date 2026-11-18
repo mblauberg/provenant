@@ -7,7 +7,7 @@ use std::path::Path;
 #[derive(Clone, Copy)]
 enum RetentionPass {
     ProviderState { days: u64, logs_days: u64 },
-    AttemptScratch { days: u64 },
+    AttemptScratch { idle_seconds: u64 },
     PayloadCap { cap_bytes: u64, measure: bool },
 }
 
@@ -33,7 +33,7 @@ pub(crate) fn collect_attempt_scratch(
     roots: &Roots,
     home: &Path,
     assets: &Path,
-    days: u64,
+    idle_seconds: u64,
     projects: Option<&[ProjectId]>,
     dry_run: bool,
 ) -> ProviderStateGc {
@@ -41,7 +41,7 @@ pub(crate) fn collect_attempt_scratch(
         roots,
         home,
         assets,
-        RetentionPass::AttemptScratch { days },
+        RetentionPass::AttemptScratch { idle_seconds },
         dry_run,
         projects,
     )
@@ -150,13 +150,21 @@ fn collect_store(
                     report.kept.append(&mut collected.kept);
                     report.errors.append(&mut collected.errors);
                 }
-                RetentionPass::AttemptScratch { days } => {
-                    let mut collected = match projects {
-                        Some(projects) => store.gc_temporary_for_projects(
-                            &directory, days, now, dry_run, projects, &call,
-                        )?,
-                        None => store.gc_temporary(&directory, days, now, dry_run, &call)?,
+                RetentionPass::AttemptScratch { idle_seconds } => {
+                    let owner = crate::scratch_owner::Owner::new(host, home, assets);
+                    let decide =
+                        |record: &provenant_run::AttemptRecord,
+                         request: &provenant_run::CanonicalRequest| {
+                            owner.disposition(record, request)
+                        };
+                    let policy = provenant_run::ScratchPolicy {
+                        idle_seconds,
+                        projects,
+                        attempts: None,
+                        owner: Some(&decide),
                     };
+                    let mut collected =
+                        store.gc_temporary(&directory, &policy, now, dry_run, &call)?;
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
                     report.attempt_logs.append(&mut collected.attempt_logs);
@@ -181,10 +189,215 @@ fn collect_store(
     }
 }
 
+/// Look up the exact merged branch; no directory or run-store inventory.
+pub(crate) fn branch_attempts(
+    roots: &Roots,
+    project: ProjectId,
+    branch: &str,
+) -> Result<Vec<provenant_core::AttemptId>, Box<dyn std::error::Error>> {
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    match provenant_run::Contributions::open_read_only(roots.state.as_path(), &call)? {
+        Some(index) => Ok(index.attempts_for_branch(project, branch, &call)?),
+        None => Ok(Vec::new()),
+    }
+}
+
+pub(crate) fn attempts_released(
+    roots: &Roots,
+    project: ProjectId,
+    ids: &[provenant_core::AttemptId],
+    _worktree: &Path,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let context = ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: project,
+        actor_id: ActorId::from_bytes([0; 16]),
+        read_prompts: false,
+    };
+    let Some(store) = RunStore::open_disk_read_only(&context, &call)? else {
+        return Ok(ids.is_empty());
+    };
+    for id in ids {
+        let record = store.record(*id, &call)?;
+        if !matches!(record.state, provenant_run::AttemptState::Terminal { .. })
+            || !store.custody_released(&record, &call)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn spawn_branch_scratch(
+    roots: &Roots,
+    home: &Path,
+    project: &Path,
+    branch: &str,
+    tip: provenant_core::GitOid,
+    integration: &str,
+    attempts: &[provenant_core::AttemptId],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target = serde_json::to_string(&(branch, tip, integration, attempts))?;
+    let args = [
+        std::env::current_exe()?.into_os_string(),
+        "--state-dir".into(),
+        roots.state.as_path().as_os_str().to_owned(),
+        "--project".into(),
+        project.as_os_str().to_owned(),
+        "gc".into(),
+        "--finished-branch".into(),
+        target.into(),
+        "--apply".into(),
+    ];
+    provenant_os::exec::spawn_detached(&args, home)?;
+    Ok(())
+}
+
+/// The land command already removed the exact worktree. Its branch index
+/// selects attempts; publication/custody locks and absent-owner proof are
+/// rechecked by RunStore at mutation. No shared cache adapters run here.
+pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str) -> u8 {
+    let collect = || -> Result<(), Box<dyn std::error::Error>> {
+        if provenant_cli::fabric::in_lane() {
+            return Err("branch scratch collection requires host custody".into());
+        }
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Checkout,
+            crate::roots::Product::Required,
+        )?;
+        let identity = provenant_cli::fabric::Context::open(
+            resolved.roots.clone(),
+            &resolved.home,
+            &resolved.project,
+        )?;
+        let project = identity.identity.project;
+        let (branch, tip, integration, requested): (
+            String,
+            provenant_core::GitOid,
+            String,
+            Vec<provenant_core::AttemptId>,
+        ) = serde_json::from_str(branch)?;
+        let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        let target = if integration.starts_with("refs/") {
+            provenant_confinement::repo::GitRefName::new(&integration)?
+        } else {
+            provenant_confinement::repo::GitRefName::remote_tracking(&integration)?
+        };
+        let landed = crate::gc_support::host_git_with_stderr(
+            &resolved.project,
+            &executor,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &tip.to_string(),
+                target.as_str(),
+            ],
+            std::time::Duration::from_secs(5),
+            false,
+        )?;
+        let landed = landed.termination == provenant_os::exec::Termination::Exit(0);
+        let indexed = branch_attempts(&resolved.roots, project, &branch)?;
+        let ids: Vec<_> = requested
+            .into_iter()
+            .filter(|id| indexed.contains(id))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let context = ExecutionContext {
+            state_root: resolved.roots.state.clone(),
+            project_id: project,
+            actor_id: ActorId::from_bytes([0; 16]),
+            read_prompts: false,
+        };
+        let directory = Directory::open_anchor(resolved.roots.state.as_path())?;
+        let store = RunStore::open(&context, &call)?;
+        let owner =
+            crate::scratch_owner::Owner::new(&resolved.roots, &resolved.home, &resolved.assets);
+        let finished = |record: &provenant_run::AttemptRecord,
+                        request: &provenant_run::CanonicalRequest| {
+            let path = request
+                .task
+                .writer
+                .as_ref()
+                .map(|writer| &writer.worktree)
+                .or(request.task.access.source_root.as_ref());
+            if path.is_some_and(|path| {
+                std::fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            }) {
+                return provenant_run::ScratchOwner::Finished;
+            }
+            if !landed {
+                // Squash merges and non-origin targets may not have local
+                // ancestry. Reuse scoped graph/forge proof for these IDs only.
+                return owner.disposition(record, request);
+            }
+            // The launch captured these IDs before deleting this branch's
+            // checkout. A queued worker cannot expand to a reused branch.
+            let Some(head) = record.head.or(record.subject) else {
+                return owner.disposition(record, request);
+            };
+            let related = crate::gc_support::host_git_with_stderr(
+                &resolved.project,
+                &executor,
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    &head.to_string(),
+                    &tip.to_string(),
+                ],
+                std::time::Duration::from_secs(5),
+                false,
+            )
+            .is_ok_and(|output| output.termination == provenant_os::exec::Termination::Exit(0));
+            if !related {
+                return owner.disposition(record, request);
+            }
+            provenant_run::ScratchOwner::Finished
+        };
+        let policy = provenant_run::ScratchPolicy {
+            idle_seconds: 0,
+            projects: None,
+            attempts: Some(&ids),
+            owner: Some(&finished),
+        };
+        let report = store.gc_temporary(&directory, &policy, clock.wall_now()?, false, &call)?;
+        if !report.errors.is_empty() {
+            return Err(
+                "branch scratch collection incomplete; retry with provenant gc --apply".into(),
+            );
+        }
+        Ok(())
+    };
+    if collect().is_ok() { 0 } else { 1 }
+}
+
 #[cfg(test)]
 pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RootInputs, WallTime};
+    use provenant_core::{AttemptId, OperationId, RootInputs, WaitBudget, WallTime};
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
     use provenant_records::CanonicalV1;
     use std::{fs, os::unix::fs::DirBuilderExt};
     let temp = tempfile::tempdir()?;
@@ -289,6 +502,46 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
         &index_call,
     )?;
     let association = index.read(context.project_id, &graph, &index_call)?;
+    // Age alone cannot finish graph-owned work. Give retention the durable
+    // cancellation proof that makes this graph's scratch collectable.
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": graph.clone(),
+        "nodes": [{"id":"retention", "access":"read_only", "prompt":"fixture", "route":{"alias":"senior"}}]
+    }))?;
+    let digest = provenant_fabric_runtime::graph::graph_plan_digest(&document)?.to_string();
+    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    let mut journal = FileJournal::open(
+        &roots.state,
+        context.project_id,
+        &graph,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: None,
+        directory: base.clone(),
+        document,
+    })?;
+    let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": graph.clone(),
+        "plan_digest": digest,
+        "cancelled": true,
+        "nodes": [{"id":"retention", "state":"skipped", "attempts":[]}]
+    }))?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    assert!(checkpoint.cancelled);
+    assert!(
+        FileJournal::read_status_checkpoint(&roots.state, context.project_id, &graph)?
+            .is_some_and(|stored| stored.cancelled)
+    );
     drop(store);
     let temporary = candidate
         .parent()

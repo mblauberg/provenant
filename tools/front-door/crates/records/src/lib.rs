@@ -6,8 +6,8 @@ pub use adapters::{
     ADAPTER_SPECS, AccountModelPlan, AccountQuota, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES,
     CapabilitySupport, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
     HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities, LaunchField, LaunchRequest,
-    LoginObservation, LoginReprobe, ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot,
-    SkillLocation, UnsupportedLaunch,
+    LoginObservation, LoginReprobe, ModelListingFormat, ModelObservation, NamedEntry,
+    QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
 };
 
 /// The instruction content bound into this product build and projected into

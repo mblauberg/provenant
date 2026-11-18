@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Report the result of a main CI run to the red-main issue."""
+import json
+import os
+import subprocess
+import sys
+
+
+def gh(*args):
+    return subprocess.run(['gh', *args], check=True, text=True, capture_output=True).stdout
+
+
+def main():
+    result = os.environ['CI_RESULT']
+    if result not in ('success', 'failure'):
+        print(f'No main-health update for {result}.')
+        return
+    repo = os.environ['GITHUB_REPOSITORY']
+    sha = os.environ['SHA']
+    run_url = os.environ['RUN_URL']
+    issues = json.loads(gh('api', '--paginate', '--slurp', f'repos/{repo}/issues?state=open&labels=ci%3Ared-main&per_page=100'))
+    issues = [issue for page in issues for issue in page if 'pull_request' not in issue]
+    if result == 'success':
+        for issue in issues:
+            gh('issue', 'close', str(issue['number']), '--repo', repo, '--comment', f'Main is green at {sha}: {run_url}')
+        return
+    jobs = json.loads(gh('api', '--paginate', '--slurp', f"repos/{repo}/actions/runs/{os.environ['RUN_ID']}/jobs?per_page=100"))
+    failed = [job['name'] for page in jobs for job in page['jobs'] if job.get('conclusion') == 'failure']
+    try:
+        green = json.loads(os.environ.get('SELECTION_JSON') or '{}').get('evidence', {}).get('main')
+    except (ValueError, AttributeError):
+        green = None
+    comparison = f'Last green main: {green}\nCompare: https://github.com/{repo}/compare/{green}...{sha}' if green else 'No green main found.'
+    body = (f'CI failed on main: {run_url}\n\nSHA: {sha}\n\nFailed jobs: '
+            + (', '.join(failed) if failed else 'none reported') + f'\n\n{comparison}\n\n'
+            + 'Fix forward: a PR that only repairs CI merges on green ci-status.')
+    if issues:
+        gh('issue', 'comment', str(issues[0]['number']), '--repo', repo, '--body', body)
+    else:
+        gh('issue', 'create', '--repo', repo, '--title', 'main is red', '--label', 'ci:red-main', '--body', body)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (subprocess.CalledProcessError, ValueError, KeyError) as exc:
+        print(f'main-health: {exc}', file=sys.stderr)
+        sys.exit(1)

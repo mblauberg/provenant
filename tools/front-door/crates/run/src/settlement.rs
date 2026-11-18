@@ -1333,6 +1333,7 @@ mod tests {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
         let registry = temp.path().join("broken-registry");
@@ -1458,6 +1459,7 @@ mod tests {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
         assert!(!store.reaction_pending(run.attempt_id, &call)?);
@@ -1547,6 +1549,7 @@ mod tests {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
         store.set_temporary_retained(id, true, &call)?;
@@ -2949,9 +2952,13 @@ impl crate::RunStore {
         if !exists {
             return Err(RunError::NotFound);
         }
-        let mut query = self.db.prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
+        let mut query = self.db.prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND refused=0 AND (terminal=0 OR (?3 AND tmp_retained=1)) ORDER BY sequence")?;
         let rows = query.query_map(
-            rusqlite::params![attempt.to_string(), self.context.project_id.to_string()],
+            rusqlite::params![
+                attempt.to_string(),
+                self.context.project_id.to_string(),
+                explicit
+            ],
             |row| row.get::<_, String>(0),
         )?;
         let mut ids = rows

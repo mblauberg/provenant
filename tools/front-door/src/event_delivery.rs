@@ -1088,7 +1088,7 @@ mod tests {
         let roots = inputs
             .resolve(&provenant_os::fs::SystemPathResolver)
             .unwrap();
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        provenant_os::fixture::private_state_dir(roots.state.as_path()).unwrap();
         (temp, roots, ProjectId::from_bytes([34; 16]))
     }
 

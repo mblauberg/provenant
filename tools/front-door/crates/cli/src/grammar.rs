@@ -112,7 +112,7 @@ pub enum Command {
     /// Replay project observations as JSON lines
     Events {
         /// Resume after this project sequence cursor
-        #[arg(long, value_parser = clap::value_parser!(i64).range(0..))]
+        #[arg(long, catalog_i64_range = 0..)]
         from: Option<i64>,
         /// Continue delivering observations as they arrive
         #[arg(long)]
@@ -1025,9 +1025,12 @@ pub struct Gc {
     /// Also delete merged worktrees and ignored declared output (otherwise previewed)
     #[arg(long)]
     pub apply: bool,
-    /// Minimum idle age for standalone caches and ignored output; merged trees are immediate
-    #[arg(long, default_value = "7", catalog_u64_range = 1..=3650)]
-    pub idle_days: u64,
+    /// Collect scratch owned by work that has finished after this branch landed
+    #[arg(long, hide = true, requires = "apply", conflicts_with = "dry_run")]
+    pub finished_branch: Option<String>,
+    /// Unowned idle lifetime (default: gc.idle, shipped default 6h)
+    #[arg(long, catalog_gc_idle())]
+    pub idle: Option<u64>,
 }
 #[derive(Debug, Args)]
 pub struct Remove {

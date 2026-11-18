@@ -145,6 +145,43 @@ pub fn from_lane(
     )
 }
 
+/// Read HEAD through the host's bounded, read-only Git utility.
+pub fn current_commit(
+    state: &std::path::Path,
+    cwd: &std::path::Path,
+    cancel: &CancelToken,
+) -> Option<String> {
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
+    let git = provenant_os::git::git_executable()?;
+    let runtime = UtilityRuntime::read_only(git, state).ok()?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
+    let repo = runtime
+        .open_read_repo(&executor, cwd, budget, cancel)
+        .ok()?;
+    let outcome = run_read_utility(
+        &executor,
+        GitRead::RevParseHead,
+        &repo,
+        &runtime,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if outcome.termination != provenant_os::exec::Termination::Exit(0)
+        || outcome.drain_truncated
+        || outcome.stdout.truncated
+        || outcome.timed_out
+        || outcome.cancelled
+    {
+        return None;
+    }
+    let text = std::str::from_utf8(&outcome.stdout.bytes).ok()?.trim();
+    provenant_core::GitOid::parse(text)
+        .ok()
+        .map(|oid| oid.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,41 +234,4 @@ mod tests {
             ));
         }
     }
-}
-
-/// Read HEAD through the host's bounded, read-only Git utility.
-pub fn current_commit(
-    state: &std::path::Path,
-    cwd: &std::path::Path,
-    cancel: &CancelToken,
-) -> Option<String> {
-    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
-    let git = provenant_os::git::git_executable()?;
-    let runtime = UtilityRuntime::read_only(git, state).ok()?;
-    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
-    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
-    let repo = runtime
-        .open_read_repo(&executor, cwd, budget, cancel)
-        .ok()?;
-    let outcome = run_read_utility(
-        &executor,
-        GitRead::RevParseHead,
-        &repo,
-        &runtime,
-        budget,
-        cancel,
-    )
-    .ok()?;
-    if outcome.termination != provenant_os::exec::Termination::Exit(0)
-        || outcome.drain_truncated
-        || outcome.stdout.truncated
-        || outcome.timed_out
-        || outcome.cancelled
-    {
-        return None;
-    }
-    let text = std::str::from_utf8(&outcome.stdout.bytes).ok()?.trim();
-    provenant_core::GitOid::parse(text)
-        .ok()
-        .map(|oid| oid.to_string())
 }

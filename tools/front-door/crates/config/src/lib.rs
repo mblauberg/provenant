@@ -20,7 +20,7 @@ pub use gc::{
     RetentionAdapter, RetentionBytes, RetentionClass, RetentionCollector, RetentionEligibility,
     RetentionIssue, RetentionKind, RetentionMeasurements, RetentionOwner, RetentionTrigger,
     STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, WRITER_LANES_CEILING, deserialize_auto,
-    parse_cache_size, retention_schedule,
+    parse_cache_size, parse_gc_idle_duration, retention_schedule,
 };
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,

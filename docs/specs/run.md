@@ -60,8 +60,10 @@ incompatible profile generations are skipped. Refresh currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
 generations and Cargo's normal per-unit freshness checks before reusing artifacts. Published generations are
 immutable, and collection cannot race an active clone. `max_generations` keeps
-history per project; `max_bytes` remains a host-wide allocated-byte limit and
-can evict a project's only generation under byte pressure. Failed refreshes
+history per project; `max_bytes` is a host-wide allocated-byte collection target.
+Collection always keeps each project's newest complete generation, even when
+that generation alone exceeds the target; busy stores and active clones remain
+protected. Failed refreshes
 retry at the next scheduled collection, while busy projects retry on the next
 tick without rebuilding other failed projects. Full requests supersede queued
 busy retries and reevaluate prior failures. Detached pending and active scopes
