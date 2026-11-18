@@ -269,7 +269,22 @@ mod account_registry_tests {
             RegisteredAccount::new("agy", "agy-registered", home.join(".agy-work")).unwrap();
         let nested =
             RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/nested")).unwrap();
-        assert!(Accounts::new(vec![local, isolated, nested]).is_ok());
+        let accounts = Accounts::new(vec![local, isolated, nested]).expect("independent stores");
+        for (key, directory) in [
+            ("local", home.clone()),
+            ("agy-registered", home.join(".agy-work")),
+            ("agy-nested", home.join(".agy-work/nested")),
+        ] {
+            let mut route = crate::tests::route("agy", "gemini-3.8-flash");
+            route.account_key = Some(key.into());
+            assert_eq!(
+                accounts
+                    .selected(&route)
+                    .expect("selected account")
+                    .directory(),
+                directory
+            );
+        }
     }
 
     // Spec: docs/specs/routing.md#accounts-and-credentials
