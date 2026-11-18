@@ -1317,10 +1317,7 @@ fn waiting_on_a_superseded_name_points_at_the_newer_handle() -> Result {
         .output()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let warning = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        text.contains("next: provenant wait wait-once-3\n"),
-        "{text}"
-    );
+    assert!(text.contains("; provenant wait wait-once-3\n"), "{text}");
     assert!(
         warning.contains("wait-once") && warning.contains("wait-once-3"),
         "{warning}"

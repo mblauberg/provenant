@@ -107,7 +107,12 @@ fn settle_phrase(settle: Settle, done: bool) -> &'static str {
 /// The one next command after a wait. Targets still running at timeout are the
 /// ones a chair resumes; once every target has settled, a status re-read is the
 /// neutral next step. The command is derived only from states just observed.
-fn next_command(sources: &[Source], latest: &[Option<Reading>]) -> String {
+fn next_command(sources: &[Source], latest: &[Option<Reading>], superseding: &[String]) -> String {
+    // A superseded name is still read as asked; the next command points at the
+    // newer handle instead of re-reading the old one.
+    if !superseding.is_empty() {
+        return format!("provenant wait {}", superseding.join(" "));
+    }
     let pending: Vec<_> = sources
         .iter()
         .zip(latest)
@@ -150,11 +155,16 @@ fn settle_states(sources: &[Source], latest: &[Option<Reading>], done: bool) -> 
 }
 
 /// The one next command, paired with the states in the summary's `next` line.
-fn final_line(sources: &[Source], latest: &[Option<Reading>], done: bool) -> String {
+fn final_line(
+    sources: &[Source],
+    latest: &[Option<Reading>],
+    done: bool,
+    superseding: &[String],
+) -> String {
     format!(
         "next: {}; {}\n",
         settle_states(sources, latest, done),
-        next_command(sources, latest)
+        next_command(sources, latest, superseding)
     )
 }
 
@@ -1852,20 +1862,19 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     if globals.full && !graph_indices.is_empty() {
         human.push_str(&format!("local observation: {observation}\n"));
     }
+    // A superseded name warns on stderr; next_command points at the newer handle.
+    let mut superseding = Vec::new();
     if let Some(project_id) = project_id {
         for target in &command.targets {
             if let Some(newest) =
                 crate::fabric::superseding_handle(&resolved.roots.state, project_id, &target.name)
             {
-                human.push_str(&crate::fabric::superseded_notice(
-                    &target.name,
-                    &newest,
-                    "wait",
-                ));
+                crate::fabric::superseded_notice(&target.name, &newest, "wait");
+                superseding.push(newest);
             }
         }
     }
-    human.push_str(&final_line(&sources, &latest, done));
+    human.push_str(&final_line(&sources, &latest, done, &superseding));
     // Compact output keeps an owner summary, not a head-only truncation, so
     // the settle states and the next command stay on its last line.
     let summary = provenant_cli::Summary::new(
@@ -1876,7 +1885,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         Some(format!(
             "{}; {}",
             settle_states(&sources, &latest, done),
-            next_command(&sources, &latest)
+            next_command(&sources, &latest, &superseding)
         )),
     );
     crate::emit_summarised(
@@ -2342,7 +2351,7 @@ mod tests {
             Some(reading(Pending)),
         ];
         assert_eq!(
-            final_line(&sources, &mixed, false),
+            final_line(&sources, &mixed, false, &[]),
             "next: fixed settled ok, broken failed, input needs input, slow still running at timeout; provenant wait slow\n"
         );
         let settled = vec![
@@ -2352,12 +2361,17 @@ mod tests {
             Some(reading(Succeeded)),
         ];
         assert_eq!(
-            final_line(&sources, &settled, true),
+            final_line(&sources, &settled, true, &[]),
             "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant status fixed broken input slow\n"
         );
         assert_eq!(
-            final_line(&[], &[], true),
+            final_line(&[], &[], true, &[]),
             "next: nothing to wait for; provenant status\n"
+        );
+        // A superseded target keeps its states; the next command names the newer handle.
+        assert_eq!(
+            final_line(&sources, &settled, true, &["slow-2".to_owned()]),
+            "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant wait slow-2\n"
         );
     }
 
