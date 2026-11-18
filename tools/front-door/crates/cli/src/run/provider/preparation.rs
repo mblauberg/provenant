@@ -1227,7 +1227,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         field: provenant_records::diagnostic::ContinuationField::Effort,
         issue: provenant_records::diagnostic::ContinuationIssue::Mismatch,
     };
-    let refused = aggregate(vec![continuation_skip("codex/gpt-6-luna", guard)]);
+    let refused = aggregate(vec![continuation_skip("codex/fixture-model", guard)]);
     assert_eq!(refused.skipped_routes[0].continuation_guard, Some(guard));
     assert_eq!(refused.policy_code.as_deref(), Some(guard.rule.code()));
     assert!(refused.message.contains(guard.rule.code()));
@@ -1833,7 +1833,7 @@ mod stale_readiness_tests {
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
             "selection_context":{"workload":"general","writes":false},
             "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
-            "adapter":"agy", "model":"gemini-3.8-pro", "effort":null,
+            "adapter":"agy", "model":"gemini-9-pro", "effort":null,
             "catalogue_revision":"revision", "account_key":"account", "host":"local",
             "alternatives":[], "exclusions":[], "eligibility":"eligible",
             "readiness":{"status":"unavailable","reason":"stale_availability"},
@@ -1859,7 +1859,7 @@ mod stale_readiness_tests {
             Some(record.observed_models.clone())
         );
         let mut flash = route.clone();
-        flash.model = "gemini-3.8-flash".into();
+        flash.model = "gemini-9-flash".into();
         assert_eq!(
             unoffered_model(std::slice::from_ref(&record), &flash, 20),
             None
@@ -2025,14 +2025,22 @@ mod stale_readiness_tests {
     #[test]
     fn refreshed_selected_route_rechecks_routing_and_access_guards() {
         use provenant_routing::{
-            AccessContext, Catalogue, Fallback, ModelId, RouteChoice, RouteRequest, RoutingConfig,
+            AccessContext, Catalogue, Fallback, RouteChoice, RouteRequest, RoutingConfig,
             RoutingContext,
         };
         let catalogue = Catalogue::bundled().unwrap();
         let config = RoutingConfig::default();
         let request = RouteRequest {
             intent: Default::default(),
-            choice: RouteChoice::Model(ModelId::parse("codex/gpt-6-luna").unwrap()),
+            choice: RouteChoice::Model(
+                catalogue
+                    .models()
+                    .iter()
+                    .find(|entry| entry.model.adapter() == "codex")
+                    .unwrap()
+                    .model
+                    .clone(),
+            ),
             effort: None,
             confidential: false,
             fallback: Fallback::None,
@@ -2705,7 +2713,7 @@ pub(super) fn prepare_candidates(
         retained_identity.and_then(|identity| identity.account_key),
         resume.is_some(),
     );
-    let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
+    let catalogue = crate::model_discovery::effective(roots).map_err(|e| e.to_string())?;
     let mut eligible = provenant_routing::probe_adapters(
         &request,
         &catalogue,
@@ -3282,6 +3290,7 @@ pub(super) fn prepare_candidates(
             continue;
         }
         let effective = config.domains.routing.model_policy.effective(
+            &catalogue,
             &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
             route.account_key.as_deref(),
             clock.wall_now().map_err(|error| error.to_string())?,
@@ -4801,11 +4810,21 @@ mod receipt_tests {
     #[test]
     fn alias_effort_reaches_launch_record() -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
+        let model = catalogue
+            .models()
+            .iter()
+            .find(|entry| {
+                entry.model.adapter() == "codex"
+                    && entry.efforts.iter().any(|effort| effort == "high")
+            })
+            .ok_or("missing fixture model")?
+            .model
+            .clone();
         let mut config = RoutingConfig::default();
         config.routes.insert(
             "fixture".into(),
             NamedRoute {
-                model: provenant_routing::ModelId::parse("codex/gpt-6.1-sol")?,
+                model: model.clone(),
                 effort: Some("high".into()),
             },
         );
@@ -4846,7 +4865,7 @@ mod receipt_tests {
         };
         let record = launch_route_record(&resolved, Some("work"), &requested, false, false);
         let wire = serde_json::to_value(&record)?;
-        assert_eq!(wire["model"], "codex/gpt-6.1-sol");
+        assert_eq!(wire["model"], model.as_str());
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["account_label"], "work");
         assert_eq!(wire["source"], "named_route");
@@ -4872,7 +4891,7 @@ mod receipt_tests {
             extra: Default::default(),
             required_family: None,
             provider: "codex".into(),
-            model: "codex/gpt-6.1-sol".into(),
+            model: model.as_str().into(),
             effort: Some("high".into()),
         };
         assert_eq!(

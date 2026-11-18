@@ -12,6 +12,7 @@ pub mod domains;
 pub mod external_contract;
 pub mod fabric;
 pub mod ignore_files;
+mod model_discovery;
 pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
@@ -830,7 +831,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             {
                 return Err(CliError::invalid_with_repair(
                     "route resolve needs a route or model, such as `route resolve utility`, \
-                     `route resolve codex/gpt-6-luna`, `--route utility` or `--model ADAPTER/ID`",
+                     `route resolve ADAPTER/ID`, `--route utility` or `--model ADAPTER/ID`",
                     "provenant route resolve --model ADAPTER/ID",
                 ));
             }

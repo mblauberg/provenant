@@ -273,6 +273,7 @@ fn valid_pairs_and_policy_preview_are_pure() -> Result {
             .is_empty()
     );
     for pair in pairs {
+        assert_eq!(pair["source"], "bundled");
         let model = pair["model"].as_str().ok_or("model")?;
         let mut args = vec!["route", "resolve", model];
         if let Some(effort) = pair["effort"].as_str() {
@@ -1260,5 +1261,25 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     assert_eq!(unlisted["data"]["effort"], "high");
     assert!(unlisted["data"]["supported_efforts"].is_null());
     assert!(!rig.state.exists());
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn route_list_includes_sources_in_json_and_human_views() -> Result {
+    let rig = rig()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.routing.routes.custom]\nmodel = 'codex/gpt-6-luna'\n",
+    )?;
+    let json = call(&rig, &["route", "list"], 0)?;
+    assert_eq!(json["data"]["named_routes"]["custom"]["source"], "user");
+    let human = rig.command(&["route", "list"])?;
+    assert!(
+        String::from_utf8_lossy(&human.stdout.bytes)
+            .contains("route custom = codex/gpt-6-luna source=user")
+    );
+    let valid = rig.command(&["route", "list", "--valid", "--adapter", "codex"])?;
+    assert!(String::from_utf8_lossy(&valid.stdout.bytes).contains("source=bundled effort="));
     Ok(())
 }

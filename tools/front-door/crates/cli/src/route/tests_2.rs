@@ -766,7 +766,7 @@
         ];
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let observed =
-            super::quota_observations(&catalogue, &availability, &[record], &policies, &requested)?;
+            super::quota_observations(&catalogue, &provenant_routing::RoutingConfig::default(), &availability, &[record], &policies, &requested)?;
         let bound: Vec<_> = observed.iter().map(|o| o.model.as_str()).collect();
         assert!(bound.contains(&"opencode/opencode-go/glm-5.1"));
         assert!(bound.contains(&"opencode/opencode-go/unlisted"));
@@ -813,7 +813,7 @@
         let catalogue = super::Catalogue::bundled()?;
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let observed =
-            super::quota_observations(&catalogue, &availability, &[record], &policies, &[])?;
+            super::quota_observations(&catalogue, &provenant_routing::RoutingConfig::default(), &availability, &[record], &policies, &[])?;
         let bound: Vec<_> = observed.iter().map(|o| o.model.as_str()).collect();
         assert!(bound.contains(&"opencode/opencode-go/glm-5.1"));
         assert!(bound.iter().all(|m| !m.contains(' ')));
