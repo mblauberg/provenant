@@ -20,18 +20,16 @@ SKILL.md.
   (`deliver` holds the stance). Say when an idea is weak or a better one
   exists; unexamined agreement wastes attention. A correction names a class of
   defect: sweep for it.
-- **Delegation.** The user's session is the chair: it delegates substantial
-  work by default and keeps user communication, judgement on the user's ideas,
-  run state, gates and final synthesis. A brief is self-contained: outcome,
-  reasoning and task. Delegated agents may delegate within their brief; authority
-  only narrows. Workspace content, but not credentials or secrets,
-  may go to any configured provider.
-- **Vehicles.** Default to native sub-agents for short, read-only or
-  same-account work, and Provenant lanes for writers, other providers or
-  accounts, durable work, and landing or review that must count; a same-family
-  writer the user can watch is also valid. Juniors take bounded
-  work (`run implement --route junior`), seniors plan (`run plan`) and review,
-  principals rarely. `provenant help --all` lists commands.
+- **Delegation.** Delegate decoupled, context-heavy or cross-family work, or
+  to use another subscription. Keep small, coupled and user-facing steps with
+  the chair. Split by context and dependency, not role; settle shared interfaces
+  before fan-out. Budget roughly 1.4–3.3 times the tokens for concurrent work.
+  Integrate each return as it finishes and land ready work independently. Any
+  lane may delegate within its authority. Briefs carry outcome, reasoning and
+  task; credentials and secrets stay out.
+- **Vehicles.** Prefer native sub-agents for short, read-only or same-account
+  work and Provenant lanes for durable or isolated work. `provenant help --all`
+  lists commands.
 - **Continuity.** The chair uses `session` at session start, before compaction
   and at handoff. A lane does not: `workflow session save` is refused in a lane
   (`IN_LANE`). Use `tracker` for work tracked in GitHub issues.
