@@ -203,9 +203,15 @@ limit holds the whole account until its reset. Agy's recorded refusals expire
 within five minutes even when the provider reports a later reset. This bound
 also applies when reading previously published readiness, so a stale multi-day
 estimate cannot prevent a new attempt or probe. Fresh provider evidence may
-renew the refusal. One function,
-`Admission::account_block`, decides account blocks for both resolution and
-the pre-launch recheck. Readiness is stored apart from quota records; a failed
+renew the refusal. A fresh reading below the 95% headroom threshold that
+postdates a refusal clears it, including a model-scoped refusal without a pool:
+with no verified binding, every reported window must show headroom before that
+model is unblocked. A successful run on a route clears that model's refusal,
+and `provenant quota clear ACCOUNT [MODEL]` removes recorded refusals on owner
+request and reports exactly what it removed (saying so when nothing matched).
+Each clearing is recorded with its source: `reading`, `run` or `manual`.
+One function, `Admission::account_block`, decides account blocks for both
+resolution and the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
 A pool cannot draw a current login-required account, even when every other
 member is unavailable. A missing availability observation reaches preparation
