@@ -323,7 +323,7 @@ impl From<InboxCursor> for String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InboxReceipt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -336,6 +336,23 @@ pub struct InboxReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_coverage: Option<WorkCoverage>,
 }
+
+// Flattened into `InboxResult::Saved`: a single-pass reader keeps that chain at
+// one flatten level while retaining unknown fields for round trips.
+provenant_records::deserialize_with_extra!(InboxReceipt {
+    extra: extra,
+    required {
+        operation_id: OperationId,
+        request_id: HumanRequestId,
+        revision: u64,
+        state: RequestState,
+    }
+    optional {
+        answer_id: Option<HumanAnswerId>,
+        delivery: Option<AnswerDelivery>,
+        work_coverage: Option<WorkCoverage>,
+    }
+});
 
 /// Project metadata attached to a host-wide inbox listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
