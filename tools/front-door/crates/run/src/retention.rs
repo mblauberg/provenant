@@ -2190,6 +2190,7 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
     #[test]
     fn released_read_only_scratch_uses_idle_age_independent_of_graph_and_checkout() -> TestResult {
         let temp = tempfile::tempdir()?;

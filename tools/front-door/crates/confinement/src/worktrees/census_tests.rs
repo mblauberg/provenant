@@ -745,6 +745,7 @@ struct InjectedCensus {
     platform_uids: BTreeMap<i64, ProcessUids>,
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
 fn unreadable_process_without_candidate_paths_only_blocks_the_root_it_occupies()
 -> Result<(), Box<dyn Error>> {

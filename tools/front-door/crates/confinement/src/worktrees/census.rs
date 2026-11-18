@@ -16,8 +16,10 @@ pub(super) fn mark_unreadable_process_warning(boot: &str, pid: i64) -> bool {
 
 fn warn_unreadable_process_once(boot: &str, pid: i64) {
     if mark_unreadable_process_warning(boot, pid) {
-        eprintln!(
-            "warning: process {pid} could not be inspected (EPERM); no cwd or descriptor is under candidate worktrees"
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: process {pid} could not be inspected (EPERM); no observed cwd or descriptor is under candidate worktrees"
         );
     }
 }
@@ -1785,6 +1787,7 @@ pub(super) enum NativeCwd {
 
 /// Place positive cwd/descriptor evidence from an EPERM process. Unreadable
 /// process metadata is scoped to roots that its known paths could occupy.
+#[allow(clippy::too_many_arguments)] // The census owns these four correlated evidence maps.
 fn record_unreadable_path(
     states: &mut BTreeMap<PathBuf, Occupancy>,
     holders: &mut BTreeMap<PathBuf, ObservedProcess>,
