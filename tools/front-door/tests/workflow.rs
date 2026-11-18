@@ -1303,11 +1303,12 @@ fn session_save_warns_once_only_when_disk_is_low() -> Result {
     let file = rig.root.join("checkpoint.md");
     std::fs::write(&file, "# Goal\nship it\n")?;
     let file = file.to_string_lossy().into_owned();
-    let (free, total) = provenant_os::fs::filesystem_bytes_at(&rig.state)?;
-    for (floor, warning) in [("1B", free < 2), ("9223372036854775807B", free < total / 2)] {
+    // Explicit critical threshold keeps the ready case independent of the
+    // host's default 2 GiB threshold; the maximum floor forces pressure.
+    for (floor, warning) in [("1B", false), ("18446744073709551615B", true)] {
         std::fs::write(
             rig.state.join("config.toml"),
-            format!("schema_version=1\n[gc]\nfree_floor='{floor}'\n"),
+            format!("schema_version=1\n[gc]\nfree_floor='{floor}'\ncritical_free='0B'\n"),
         )?;
         for json in [false, true] {
             let mut args = vec!["workflow", "session", "save", "disk-test", "--file", &file];
