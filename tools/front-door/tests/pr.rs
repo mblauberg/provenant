@@ -494,7 +494,8 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     let text = String::from_utf8(output.stdout.bytes)?;
     assert!(text.starts_with("2 PRs:"), "{text}");
     assert!(
-        text.lines().any(|line| line == "next: gh pr checks 1669"),
+        text.lines()
+            .any(|line| line == "next: provenant ci failures pr 1669"),
         "{text}"
     );
     let line = text
