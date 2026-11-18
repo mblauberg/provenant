@@ -94,14 +94,28 @@ fn scanner_refusal(input: &Value) -> Option<FacadeError> {
             }
         }
     }
-    for field in ["set", "document"] {
+    for field in [
+        "set",
+        "document",
+        "name",
+        "template",
+        "route",
+        "model",
+        "account",
+        "host",
+        "worktree",
+        "branch",
+        "base",
+        "write_scope",
+        "over",
+    ] {
         if let Some(value) = input.get(field)
             && let Some(error) = scan(value, field)
         {
             return Some(error);
         }
     }
-    None
+    scan(input, "input")
 }
 
 #[cfg(test)]
@@ -1265,7 +1279,7 @@ impl Factory {
         .lower(&node)
         .map_err(|error| {
             if error.to_string().contains("secret pattern")
-                && let Some(refusal) = scanner_refusal(&input)
+                && let Some(refusal) = scanner_refusal(input)
             {
                 refusal
             } else {

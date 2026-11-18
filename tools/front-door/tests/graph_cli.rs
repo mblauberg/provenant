@@ -1755,7 +1755,18 @@ fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() 
             id.clone()
         };
         let brief = "line one\nline two: corrected scope\n";
-        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
+        let brief_path = rig.project.join("amended-brief.txt");
+        std::fs::write(&brief_path, brief)?;
+        let (output, retried) = if qualified {
+            rig.run(&[
+                "retry",
+                &target,
+                "--brief-file",
+                brief_path.to_str().ok_or("brief path")?,
+            ])?
+        } else {
+            rig.run(&["retry", &target, "--brief", brief])?
+        };
         assert!(output.status.success(), "{target}: {retried}");
         let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
         assert_eq!(prompt, brief, "{target}");

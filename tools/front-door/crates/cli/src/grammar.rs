@@ -1350,11 +1350,16 @@ pub struct Edit {
 }
 #[derive(Debug, Args)]
 pub struct Templates {
-    /// Template to show; omit to list effective templates
-    pub name: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<TemplatesCommand>,
     /// Document containing inline templates (JSON or TOML)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub file: Option<PathBuf>,
+}
+#[derive(Debug, Subcommand)]
+pub enum TemplatesCommand {
+    /// Show one effective template
+    Show { name: String },
 }
 /// A bare graph name: a target with no node.
 fn edit_graph_name(value: &str) -> Result<String, String> {

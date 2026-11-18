@@ -211,6 +211,13 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         ));
         assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
         let record = store.record(id, &call)?;
+        let result = std::fs::read_to_string(
+            store
+                .attempt_dir(id, false)?
+                .current_path()?
+                .join("result.md"),
+        )?;
+        assert!(result.contains(message));
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(record.skipped_routes[1].cause, cause);
         assert_eq!(

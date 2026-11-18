@@ -800,7 +800,11 @@ pub(crate) fn enrich_status_rows_within(
 fn project_attempt_failure(row: &mut Value) {
     if row["terminal_cause"].is_string() {
         row["cause_code"] = row["terminal_cause"].clone();
-        if row["reason"].is_string() {
+        if row["terminal_cause"] == "handoff_refused" {
+            if let Some(id) = row["id"].as_str() {
+                row["next"] = json!(format!("provenant retry {id}"));
+            }
+        } else if row["reason"].is_string() {
             row["next"] = row["reason"].clone();
         }
     }
@@ -838,6 +842,7 @@ fn project_node_failures(rows: &mut [Value]) {
                     row["graph_state"].clone(),
                     row["terminal_cause"].clone(),
                     row["reason"].clone(),
+                    row["next"].clone(),
                 ),
             ))
         })
@@ -850,7 +855,7 @@ fn project_node_failures(rows: &mut [Value]) {
             row["graph_id"].as_str().unwrap_or_default().to_owned(),
             row["node_id"].as_str().unwrap_or_default().to_owned(),
         );
-        if let Some((state, cause, reason)) = failures.get(&key)
+        if let Some((state, cause, reason, next)) = failures.get(&key)
             && state == "terminal"
         {
             if !cause.is_null() {
@@ -858,7 +863,11 @@ fn project_node_failures(rows: &mut [Value]) {
             }
             if !reason.is_null() {
                 row["reason"] = reason.clone();
-                row["next"] = reason.clone();
+                row["next"] = if next.is_null() {
+                    reason.clone()
+                } else {
+                    next.clone()
+                };
             }
         }
     }
@@ -2082,7 +2091,12 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
         .filter(|row| {
             row["kind"] == "node"
                 || (row["kind"] == "attempt"
-                    && (target.attempt.is_some() || row["latest_attempt"] == true))
+                    && (target.attempt.is_some()
+                        || !rows.iter().any(|other| {
+                            other["kind"] == "attempt"
+                                && other["node_id"] == row["node_id"]
+                                && other["attempt_number"].as_u64() > row["attempt_number"].as_u64()
+                        })))
         })
         .cloned()
         .collect();
@@ -2154,8 +2168,8 @@ fn result_reports_latest_handoff_branch_head_and_checks() -> Result<(), Box<dyn 
     let target = "work/task".parse()?;
     let rows = vec![
         json!({"kind":"node", "id":"work/task", "state":"succeeded", "branch":"feat/work"}),
-        json!({"kind":"attempt", "id":"work/task#1", "latest_attempt":false, "state":"failed"}),
-        json!({"kind":"attempt", "id":"work/task#2", "latest_attempt":true, "state":"succeeded", "head":"abc123", "handoff":{"Ok":{"status":"done", "note":"finished", "verify":["focused tests passed"]}}}),
+        json!({"kind":"attempt", "id":"work/task#1", "node_id":"task", "attempt_number":1, "state":"failed"}),
+        json!({"kind":"attempt", "id":"work/task#2", "node_id":"task", "attempt_number":2, "state":"succeeded", "head":"abc123", "handoff":{"Ok":{"status":"done", "note":"finished", "verify":["focused tests passed"]}}}),
     ];
     let reply = result_reply(&target, &rows);
     for text in ["feat/work", "abc123", "finished", "focused tests passed"] {
@@ -3747,6 +3761,19 @@ mod tests {
         project_node_failures(&mut rows);
         assert!(rows[0]["reason"].is_null());
         assert_eq!(rows[0]["cause_code"], "adapter_unavailable");
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#results
+    fn launch_refusal_propagates_cause_and_retry_to_node() {
+        let mut rows = vec![
+            json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null}),
+            json!({"kind":"attempt", "id":"g/a#1", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":"handoff_refused", "reason":"repository lock busy"}),
+        ];
+        project_attempt_failure(&mut rows[1]);
+        project_node_failures(&mut rows);
+        assert_eq!(rows[0]["reason"], "repository lock busy");
+        assert_eq!(rows[0]["next"], "provenant retry g/a#1");
     }
 
     #[test]

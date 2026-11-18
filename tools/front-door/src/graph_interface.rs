@@ -708,7 +708,7 @@ pub(crate) fn templates(
 ) -> u8 {
     let input = (|| {
         let mut input = json!({"op":"templates"});
-        if let Some(name) = request.name {
+        if let Some(provenant_cli::TemplatesCommand::Show { name }) = request.command {
             input["name"] = json!(name);
         }
         if let Some(path) = request.file {

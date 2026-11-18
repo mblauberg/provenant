@@ -6,8 +6,8 @@ Settings live in the selected state root's `<state>/config.toml`; `provenant con
 schema [--all]` lists every key with its table, default, bounds and effect,
 `config show --full` the effective values and sources, `config check` every warning
 with its file and key. This page covers only what those cannot: safety rules
-and operator decisions. Edit with `config set|unset|apply` (one lock, whole-file
-validation, `apply --expect-revision`); tables outside `[knobs]`, such as
+and operator decisions. Edit with `config set|unset|apply` (whole-file validation and
+`apply --expect-revision`); tables outside `[knobs]`, such as
 `[domains.fabric.lanes]` and `[gc]`, are edited by hand.
 
 ## Precedence and refusals

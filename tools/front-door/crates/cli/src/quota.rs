@@ -2954,7 +2954,7 @@ mod tests {
         for _ in 0..14 {
             report.accounts.push(row(QuotaStatus::Stale));
         }
-        report.coverage.total = report.accounts.len();
+        report.coverage.total = report.accounts.len().try_into().unwrap();
         let summary = quota_summary(&report);
         assert_eq!(summary.lines.len(), 1 + crate::limits::SUMMARY_ROWS);
         assert_eq!(summary.omitted, 18 - crate::limits::SUMMARY_ROWS);

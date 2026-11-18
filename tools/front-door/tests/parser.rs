@@ -496,6 +496,24 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/cli.md#results
+fn config_set_reports_only_the_changed_effective_setting() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let before = rig.command(&["config", "show", "--json"])?;
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout.bytes)?;
+    let key = "config.history_max_bytes";
+    let output = rig.command(&["config", "set", key, "300000", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["key"], key);
+    assert_eq!(result["data"]["previous"], before["data"]["knobs"][key]);
+    assert_eq!(result["data"]["effective"]["value"], 300000);
+    assert!(result["data"]["effective"]["source"].is_string());
+    assert!(result["data"].get("domains").is_none());
+    Ok(())
+}
+
+#[test]
 fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let rig = TestRig::new()?;
     std::fs::write(

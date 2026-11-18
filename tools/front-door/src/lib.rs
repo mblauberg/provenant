@@ -715,11 +715,25 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 serde_json::to_value(schema)?
             }
             ConfigAction::Edit(edit) => {
-                let edited =
-                    config::edit_config(&roots, sections, &options, |doc, _| edit.apply(doc))?;
-                let mut value = serde_json::to_value(&edited.config)?;
-                value["revision"] = edited.after_revision.into();
-                value
+                let mut previous = serde_json::Value::Null;
+                let edited = config::edit_config(&roots, sections, &options, |doc, current| {
+                    previous = match edit {
+                        config::KnobEdit::Set { name, .. } | config::KnobEdit::Unset(name) => {
+                            serde_json::to_value(current.knobs.get(name)).unwrap_or_default()
+                        }
+                        config::KnobEdit::Profile(_) => serde_json::json!(current.profile),
+                    };
+                    edit.apply(doc)
+                })?;
+                match edit {
+                    config::KnobEdit::Set { name, .. } | config::KnobEdit::Unset(name) => {
+                        serde_json::json!({"key": name, "previous": previous,
+                            "effective": edited.config.knobs.get(name), "revision": edited.after_revision})
+                    }
+                    config::KnobEdit::Profile(_) => serde_json::json!({"key": "profile",
+                        "previous": previous, "effective": edited.config.profile,
+                        "revision": edited.after_revision}),
+                }
             }
             ConfigAction::Apply {
                 patch,
@@ -771,6 +785,13 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                         "effective configuration: profile={profile} revision={revision} warnings={warnings}\nsections: {sections}\nUse `provenant config show --full` for values and sources, or `--json` for structured data.\n"
                     )
                 }
+            } else if command == "config set" || command == "config unset" {
+                format!(
+                    "{}: {} (previous: {})\n",
+                    value["key"].as_str().unwrap_or("profile"),
+                    value["effective"],
+                    value["previous"]
+                )
             } else {
                 provenant_cli::terse(&value)
             };

@@ -1772,7 +1772,13 @@ mod tests {
             invalid(&["run", "task", flag, "example"]);
         }
         valid(&["templates"]);
-        valid(&["templates", "review.security", "--file", "inline.toml"]);
+        valid(&[
+            "templates",
+            "show",
+            "review.security",
+            "--file",
+            "inline.toml",
+        ]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
         // --plan is a graph-run flag; non-implementation templates ignore it.

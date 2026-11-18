@@ -12,7 +12,7 @@ areas, `research` for dated primary sources, `design` for options, `review`
 for a pinned head, `verify` to falsify claims and `synthesise` to reconcile
 returns. Dotted names select flavours (`review.security`, `implement.fix`).
 Layers are bundled, user, repository (`.provenant/templates/`) and inline;
-`provenant templates NAME --json` shows one.
+`provenant templates show NAME --json` shows one.
 
 ## Commands
 

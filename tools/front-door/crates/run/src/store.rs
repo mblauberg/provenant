@@ -1238,6 +1238,10 @@ impl RunStore {
                 ),
             };
         old.preparation_failure = preparation_failure;
+        let refusal_result = reason
+            .as_deref()
+            .map(|text| provenant_confinement::redact::bounded_line(text, 256))
+            .unwrap_or_default();
         let publication = TerminalPublication {
             handoff: Ok(None),
             terminal_cause,
@@ -1247,9 +1251,9 @@ impl RunStore {
             started_at: None,
             provider_ms: None,
             reason,
-            result: "",
+            result: &refusal_result,
             complete: true,
-            redacted: false,
+            redacted: true,
             resolved_route: old.resolved_route.clone(),
             applied_route: old.applied_route.clone(),
             observed_route: old.observed_route.clone(),
