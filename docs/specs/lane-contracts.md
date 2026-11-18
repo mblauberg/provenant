@@ -33,8 +33,11 @@ pattern. Lane lifecycle comes from attempt settlement and the existing graph
 `*.events.jsonl` journal; notes retain their append-only state files; forge
 check_run, check_suite, workflow_run, pull_request and issue_comment originate
 at the host listener. Those source stores remain authoritative; the shared
-stream indexes observations for replay and does not replace them. No listener,
-stream append or adapter is implemented by this contract slice.
+stream indexes observations for replay and does not replace them. The store's
+`append_observation` deduplicates stable source identities and `observations`
+assigns the project cursor on replay. `provenant events --from SEQ [--follow]`
+emits those observations as JSON lines; readers persist a cursor only after
+processing. Source ingestion, listener and chair adapter remain separate work.
 
 ## Result projection
 

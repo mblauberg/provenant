@@ -46,6 +46,7 @@ mod settlement;
 mod staging_gc;
 mod state_handoff;
 mod status_wait;
+mod events;
 mod target_seed_build;
 mod usage;
 mod verify;
@@ -1380,6 +1381,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             process.workers(),
         ),
         Command::Wait(cmd) => status_wait::run(cmd, globals),
+        Command::Events { from, follow } => events::run(from, follow, globals),
         Command::Land {
             numbers,
             strategy,
