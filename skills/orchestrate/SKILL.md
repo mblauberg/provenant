@@ -46,7 +46,8 @@ other.
 Block on one `wait` call, with `--any` for the first settlement; never poll.
 Expiry leaves targets running. Reconcile the returned event before resuming.
 Recover an existing graph with `status`, `output` and `retry` before launching
-replacement work. An idle run or empty queue means no eligible work now, not
+replacement work. Read a settled lane with `result NAME`, which carries its
+handoff, head and verification; do not parse provider logs. An idle run or empty queue means no eligible work now, not
 done.
 
 ## Collect
@@ -55,6 +56,7 @@ Check commits, paths, acceptance evidence, review subject and the resolved
 `adapter/model@effort` against the output, not the requested tier. A failed
 child blocks dependent work, and a synthesis cannot waive a gate. Integrate each
 ready head in dependency order; run affected checks and use proportionate review.
+Read CI through `ci failures pr N M` and `pr status N M`: one call per question, not one `gh` read per job.
 
 [Lanes and panels](references/lanes.md) covers briefs, confinement and review
 independence. [Herdr](references/herdr.md) covers watching panes and peers.
