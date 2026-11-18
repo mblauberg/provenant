@@ -231,7 +231,8 @@ dynamic-loader traversal; directory contents and extended attributes stay denied
 These metadata exceptions do not add read or execution authority over siblings.
 Undeclared store files outside validated carve-outs remain denied in both profiles;
 files inside a lane root are accessible by design. A store equal to or inside
-a lane root refuses the launch.
+a lane root refuses the launch. A provider can use its admitted runtime files
+and lane-private writable state while unlisted store files remain inaccessible.
 
 Adapter and host file inventories, including Provenant-owned per-account lane
 tokens and refresh locks, serve only to check that no declared credential file

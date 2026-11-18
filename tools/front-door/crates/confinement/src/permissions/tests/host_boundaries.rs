@@ -213,8 +213,7 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let package = home.join("provider-package");
     std::fs::create_dir_all(&package)?;
-    let provider = package.join("provider");
-    std::fs::copy("/bin/bash", &provider)?;
+    let provider = std::path::PathBuf::from("/bin/bash");
     let asset = package.join("asset");
     std::fs::write(&asset, b"runtime\n")?;
     let unselected_endpoint = package.join("unselected-keychain");
@@ -224,22 +223,8 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
     let external_secret = external.join("nested/secret");
     std::fs::write(&external_secret, b"external credential\n")?;
     let executor = SystemExecutor::new(2)?;
-    // Apple's platform signature constrains bash to its system location.
-    // Re-sign this copied fixture so AMFI does not kill it before Seatbelt
-    // can exercise the shared-store boundary. Keep it inside the store to
-    // cover provider runtime and executable carve-outs.
-    let sign = [
-        OsString::from("/usr/bin/codesign"),
-        "--force".into(),
-        "--sign".into(),
-        "-".into(),
-        provider.as_os_str().to_owned(),
-    ];
-    let signed = executor.execute(ExecOptions::new(&sign, &root, Duration::from_secs(30)))?;
-    assert!(
-        successful_probe(&signed),
-        "sign provider fixture: {signed:?}"
-    );
+    // Use the platform shell in place: relocating Apple's signed binary is not
+    // representative of a provider and can be killed before the probe runs.
     for store in [
         home.clone(),
         home.join("relocated-codex"),
@@ -378,29 +363,10 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
                 &provenant_os::fs::Directory::open_anchor(&root)?,
             )?;
             let result = executor.execute(command.options(&cwd, Duration::from_secs(5))?)?;
-            if !successful_probe(&result) {
-                // A kill leaves no output; the kernel log names the denied
-                // operation (Sandbox) or the code-signing refusal (AMFI).
-                let query = [
-                    OsString::from("/usr/bin/log"),
-                    "show".into(),
-                    "--style".into(),
-                    "compact".into(),
-                    "--last".into(),
-                    "2m".into(),
-                    "--predicate".into(),
-                    "sender == \"Sandbox\" OR sender == \"AppleMobileFileIntegrity\" OR eventMessage CONTAINS \"AMFI\"".into(),
-                ];
-                let log = executor
-                    .execute(ExecOptions::new(&query, &root, Duration::from_secs(30)))
-                    .map(|outcome| String::from_utf8_lossy(&outcome.stdout.bytes).into_owned())
-                    .unwrap_or_else(|error| error.to_string());
-                let tail: Vec<&str> = log.lines().rev().take(40).collect();
-                panic!(
-                    "default={default}, store={store:?}: {result:?}\nkernel log:\n{}",
-                    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-                );
-            }
+            assert!(
+                successful_probe(&result),
+                "default={default}, store={store:?}: {result:?}"
+            );
         }
         // Runtime authority cannot reopen an inventoried external subtree.
         // An enclosed exact endpoint instead keeps its independent denial.
