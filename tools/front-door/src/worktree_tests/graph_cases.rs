@@ -71,7 +71,17 @@ fn finish_graph_command(mut pending: PendingGraphCommand, phase: &str) -> Result
 }
 
 pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
-    let rig = repository()?;
+    let mut rig = repository()?;
+    let bin = rig.root.join("provider-bin");
+    fs::create_dir(&bin)?;
+    let codex = bin.join("codex");
+    fs::write(&codex, "#!/bin/sh\nprintf 'codex fixture\\n'\n")?;
+    fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
     ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
     let (roots, _) = writer_context(&rig)?;
     let settings = provenant_config::read(&roots)?;
@@ -81,6 +91,49 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
         // Low space warns by default; this host declares the floor refusing.
         "schema_version=1\n[knobs]\n'policy.DISK_FLOOR'='refuse'\n[gc]\ncritical_free='18446744073709551615B'\n",
     )?;
+    // Route admission precedes disk admission; supply fresh local readiness so
+    // this fixture reaches the disk boundary without contacting a provider.
+    let account_dir = rig.home.join("disk-fixture-account");
+    fs::create_dir(&account_dir)?;
+    let auth = br#"{"tokens":{"account_id":"disk-fixture"}}"#;
+    fs::write(account_dir.join("auth.json"), auth)?;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("fixture identity")?;
+    support::register_account(&rig, "codex", "work", &key, &account_dir)?;
+    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        account_key: key.clone(),
+        label: "work".into(),
+    });
+    let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+    let readiness = provenant_quota::ReadinessFile {
+        records: vec![provenant_quota::RouteReadiness {
+            extra: Default::default(),
+            schema_version: 1,
+            scope: provenant_quota::ReadinessScope {
+                extra: Default::default(),
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: account.account.adapter.clone(),
+                account_key: account.account.account_key.clone(),
+                route: "codex/gpt-6-luna".into(),
+            },
+            state: provenant_quota::ReadinessState::Ready,
+            reason: None,
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+            reset_unix_seconds: None,
+            evidence_ref: Some("fixture".into()),
+        }],
+        ..Default::default()
+    };
+    let dir = rig.state.join("readiness").join(&key);
+    fs::create_dir_all(&dir)?;
+    for path in [rig.state.join("readiness"), dir.clone()] {
+        fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    }
+    let path = dir.join("codex.json");
+    fs::write(&path, serde_json::to_vec(&readiness)?)?;
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let document = rig.root.join("low-disk.json");
     fs::write(
         &document,
@@ -88,7 +141,7 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
             "schema_version": 2, "graph_id":"low-disk", "nodes":[{
                 "id":"writer", "prompt":"hello", "access":"worktree_write",
                 "worktree":rig.project.join(".worktrees/low-disk"),
-                "write_scope":["."], "route":{"adapter":"codex","model":"gpt-6-luna"}
+                "write_scope":["."], "route":{"adapter":"codex","model":"gpt-6-luna","account":"work"}
             }]
         }))?,
     )?;
@@ -106,16 +159,19 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
     assert_eq!(value["status"], "failed", "{value}");
     assert_eq!(value["data"]["outcome"], "failed", "{value}");
     let node = &value["data"]["checkpoint"]["nodes"][0];
-    assert_eq!(node["state"], "blocked", "{value}");
-    assert_eq!(node["advance_error_code"], "launch_refused", "{value}");
-    assert!(node["attempts"][0]["attempt_ref"].is_null(), "{value}");
+    assert_eq!(node["state"], "failed", "{value}");
+    assert_eq!(node["advance_error_code"], "preparation_refused", "{value}");
+    assert_eq!(node["attempts"][0]["launched"], false, "{value}");
+    assert_eq!(
+        node["attempts"][0]["stop"], "launch_handoff_refused",
+        "{value}"
+    );
     let message = node["advance_error"].as_str().ok_or("message")?;
     assert!(
-        message.contains("available") && message.contains("floor 18446744073709551615"),
+        message.contains("[DISK_FLOOR]") && message.contains("18446744073709551615"),
         "{message}"
     );
     assert!(message.contains("provenant gc"), "{message}");
-    assert!(!rig.state.join("attempts").exists());
     fs::write(
         &document,
         serde_json::to_vec(&serde_json::json!({

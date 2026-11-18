@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Summarise Clippy diagnostics from cargo's JSON message stream."""
+import json
+import sys
+
+
+def main():
+    lints = {}
+    other = 0
+    for line in sys.stdin:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get('reason') != 'compiler-message':
+            continue
+        message = record.get('message', {})
+        code = (message.get('code') or {}).get('code') or ''
+        if code.startswith('clippy::'):
+            spans = message.get('spans') or []
+            span = next((s for s in spans if s.get('is_primary')), spans[0] if spans else {})
+            location = f"{span.get('file_name', '?')}:{span.get('line_start', '?')}"
+            if code not in lints:
+                lints[code] = [0, location]
+            lints[code][0] += 1
+        elif message.get('level') in ('warning', 'error'):
+            other += 1
+    if lints:
+        print('### Clippy diagnostics\n\n| Lint | Count | First location |\n| --- | ---: | --- |')
+        for code, (count, location) in sorted(lints.items()):
+            print(f'| `{code}` | {count} | `{location}` |')
+    else:
+        print('No Clippy lints fired.')
+    if other:
+        print(f'\nOther warnings/errors: {other}.')
+
+
+if __name__ == '__main__':
+    main()

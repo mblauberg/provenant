@@ -171,7 +171,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # The oversized peer-frame refusal also reads its boundary-sized frame before
 # contact and exceeds 30 seconds on this host even when run on its own.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_and_compiles_with_its_declared_parameters)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # Three isolated credential layouts each run real writer preparation. Retain

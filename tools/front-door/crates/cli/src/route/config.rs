@@ -47,7 +47,7 @@ pub(super) fn display_list_data(
     query: &RouteListRequest,
 ) -> Result<Box<RouteListDisplay>, EdgeError> {
     let (routes, accounts) = list_data_and_accounts(roots, query)?;
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     let now = SystemClock::new().unix_seconds();
     let mut models = BTreeSet::new();
     models.extend(routes.models.iter().map(|entry| entry.model.clone()));
@@ -208,10 +208,17 @@ pub(super) fn edit_config(
     Ok(())
 }
 
+#[allow(clippy::print_stderr, reason = "warn about an uncatalogued model")]
 pub(super) fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeError> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     let model = ModelId::parse(&request.model.0)?;
-    let entry = catalogue.model(&model).ok_or(RoutingError::InvalidModel)?;
+    let entry = catalogue.model(&model);
+    if entry.is_none() {
+        eprintln!(
+            "warning: model {} is absent from bundled and discovered catalogues; source=user",
+            model.as_str()
+        );
+    }
     if !REGISTRY
         .iter()
         .any(|provider| provider.adapter.id() == model.adapter())
@@ -226,7 +233,10 @@ pub(super) fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeErro
     let existing = members.iter().position(|member| member.model == model);
     let old = existing.map(|index| &members[index]);
     let efforts = if request.efforts.is_empty() {
-        old.map_or_else(|| entry.efforts.clone(), |member| member.efforts.clone())
+        old.map_or_else(
+            || entry.map_or_else(Vec::new, |entry| entry.efforts.clone()),
+            |member| member.efforts.clone(),
+        )
     } else {
         request.efforts.clone()
     };
@@ -267,7 +277,7 @@ pub(super) fn remove_pool_member(roots: &Roots, request: &RouteRemove) -> Result
 }
 
 pub(super) fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     if !catalogue.has_pool(&request.pool) {
         return Err(RoutingError::UnknownRoute.into());
     }
@@ -745,7 +755,11 @@ pub(super) fn edit_model_exclusion(
     now: WallTime,
 ) -> Result<(), EdgeError> {
     let id = ModelId::parse(&model.0)?;
-    if add && Catalogue::bundled()?.model(&id).is_none() {
+    if add
+        && crate::model_discovery::effective(roots)?
+            .model(&id)
+            .is_none()
+    {
         return Err(RoutingError::InvalidModel.into());
     }
     edit_config(roots, |document| {
@@ -835,6 +849,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                 }
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
                 let model_policy = context.config.model_policy.effective(
+                    context.catalogue,
                     &model,
                     query.account.as_deref().or(route.account_key.as_deref()),
                     context.now,
@@ -898,6 +913,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                 let pools = context.catalogue.admission_pools(&model);
                 let quota_evidence = quota_observations(
                     context.catalogue,
+                    context.config,
                     context.availability,
                     records,
                     policies,

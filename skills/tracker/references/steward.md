@@ -1,6 +1,6 @@
 # Steward and closing
 
-Inspect the bundled brief with `provenant templates steward --json`.
+Inspect the bundled brief with `provenant templates show steward --json`.
 
 ## Scheduled proposal sweep
 

@@ -1000,7 +1000,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let state = root.path().join("state");
-        let isolated = root.path().join("agy-second");
+        let isolated = home.join(".agy-second");
         let legacy = root.path().join("gemini");
         fs::create_dir_all(&state).unwrap();
         fs::create_dir_all(isolated.join("Library/Keychains")).unwrap();
@@ -1052,6 +1052,11 @@ mod tests {
         // The user's own login is registered at the home directory itself.
         probe(&home, "first@example.test").unwrap();
         assert_eq!(*homes.lock().unwrap(), [isolated.clone(), home.clone()]);
+        let mut local = account(&home, "first@example.test");
+        local.scope.account_key = "local".into();
+        quota
+            .agy(&local, quota.now() + 60, &mut QuotaDetails::default())
+            .unwrap();
         // Any other directory without a regular keychain file (absent, no file,
         // or a symlink) is refused without a probe, never run under the login.
         for dir in [&legacy, &root.path().join("absent"), &linked] {
@@ -1066,7 +1071,7 @@ mod tests {
             probe(&isolated, "second@example.test").unwrap_err(),
             ProbeFailure::IsolatedKeychainUnavailable
         );
-        assert_eq!(*homes.lock().unwrap(), [isolated, home]);
+        assert_eq!(*homes.lock().unwrap(), [isolated, home.clone(), home]);
     }
 
     /// Runs the wrapped fake, then removes `keychain` as a competing process

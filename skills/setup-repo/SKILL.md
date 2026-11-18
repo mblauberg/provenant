@@ -13,11 +13,8 @@ repository grants.
 
 "This repo" in a checkout means that checkout; otherwise name the target. Read
 its `Repository process` declaration, `MAINTAINING.md`, `.github/**`,
-`.provenant/**` and runbook first, and ask only what it has not settled. Show
-one diff naming the target and get one approval. Mark each action **keep**
-(exact match), **create** (absent), **adapt** (compatible, propose the merge)
-or **conflict** (semantic mismatch: ask). Never overwrite; a re-run on a set-up
-repository produces no diff. Confirm the remote host before any `gh` command.
+`.provenant/**` and runbook first. Preserve existing intent when adapting the
+setup, and confirm the remote host before any `gh` command.
 
 ## Declare the process
 
@@ -52,5 +49,4 @@ go under `.provenant/templates/`; a template grants no new authority. Run
    [the runbook seed](references/runbook-seed.md).
 6. **Dependabot and CODEOWNERS:** adapt [`dependabot.yml`](templates/dependabot.yml).
 
-Stop and ask before replacing an existing ruleset or labels file, on a
-semantic conflict, or when write permission or the host is unconfirmed.
+Check authority before changes to rulesets or destructive label synchronisation.

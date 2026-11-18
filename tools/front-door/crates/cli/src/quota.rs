@@ -2446,7 +2446,7 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         .iter()
         .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
         .then(|| "provenant quota tick".to_owned());
-    crate::Summary::complete(
+    crate::Summary::new(
         format!(
             "quota {}/{} current{}{}",
             report.coverage.known,
@@ -2458,6 +2458,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         next,
     )
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "quota command is a real-time boundary"
+)]
 pub fn run(
     command: Quota,
     globals: &crate::Globals,
@@ -2474,6 +2478,7 @@ pub fn run(
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
+    let started = std::time::Instant::now();
     let mut summary = None;
     let result = match &command {
         Quota::History {
@@ -2491,11 +2496,51 @@ pub fn run(
             *limit,
         ),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
-            let human = quota_human(&report);
+            let mut human = quota_human(&report);
+            let mut data = serde_json::to_value(&report)?;
+            if let Quota::Tick { adapter, power, .. } = &command
+                && !matches!(power, Power::Low)
+            {
+                let config = crate::config_reads::read_for(roots, "quota")?;
+                let enabled = config
+                    .knobs
+                    .get("quota.model_discovery")
+                    .and_then(|value| value.value.as_bool())
+                    .unwrap_or(true);
+                let accounts = effects.accounts()?;
+                let eligible: Vec<String> = registry
+                    .iter()
+                    .filter(|entry| {
+                        let id = entry.adapter.id();
+                        enabled
+                            && entry.quota_source.is_some()
+                            && provenant_records::AdapterSpec::get(id).is_some_and(|spec| {
+                                spec.quota_probe != provenant_records::QuotaProbeKind::None
+                            })
+                            && adapter.adapter.as_deref().is_none_or(|filter| filter == id)
+                            && accounts.iter().any(|account| account.adapter == id)
+                    })
+                    .map(|entry| entry.adapter.id().to_owned())
+                    .collect();
+                let budget =
+                    std::time::Duration::from_secs(config.domains.quota.wall_budget_seconds)
+                        .saturating_sub(started.elapsed())
+                        .saturating_sub(std::time::Duration::from_secs(1));
+                let changes = crate::model_discovery::refresh(
+                    roots,
+                    &eligible,
+                    report.generated_unix_seconds,
+                    budget,
+                );
+                for change in &changes {
+                    human.push_str(&format!("{change}\n"));
+                }
+                data["model_discovery"] = serde_json::to_value(changes)?;
+            }
             if matches!(command, Quota::Show(_)) {
                 summary = Some(quota_summary(&report));
             }
-            Ok((serde_json::to_value(report)?, human))
+            Ok((data, human))
         }),
     };
     let (envelope, human) = match result {
@@ -2889,7 +2934,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_summary_shows_every_configured_account() {
+    fn quota_summary_bounds_rows_and_counts_omitted_accounts() {
         let row = |status| AccountRow {
             account: AccountScope {
                 extra: Default::default(),
@@ -2954,17 +2999,11 @@ mod tests {
         for _ in 0..14 {
             report.accounts.push(row(QuotaStatus::Stale));
         }
+        report.coverage.total = report.accounts.len().try_into().unwrap();
         let summary = quota_summary(&report);
-        assert_eq!(summary.lines.len(), 19); // more than the shared summary row limit
-        assert!(
-            summary
-                .lines
-                .iter()
-                .filter(|line| line.contains("[test]:"))
-                .count()
-                == 17
-        );
-        assert_eq!(summary.omitted, 0);
+        assert_eq!(summary.lines.len(), 1 + crate::limits::SUMMARY_ROWS);
+        assert_eq!(summary.omitted, 18 - crate::limits::SUMMARY_ROWS);
+        assert!(summary.lines[0].contains("quota 3/17"));
         assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
     }
 

@@ -2,6 +2,7 @@
 Owner: repository maintainers
 Anchor: scripts/verify-tier
 
+The tiers describe what each place runs; they are not a checklist for a lane.
 A lane needs a host-provided shared warm `CARGO_TARGET_DIR`, never a fresh cold target, and
 runs `cargo check`, clippy for touched crates, and tests filtered to changed
 code. Set `CARGO_BUILD_BUILD_DIR` to the same warm directory when it is set,

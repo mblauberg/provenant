@@ -32,17 +32,10 @@ subject. Australian English, plain and mildly casual by default
 Pick the lightest pass: repair named defects, rewrite (default) or diagnose
 (findings only). If the draft already reads well, say so and touch little.
 
-1. **Lock** facts, numbers, names, quotes, citation keys, defined terms,
-   modals and negations. List them.
-2. **Diagnose** by mechanism ([mechanisms.md](references/mechanisms.md)), not
-   by phrase. Name the two or three that cost the reader most.
-3. **Rewrite once**, restating each claim directly and adding only anchors the
-   source holds.
-4. **Audit independently.** Compare the lock list with the result; revert any
-   sentence that lost or strengthened a claim. For high-stakes text, a
-   clean-context reviewer sees only the before and after. For number-heavy
-   text, script the check ([claims.md](references/claims.md)).
-5. **Report** the text first, with notes only for material flags.
+Preserve facts, numbers, names, quotations and the strength of each claim.
+Diagnose by [mechanism](references/mechanisms.md), rewrite with source support
+and check the result against the original. Scale independent review and numerical
+checks ([claims.md](references/claims.md)) to risk. Report material flags.
 
 `provenant check writing PATH` flags em dashes and lexical hints. Its silence
 is necessary, not sufficient.

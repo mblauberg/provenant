@@ -95,15 +95,22 @@ pub fn collect(
         .iter()
         .fold(0u64, |sum, item| sum.saturating_add(item.size));
     let mut per_project = BTreeMap::<String, usize>::new();
+    let mut newest_by_project = BTreeMap::<String, std::ffi::OsString>::new();
     for generation in &generations {
         *per_project
             .entry(generation.project_key.clone())
             .or_default() += 1;
+        // IDs are monotonic; generations are sorted by ID, so the last ID for
+        // each project is its newest complete seed and remains warm.
+        newest_by_project.insert(generation.project_key.clone(), generation.id.clone());
     }
     for generation in generations {
         let Some(kept) = per_project.get_mut(&generation.project_key) else {
             return Err(io::Error::other("target seed project count changed").into());
         };
+        if newest_by_project.get(&generation.project_key) == Some(&generation.id) {
+            continue;
+        }
         if *kept > max_generations || total > max_bytes {
             if !dry_run {
                 make_directories_writable(&generation.path)?;
@@ -227,9 +234,12 @@ mod tests {
         let older = generation_for_project(another.path(), "001", 3, "project-a");
         let newer = generation_for_project(another.path(), "002", 4, "project-b");
         let cap = allocated_size(&newer).unwrap();
-        collect(another.path(), 10, cap, false).unwrap();
-        assert!(!older.exists());
-        assert!(newer.exists());
+        let retained = collect(another.path(), 10, cap, false).unwrap();
+        assert!(retained.removed.is_empty());
+        assert!(
+            older.exists() && newer.exists(),
+            "each project's newest seed stays warm even over the global cap"
+        );
     }
     #[test]
     fn active_clone_lock_prevents_collection() {
@@ -239,8 +249,12 @@ mod tests {
         assert!(!collect(state.path(), 0, 0, false).unwrap().busy.is_empty());
         assert!(generation.exists());
         drop(guard);
-        collect(state.path(), 0, 0, false).unwrap();
-        assert!(!generation.exists());
+        let report = collect(state.path(), 0, 0, false).unwrap();
+        assert!(report.removed.is_empty());
+        assert!(
+            generation.exists(),
+            "the newest generation survives even over cap"
+        );
     }
     #[test]
     fn abandoned_stages_and_incomplete_generations_are_reclaimed() {

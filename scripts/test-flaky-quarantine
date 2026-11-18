@@ -38,6 +38,18 @@ expires = 2030-01-20
 TOML
 filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --test-list "$scratch/macos-tests.json" --today 2030-01-01)
 test "$filter" = '(package(=provenant-cli) & test(=network::flaky_case)) | (package(=provenant-cli) & test(=network::macos_case))'
+independent=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --filter-only --today 2030-01-01)
+test "$independent" = "$filter"
+# Spec: docs/specs/ci.md#skips-are-named
+partial=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --partial-inventory --today 2030-01-01 2>"$scratch/warnings")
+test "$partial" = "$filter"
+grep -F 'provenant-cli::network::macos_case; native list was not built on this run' "$scratch/warnings" >/dev/null
+# A platform-specific identity is accepted by the union but not by Linux alone.
+if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --today 2030-01-01 >"$scratch/output" 2>&1; then
+  echo 'Expected a missing platform-specific identity to fail' >&2
+  exit 1
+fi
+
 
 
 expect_failure() {
@@ -58,6 +70,11 @@ owner = "maintainer"
 expires = 2029-12-31
 TOML
 expect_failure 'quarantine expired'
+if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --filter-only --today 2030-01-01 >"$scratch/output" 2>&1; then
+  echo 'Expected expired entry to fail before inventory validation' >&2
+  exit 1
+fi
+grep -F 'quarantine expired' "$scratch/output" >/dev/null
 
 write_config <<'TOML'
 [[test]]
@@ -77,5 +94,32 @@ owner = "maintainer"
 expires = 2030-01-20
 TOML
 expect_failure 'unknown test provenant-cli::network::missing_case'
+
+# Syntax, expiry and duplicate checks also apply before inventories are available.
+write_config <<'TOML'
+[[test]]
+package = "provenant-cli"
+name = "network::flaky_case"
+issue = "#2599"
+owner = "maintainer"
+expires = 2030-01-20
+[[test]]
+package = "provenant-cli"
+name = "network::flaky_case"
+issue = "#2599"
+owner = "maintainer"
+expires = 2030-01-20
+TOML
+if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --filter-only --today 2030-01-01 >"$scratch/output" 2>&1; then
+  echo 'Expected duplicate entry to fail' >&2
+  exit 1
+fi
+grep -F 'duplicate test' "$scratch/output" >/dev/null
+expect_failure 'duplicate test'
+printf '%s\n' 'invalid = value' > "$scratch/quarantine.toml"
+if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --filter-only --today 2030-01-01 >"$scratch/output" 2>&1; then
+  echo 'Expected malformed entry to fail' >&2
+  exit 1
+fi
 
 echo 'Flaky quarantine checks passed.'

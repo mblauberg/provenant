@@ -120,6 +120,7 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
     assert_eq!(record.resolved_route, record.applied_route);
     Ok(())
 }
+// Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
 fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
     use provenant_records::RouteExclusionReason;
@@ -142,6 +143,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                 terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
                 message: self.message.into(),
+                host_message: Some(self.message.into()),
                 fallback_outcome: None,
                 skipped_routes: [
                     Some(RouteExclusionReason::UnknownAvailability),
@@ -155,7 +157,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                     route: format!("codex/example-{index}"),
                     kind: SkipKind::Unavailable,
                     cause,
-                    detail: "opaque candidate detail".into(),
+                    detail: "PROVIDER_SENTINEL opaque candidate detail".into(),
                     ..Default::default()
                 })
                 .collect(),
@@ -211,6 +213,14 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         ));
         assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
         let record = store.record(id, &call)?;
+        let result = std::fs::read_to_string(
+            store
+                .attempt_dir(id, false)?
+                .current_path()?
+                .join("result.md"),
+        )?;
+        assert!(result.contains(message));
+        assert!(!result.contains("PROVIDER_SENTINEL"));
         assert_eq!(record.provider_launched, Some(false));
         assert_eq!(record.skipped_routes[1].cause, cause);
         assert_eq!(
@@ -238,6 +248,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                 terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
+                host_message: None,
                 fallback_outcome: (!self.0)
                     .then_some(provenant_records::run::PreparationFailure::AuthRequired),
                 skipped_routes: ["cursor/example", "codex/example"]

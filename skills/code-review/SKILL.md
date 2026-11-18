@@ -46,5 +46,4 @@ config, persisted state), the checks that ran with their results, and what was n
 reachable. Never infer coverage from a green summary. Check that criteria map
 to evidence and that no test was loosened or deleted to mask a real defect
 (pruning rigid, redundant or implementation-pinned tests with stated reasons is
-welcome). For rendered UI, also inspect light and dark captures of changed screens
-(`ui-ux-design`).
+welcome). For rendered UI, use `ui-ux-design` to choose representative states.

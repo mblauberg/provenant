@@ -487,7 +487,7 @@ fn permitted(
         && input
             .config
             .model_policy
-            .effective(model, account, input.now)
+            .effective(input.catalogue, model, account, input.now)
             .policy
             .permits(input.intent)
 }

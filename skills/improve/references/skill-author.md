@@ -11,8 +11,8 @@ Create or materially revise a skill under an explicit write grant.
 2. Keep project-only policy in the project. A project skill that only points at
    a global skill is redundant; one that departs from it lists each departure
    under `Project overrides:`.
-3. Run the task without the skill, then with it, in a fresh context without
-   leaking the intended answer. Keep only lines that changed the result.
+3. For changes whose effect is uncertain, compare runs with and without the skill
+   in fresh contexts.
 4. Run the validation the target repository names; otherwise say which checks
    did not run.
 

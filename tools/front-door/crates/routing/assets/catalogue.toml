@@ -21,6 +21,11 @@ family = "anthropic"
 evidence_ref = "providers/claude/model-mismatch.jsonl"
 trains_on_prompts = false
 
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.10
+
+
 [[models]]
 model = "cursor/auto"
 efforts = []
@@ -47,6 +52,27 @@ efforts = []
 evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28"
 trains_on_prompts = false
 
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.02
+write_ratio = 0.0
+output_ratio = 4.0
+context_window = 1000000
+read_heavy_weight = 3
+price_multiplier = 1.0
+[models.policy_rules.policy.compaction]
+window = 800000
+mode = "task_boundary"
+min_turns = 20
+
+# Single source for DeepSeek's weekday peak adjustment, including telemetry consumers.
+[[models.policy_rules]]
+[models.policy_rules.schedule]
+windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 1, end_hour = 4 }, { weekdays = [0, 1, 2, 3, 4], start_hour = 6, end_hour = 10 }]
+[models.policy_rules.policy.cache]
+price_multiplier = 2.0
+
+
 [[models]]
 model = "opencode/opencode-go/glm-5.3-flash"
 monthly_allowance_usd = 60
@@ -70,12 +96,22 @@ family = "anthropic"
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.10
+
+
 [[models]]
 model = "codex/gpt-6-luna"
 efforts = ["low", "medium", "high", "xhigh"]
 family = "openai"
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
+
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.10
+
 
 [[models]]
 model = "codex/gpt-6.1-terra"
@@ -85,6 +121,11 @@ family = "openai"
 evidence_ref = "~/.codex/models_cache.json fetched 2026-10-26T22:24Z; user-verified codex exec -m gpt-6.1-terra"
 trains_on_prompts = false
 
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.05
+
+
 [[models]]
 model = "codex/gpt-6.1-sol"
 capability = "strong"
@@ -92,6 +133,11 @@ efforts = ["low", "medium", "high", "xhigh", "max"]
 family = "openai"
 evidence_ref = "~/.codex/models_cache.json fetched 2026-10-26T22:24Z"
 trains_on_prompts = false
+
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.05
+
 
 [[models]]
 model = "claude/claude-sonnet-5-5"
@@ -101,6 +147,11 @@ family = "anthropic"
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.05
+
+
 [[models]]
 model = "claude/claude-opus-5-5"
 capability = "frontier"
@@ -109,12 +160,24 @@ family = "anthropic"
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
+[[models.policy_rules]]
+[models.policy_rules.policy.cache]
+read_ratio = 0.05
+
+
 [[models]]
 model = "agy/gemini-3.8-flash"
 quota_pool = "gemini"
 efforts = ["low", "medium", "high"]
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
+
+[[models.policy_rules]]
+[models.policy_rules.policy.result]
+check = true
+fallback_family = "codex/gpt-*-luna"
+fallback_effort = "high"
+
 
 [[models]]
 model = "agy/claude-sonnet-4-6"
@@ -165,60 +228,60 @@ codex = "spend"
 [pools]
 utility = [
     # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
-    { model = "cursor/composer-2.5", weight = 1, efforts = [] },
-    { model = "claude/claude-haiku-5-5", weight = 4, effort = "low", efforts = ["low"] },
-    { model = "codex/gpt-6-luna", weight = 2, effort = "low", efforts = ["low"] },
+    { selector = "cursor/composer-*", weight = 1, efforts = [] },
+    { selector = "claude/claude-haiku-*", weight = 4, effort = "low", efforts = ["low"] },
+    { selector = "codex/gpt-*-luna", weight = 2, effort = "low", efforts = ["low"] },
 ]
 junior = [
     # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
-    { model = "cursor/composer-2.5", weight = 1, efforts = [] },
+    { selector = "cursor/composer-*", weight = 1, efforts = [] },
     # Prefer free capacity while it is eligible and available.
-    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 50, efforts = [] },
-    { model = "opencode/opencode/glm-5.3-flash-free", weight = 50, efforts = [] },
+    { selector = "opencode/opencode/deepseek-v*-flash-free", weight = 50, free = true, efforts = [] },
+    { selector = "opencode/opencode/glm-*-flash-free", weight = 50, free = true, efforts = [] },
     # Provisional pending local trial evidence.
-    { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 2, efforts = [] },
-    { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },
-    { model = "codex/gpt-6.1-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
-    { model = "codex/gpt-6-luna", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
-    { model = "claude/claude-haiku-5-5", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
-    { model = "agy/gemini-3.8-flash", weight = 2, effort = "medium", efforts = ["low", "medium", "high"] },
-    { model = "agy/claude-sonnet-4-6", weight = 1, efforts = [] },
+    { selector = "opencode/opencode-go/deepseek-v*-flash", weight = 2, efforts = [] },
+    { selector = "opencode/opencode-go/glm-*-flash", weight = 1, efforts = [] },
+    { selector = "codex/gpt-*-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
+    { selector = "codex/gpt-*-luna", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-haiku-*", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-flash", weight = 2, effort = "medium", efforts = ["low", "medium", "high"] },
+    { selector = "agy/claude-sonnet-*", weight = 1, efforts = [] },
 ]
 senior = [
     # Provisional pending local trial evidence.
-    { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 1, efforts = [] },
-    { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },
+    { selector = "opencode/opencode-go/deepseek-v*-flash", weight = 1, efforts = [] },
+    { selector = "opencode/opencode-go/glm-*-flash", weight = 1, efforts = [] },
     # Writer work stopped early more often and cost more per success on terra at
     # high effort than on the other routes, while terra at low or medium effort and
     # on read-only work did well. A hash-assigned pool makes that a fair comparison.
     # Terra stays here at low or medium effort; its weight moved to codex sol, which
     # the codex provider paces to spend, since Claude quota is the scarcer one.
     # Exact routes and user-configured pools can still select terra at high effort.
-    { model = "codex/gpt-6.1-sol", weight = 6, effort = "medium", efforts = ["low", "medium", "high"] },
-    { model = "codex/gpt-6.1-terra", weight = 2, effort = "medium", efforts = ["low", "medium"] },
-    { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
-    { model = "agy/gemini-3.8-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
-    { model = "agy/claude-opus-4-6-thinking", weight = 1, efforts = [] },
+    { selector = "codex/gpt-*-sol", weight = 6, effort = "medium", efforts = ["low", "medium", "high"] },
+    { selector = "codex/gpt-*-terra", weight = 2, effort = "medium", efforts = ["low", "medium"] },
+    { selector = "claude/claude-sonnet-*", weight = 4, efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
+    { selector = "agy/claude-opus-*-thinking", weight = 1, efforts = [] },
     # Lowest weight for the same reason as Composer above.
-    { model = "cursor/grok-4.7", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "cursor/grok-*", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
 ]
 principal = [
-    { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
-    { model = "codex/gpt-6.1-sol", weight = 1, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-opus-*", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "codex/gpt-*-sol", weight = 1, effort = "high", efforts = ["medium", "high", "xhigh"] },
 ]
 writing = [
     # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
-    { model = "cursor/composer-2.5", weight = 1, efforts = [] },
-    { model = "agy/gemini-3.8-flash", weight = 4, efforts = ["low", "medium", "high"] },
-    { model = "claude/claude-haiku-5-5", weight = 4, efforts = ["low", "medium", "high", "xhigh"] },
-    { model = "agy/claude-sonnet-4-6", weight = 2, efforts = [] },
-    { model = "claude/claude-sonnet-5-5", weight = 1, efforts = ["medium", "high", "xhigh"] },
-    { model = "codex/gpt-6-luna", weight = 1, effort = "high", efforts = ["high", "xhigh"] },
+    { selector = "cursor/composer-*", weight = 1, efforts = [] },
+    { selector = "agy/gemini-*-flash", weight = 4, efforts = ["low", "medium", "high"] },
+    { selector = "claude/claude-haiku-*", weight = 4, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "agy/claude-sonnet-*", weight = 2, efforts = [] },
+    { selector = "claude/claude-sonnet-*", weight = 1, efforts = ["medium", "high", "xhigh"] },
+    { selector = "codex/gpt-*-luna", weight = 1, effort = "high", efforts = ["high", "xhigh"] },
 ]
 design = [
-    { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
-    { model = "agy/gemini-3.8-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
-    { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "claude/claude-sonnet-*", weight = 4, efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
+    { selector = "claude/claude-opus-*", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
 ]
 
 # Capability preferences affect ranking without excluding pool members.
