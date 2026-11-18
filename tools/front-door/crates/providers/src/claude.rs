@@ -107,7 +107,7 @@ const MODEL_ON_WIRE: bool = true;
 /// The default config directory's keychain service. A non-default
 /// `CLAUDE_CONFIG_DIR` appends [`keychain_suffix`].
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-pub(crate) const OAUTH_REFRESH_LOCK: &str = "provenant-oauth-refresh.lock";
+pub const OAUTH_REFRESH_LOCK: &str = "provenant-oauth-refresh.lock";
 /// Refresh when the access token expires within this window.
 const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
 /// After a refresh, the CLI may keep a token that is inside the window; accept

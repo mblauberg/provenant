@@ -1,0 +1,25 @@
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5523370Z         FAIL [   6.475s] ( 103/1208) provenant-confinement permissions::tests::host_boundaries::native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5524500Z   stdout ───
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5524690Z
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5524820Z     running 1 test
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5542040Z     test permissions::tests::host_boundaries::native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults ... FAILED
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5564070Z
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5567260Z     failures:
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5585650Z
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5623790Z     failures:
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5626830Z         permissions::tests::host_boundaries::native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5697730Z
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5700150Z     test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 430 filtered out; finished in 6.47s
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5703740Z
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5719850Z   stderr ───
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5723220Z
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5754210Z     thread 'permissions::tests::host_boundaries::native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults' (10210) panicked at crates/confinement/src/permissions/tests/host_boundaries.rs:399:17:
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5776530Z     default=allow, store="/Users/runner/work/_temp/.tmpd563f1/home": ExecOutcome { termination: Signal(9), stdout: CapturedStream { bytes: [], total_bytes: 0, truncated: false, sink_lost_bytes: 0, sink_failed: false, oversized_frames: 0, decoder_lost_frames: 0, read_failed: false, filter_failed: false }, stderr: CapturedStream { bytes: [], total_bytes: 0, truncated: false, sink_lost_bytes: 0, sink_failed: false, oversized_frames: 0, decoder_lost_frames: 0, read_failed: false, filter_failed: false }, timed_out: false, drain_truncated: false, overflow_stopped: false, cancelled: false, elapsed_micros: 20592 }
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5781800Z     kernel log:
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5815430Z     2026-11-18 00:07:41.289 E  kernel[0:284b] [com.apple.sandbox.reporting:violation] Sandbox: cat(2532) deny(1) file-read-metadata /etc
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5859790Z     2026-11-18 00:07:41.304 E  kernel[0:284e] [com.apple.sandbox.reporting:violation] Sandbox: touch(2533) deny(1) file-write* /Users/runner/work/_temp/.tmp2fTg9b/state/attempts/a/tmp/candidate-0-skills-snapshot/tool
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5864620Z     2026-11-18 00:07:41.323 E  kernel[0:2854] [com.apple.sandbox.reporting:violation] Sandbox: cat(2536) deny(1) file-read-data /Users/runner/work/_temp/.tmp2fTg9b/state/attempts/a/tmp/unselected-sibling/secret
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5868880Z     2026-11-18 00:07:41.365 E  kernel[0:2869] [com.apple.sandbox.reporting:violation] Sandbox: touch(2542) deny(1) file-write* /Users/runner/work/_temp/.tmp2fTg9b/state/releases/fixture-digest/tool
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5894670Z     2026-11-18 00:07:41.384 E  kernel[0:2874] [com.apple.sandbox.reporting:violation] Sandbox: cat(2546) deny(1) file-read-data /Users/runner/work/_temp/.tmp2fTg9b/state/releases/unselected-sibling/secret
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5914780Z     2026-11-18 00:07:41.385 E  kernel[0:2875] [com.apple.sandbox.reporting:violation] Sandbox: true(2548) deny(1) sysctl-read security.mac.lockdown_mode_state
+Rust macOS tests (custody)	Run macOS supervisor custody tests	2026-11-18T00:07:47.5925500Z     2026-11-18 00:07:41.385 E  kernel[0:2875] [com.apple.sandbox.reporting:violation] Sandbox: true(2548) deny(1) sysctl-read kern.bootargs
