@@ -708,13 +708,23 @@ fn quote(byte: u8) -> bool {
     matches!(byte, b'"' | b'\'' | b'`')
 }
 
-fn quoted_end(bytes: &[u8], start: usize) -> Option<usize> {
+fn quoted_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
     let quote = bytes[start];
     let mut i = start + 1;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i = (i + 2).min(bytes.len());
         } else if bytes[i] == quote {
+            // A possessive or contraction inside prose does not close its quote.
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            if quote == b'\''
+                && text[..i].chars().next_back().is_some_and(word)
+                && text[i + 1..].chars().next().is_some_and(word)
+            {
+                i += 1;
+                continue;
+            }
             return Some(i + 1);
         } else {
             i += 1;
@@ -760,7 +770,7 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
         let start = i;
         let key: std::borrow::Cow<'_, str>;
         if quote(bytes[i]) {
-            let end = quoted_end(&bytes[..limit], i);
+            let end = quoted_end(&text[..limit], i);
             let mut after = end.unwrap_or(limit);
             while after < limit && matches!(bytes[after], b' ' | b'\t') {
                 after += 1;
@@ -809,7 +819,7 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
         if doc < docs.len() && i == docs[doc].0 {
             i = docs[doc].1;
         } else if i < limit && quote(bytes[i]) {
-            i = quoted_end(&bytes[..limit], i).unwrap_or(limit);
+            i = quoted_end(&text[..limit], i).unwrap_or(limit);
         } else {
             while i < limit && !bytes[i].is_ascii_whitespace() && !b",;}".contains(&bytes[i]) {
                 i += 1;
@@ -998,6 +1008,10 @@ mod tests {
                 r#""api\u002ekey"=[REDACTED]; copy private-value"#,
             ),
             (
+                "'user's api key'='private'value'; copy private'value",
+                "'user's api key'='[REDACTED]'; copy private'value",
+            ),
+            (
                 "it's token=private'value; copy private'value",
                 "it's token=[REDACTED]; copy private'value",
             ),
@@ -1026,6 +1040,14 @@ mod tests {
             (
                 "diagnostic 'token: private-value'; copy private-value",
                 "diagnostic 'token: [REDACTED]'; copy private-value",
+            ),
+            (
+                "diagnostic 'the user's token: private-value'; copy private-value",
+                "diagnostic 'the user's token: [REDACTED]'; copy private-value",
+            ),
+            (
+                "diagnostic 'it isn't safe: token: private-value'; copy private-value",
+                "diagnostic 'it isn't safe: token: [REDACTED]'; copy private-value",
             ),
             (
                 "diagnostic `token: private-value`; copy private-value",
