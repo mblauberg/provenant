@@ -10,34 +10,6 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "writer_cli_branch_binds_the_new_worktree"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_launches_from_primary_checkout"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_launches_from_worktree_subdirectory"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_launches_from_worktree_root"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
 name = "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks"
 issue = "#3295"
 owner = "chair"

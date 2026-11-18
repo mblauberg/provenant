@@ -71,6 +71,27 @@ was superseded and print the newer handle as the next step
 (`next: provenant wait NAME-2`). They never redirect silently.
 - Why: the operator must see the new handle without losing access to the old graph.
 
+## Writer binding
+
+`--branch B --base REF` allocates a managed writer worktree under the project
+layout, not under the invoking checkout. The launch owner resolves and
+checkpoints `REF` before any Git effect, then creates the worktree from that
+commit and binds it by source identity and head. This is identical from the
+primary checkout, a linked worktree, a separate Git directory or a bare linked
+checkout: the project's saved primary layout owns the allocation in every case.
+An existing clean worktree at the exact checkpointed head is rebound; a
+different branch, head or unclean tree is refused with the named cause.
+- Why: an owned writer must land in one project-owned location regardless of
+  where the launch command ran, and a failed bind must not leave a half-made
+  worktree.
+
+A refused bind keeps its typed cause all the way to the facade. A held writer
+lease is `writer_lease_held` and names its holder locally; scope, confinement
+and resource failures keep their own codes and repair actions instead of
+reporting `confinement_refused` with no resource. See
+`docs/specs/cli.md#run-refusals-keep-their-own-code-at-the-facade`.
+- Why: the operator needs the real cause to repair a launch.
+
 ## Policy and confinement
 
 Launch policy defaults to refusal only at credentials, Git isolation, data

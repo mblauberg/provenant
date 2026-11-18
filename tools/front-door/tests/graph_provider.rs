@@ -1064,7 +1064,7 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
 }
 
 /// Exercise the same public writer command with an isolated invocation directory.
-fn writer_cli_launches_from_cwd(location: &str) -> Result {
+fn writer_cli_launches_from_cwd(location: &str, base: &str) -> Result {
     let native_available = graph_fixture_available()?;
     let mut rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
@@ -1171,6 +1171,17 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             assert_eq!(code(&output), 0, "{output:?}");
         }
     }
+    if base == "origin/main" {
+        let remote = rig.root.join("remote.git");
+        for args in [
+            vec!["init", "--bare", "-q", remote.to_str().ok_or("remote")?],
+            vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+            vec!["push", "-q", "origin", "HEAD:main"],
+        ] {
+            let output = rig.execute(&git, &args, None)?;
+            assert_eq!(code(&output), 0, "{args:?}: {output:?}");
+        }
+    }
     let tree = if branch_mode {
         let root = if location == "branch-worktree" {
             "writer-trees"
@@ -1228,7 +1239,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
                 "--branch",
                 "writer-branch",
                 "--base",
-                "HEAD",
+                base,
             ],
             "30s",
         )?
@@ -1258,6 +1269,14 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             assert_eq!(node["worktree"].as_str(), tree.to_str());
         }
         assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
+        if base == "origin/main" {
+            let checkpointed = node["new_worktree_base"].as_str().unwrap_or_default();
+            assert_eq!(
+                checkpointed.len(),
+                40,
+                "base was not checkpointed: {response}"
+            );
+        }
         if matches!(
             location,
             "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
@@ -1300,33 +1319,43 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
 }
 
 fn writer_cli_launches_from_worktree_root() -> Result {
-    writer_cli_launches_from_cwd("worktree")
+    writer_cli_launches_from_cwd("worktree", "HEAD")
 }
 
 fn writer_cli_branch_binds_the_new_worktree() -> Result {
-    writer_cli_launches_from_cwd("branch")
+    writer_cli_launches_from_cwd("branch", "HEAD")
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+fn writer_cli_branch_with_remote_base_from_primary_checkout() -> Result {
+    writer_cli_launches_from_cwd("branch", "origin/main")
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+fn writer_cli_branch_with_remote_base_from_linked_checkout() -> Result {
+    writer_cli_launches_from_cwd("branch-worktree", "origin/main")
 }
 
 // Spec: docs/specs/supervisor.md#managed-writer-path-owner
 fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
-    writer_cli_launches_from_cwd("branch-worktree")
+    writer_cli_launches_from_cwd("branch-worktree", "HEAD")
 }
 
 // Spec: docs/specs/run-git.md#project-layout-ownership
 fn writer_cli_branch_from_separate_git_directory_uses_saved_primary() -> Result {
-    writer_cli_launches_from_cwd("branch-separate-git-dir")
+    writer_cli_launches_from_cwd("branch-separate-git-dir", "HEAD")
 }
 
 fn writer_cli_branch_from_bare_linked_checkout_uses_common_layout() -> Result {
-    writer_cli_launches_from_cwd("branch-bare-linked")
+    writer_cli_launches_from_cwd("branch-bare-linked", "HEAD")
 }
 
 fn writer_cli_launches_from_worktree_subdirectory() -> Result {
-    writer_cli_launches_from_cwd("subdirectory")
+    writer_cli_launches_from_cwd("subdirectory", "HEAD")
 }
 
 fn writer_cli_launches_from_primary_checkout() -> Result {
-    writer_cli_launches_from_cwd("primary")
+    writer_cli_launches_from_cwd("primary", "HEAD")
 }
 
 fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
@@ -5875,6 +5904,14 @@ fn main() -> ExitCode {
             (
                 "writer_cli_branch_binds_the_new_worktree",
                 writer_cli_branch_binds_the_new_worktree,
+            ),
+            (
+                "writer_cli_branch_with_remote_base_from_primary_checkout",
+                writer_cli_branch_with_remote_base_from_primary_checkout,
+            ),
+            (
+                "writer_cli_branch_with_remote_base_from_linked_checkout",
+                writer_cli_branch_with_remote_base_from_linked_checkout,
             ),
             (
                 "writer_cli_branch_from_linked_checkout_uses_primary_layout",
