@@ -2224,12 +2224,6 @@ mod tests {
             ),
             (attempt.join("stdout.log"), b"log".as_slice()),
         ];
-        for (path, contents) in &durable {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, contents)?;
-        }
 
         let root = Directory::open_anchor(context.state_root.as_path())?;
         let idle = 7 * 86_400;
@@ -2252,6 +2246,12 @@ mod tests {
 
         withdraw(&store, &input, &call)?;
         let result = fs::read(attempt.join("result.md"))?;
+        for (path, contents) in &durable {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, contents)?;
+        }
         let before_idle = store.gc_temporary(
             &root,
             &policy,
