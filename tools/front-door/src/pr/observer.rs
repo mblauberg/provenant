@@ -46,7 +46,7 @@ const RUN_HISTORY_LIMIT: usize = 512;
 /// bound keeps a conflicting head from being diagnosed as "no checks" forever.
 const MERGEABLE_UNKNOWN_RETRIES: u8 = 3;
 /// Pause between bounded UNKNOWN mergeability rereads.
-const MERGEABLE_UNKNOWN_PAUSE: Duration = Duration::from_millis(50);
+const MERGEABLE_UNKNOWN_PAUSE: Duration = Duration::from_secs(1);
 
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]

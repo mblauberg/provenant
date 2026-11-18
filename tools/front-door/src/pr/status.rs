@@ -607,8 +607,7 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         std::time::Duration::ZERO,
         request,
     )?;
-    let (merge_state, value) = observer.pull_merge_state(number, value, request)?;
-    let pull: RestWaitPull = serde_json::from_value(value)?;
+    let pull: RestWaitPull = serde_json::from_value(value.clone())?;
     let state = if pull.merged_at.is_some() {
         "MERGED".to_owned()
     } else {
@@ -628,6 +627,9 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
     let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
     let mut line = status_line(number, view, Some(&checks));
     if checks.is_empty() {
+        // Mergeability is read (and an UNKNOWN reread) only when it can change
+        // the diagnosis: a head with checks needs no cause.
+        let (merge_state, _) = observer.pull_merge_state(number, value, request)?;
         let cause = merge_state.no_checks_cause(base.as_deref());
         line.cause = Some(cause.code.to_owned());
         line.next = Some(cause.next);
