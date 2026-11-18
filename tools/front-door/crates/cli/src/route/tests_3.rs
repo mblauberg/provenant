@@ -856,3 +856,285 @@
         );
         Ok(())
     }
+
+    #[test]
+    fn route_resolve_shows_evidence_from_settled_attempts() -> Result<(), Box<dyn Error>> {
+        use provenant_core::{Clock, CancelToken, RootInputs};
+        use provenant_os::clock::SystemClock;
+        use provenant_records::route_selection::{Exploration, PriorSource, SelectionRule, WeightSource};
+        use provenant_run as run;
+        use std::os::unix::fs::PermissionsExt;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let project = base.join("project");
+        let state = base.join("state");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&state)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let config_path = roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[\n  {model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},\n  {model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}\n]\n",
+        )?;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
+
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(project.clone())?,
+        )?;
+
+        let context = crate::fabric::Context::open(roots.clone(), &home, &project)?;
+        let project_id = context.identity.project;
+        let actor_id = context.identity.inbox.actor;
+
+        let clock = SystemClock::new();
+        let make_query = || RouteResolve {
+            writes: false,
+            account: None,
+            name: Some("principal".into()),
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        };
+
+        // Before any attempts: evidence count is 0, source is NoEvidence
+        let Data::Resolved(initial) = execute_in(&Route::Resolve(make_query()), &roots, clock.wall_now()?, &home, &project)? else {
+            return Err("expected resolved route".into());
+        };
+        let luna_initial = initial
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("pool selection receipt")?
+            .candidates
+            .iter()
+            .find(|c| c.model == "codex/gpt-6-luna")
+            .ok_or("luna candidate")?;
+        let initial_prior = luna_initial.ranking.outcome_prior.as_ref().ok_or("outcome prior")?;
+        assert_eq!(initial_prior.evidence_count, 0);
+        assert_eq!(initial_prior.source, PriorSource::NoEvidence);
+
+        let cancel = CancelToken::new();
+        let run_call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let exec = run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id,
+            actor_id,
+            read_prompts: false,
+        };
+        let store = run::RunStore::open(&exec, &run_call)?;
+
+        let make_receipt = || provenant_records::RouteSelectionReceipt {
+            selection_rule: SelectionRule::WeightedDraw,
+            considered_exclusions: vec![],
+            exploration: Exploration {
+                extra: Default::default(),
+                selected: false,
+                percent: 0,
+                enabled: false,
+                source: "default".into(),
+            },
+            weight_source: WeightSource::Config,
+            account_load: None,
+            extra: Default::default(),
+            pool: "principal".into(),
+            candidates: vec![],
+            roll: 0,
+            total_weight: 1,
+            pick: "codex/gpt-6-luna".into(),
+            reason: None,
+            redraws: vec![],
+        };
+        let make_route = || run::RouteRecord {
+            selection_context: Some(provenant_records::route_selection::RouteAttemptContext {
+                extra: Default::default(),
+                workload: provenant_routing::Workload::General,
+                writes: false,
+            }),
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6-luna".into()),
+            effort: Some("high".into()),
+            account_label: Some("codex-account".into()),
+            pool_selection: Some(make_receipt()),
+            ..Default::default()
+        };
+
+        let settle_attempt = |attempt_num: u8, succeeded: bool| -> Result<(), Box<dyn Error>> {
+            let attempt_id = provenant_core::AttemptId::from_bytes([attempt_num; 16]);
+            let mut request: run::CanonicalRequest = serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "task": {
+                    "prompt_digest": provenant_records::CanonicalV1::file_digest(b"task"),
+                    "route": {
+                        "kind": "model",
+                        "provider": "codex",
+                        "model": "codex/gpt-6-luna",
+                        "effort": "high"
+                    },
+                    "authority_digest": provenant_core::Digest::from_bytes([1; 32]),
+                    "provider_timeout_seconds": 30,
+                    "delivery_id": null
+                },
+                "parent": null,
+                "lane_depth": 1
+            }))?;
+            request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{attempt_num}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                role: None,
+                ..Default::default()
+            });
+            let prepared = run::PreparedRun {
+                attempt_id,
+                operation_id: provenant_core::OperationId::parse(&format!("op-{attempt_num}"))?,
+                created_at: clock.wall_now()?,
+                request,
+                prompt: "task".into(),
+            };
+            store.create(&prepared, &run_call)?;
+
+            let code = if succeeded { 0 } else { 1 };
+            let exit_obs = provenant_supervisor::custody::ExitObservation {
+                cancel_delivered_before_exit: None,
+                provider_identity_conflict: false,
+                provider_identity_evidence_incomplete: false,
+                provider_identity_eof_fragment: false,
+                publication: provenant_supervisor::custody::PublicationState::Durable,
+                scope: provenant_records::custody::Scope {
+                    attempt: attempt_id,
+                    generation: 0,
+                },
+                termination: Some(provenant_os::exec::Termination::Exit(code)),
+                never_spawned: false,
+                stop_reason: None,
+                delivered_signals: vec![],
+                reaped: vec![],
+                omitted_reaped: 0,
+                spared: vec![],
+                omitted_spared: 0,
+                launch_refusal: None,
+                warnings: vec![],
+                omitted_warnings: 0,
+                terminal_observed: false,
+                unresolved_cleanup: false,
+                unresolved_pids: vec![],
+                settlement_evidence: provenant_supervisor::custody::SettlementEvidence::DarwinCensusAndCustodyLease,
+                stdout: Default::default(),
+                stderr: Default::default(),
+            };
+            let mut exit_val = serde_json::to_value(&exit_obs)?;
+            let exit_obj = exit_val.as_object_mut().ok_or("exit fixture")?;
+            exit_obj.remove("publication");
+            exit_obj.insert("schema_version".into(), 1.into());
+            let exit_path = roots
+                .state
+                .as_path()
+                .join("attempts")
+                .join(attempt_id.to_string())
+                .join("process-exit.json");
+            std::fs::write(&exit_path, serde_json::to_vec(&exit_val)?)?;
+
+            let route = make_route();
+            let finished_at = clock.wall_now()?;
+            let publication = run::TerminalPublication {
+                handoff: Ok(None),
+                terminal_cause: None,
+                terminal_note: None,
+                outcome: if succeeded {
+                    run::Outcome::Succeeded
+                } else {
+                    run::Outcome::Failed
+                },
+                finished_at,
+                started_at: Some(finished_at),
+                provider_ms: Some(100),
+                reason: None,
+                result: if succeeded {
+                    "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```"
+                } else {
+                    "failed"
+                },
+                complete: succeeded,
+                redacted: false,
+                resolved_route: Some(route.clone()),
+                applied_route: Some(route.clone()),
+                observed_route: Some(route),
+                usage: run::UsageRecord::default(),
+                session: None,
+                partial_signals: Vec::new(),
+            };
+            store.publish_terminal(attempt_id, 1, &publication, &exit_obs, &run_call)?;
+            Ok(())
+        };
+
+        // Settle first attempt: success
+        settle_attempt(1, true)?;
+
+        let Data::Resolved(after_success) = execute_in(&Route::Resolve(make_query()), &roots, clock.wall_now()?, &home, &project)? else {
+            return Err("expected resolved route".into());
+        };
+        let luna_success = after_success
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("pool selection receipt")?
+            .candidates
+            .iter()
+            .find(|c| c.model == "codex/gpt-6-luna")
+            .ok_or("luna candidate")?;
+        let success_prior = luna_success.ranking.outcome_prior.as_ref().ok_or("outcome prior")?;
+        assert_eq!(success_prior.evidence_count, 1, "selection evidence: {:?}", super::selection_evidence(&roots, &home, &project, None));
+        assert_eq!(success_prior.source, PriorSource::RouteOutcomes);
+        let success_ev = success_prior.evidence.as_ref().ok_or("evidence")?;
+        assert_eq!(success_ev.successes, 1);
+        assert_eq!(success_ev.failures, 0);
+        let success_basis_points = success_prior.factor_basis_points;
+
+        // Settle second attempt: failure
+        settle_attempt(2, false)?;
+
+        let Data::Resolved(after_failure) = execute_in(&Route::Resolve(make_query()), &roots, clock.wall_now()?, &home, &project)? else {
+            return Err("expected resolved route".into());
+        };
+        let luna_failure = after_failure
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("pool selection receipt")?
+            .candidates
+            .iter()
+            .find(|c| c.model == "codex/gpt-6-luna")
+            .ok_or("luna candidate")?;
+        let failure_prior = luna_failure.ranking.outcome_prior.as_ref().ok_or("outcome prior")?;
+        assert_eq!(failure_prior.evidence_count, 2);
+        assert_eq!(failure_prior.source, PriorSource::RouteOutcomes);
+        let failure_ev = failure_prior.evidence.as_ref().ok_or("evidence")?;
+        assert_eq!(failure_ev.successes, 1);
+        assert_eq!(failure_ev.failures, 1);
+        let failure_basis_points = failure_prior.factor_basis_points;
+
+        assert!(
+            failure_basis_points < success_basis_points,
+            "failure must move factor down: {failure_basis_points} < {success_basis_points}"
+        );
+
+        Ok(())
+    }

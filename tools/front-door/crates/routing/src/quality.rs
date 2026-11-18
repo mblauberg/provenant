@@ -34,7 +34,38 @@ pub struct SelectionEvidence {
     pub priors: Vec<RoutePrior>,
     pub source: String,
 }
-/// The one role key shared by outcome producers and route consumers.
+/// The complete in-memory identity of comparable routing outcomes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OutcomeKey {
+    pub model: ModelId,
+    pub pool: String,
+    pub role: PriorKey,
+}
+impl OutcomeKey {
+    pub fn new(model: ModelId, pool: impl Into<String>, role: PriorKey) -> Self {
+        Self {
+            model,
+            pool: pool.into(),
+            role,
+        }
+    }
+
+    pub fn from_prior(prior: &RoutePrior) -> Self {
+        Self::new(
+            prior.model.clone(),
+            &prior.pool,
+            PriorKey(prior.role.clone()),
+        )
+    }
+}
+impl SelectionEvidence {
+    pub fn prior(&self, key: &OutcomeKey) -> Option<&RoutePrior> {
+        self.priors
+            .iter()
+            .find(|prior| OutcomeKey::from_prior(prior) == *key)
+    }
+}
+/// The role component shared by outcome producers and route consumers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PriorKey(String);
