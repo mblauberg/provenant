@@ -7,14 +7,17 @@ Anchor: `crates/cli/src/lib.rs`, `crates/cli/src/render.rs`,
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
 `scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table. Every enumeration an owner declares for the editor, such as `gc.projects.{project}.foreign_worktrees`, publishes its values and runtime default through the same data; the configuration reference fills them in and refuses an entry that restates them.
-The [consumer contract](consumer-contract.md) gives each command, output and variable its tier: the few stable ones hold across 2.x, and the rest evolve with release notes; direct internal-state readers are unsupported.
+The [consumer contract](consumer-contract.md) describes output and variable tiers; command names may change freely. Direct internal-state readers are unsupported.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
+Repository CI selection, its gate and quarantine validation are specified in [CI](ci.md).
 
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
 reported, never resolved by guessing; conflicting manifest settings are refused.
+The `TargetGrammar` declaration identifies each target argument, whose attached
+parser must accept and refuse the values of its declared syntax.
 
 - Why: an action must address the intended work.
 
@@ -22,7 +25,7 @@ reported, never resolved by guessing; conflicting manifest settings are refused.
 
 Help and version inspection require no project state. Paths retain their native
 bytes, and invalid or conflicting arguments are rejected.
-The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains.
+The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains. Every catalogued command resolves to scoped help containing its metadata.
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
 

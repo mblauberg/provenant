@@ -1,7 +1,6 @@
 # Design defaults
 
-Where the project's design doc is silent, start here and record any departure in
-it. When defaults conflict, correctness and recoverability come before speed, and speed
+Where the project's design doc is silent, start here. When defaults conflict, correctness and recoverability come before speed, and speed
 before decoration.
 
 ## Action safety
@@ -29,8 +28,7 @@ loss; routine confirmations teach people to click through.
 - A toast confirms the person's own action and is never the only home of an error
   or an undo. System state (degraded, read-only, expired session) is a banner that
   persists. Critical messages never auto-dismiss. A disabled control says why.
-- Define states in this order: loading, error, empty, content; also permission
-  denied and extreme content.
+- Consider loading, error, empty, content, permission denied and extreme content states.
 - First-use empty says what will appear and offers the one creating action.
   Filtered-to-zero says so and offers to clear filters, not to create.
 - Errors sit at the point of failure, keep everything entered and never show a
@@ -42,7 +40,7 @@ loss; routine confirmations teach people to click through.
 ## Modality, tables, keyboard
 
 - Lightest container wins. Editing a record in a work tool defaults to a sheet or
-  side panel with the list visible. Never nest dialogs. Shareable or reloadable
+  side panel with the list visible. Shareable or reloadable
   state (filters, tabs, pagination, open panel) lives in the URL.
 - Tables: declare each column's kind once (text, number, amount, date, status,
   identifier); it sets alignment, formatter and sort. Numbers use tabular figures
@@ -62,8 +60,7 @@ loss; routine confirmations teach people to click through.
 - Each status hue has one meaning everywhere and is never reused as brand or
   decoration. Never rely on colour alone: a negative amount shows its minus sign,
   an overdue item says 'Overdue'.
-- Components use semantic tokens only; a raw value in a component is a finding.
-  Design light and dark separately.
+- Use semantic tokens where they improve consistency; consider supported themes.
 
 ## Content and trust
 

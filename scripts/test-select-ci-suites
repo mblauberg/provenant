@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Exercise suite selection against local history and a fake GitHub API."""
+import json
+import os
+import stat
+import subprocess
+import tempfile
+import tomllib
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+config = tomllib.loads((root / 'config/ci-suites.toml').read_text())
+names = [s['name'] for s in config['suite']]
+all_run = {n: 'run' for n in names}
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp); repo = tmp / 'repo'; repo.mkdir(); bindir = tmp / 'bin'; bindir.mkdir()
+    fake = bindir / 'gh'
+    fake.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+s = json.loads(pathlib.Path(os.environ['FAKE_STATE']).read_text())
+if s.get('fail'): sys.exit(1)
+if sys.argv[1:3] == ['run', 'download']:
+    if 'artifact' not in s: sys.exit(1)
+    pathlib.Path(sys.argv[-1], 'evidence.json').write_text(json.dumps(s['artifact']))
+elif '/jobs?' in sys.argv[2]:
+    rid = sys.argv[2].split('/runs/')[1].split('/')[0]
+    print(json.dumps({'jobs': [{'name': 'ci-status', 'status': 'completed', 'conclusion': s.get('jobs', {}).get(rid, 'success')}]}))
+elif 'event=pull_request' in sys.argv[2]: print(json.dumps({'workflow_runs': s.get('pr', [])}))
+else: print(json.dumps({'workflow_runs': s.get('main', [])}))
+''')
+    fake.chmod(0o755)
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test')
+    def commit(path, content, mode=None):
+        target = repo / path; target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink(): target.unlink()
+        if mode == 'symlink': target.symlink_to(content)
+        else:
+            target.write_text(content)
+            if mode == 'executable': target.chmod(target.stat().st_mode | stat.S_IXUSR)
+        git('add', '-A'); git('commit', '-qm', path)
+        return git('rev-parse', 'HEAD')
+    base = commit('base.txt', 'base')
+    def mainrun(sha, rid=1): return {'id': rid, 'head_sha': sha}
+    state = {'main': [mainrun(base)]}
+    state_path = tmp / 'state.json'; output = tmp / 'output'; summary = tmp / 'summary'
+    def run(head, expected, extra=None, check=None, state_override=None):
+        state_path.write_text(json.dumps(state if state_override is None else state_override))
+        output.write_text(''); summary.write_text('')
+        env = {**os.environ, 'PATH': str(bindir) + os.pathsep + os.environ['PATH'], 'FAKE_STATE': str(state_path),
+               'EVENT_NAME': 'pull_request', 'REF': 'refs/pull/1/merge', 'TESTED_SHA': head, 'PR_HEAD_SHA': head,
+               'PR_BEFORE': '', 'PR_ACTION': 'opened', 'PR_NUMBER': '1', 'PR_LABELS': '[]', 'DISPATCH_TIER': '',
+               'GITHUB_REPOSITORY': 'example/repo', 'GITHUB_OUTPUT': str(output), 'GITHUB_STEP_SUMMARY': str(summary)}
+        env.update(extra or {})
+        proc = subprocess.run([root / 'scripts/select-ci-suites'], cwd=repo, env=env, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+        suites = json.loads(values['suites']); selection = json.loads(values['selection'])
+        assert suites == expected, (suites, expected, selection)
+        for name, suite in selection['suites'].items():
+            if suite['state'] != 'run':
+                assert name in summary.read_text() and suite['reason'] in summary.read_text()
+        if check: check(selection)
+        return selection
+    # Spec: docs/specs/ci.md#main-runs-everything
+    run(base, all_run, {'EVENT_NAME': 'push', 'REF': 'refs/heads/main'})
+    # Spec: docs/specs/ci.md#pull-requests-start-from-green-evidence
+    docs = commit('notes.md', 'docs')
+    covered = {n: ('run' if n == 'checks' else 'covered') for n in names}
+    run(docs, covered)
+    code = commit('tools/front-door/crates/workflow/src/x.rs', 'code')
+    normal = {'checks': 'run', 'rust': 'run', 'macos_lint': 'run', 'macos_native': 'deferred', 'macos_release': 'deferred'}
+    run(code, normal)
+    os_change = commit('tools/front-door/crates/os/x.rs', 'native')
+    run(os_change, {**normal, 'macos_native': 'run'})
+    run(code, all_run, {'PR_LABELS': '["ci:full"]'})
+    run(code, all_run, {'DISPATCH_TIER': 'full'})
+    # A dispatch renders absent labels as null; auto tier still selects from evidence.
+    run(code, all_run, {'EVENT_NAME': 'workflow_dispatch', 'REF': 'refs/heads/topic', 'PR_LABELS': 'null', 'DISPATCH_TIER': 'auto', 'PR_NUMBER': ''},
+        check=lambda s: (not s['full'] and s['rust_base'] == '') or (_ for _ in ()).throw(AssertionError(s)))
+    full = commit('rust-toolchain.toml', 'full')
+    run(full, all_run)
+    run(code, all_run, state_override={'main': []})
+    run(code, normal, state_override={'main': [mainrun(code, 2), mainrun(base, 1)], 'jobs': {'2': 'failure'}}, check=lambda s: s['evidence']['main'] == base or (_ for _ in ()).throw(AssertionError(s)))
+    # An unrelated green SHA must not replace an older ancestor.
+    git('checkout', '-q', '--detach', base); unrelated = commit('other.rs', 'other')
+    run(code, normal, state_override={'main': [mainrun(unrelated, 3), mainrun(base)]}, check=lambda s: s['evidence']['main'] == base or (_ for _ in ()).throw(AssertionError(s)))
+    # A pull-request run tests GitHub's merge of the base tip and the head.
+    def merge(tip, head):
+        tree = git('merge-tree', '--write-tree', tip, head).split('\n')[0]
+        return git('commit-tree', tree, '-p', tip, '-p', head, '-m', 'merge'), tree
+    def pr(tip, head):
+        return {'TESTED_SHA': merge(tip, head)[0], 'PR_HEAD_SHA': head}
+    git('checkout', '-q', '--detach', code); doc_after = commit('more.md', 'more')
+    prrun = {'id': 4, 'head_sha': code, 'status': 'completed', 'conclusion': 'success', 'pull_requests': [{'number': 1}]}
+    artifact = {'schema_version': 1, 'head': code, 'pr_number': 1, 'base': base, 'tree': merge(base, code)[1], 'suites': {n: 'run' for n in names}}
+    pstate = {'main': [mainrun(base)], 'pr': [prrun], 'artifact': artifact}
+    sync = {'PR_ACTION': 'synchronize', 'PR_BEFORE': code}
+    first = run(code, normal, pr(base, code))
+    assert (first['base'], first['tree']) == (artifact['base'], artifact['tree']), first
+    run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, {**sync, **pr(base, doc_after)}, state_override=pstate)
+    code_after = commit('another.rs', 'new')
+    run(code_after, normal, {**sync, **pr(base, code_after)}, state_override=pstate)
+    run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={'main': [mainrun(base)], 'pr': [prrun]})
+    run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={**pstate, 'artifact': {**artifact, 'head': base}})
+    run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={**pstate, 'artifact': {**artifact, 'tree': artifact['tree'][::-1]}})
+    # Base code that entered the merge since the green PR run is not covered by it.
+    git('checkout', '-q', '--detach', base); moved = commit('tools/front-door/crates/workflow/src/main_only.rs', 'main')
+    run(doc_after, normal, {**sync, **pr(moved, doc_after)}, state_override=pstate)
+    # Spec: docs/specs/ci.md#unknown-paths-are-inputs
+    for mode in ('executable', 'symlink'):
+        git('checkout', '-q', '--detach', base)
+        special = commit('special.md', 'target', mode)
+        run(special, normal)
+    git('checkout', '-q', '--detach', base)
+    watched = commit('skills/legal-writing/references/x.md', 'reference')
+    run(watched, {**normal, "macos_release": "covered"})
+    run(code, all_run, state_override={'fail': True})
+    bad = tmp / 'bad.toml'; bad.write_text('schema_version = 99\n')
+    env = {**os.environ, 'CI_SUITES': str(bad), 'GITHUB_OUTPUT': str(output), 'GITHUB_STEP_SUMMARY': str(summary)}
+    assert subprocess.run([root / 'scripts/select-ci-suites'], env=env, capture_output=True).returncode != 0
+print('CI suite selector fixtures passed.')

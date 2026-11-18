@@ -120,10 +120,10 @@ fn warnings_recover_rows_and_preserve_effective_origins() {
 fn core_sections_keep_valid_siblings_and_handle_quoted_unknown_keys() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
-    let text = "schema_version=1\nproviders={codex={update=false}}\n[gc]\n'future.option'=true\nschedule=false\nidle_days=0\n[retention.projects.bad]\ncheckpoint_soft_bytes=0\n[retention.projects.good]\ncheckpoint_soft_bytes=4096\n";
+    let text = "schema_version=1\nproviders={codex={update=false}}\n[gc]\n'future.option'=true\nschedule=false\nidle='invalid'\n[retention.projects.bad]\ncheckpoint_soft_bytes=0\n[retention.projects.good]\ncheckpoint_soft_bytes=4096\n";
     let config = load(&roots, Some(text.as_bytes())).unwrap();
     assert!(!config.gc.schedule);
-    assert_eq!(config.gc.idle_days, 7);
+    assert_eq!(config.gc.idle, "6h");
     assert_eq!(
         config.providers["codex"].update,
         ProviderUpdate::Enabled(false)
@@ -141,7 +141,7 @@ fn core_sections_keep_valid_siblings_and_handle_quoted_unknown_keys() {
         warning_paths,
         [
             "gc.future.option",
-            "gc.idle_days",
+            "gc.idle",
             "retention.projects.bad.checkpoint_soft_bytes",
         ]
         .into_iter()

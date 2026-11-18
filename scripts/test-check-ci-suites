@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Check workflow/manifest invariants with small independent fixtures."""
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    print('SKIP: PyYAML is not installed')
+    sys.exit(0)
+loader = importlib.machinery.SourceFileLoader('checker', str(Path(__file__).with_name('check-ci-suites')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+checker = importlib.util.module_from_spec(spec)
+loader.exec_module(checker)
+config = {'jobs': {'always': ['scope'], 'ungated': ['health']}, 'suite': [{'name': 'rust', 'jobs': ['test']} ]}
+workflow = yaml.safe_load('''
+jobs:
+  scope: {}
+  test:
+    if: "${{ fromJSON(needs.scope.outputs.suites).rust == 'run' }}"
+  ci-status:
+    needs: [scope, test]
+  health: {}
+''')
+# Spec: docs/specs/ci.md#suites-are-declared-once
+assert not checker.check(config, workflow)
+for mutation in ('missing', 'needs', 'unmapped', 'binding', 'always'):
+    w = yaml.safe_load(yaml.safe_dump(workflow))
+    if mutation == 'missing': del w['jobs']['test']
+    if mutation == 'needs': w['jobs']['ci-status']['needs'].remove('test')
+    if mutation == 'unmapped': w['jobs']['extra'] = {}; w['jobs']['ci-status']['needs'].append('extra')
+    if mutation == 'binding': w['jobs']['test']['if'] = 'true'
+    if mutation == 'always': w['jobs']['scope']['if'] = 'needs.scope.outputs.suites.rust'
+    assert checker.check(config, w), mutation
+print('CI suite manifest fixtures passed.')

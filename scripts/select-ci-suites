@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Select CI suites from verified green evidence and declared inputs."""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SHA = re.compile(r'^[0-9a-f]{40}$')
+
+
+def manifest():
+    path = Path(os.environ.get('CI_SUITES', ROOT / 'config/ci-suites.toml'))
+    with path.open('rb') as f:
+        data = tomllib.load(f)
+    if data.get('schema_version') != 1:
+        raise ValueError('unsupported manifest schema')
+    def strings(value, name, nonempty=False):
+        if not isinstance(value, list) or any(not isinstance(x, str) or not x for x in value) or (nonempty and not value):
+            raise ValueError(f'invalid {name}')
+        return value
+    jobs = data['jobs']
+    all_jobs = strings(jobs['always'], 'always') + strings(jobs['ungated'], 'ungated')
+    if 'scope' not in jobs['always']:
+        raise ValueError('scope must be an always job')
+    suites = data['suite']
+    if not isinstance(suites, list) or not suites:
+        raise ValueError('no suites')
+    names = []
+    for s in suites:
+        name = s['name']
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
+            raise ValueError('invalid suite name')
+        names.append(name)
+        if s['tier'] not in ('pr', 'main') or isinstance(s['cost_minutes'], bool) or not isinstance(s['cost_minutes'], (int, float)) or s['cost_minutes'] < 0:
+            raise ValueError(f'invalid suite {name}')
+        all_jobs += strings(s['jobs'], f'{name}.jobs', True)
+        for key in ('watch', 'inert', 'pr_paths'):
+            if key in s:
+                strings(s[key], f'{name}.{key}')
+    if len(set(names)) != len(names) or len(set(all_jobs)) != len(all_jobs):
+        raise ValueError('duplicate suite or job')
+    strings(data['defaults']['inert'], 'defaults.inert')
+    strings(data['full']['paths'], 'full.paths')
+    evidence = data['evidence']
+    for k in ('workflow', 'branch', 'artifact'):
+        if not isinstance(evidence[k], str) or not evidence[k]:
+            raise ValueError(f'invalid evidence.{k}')
+    if type(evidence['lookback']) is not int or not 1 <= evidence['lookback'] <= 100:
+        raise ValueError('invalid evidence.lookback')
+    if not isinstance(data['request']['full_label'], str) or not data['request']['full_label']:
+        raise ValueError('invalid full label')
+    return data
+
+
+def matches(pattern, path):
+    out = ''
+    i = 0
+    while i < len(pattern):
+        if pattern[i:i+3] == '**/':
+            out += '(?:.*/)?'; i += 3
+        elif pattern[i:i+2] == '**':
+            out += '.*'; i += 2
+        elif pattern[i] == '*':
+            out += '[^/]*'; i += 1
+        elif pattern[i] == '?':
+            out += '[^/]'; i += 1
+        else:
+            out += re.escape(pattern[i]); i += 1
+    return re.fullmatch(out, path) is not None
+
+
+def any_match(patterns, path):
+    return any(matches(p, path) for p in patterns)
+
+
+def relevant(suite, defaults, change):
+    path, old, new = change
+    return (old not in ('000000', '100644') or new not in ('000000', '100644')
+            or any_match(suite.get('watch', []), path)
+            or not any_match(suite.get('inert', defaults), path))
+
+
+def command(args, **kwargs):
+    return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, **kwargs).stdout
+
+
+def api(path):
+    return json.loads(command(['gh', 'api', path], text=True))
+
+
+def green_job(prefix, run):
+    jobs = api(f"{prefix}/runs/{int(run['id'])}/jobs?per_page=100")['jobs']
+    return any(j.get('name') == 'ci-status' and j.get('status') == 'completed' and j.get('conclusion') == 'success' for j in jobs)
+
+
+def exists(sha):
+    return subprocess.run(['git', 'cat-file', '-e', sha + '^{commit}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def main_evidence(prefix, config, tested):
+    ev = config['evidence']
+    runs = api(f"{prefix}/workflows/{ev['workflow']}/runs?branch={ev['branch']}&event=push&status=completed&per_page={ev['lookback']}")['workflow_runs']
+    for run in runs:
+        sha = run.get('head_sha', '')
+        if not SHA.fullmatch(sha) or not exists(sha):
+            continue
+        ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', sha, tested], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if ancestor not in (0, 1):
+            raise ValueError('git ancestor check failed')
+        if ancestor == 0 and green_job(prefix, run):
+            return sha
+    return None
+
+
+def predecessor(prefix, config, env):
+    """Return the previous green head, the tree it tested and its suite states.
+
+    The previous run tested a merge with the base of that time, so its tree is
+    rebuilt from the recorded base and head and must match the recorded tree.
+    """
+    before, number = env.get('PR_BEFORE', ''), env.get('PR_NUMBER', '')
+    if env.get('EVENT_NAME') != 'pull_request' or env.get('PR_ACTION') != 'synchronize' or not SHA.fullmatch(before) or not number.isdecimal() or not exists(before):
+        return None, None, None
+    try:
+        runs = api(f"{prefix}/workflows/{config['evidence']['workflow']}/runs?event=pull_request&head_sha={before}&per_page=100")['workflow_runs']
+        for run in runs:
+            if (run.get('head_sha') != before or run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                    or not any(pr.get('number') == int(number) for pr in run.get('pull_requests', [])) or not green_job(prefix, run)):
+                continue
+            with tempfile.TemporaryDirectory() as tmp:
+                command(['gh', 'run', 'download', str(run['id']), '-n', config['evidence']['artifact'], '-D', tmp])
+                files = list(Path(tmp).iterdir())
+                if len(files) != 1 or not files[0].is_file():
+                    continue
+                evidence = json.loads(files[0].read_text())
+            base, tree = str(evidence.get('base')), str(evidence.get('tree'))
+            if (evidence.get('schema_version') == 1 and evidence.get('head') == before and evidence.get('pr_number') == int(number)
+                    and isinstance(evidence.get('suites'), dict) and SHA.fullmatch(base) and SHA.fullmatch(tree) and exists(base)):
+                rebuilt = command(['git', 'merge-tree', '--write-tree', base, before], text=True).split('\n', 1)[0]
+                if rebuilt == tree:
+                    return before, tree, evidence['suites']
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass
+    return None, None, None
+
+
+def diff(base, head):
+    raw = command(['git', 'diff', '--no-renames', '--raw', '-z', base, head]).split(b'\0')
+    if raw[-1] != b'':
+        raise ValueError('invalid git diff')
+    records = raw[:-1]
+    if len(records) % 2:
+        raise ValueError('invalid git diff records')
+    changes = []
+    for i in range(0, len(records), 2):
+        fields = records[i].decode('ascii').split()
+        if len(fields) != 5 or not fields[0].startswith(':'):
+            raise ValueError('invalid git diff header')
+        changes.append((os.fsdecode(records[i+1]), fields[0][1:], fields[1]))
+    return changes
+
+
+def select(config, env):
+    tested = env.get('TESTED_SHA', '')
+    event = env.get('EVENT_NAME', '')
+    head = env.get('PR_HEAD_SHA', '') if event == 'pull_request' else tested
+    number = env.get('PR_NUMBER', '')
+    result = {'schema_version': 1, 'tested': tested, 'head': head, 'event': event,
+              'pr_number': int(number) if number.isdecimal() else None, 'full': False, 'full_reason': None,
+              'evidence': {'main': None, 'pr': None}, 'rust_base': '', 'base': '', 'tree': '', 'suites': {}}
+    try:
+        repo = env['GITHUB_REPOSITORY']
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not SHA.fullmatch(tested) or not SHA.fullmatch(head):
+            raise ValueError('invalid repository or commit SHA')
+        # toJSON of an absent pull request's labels renders null on push and dispatch.
+        labels = json.loads(env.get('PR_LABELS') or 'null') or []
+        if not isinstance(labels, list) or any(not isinstance(x, str) for x in labels):
+            raise ValueError('invalid PR labels')
+        prefix = f'repos/{repo}/actions'
+        result['tree'] = command(['git', 'rev-parse', tested + '^{tree}'], text=True).strip()
+        parents = command(['git', 'rev-list', '--parents', '-n', '1', tested], text=True).split()[1:]
+        if event == 'pull_request' and len(parents) == 2 and parents[1] == head:
+            result['base'] = parents[0]
+        try:
+            main = main_evidence(prefix, config, tested)
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+            main = None
+            evidence_error = str(error)
+        else:
+            evidence_error = 'no green main evidence'
+        result['evidence']['main'] = main
+        ref = env.get('REF', '')
+        reason = None
+        if event == 'push' and (ref == 'refs/heads/' + config['evidence']['branch'] or ref.startswith('refs/heads/land/')):
+            reason = 'main or landing push'
+        elif env.get('DISPATCH_TIER') == 'full':
+            reason = 'full dispatch requested'
+        elif config['request']['full_label'] in labels:
+            reason = 'full label requested'
+        elif not main:
+            reason = f'green main unavailable: {evidence_error}'
+        changes = diff(main, tested) if main and not reason else []
+        if not reason and any(any_match(config['full']['paths'], p) for p, _, _ in changes):
+            reason = 'full-run path changed'
+        if reason:
+            result['full'] = True; result['full_reason'] = reason
+            for s in config['suite']:
+                result['suites'][s['name']] = {'state': 'run', 'reason': reason, 'evidence': None}
+            return result
+        p, p_tree, p_states = predecessor(prefix, config, env)
+        result['evidence']['pr'] = p
+        # Compare tested trees: the base may have moved since the previous run.
+        p_changes = diff(p_tree, tested) if p else []
+        result['rust_base'] = main if event == 'pull_request' else ''
+        for s in config['suite']:
+            name = s['name']
+            relevant_main = [c[0] for c in changes if relevant(s, config['defaults']['inert'], c)]
+            if not relevant_main:
+                state, why, evidence = 'covered', f'no {name} input changed since green main {main[:8]}', main
+            elif p and p_states.get(name) in ('run', 'covered') and not any(relevant(s, config['defaults']['inert'], c) for c in p_changes):
+                state, why, evidence = 'covered', f'no {name} input changed since green PR {p[:8]}', p
+            elif event == 'pull_request' and s['tier'] == 'main' and not any(any_match(s.get('pr_paths', []), c[0]) for c in changes):
+                state, why, evidence = 'deferred', f"main tier; no pull-request path changed; runs on main, or add label {config['request']['full_label']} / dispatch tier=full", None
+            else:
+                state, why, evidence = 'run', 'relevant paths: ' + ', '.join(relevant_main[:5]), None
+            result['suites'][name] = {'state': state, 'reason': why, 'evidence': evidence}
+    except Exception as error:
+        result.update(full=True, full_reason=f'selection error: {error}', rust_base='')
+        result['suites'] = {s['name']: {'state': 'run', 'reason': result['full_reason'], 'evidence': None} for s in config['suite']}
+    return result
+
+
+def main():
+    try:
+        config = manifest()
+    except (OSError, ValueError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        print(f'Invalid CI suites manifest: {error}', file=sys.stderr); return 1
+    result = select(config, os.environ)
+    compact = lambda obj: json.dumps(obj, separators=(',', ':'), ensure_ascii=True)
+    suites = {n: entry['state'] for n, entry in result['suites'].items()}
+    with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+        out.write(f"suites={compact(suites)}\nselection={compact(result)}\nrust_base={result['rust_base']}\n")
+    lines = [f"CI selection: tested {result['tested']}; main {result['evidence']['main'] or '-'}; PR {result['evidence']['pr'] or '-'}; full reason {result['full_reason'] or '-'}", '', '| Suite | State | Evidence | Reason | Estimated minutes |', '| --- | --- | --- | --- | ---: |']
+    for s in config['suite']:
+        e = result['suites'][s['name']]
+        clean = lambda v: str(v).replace('|', '\\|').replace('\n', ' ')
+        lines.append(f"| {s['name']} | {e['state']} | {e['evidence'] or '-'} | {clean(e['reason'])} | {s['cost_minutes']} |")
+    table = '\n'.join(lines) + '\n'
+    print(table, end='')
+    with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+        summary.write(table)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -84,6 +84,7 @@ pub struct ResultPolicy {
     pub check: Option<bool>,
     pub sections: Option<Vec<String>>,
     pub fallback: Option<ModelId>,
+    pub fallback_family: Option<String>,
     pub fallback_effort: Option<String>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -125,12 +126,19 @@ impl ModelPolicy {
             read_only,
             user_skills,
         );
+        if patch.result.fallback.is_some() {
+            self.result.fallback_family = None;
+        }
+        if patch.result.fallback_family.is_some() {
+            self.result.fallback = None;
+        }
         overlay!(
             self.result,
             patch.result,
             check,
             sections,
             fallback,
+            fallback_family,
             fallback_effort
         );
     }
@@ -590,6 +598,7 @@ pub struct EffectiveModelPolicy {
 impl ModelPolicies {
     pub fn effective(
         &self,
+        catalogue: &crate::Catalogue,
         model: &ModelId,
         account: Option<&str>,
         now: WallTime,
@@ -600,7 +609,7 @@ impl ModelPolicies {
             None => Some(account),
         });
         let mut policy = if self.bundled {
-            bundled_policy(model, now)
+            bundled_policy(catalogue, model, now)
         } else {
             ModelPolicy::default()
         };
@@ -614,12 +623,12 @@ impl ModelPolicies {
             .into(),
         ];
         self.apply_rules(&mut policy, &mut sources, model, account, now);
+        if let Some(selector) = policy.result.fallback_family.take() {
+            policy.result.fallback = catalogue.latest_family(&selector).cloned();
+        }
         let mut dropped_fallback = None;
         if let Some(model) = policy.result.fallback.clone() {
-            let problem = crate::Catalogue::bundled()
-                .map_or(Some("catalogue unavailable"), |catalogue| {
-                    fallback_problem(&policy.result, &catalogue)
-                });
+            let problem = fallback_problem(&policy.result, catalogue);
             if let Some(reason) = problem {
                 policy.result.fallback = None;
                 policy.result.fallback_effort = None;
@@ -869,7 +878,7 @@ impl ModelPolicy {
 
 // Invalid embedded data is a build defect, never a recoverable user configuration.
 #[allow(clippy::expect_used)]
-fn bundled_policy(model: &ModelId, now: WallTime) -> ModelPolicy {
+fn bundled_policy(catalogue: &crate::Catalogue, model: &ModelId, now: WallTime) -> ModelPolicy {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Bundled {
@@ -894,6 +903,14 @@ fn bundled_policy(model: &ModelId, now: WallTime) -> ModelPolicy {
     });
     let mut policy = BUNDLED.defaults.clone();
     BUNDLED.apply_rules(&mut policy, &mut Vec::new(), model, None, now);
+    if let Some(entry) = catalogue.model(model) {
+        let model_policies = ModelPolicies {
+            bundled: false,
+            defaults: ModelPolicy::default(),
+            rules: entry.policy_rules.clone(),
+        };
+        model_policies.apply_rules(&mut policy, &mut Vec::new(), model, None, now);
+    }
     policy
 }
 
@@ -984,7 +1001,12 @@ mod tests {
         ] {
             assert_eq!(
                 policies
-                    .effective(&ModelId::parse(model)?, None, at(1))
+                    .effective(
+                        &crate::Catalogue::bundled().unwrap(),
+                        &ModelId::parse(model)?,
+                        None,
+                        at(1)
+                    )
                     .policy
                     .lane
                     .user_skills,
@@ -1011,7 +1033,12 @@ mod tests {
             assert!(errors.iter().any(|e| e.field == "model_policy.rules.0"));
             assert_eq!(
                 policies
-                    .effective(&ModelId::parse("opencode/unknown-free")?, None, at(0))
+                    .effective(
+                        &crate::Catalogue::bundled().unwrap(),
+                        &ModelId::parse("opencode/unknown-free")?,
+                        None,
+                        at(0)
+                    )
                     .policy
                     .cache
                     .read_ratio,
@@ -1084,6 +1111,7 @@ mod tests {
         )?;
         let claude = policies
             .effective(
+                &crate::Catalogue::bundled().unwrap(),
                 &ModelId::parse("claude/claude-opus-5-5")?,
                 Some("work"),
                 at(0),
@@ -1099,7 +1127,12 @@ mod tests {
             ("other", 2, 2.0),
         ] {
             let policy = policies
-                .effective(&deepseek, Some(account), at(4 * 86400 + hour * 3600))
+                .effective(
+                    &crate::Catalogue::bundled().unwrap(),
+                    &deepseek,
+                    Some(account),
+                    at(4 * 86400 + hour * 3600),
+                )
                 .policy;
             assert_eq!(policy.cache.price_multiplier, Some(expected));
             assert_eq!(
@@ -1113,6 +1146,7 @@ mod tests {
         }
         let terra = policies
             .effective(
+                &crate::Catalogue::bundled().unwrap(),
                 &ModelId::parse("codex/gpt-6.1-terra")?,
                 Some("codex/work"),
                 at(0),
@@ -1121,6 +1155,7 @@ mod tests {
         assert_eq!(terra.lane.stop_early_ok, Some(true));
         let free = policies
             .effective(
+                &crate::Catalogue::bundled().unwrap(),
                 &ModelId::parse("opencode/unknown-free")?,
                 Some("work"),
                 at(0),
@@ -1164,7 +1199,12 @@ mod tests {
             let expected = if peak { multiplier } else { 1.0 };
             assert_eq!(
                 policies
-                    .effective(&model, None, self::at(at))
+                    .effective(
+                        &crate::Catalogue::bundled().unwrap(),
+                        &model,
+                        None,
+                        self::at(at)
+                    )
                     .policy
                     .cache
                     .price_multiplier,
@@ -1209,7 +1249,12 @@ mod tests {
             (Some("other"), 3600, 200_000),
             (None, 3600, 200_000),
         ] {
-            let effective = policies.effective(&model, account, at(time));
+            let effective = policies.effective(
+                &crate::Catalogue::bundled().unwrap(),
+                &model,
+                account,
+                at(time),
+            );
             assert_eq!(effective.policy.compaction.window, Some(expected));
             assert_eq!(effective.policy.cache.ttl_seconds, Some(300));
             assert_eq!(effective.policy.lane.stop_early_ok, Some(false));
@@ -1268,8 +1313,12 @@ mod tests {
             policies.defaults.result.fallback_effort.as_deref(),
             Some("max")
         );
-        let effective =
-            policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("work"), at(0));
+        let effective = policies.effective(
+            &crate::Catalogue::bundled().unwrap(),
+            &ModelId::parse("codex/gpt-6-luna")?,
+            Some("work"),
+            at(0),
+        );
         assert_eq!(
             effective
                 .policy
@@ -1284,7 +1333,12 @@ mod tests {
             Some("high")
         );
         assert!(effective.dropped_fallback.is_none());
-        let other = policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("other"), at(0));
+        let other = policies.effective(
+            &crate::Catalogue::bundled().unwrap(),
+            &ModelId::parse("codex/gpt-6-luna")?,
+            Some("other"),
+            at(0),
+        );
         assert!(other.policy.result.fallback.is_none());
         assert_eq!(
             other.dropped_fallback,
@@ -1306,7 +1360,12 @@ mod tests {
         ))?;
         assert_eq!(
             canonical
-                .effective(&model, None, at(starts))
+                .effective(
+                    &crate::Catalogue::bundled().unwrap(),
+                    &model,
+                    None,
+                    at(starts)
+                )
                 .policy
                 .lane
                 .max_turns,
@@ -1340,7 +1399,12 @@ mod tests {
         for time in [3 * 86_400 + 23 * 3600, 4 * 86_400 + 3600] {
             assert_eq!(
                 policies
-                    .effective(&model, None, at(time))
+                    .effective(
+                        &crate::Catalogue::bundled().unwrap(),
+                        &model,
+                        None,
+                        at(time)
+                    )
                     .policy
                     .lane
                     .max_turns,
@@ -1471,7 +1535,7 @@ mod tests {
 
         assert_eq!(
             policies
-                .effective(&model, None, at(99))
+                .effective(&crate::Catalogue::bundled().unwrap(), &model, None, at(99))
                 .policy
                 .lane
                 .max_turns,
@@ -1479,7 +1543,7 @@ mod tests {
         );
         assert_eq!(
             policies
-                .effective(&model, None, at(100))
+                .effective(&crate::Catalogue::bundled().unwrap(), &model, None, at(100))
                 .policy
                 .lane
                 .max_turns,
@@ -1487,7 +1551,7 @@ mod tests {
         );
         assert_eq!(
             policies
-                .effective(&model, None, at(101))
+                .effective(&crate::Catalogue::bundled().unwrap(), &model, None, at(101))
                 .policy
                 .lane
                 .max_turns,
@@ -1508,7 +1572,12 @@ mod tests {
             clock.advance(DurationMicros::from_micros(advance))?;
             assert_eq!(
                 policies
-                    .effective(&model, None, clock.wall_now()?)
+                    .effective(
+                        &crate::Catalogue::bundled().unwrap(),
+                        &model,
+                        None,
+                        clock.wall_now()?
+                    )
                     .policy
                     .lane
                     .max_turns,
@@ -1523,7 +1592,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("claude/claude-opus-5-5")?;
         let policy = ModelPolicies::default()
-            .effective(&model, None, at(0))
+            .effective(&crate::Catalogue::bundled().unwrap(), &model, None, at(0))
             .policy;
         let window = policy
             .compaction
@@ -1538,6 +1607,7 @@ mod tests {
         );
         let deepseek = ModelPolicies::default()
             .effective(
+                &crate::Catalogue::bundled().unwrap(),
                 &ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?,
                 None,
                 at(0),
@@ -1557,7 +1627,12 @@ mod tests {
         ] {
             assert_eq!(
                 ModelPolicies::default()
-                    .effective(&deepseek_model, None, at(time))
+                    .effective(
+                        &crate::Catalogue::bundled().unwrap(),
+                        &deepseek_model,
+                        None,
+                        at(time)
+                    )
                     .policy
                     .cache_factor_basis_points(intent),
                 expected
@@ -1587,7 +1662,12 @@ mod tests {
     fn launch_controls_result_sections_and_overrides() -> Result<(), Box<dyn std::error::Error>> {
         let policies = ModelPolicies::default();
         let claude = policies
-            .effective(&ModelId::parse("claude/claude-sonnet-5-5")?, None, at(0))
+            .effective(
+                &crate::Catalogue::bundled().unwrap(),
+                &ModelId::parse("claude/claude-sonnet-5-5")?,
+                None,
+                at(0),
+            )
             .policy;
         let variable = provenant_records::AdapterSpec::get("claude")
             .and_then(|spec| spec.compaction_env)
@@ -1605,7 +1685,12 @@ mod tests {
         );
         assert!(claude.launch_env("codex").is_empty());
         let gemini = policies
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(0))
+            .effective(
+                &crate::Catalogue::bundled().unwrap(),
+                &ModelId::parse("agy/gemini-3.8-flash")?,
+                None,
+                at(0),
+            )
             .policy;
         assert!(!gemini.result_valid(" \n"));
         assert!(gemini.result_valid("Done."));
@@ -1617,7 +1702,12 @@ mod tests {
             "[[rules]]\nmodel='agy/gemini-3.8-flash'\n[rules.policy.result]\nsections=['## Findings', '## Evidence']\n[rules.policy.lane]\nread_only=true\n",
         )?;
         let configured = with_sections
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(0))
+            .effective(
+                &crate::Catalogue::bundled().unwrap(),
+                &ModelId::parse("agy/gemini-3.8-flash")?,
+                None,
+                at(0),
+            )
             .policy;
         assert!(!configured.result_valid("the words ## Findings and ## Evidence"));
         assert!(configured.result_valid("## Findings\nClean.\n## Evidence\nChecked the diff."));
@@ -1639,7 +1729,12 @@ mod tests {
         });
         assert_eq!(
             disabled
-                .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(100))
+                .effective(
+                    &crate::Catalogue::bundled().unwrap(),
+                    &ModelId::parse("agy/gemini-3.8-flash")?,
+                    None,
+                    at(100)
+                )
                 .policy
                 .result
                 .check,
@@ -1677,7 +1772,12 @@ mod tests {
         );
         assert!(
             drifted
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, at(0))
+                .effective(
+                    &crate::Catalogue::bundled().unwrap(),
+                    &ModelId::parse("codex/gpt-6-luna")?,
+                    None,
+                    at(0)
+                )
                 .policy
                 .result
                 .fallback

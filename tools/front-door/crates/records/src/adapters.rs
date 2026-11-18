@@ -52,6 +52,15 @@ macro_rules! adapter_specs {
     };
 }
 
+/// Wire format of a provider CLI model listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelListingFormat {
+    CodexJson,
+    AgyText,
+    OpencodeText,
+    CursorText,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProbeKind {
     None,
@@ -522,6 +531,8 @@ const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
 pub struct AdapterSpec {
     pub id: Harness,
     pub name: &'static str,
+    /// Format of a supported CLI model listing.
+    pub model_listing: Option<ModelListingFormat>,
     /// Provider family used by declared route constraints.
     pub family: &'static str,
     pub binary: &'static str,
@@ -597,6 +608,8 @@ pub struct AdapterSpec {
     pub chair_switch: bool,
     /// The account reports the models it offers; a launch naming another model is refused.
     pub offered_models: bool,
+    /// Maximum age of provider refusal evidence before revalidation.
+    pub refusal_revalidation_seconds: Option<i64>,
     pub github_auth: Option<GithubAuth>,
     /// Supports launching a transferred interactive session.
     pub session_handoff: bool,
@@ -811,6 +824,7 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
 adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
+        model_listing: None,
         family: "anthropic",
         binary: "claude",
         install: Some(HarnessInstall {
@@ -869,6 +883,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: true,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: Some(GithubAuth::Environment),
         session_handoff: true,
         launch_token_refresh: true,
@@ -911,6 +926,7 @@ adapter_specs! { $;
     },
     Codex [] (codex: 0) {
         name: "codex",
+        model_listing: Some(ModelListingFormat::CodexJson),
         family: "openai",
         binary: "codex",
         install: Some(HarnessInstall {
@@ -976,6 +992,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: false,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: Some(GithubAuth::ShellEnvironment),
         session_handoff: false,
         launch_token_refresh: false,
@@ -1018,6 +1035,7 @@ adapter_specs! { $;
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
+        model_listing: Some(ModelListingFormat::CursorText),
         family: "cursor",
         binary: "cursor-agent",
         install: Some(HarnessInstall {
@@ -1088,6 +1106,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: false,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -1130,6 +1149,7 @@ adapter_specs! { $;
     },
     Agy [] (agy: 3) {
         name: "agy",
+        model_listing: Some(ModelListingFormat::AgyText),
         family: "google",
         binary: "agy",
         install: Some(HarnessInstall {
@@ -1201,6 +1221,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: false,
         offered_models: true,
+        refusal_revalidation_seconds: Some(300),
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -1243,6 +1264,7 @@ adapter_specs! { $;
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
+        model_listing: Some(ModelListingFormat::OpencodeText),
         family: "opencode",
         binary: "opencode",
         install: Some(HarnessInstall {
@@ -1309,6 +1331,7 @@ adapter_specs! { $;
         namespaced_models: true,
         chair_switch: false,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -1354,6 +1377,7 @@ adapter_specs! { $;
     },
     Command [] (command: 5) {
         name: "command",
+        model_listing: None,
         family: "command",
         binary: "",
         install: None,
@@ -1393,6 +1417,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: false,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -1437,6 +1462,7 @@ adapter_specs! { $;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
+        model_listing: None,
         family: "host-native",
         binary: "",
         install: None,
@@ -1476,6 +1502,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: false,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -1519,6 +1546,7 @@ adapter_specs! { $;
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
+        model_listing: None,
         family: "fixture",
         binary: "fixture-provider",
         install: None,
@@ -1558,6 +1586,7 @@ adapter_specs! { $;
         namespaced_models: false,
         chair_switch: false,
         offered_models: false,
+        refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,

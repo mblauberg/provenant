@@ -798,6 +798,37 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
             directories: &directories,
             worktree,
         };
+        // Spec: docs/specs/run-launch.md#policy-and-confinement
+        // Shared private state is allowed by default and can be refused by policy.
+        plan.private_state = Some(plan.scratch.clone());
+        let default_policy = provenant_records::policy::Policy::default();
+        assert!(matches!(
+            default_policy.check(
+                "PLAN_STATE_SCRATCH_OVERLAP",
+                provenant_records::policy::Facts::violation("private state overlaps scratch"),
+            ),
+            provenant_records::policy::Effect::Warn(_)
+        ));
+        compile_sbpl_impl(
+            &plan,
+            &profile,
+            &anchors,
+            ProfileLimits::default(),
+            &default_policy,
+        )?;
+        let mut strict = default_policy;
+        strict.overlay(
+            &BTreeMap::from([(
+                "PLAN_STATE_SCRATCH_OVERLAP".to_owned(),
+                provenant_records::policy::Strength::Refuse,
+            )]),
+            provenant_records::policy::Source::Project,
+        );
+        assert!(matches!(
+            compile_sbpl_impl(&plan, &profile, &anchors, ProfileLimits::default(), &strict),
+            Err(PermissionError::ProtectedOverlap)
+        ));
+        plan.private_state = None;
         let compiled = compile_sbpl(&plan, &profile, &anchors)?;
         let sbpl = std::str::from_utf8(&compiled.profile)?;
         let held_without_parent = directories.iter().filter(|anchor| anchor.path != root);

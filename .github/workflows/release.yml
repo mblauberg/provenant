@@ -31,10 +31,9 @@ jobs:
           test "$(uname -m)" = arm64
           test -f "docs/release-notes/$RELEASE_TAG.md"
       - name: Install pinned toolchain
-        working-directory: tools/front-door
-        run: |
-          toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
-          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+        uses: ./.github/actions/install-rust
+        with:
+          components: rustfmt clippy
       - name: Build and package
         working-directory: tools/front-door
         env:

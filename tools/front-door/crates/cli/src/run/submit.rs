@@ -320,6 +320,7 @@ pub(super) enum DiskCheck {
         available: u64,
         floor: u64,
         reclaimed: u64,
+        gc_scheduled: bool,
         origin: provenant_records::diagnostic::SettingSource,
     },
 }
@@ -332,12 +333,18 @@ impl From<DiskCheck> for String {
                 path,
                 available,
                 floor,
-                reclaimed,
+                gc_scheduled,
                 origin,
+                ..
             } => format!(
-                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.critical_free source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.critical_free source: {}; {}; run `provenant gc --free-floor {floor}B` before dispatching a writer",
                 path.display(),
-                origin.description()
+                origin.description(),
+                if gc_scheduled {
+                    "background GC scheduled; reclaimed bytes are not observed here"
+                } else {
+                    "background GC was not scheduled; reclaimed bytes are not observed here"
+                }
             ),
         }
     }
@@ -348,7 +355,6 @@ pub(super) fn check_writer_disk(
     policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
-    project: &Path,
     home: &Path,
 ) -> Result<(), DiskCheck> {
     check_writer_disk_with_collection(
@@ -372,50 +378,38 @@ pub(super) fn check_writer_disk(
                 }
             }
         },
-        || pressure_collection(state, home, project),
+        || schedule_low_space_gc(state, home, worktree),
     )
 }
 
-/// Run the same pressure classes as GC in a separate bounded process. A killed
-/// collector leaves identity-bearing tombstones for the next sweep.
-pub(super) fn pressure_collection(state: &Path, home: &Path, project: &Path) -> u64 {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
-    let collect = || -> Result<u64, Box<dyn std::error::Error>> {
-        let program = std::env::current_exe()?;
-        let argv = vec![
-            program.into_os_string(),
+/// Start the host-wide GC worker. It acquires the shared single-flight lock
+/// before sweeping, without waiting on this launch.
+#[allow(
+    clippy::print_stderr,
+    reason = "a failed GC schedule is a launch warning"
+)]
+pub(super) fn schedule_low_space_gc(state: &Path, home: &Path, worktree: &Path) -> bool {
+    let start = || -> Result<(), Box<dyn std::error::Error>> {
+        let argv = [
+            std::env::current_exe()?.into_os_string(),
             "--state-dir".into(),
             state.as_os_str().to_owned(),
             "--project".into(),
-            project.as_os_str().to_owned(),
+            worktree.as_os_str().to_owned(),
             "gc".into(),
-            "--pressure".into(),
+            "--scheduled".into(),
             "--apply".into(),
             "--json".into(),
         ];
-        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(5));
-        options.stdin = Some(b"");
-        options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
-        options.stderr = StreamPolicy::Discard;
-        options.stop_on_output_limit = true;
-        let output = SystemExecutor::new(1)?.execute(options)?;
-        if output.stdout.truncated || output.drain_truncated || output.stdout.sink_lost_bytes != 0 {
-            return Ok(0);
-        }
-        let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-        let data = &value["data"];
-        let temporary = data["provider_state"]["attempt_tmp"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|row| row["bytes"].as_u64())
-            .fold(0_u64, u64::saturating_add);
-        Ok(data["bytes_freed"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(temporary))
+        provenant_os::exec::spawn_detached(&argv, home)?;
+        Ok(())
     };
-    collect().unwrap_or(0)
+    if let Err(error) = start() {
+        eprintln!("provenant: warning: could not schedule low-space GC: {error}");
+        false
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -427,7 +421,7 @@ pub(super) fn check_writer_disk_with(
     home: &Path,
     available: impl FnMut(&Path) -> Result<u64, String>,
 ) -> Result<(), DiskCheck> {
-    check_writer_disk_with_collection(settings, policy, state, worktree, home, available, || 0)
+    check_writer_disk_with_collection(settings, policy, state, worktree, home, available, || false)
 }
 
 #[allow(clippy::print_stderr)]
@@ -438,7 +432,7 @@ pub(super) fn check_writer_disk_with_collection(
     worktree: &Path,
     home: &Path,
     mut available: impl FnMut(&Path) -> Result<u64, String>,
-    mut collect: impl FnMut() -> u64,
+    mut schedule_gc: impl FnMut() -> bool,
 ) -> Result<(), DiskCheck> {
     let observed = (|| -> Result<(), DiskCheck> {
         let limits = settings
@@ -452,15 +446,8 @@ pub(super) fn check_writer_disk_with_collection(
                 (limiting, minimum) = (path, bytes);
             }
         }
-        if limits.level(minimum) != provenant_config::DiskLevel::Ready {
-            let reclaimed = if settings.schedule { collect() } else { 0 };
-            minimum = u64::MAX;
-            for path in [worktree, state, cache.as_path()] {
-                let bytes = available(path).map_err(DiskCheck::Unobserved)?;
-                if bytes < minimum {
-                    (limiting, minimum) = (path, bytes);
-                }
-            }
+        if minimum < limits.free_floor {
+            let gc_scheduled = settings.schedule && schedule_gc();
             // Admission and new builds take this same declared decision.
             match provenant_config::DiskGate::new(limits, policy).decide(minimum) {
                 provenant_records::policy::Effect::Proceed => {}
@@ -473,7 +460,8 @@ pub(super) fn check_writer_disk_with_collection(
                         path: limiting.to_path_buf(),
                         available: minimum,
                         floor: limits.critical_free,
-                        reclaimed,
+                        reclaimed: 0,
+                        gc_scheduled,
                         origin: limits.critical_free_source,
                     });
                 }
@@ -624,7 +612,6 @@ fn submit_with_launcher(
                     ),
                     edge.roots.state.as_path(),
                     &writer.worktree,
-                    &writer.project,
                     edge.home,
                 )
                 .map_err(|check| {
@@ -633,11 +620,11 @@ fn submit_with_launcher(
                         DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
                     };
                     let projection = match &check {
-                        DiskCheck::Low { path, available, floor, reclaimed, origin } => {
+                        DiskCheck::Low { path, available, floor, reclaimed, gc_scheduled, origin } => {
                             let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
                                 .unwrap_or_else(|| "the limiting volume".into());
                             Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.critical_free from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
+                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.critical_free from {}; {}; reclaimed bytes are not observed here", origin.description(), if *gc_scheduled { "background GC scheduled" } else { "background GC was not scheduled" }))
                                 .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
                                 .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed, origin: *origin }))
                         }

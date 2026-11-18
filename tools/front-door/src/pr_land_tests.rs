@@ -428,10 +428,24 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "{}",
         String::from_utf8_lossy(&gc.stdout.bytes)
     );
-    assert!(!log.exists(), "expired capture was collected");
-    assert_eq!(
-        fs::metadata(log.with_file_name("stdout.log.tail"))?.len(),
-        64 * 1024
+    // The synthetic publication has no release receipt, so custody is not
+    // proven and GC retains its capture while contributions remain readable.
+    assert!(log.exists(), "unreleased capture must be retained");
+    let gc_result = json(&gc)?;
+    assert!(
+        gc_result["data"]["provider_state"]["kept"]
+            .as_array()
+            .ok_or("kept")?
+            .iter()
+            .any(|entry| {
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains(&first.attempt_id.to_string()))
+                    && entry["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("release receipt unavailable"))
+            }),
+        "{gc_result}"
     );
     assert_eq!(read()?, before);
     land(&landing)?;

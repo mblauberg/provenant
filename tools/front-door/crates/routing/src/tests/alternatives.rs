@@ -10,6 +10,9 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         efforts: vec!["high".into()],
         effort_suffix: false,
         evidence_ref: "test".into(),
+        source: "fixture".into(),
+        service_tiers: Vec::new(),
+        policy_rules: Vec::new(),
         family: None,
         trains_on_prompts: None,
         monthly_allowance_usd: None,
@@ -22,6 +25,9 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         efforts: vec![],
         effort_suffix: false,
         evidence_ref: "test".into(),
+        source: "fixture".into(),
+        service_tiers: Vec::new(),
+        policy_rules: Vec::new(),
         family: None,
         trains_on_prompts: None,
         monthly_allowance_usd: None,
@@ -523,6 +529,7 @@ fn invalid_policy_siblings_cannot_lift_enforced_restrictions()
             .routing
             .model_policy
             .effective(
+                &crate::Catalogue::bundled().unwrap(),
                 &model,
                 None,
                 provenant_core::WallTime::from_unix_seconds(0)?,
@@ -656,6 +663,9 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         effort_suffix: false,
         family: Some("anthropic".into()),
         evidence_ref: "test".into(),
+        source: "fixture".into(),
+        service_tiers: Vec::new(),
+        policy_rules: Vec::new(),
         trains_on_prompts: None,
         monthly_allowance_usd: None,
         quota_pool: None,

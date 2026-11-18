@@ -20,3 +20,4 @@ stable.
 | [0037](0037-batched-exact-candidate-landing.md) | Accepted | Gate an exact batched landing candidate |
 | [0039](0039-graph-of-templates.md) | Accepted | One graph of template nodes: a plain lane is one node, composites are data, one patch path changes a graph |
 | [0040](0040-open-lane-policy-with-explicit-boundaries.md) | Accepted | Ambient lane access with explicit mandatory boundaries |
+| [0041](0041-tiered-ci-from-green-evidence.md) | Accepted | Tiered CI that starts pull requests from green `main` evidence |

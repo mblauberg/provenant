@@ -792,17 +792,6 @@ impl DomainConfig for RoutingConfig {
         let catalogue = Catalogue::bundled().ok();
         self.review.validate(self, catalogue.as_ref(), &mut errors);
         for (name, route) in &self.routes {
-            if catalogue
-                .as_ref()
-                .and_then(|value| value.model(&route.model))
-                .is_none()
-            {
-                errors.push(SectionError {
-                    detail: None,
-                    field: format!("routes.{name}.model"),
-                    code: "unknown_model",
-                });
-            }
             let collides_with_pool = catalogue.as_ref().is_some_and(|value| value.has_pool(name));
             if !identifier(name)
                 || collides_with_pool
@@ -860,16 +849,6 @@ impl DomainConfig for RoutingConfig {
                         detail: None,
                         field: format!("{prefix}.weight"),
                         code: "range",
-                    });
-                }
-                let model = catalogue
-                    .as_ref()
-                    .and_then(|value| value.model(&member.model));
-                if model.is_none() {
-                    errors.push(SectionError {
-                        detail: None,
-                        field: format!("{prefix}.model"),
-                        code: "unknown_model",
                     });
                 }
                 if !provenant_providers::REGISTRY
@@ -1251,6 +1230,12 @@ pub struct ModelEntry {
     #[serde(default)]
     pub effort_suffix: bool,
     pub evidence_ref: String,
+    #[serde(default = "bundled_source")]
+    pub source: String,
+    #[serde(default)]
+    pub service_tiers: Vec<String>,
+    #[serde(default)]
+    pub policy_rules: Vec<crate::ModelPolicyRule>,
     pub family: Option<String>,
     /// Covers prompt training and retention. Unknown is ineligible for confidential selection.
     #[serde(default)]
@@ -1261,6 +1246,9 @@ pub struct ModelEntry {
     /// are grouped (`group.window`). Unset applies every window.
     #[serde(default)]
     pub quota_pool: Option<String>,
+}
+fn bundled_source() -> String {
+    "bundled".into()
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -1447,8 +1435,12 @@ pub struct Catalogue {
     pub(crate) revision: String,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) pools: BTreeMap<String, Vec<RoutePoolMember>>,
+    #[serde(skip)]
+    pool_selectors: BTreeMap<String, Vec<String>>,
     pub(crate) pacing: BTreeMap<String, PacingPolicy>,
     pub(crate) writer_advisory: WriterAdvisory,
+    #[serde(skip)]
+    writer_selectors: BundledWriterAdvisory,
     pub(crate) capability_preferences: crate::CapabilityPreferences,
 }
 #[derive(Deserialize)]
@@ -1460,10 +1452,82 @@ struct CatalogueAsset {
     revision: String,
     models: Vec<ModelEntry>,
     #[serde(default)]
-    pools: BTreeMap<String, Vec<RoutePoolMember>>,
+    pools: BTreeMap<String, Vec<BundledPoolMember>>,
     #[serde(default)]
     pacing: BTreeMap<String, PacingPolicy>,
 }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundledWriterAdvisory {
+    label: Option<String>,
+    warn_selectors: Vec<String>,
+    cheaper_selectors: Vec<String>,
+    pool_priority: Vec<String>,
+}
+impl BundledWriterAdvisory {
+    fn resolve(&self, models: &[ModelEntry]) -> Result<WriterAdvisory, RoutingError> {
+        let resolve = |selectors: &[String]| {
+            selectors
+                .iter()
+                .map(|selector| {
+                    latest_in_family(selector, models)
+                        .map(|entry| entry.model.clone())
+                        .ok_or(RoutingError::Catalogue)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(WriterAdvisory {
+            label: self.label.clone(),
+            warn_models: resolve(&self.warn_selectors)?,
+            cheaper_models: resolve(&self.cheaper_selectors)?,
+            pool_priority: self.pool_priority.clone(),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundledPoolMember {
+    selector: String,
+    #[serde(default = "default_weight")]
+    weight: u8,
+    effort: Option<String>,
+    #[serde(default)]
+    efforts: Vec<String>,
+    #[serde(default)]
+    free: bool,
+}
+
+// A selector has one wildcard around the version. Comparing numeric components
+// avoids treating 6.10 as older than 6.2. Names break equal-version ties.
+fn latest_in_family<'a>(selector: &str, models: &'a [ModelEntry]) -> Option<&'a ModelEntry> {
+    let (prefix, suffix) = selector.split_once('*')?;
+    if suffix.contains('*') {
+        return None;
+    }
+    let version = |s: &str| -> Vec<u64> {
+        s.split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse().ok())
+            .collect()
+    };
+    models
+        .iter()
+        .filter(|entry| {
+            let id = entry.model.as_str();
+            id.starts_with(prefix)
+                && id.ends_with(suffix)
+                && id.len() >= prefix.len() + suffix.len()
+                && id[prefix.len()..id.len() - suffix.len()]
+                    .chars()
+                    .any(|c| c.is_ascii_digit())
+                && id[prefix.len()..id.len() - suffix.len()]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-'))
+        })
+        .max_by_key(|entry| (version(entry.model.as_str()), entry.model.as_str()))
+}
+
 // The fixture feature provides an isolated catalogue for integration tests. It
 // never changes the process-wide bundled catalogue or production behaviour.
 #[cfg(feature = "fixture")]
@@ -1501,6 +1565,40 @@ pub fn fixture_family_override(
             .ok_or(RoutingError::Catalogue)?;
         entry.family = Some((*family).to_owned());
     }
+    let previous = FIXTURE_CATALOGUE.with(|slot| slot.borrow_mut().replace(catalogue));
+    Ok(FixtureFamilyOverride {
+        previous,
+        _thread: std::marker::PhantomData,
+    })
+}
+
+/// Add test-only model rows with explicit answering-family evidence for the current thread.
+#[cfg(feature = "fixture")]
+pub fn fixture_models(rows: &[(&str, &str)]) -> Result<FixtureFamilyOverride, RoutingError> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue.revision.push_str("-fixture-models");
+    for (model, family) in rows {
+        let id = ModelId::parse(model)?;
+        if catalogue.model(&id).is_some() {
+            return Err(RoutingError::Catalogue);
+        }
+        catalogue.models.push(ModelEntry {
+            capability: Default::default(),
+            free: false,
+            model: id,
+            efforts: vec!["high".into()],
+            effort_suffix: false,
+            evidence_ref: "fixture".into(),
+            source: "fixture".into(),
+            service_tiers: Vec::new(),
+            policy_rules: Vec::new(),
+            family: Some((*family).into()),
+            trains_on_prompts: None,
+            monthly_allowance_usd: None,
+            quota_pool: None,
+        });
+    }
+    catalogue.validate()?;
     let previous = FIXTURE_CATALOGUE.with(|slot| slot.borrow_mut().replace(catalogue));
     Ok(FixtureFamilyOverride {
         previous,
@@ -1551,20 +1649,161 @@ impl Catalogue {
             "/assets/catalogue.toml"
         )))
         .map_err(|_| RoutingError::Catalogue)?;
+        let mut pools = BTreeMap::new();
+        let mut pool_selectors = BTreeMap::new();
+        for (name, rows) in asset.pools {
+            let mut members = Vec::new();
+            let mut selectors = Vec::new();
+            for row in rows {
+                let model = latest_in_family(&row.selector, &asset.models)
+                    .ok_or(RoutingError::Catalogue)?
+                    .model
+                    .clone();
+                selectors.push(row.selector);
+                members.push(RoutePoolMember {
+                    model,
+                    weight: row.weight,
+                    effort: row.effort,
+                    efforts: row.efforts,
+                    free: row.free,
+                });
+            }
+            pools.insert(name.clone(), members);
+            pool_selectors.insert(name, selectors);
+        }
+        let writer_selectors: BundledWriterAdvisory =
+            toml_edit::de::from_str(include_str!("../assets/writer-advisory.toml"))
+                .map_err(|_| RoutingError::Catalogue)?;
+        let writer_advisory = writer_selectors.resolve(&asset.models)?;
         let value = Self {
             capability_preferences: asset.capability_preferences,
             schema_version: asset.schema_version,
             revision: asset.revision,
             models: asset.models,
-            pools: asset.pools,
+            pools,
+            pool_selectors,
             pacing: asset.pacing,
-            writer_advisory: toml_edit::de::from_str(include_str!(
-                "../assets/writer-advisory.toml"
-            ))
-            .map_err(|_| RoutingError::Catalogue)?,
+            writer_advisory,
+            writer_selectors,
         };
         value.validate()?;
         Ok(value)
+    }
+    /// Overlay successful, timestamped provider listings. Security and capability
+    /// claims remain tied to exact bundled entries, never inferred from a name.
+    pub fn with_discovery(
+        mut self,
+        snapshots: &[crate::DiscoverySnapshot],
+    ) -> Result<Self, RoutingError> {
+        use sha2::{Digest as _, Sha256};
+        let mut seen = BTreeSet::new();
+        for snapshot in snapshots {
+            if !seen.insert(&snapshot.adapter)
+                || snapshot.models.len() > 1024
+                || snapshot.models.is_empty()
+            {
+                return Err(RoutingError::Catalogue);
+            }
+            let mut model_ids = BTreeSet::new();
+            for item in &snapshot.models {
+                if !model_ids.insert(&item.model)
+                    || item.model.adapter() != snapshot.adapter
+                    || item.efforts.len() > 16
+                    || item.service_tiers.len() > 16
+                    || item
+                        .efforts
+                        .iter()
+                        .chain(&item.service_tiers)
+                        .any(|s| !identifier(s))
+                {
+                    return Err(RoutingError::Catalogue);
+                }
+                if let Some(row) = self.models.iter_mut().find(|row| row.model == item.model) {
+                    if item.controls_known {
+                        row.efforts.clone_from(&item.efforts);
+                        row.effort_suffix = item.effort_suffix;
+                        row.service_tiers.clone_from(&item.service_tiers);
+                    }
+                    row.source = "discovered".into();
+                } else {
+                    self.models.push(ModelEntry {
+                        model: item.model.clone(),
+                        capability: Default::default(),
+                        free: false,
+                        efforts: item.efforts.clone(),
+                        effort_suffix: item.effort_suffix,
+                        evidence_ref: format!(
+                            "{} CLI model listing at {}",
+                            snapshot.adapter, snapshot.observed_at
+                        ),
+                        source: "discovered".into(),
+                        service_tiers: item.service_tiers.clone(),
+                        policy_rules: Vec::new(),
+                        family: None,
+                        trains_on_prompts: None,
+                        monthly_allowance_usd: None,
+                        quota_pool: None,
+                    });
+                }
+            }
+        }
+        // Bind routing evidence to the actual snapshot, rather than retaining the
+        // bundled revision after models or controls change.
+        if !snapshots.is_empty() {
+            let contents: Vec<_> = snapshots
+                .iter()
+                .map(|snapshot| (&snapshot.adapter, &snapshot.models))
+                .collect();
+            let bytes = serde_json::to_vec(&(self.revision.as_str(), contents))
+                .map_err(|_| RoutingError::Catalogue)?;
+            let digest = Sha256::digest(bytes);
+            self.revision = format!(
+                "discovered-{}",
+                digest
+                    .iter()
+                    .take(24)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+        }
+        // Shipped pool effort preferences may have retired. Reconcile before
+        // validating the effective snapshot, retaining the explicit model.
+        let models = &self.models;
+        let active_models: Vec<_> = models
+            .iter()
+            .filter(|model| {
+                !seen.contains(&model.model.adapter().to_owned()) || model.source == "discovered"
+            })
+            .cloned()
+            .collect();
+        // Resolve each family independently: a partial listing must not freeze
+        // unrelated selectors. Missing families retain their bundled model.
+        let select = |selectors: &[String]| {
+            selectors
+                .iter()
+                .filter_map(|selector| {
+                    latest_in_family(selector, &active_models)
+                        .or_else(|| latest_in_family(selector, models))
+                        .map(|entry| entry.model.clone())
+                })
+                .collect()
+        };
+        self.writer_advisory.warn_models = select(&self.writer_selectors.warn_selectors);
+        self.writer_advisory.cheaper_models = select(&self.writer_selectors.cheaper_selectors);
+        for (name, members) in &mut self.pools {
+            let selectors = self
+                .pool_selectors
+                .get(name)
+                .ok_or(RoutingError::Catalogue)?;
+            for (member, selector) in members.iter_mut().zip(selectors) {
+                if let Some(entry) = latest_in_family(selector, &active_models) {
+                    member.model = entry.model.clone();
+                    *member = member.reconciled(Some(entry)).0;
+                }
+            }
+        }
+        self.validate()?;
+        Ok(self)
     }
     pub fn revision(&self) -> &str {
         &self.revision
@@ -1618,6 +1857,27 @@ impl Catalogue {
         matches.into_iter().take(3).map(|(_, id)| id).collect()
     }
 
+    pub fn latest_family(&self, selector: &str) -> Option<&ModelId> {
+        let adapter = selector.split_once('/')?.0;
+        let discovered = self
+            .models
+            .iter()
+            .any(|row| row.model.adapter() == adapter && row.source == "discovered");
+        let candidates: Vec<_> = self
+            .models
+            .iter()
+            .filter(|row| {
+                !discovered || row.model.adapter() != adapter || row.source == "discovered"
+            })
+            .cloned()
+            .collect();
+        latest_in_family(selector, &candidates)
+            .and_then(|selected| self.models.iter().find(|row| row.model == selected.model))
+            .map(|row| &row.model)
+    }
+    pub fn pool_models(&self) -> impl Iterator<Item = &ModelId> {
+        self.pools.values().flatten().map(|member| &member.model)
+    }
     pub fn models(&self) -> &[ModelEntry] {
         &self.models
     }
@@ -1641,7 +1901,7 @@ impl Catalogue {
             return Err(RoutingError::Catalogue);
         }
         let mut seen = BTreeSet::new();
-        if self.schema_version != 1 || !identifier(&self.revision) || self.models.len() > 256 {
+        if self.schema_version != 1 || !identifier(&self.revision) || self.models.len() > 4096 {
             return Err(RoutingError::Catalogue);
         }
         for row in &self.models {
@@ -1727,7 +1987,9 @@ impl Catalogue {
     /// `agy/gemini-4-pro` follows the gemini windows; an unknown family keeps
     /// every window.
     pub fn quota_pool(&self, id: &ModelId) -> Option<&str> {
-        if let Some(row) = self.model(id) {
+        if let Some(row) = self.model(id)
+            && (row.source != "discovered" || row.quota_pool.is_some())
+        {
             return row.quota_pool.as_deref();
         }
         let family = id.model().split('-').next()?;
@@ -1995,6 +2257,55 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn partial_discovery_keeps_writer_advice_for_each_family()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = crate::parse_codex_models(br#"{"models":[{"slug":"gpt-6.2-sol","supported_reasoning_levels":[{"effort":"high"}]}]}"#, 1)?;
+        let catalogue = Catalogue::bundled()?.with_discovery(&[snapshot])?;
+        assert!(
+            catalogue
+                .writer_advisory
+                .cheaper_models
+                .iter()
+                .any(|id| id.as_str() == "codex/gpt-6.2-sol")
+        );
+        let config = RoutingConfig::default();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            choice_context: None,
+            selection_evidence: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
+            launch_specs: None,
+            readiness: None,
+            access: &[],
+            now: provenant_core::WallTime::from_micros(0)?,
+            host: "test-host",
+        };
+        let opus = catalogue.pools["principal"]
+            .iter()
+            .find(|member| {
+                catalogue
+                    .writer_advisory
+                    .warn_models
+                    .contains(&member.model)
+            })
+            .ok_or("missing principal Opus")?;
+        let route = resolve(&request_for(opus.model.as_str())?, &context)?;
+        let advice = config
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("missing advice")?;
+        assert!(advice.contains("codex/gpt-6.2-sol"), "{advice}");
+        Ok(())
+    }
+
     #[test]
     fn partial_writer_advisory_override_keeps_bundled_classes()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2065,6 +2376,7 @@ mod tests {
         config.model_policy.defaults.result.fallback = Some(unknown_fallback.clone());
         assert!(config.validate().is_empty());
         let effective = config.model_policy.effective(
+            &crate::Catalogue::bundled().unwrap(),
             &ModelId::parse("codex/gpt-6-luna")?,
             None,
             provenant_core::WallTime::from_unix_seconds(1)?,
@@ -2081,6 +2393,7 @@ mod tests {
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
         assert!(config.validate().is_empty());
         let effective = config.model_policy.effective(
+            &crate::Catalogue::bundled().unwrap(),
             &ModelId::parse("codex/gpt-6-luna")?,
             None,
             provenant_core::WallTime::from_unix_seconds(1)?,

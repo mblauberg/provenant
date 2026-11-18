@@ -368,7 +368,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         .ok_or("fixture AdapterSpec is missing")?;
     assert!(spec.local_login);
     assert_eq!(spec.local_account, ("fixture", "work"));
-    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work")
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", false)
 }
 
 #[test]
@@ -436,7 +436,14 @@ fn registry_spec_drives_local_provider_preparation_and_quota()
         .expect("monthly assessment")
         .constrained
     );
-    registry_provider_resolves_prepares_and_reports_quota("cursor", "local")
+    registry_provider_resolves_prepares_and_reports_quota("cursor", "local", false)
+}
+
+#[test]
+// Spec: docs/specs/routing.md#accounts-and-credentials
+fn unknown_identity_policy_reaches_provider_preparation() -> Result<(), Box<dyn std::error::Error>> {
+    // Keep monthly eligibility out of this identity-policy fixture.
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", true)
 }
 
 // Spec: docs/specs/routing.md#monthly-allowance-ledger
@@ -658,6 +665,7 @@ fn local_login_preparation_booking_survives_ordinary_quota_tick()
 fn registry_provider_resolves_prepares_and_reports_quota(
     adapter_name: &'static str,
     account_key: &'static str,
+    unknown_identity: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
@@ -930,7 +938,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         readiness_dir.join(format!("{adapter_name}.json")),
         serde_json::to_vec(&stale)?,
     )?;
-    let task = run::TaskRequest {
+    let mut task = run::TaskRequest {
         context: None,
         extra: Default::default(),
         limit_extensions: Default::default(),
@@ -948,7 +956,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             model,
             effort: None,
         },
-        account: Some(account_key.into()),
+        account: (!unknown_identity).then(|| account_key.into()),
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
         deliver: None,
@@ -967,27 +975,43 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
-    let prepared = super::preparation::prepare_candidates(
+    let locate = |name: &str| {
+        if name == adapter_name { Ok(executable.clone()) } else { Err("unavailable".into()) }
+    };
+    let alter = |records: &mut Vec<provenant_providers::AvailabilityRecord>| {
+        for record in records { record.account_key = None; }
+    };
+    if unknown_identity {
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), provenant_records::policy::Strength::Refuse)].into(), provenant_records::policy::Source::Project);
+        task.profile.launch_policy = Some(strict);
+        let result = super::preparation::prepare_candidates_inner(
+            &registry, &providers, &task, prompt, &paths, None, Some(&locate), None, None,
+            Some(&alter),
+        );
+        assert!(matches!(
+            result,
+            Err(super::preparation::PrepareError::Candidates { skipped_routes, .. })
+                if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::UnknownAccount))
+        ), "strict unknown identity must refuse preparation for that reason");
+        task.profile.launch_policy = None;
+    }
+    let prepared = super::preparation::prepare_candidates_inner(
         &registry,
         &providers,
         &task,
         prompt,
         &paths,
         None,
-        Some(&|name| {
-            if name == adapter_name {
-                Ok(executable.clone())
-            } else {
-                Err("unavailable".into())
-            }
-        }),
+        Some(&locate),
         None,
         None,
+        if unknown_identity { Some(&alter) } else { None },
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
-    assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
+    assert_eq!(prepared.route.account_key.as_deref(), (!unknown_identity).then_some(account_key));
     assert!(!prepared.argv.is_empty());
-    assert!(
+    assert!(unknown_identity ||
         prepared
             .route
             .availability_warning

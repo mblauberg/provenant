@@ -359,7 +359,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     Ok(())
 }
 #[test]
-fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> TestResult {
+fn release_preserves_private_temporary_directories_for_follow_up() -> TestResult {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir()?;
@@ -387,7 +387,16 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
         WallTime::from_micros(150)?,
         &call,
     )?;
-    assert!(!withdrawn_tmp.exists());
+    assert!(withdrawn_tmp.exists());
+    assert_eq!(
+        std::fs::read_to_string(withdrawn_tmp.join("provider.tmp"))?,
+        "discard"
+    );
+    assert!(
+        std::fs::symlink_metadata(withdrawn_tmp.join("outside-link"))?
+            .file_type()
+            .is_symlink()
+    );
 
     let terminal = other.attempt_id;
     let terminal_tmp = store.temporary_path(terminal, &call)?;
@@ -417,12 +426,21 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
         partial_signals: Vec::new(),
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
-    assert!(!terminal_tmp.exists());
+    assert!(terminal_tmp.exists());
+    assert_eq!(
+        std::fs::read_to_string(terminal_tmp.join("provider.tmp"))?,
+        "discard"
+    );
+    assert!(
+        std::fs::symlink_metadata(terminal_tmp.join("outside-link"))?
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(std::fs::read_to_string(outside)?, "keep");
     Ok(())
 }
 #[test]
-fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> TestResult {
+fn writer_release_preserves_private_temporary_directories_for_follow_up() -> TestResult {
     for withdrawn in [false, true] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -472,7 +490,11 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
                 .metadata_at(std::ffi::OsStr::new("scratch"), false)
                 .is_err_and(|e| e.is_not_found())
         );
-        assert!(!temporary.exists());
+        assert!(temporary.exists());
+        assert_eq!(
+            std::fs::read_to_string(candidate.join("provider.tmp"))?,
+            "discard"
+        );
     }
     Ok(())
 }
