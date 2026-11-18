@@ -154,6 +154,12 @@ debug = 0
 [profile.dev.package.regex-automata]
 opt-level = 3
 
+# Redaction scans every provider byte and every graph envelope through
+# per-byte state machines; unoptimised, large briefs and frames take tens of
+# seconds and time out suites. Overflow checks and debug assertions stay on.
+[profile.dev.package.provenant-confinement]
+opt-level = 2
+
 # Optimise proc-macros and their dependencies without emitting build-script DWARF.
 [profile.dev.build-override]
 debug = 0
