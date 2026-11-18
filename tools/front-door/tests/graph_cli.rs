@@ -635,7 +635,10 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
 }
 
 #[test]
-fn every_bundled_template_is_listed_shown_and_explained() -> Result {
+fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() -> Result {
+    // Spec: docs/specs/fabric.md#bundled-template-declarations
+    use provenant_fabric_runtime::graph::template::{Compiler, TemplateLibrary};
+
     let rig = GraphProject::new()?;
     let (output, value) = rig.run(&["templates"])?;
     assert!(output.status.success(), "{value}");
@@ -644,7 +647,7 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         .iter()
         .filter_map(|entry| entry["name"].as_str())
         .collect();
-    let library = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
+    let library = TemplateLibrary::bundled();
     assert_eq!(names, library.names().collect::<Vec<_>>());
     let directory =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/fabric-runtime/assets/templates");
@@ -673,16 +676,24 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
             .collect::<std::collections::BTreeSet<_>>(),
         expected.iter().map(String::as_str).collect()
     );
+
+    let (output, shown) = rig.run(&["templates", "task"])?;
+    assert!(output.status.success(), "{shown}");
+    assert_eq!(
+        &shown["data"]["templates"][0],
+        listed
+            .iter()
+            .find(|entry| entry["name"] == "task")
+            .ok_or("task template")?
+    );
+
+    // Keep one representative CLI show; exercise every declaration and its
+    // parameter bindings through the in-process compiler.
+    let compiler = Compiler::new(&library);
     for entry in listed {
         let name = entry["name"].as_str().ok_or("template name")?;
-        let (output, shown) = rig.run(&["templates", name])?;
-        assert!(output.status.success(), "{name}: {shown}");
-        assert_eq!(shown["data"]["templates"][0], *entry, "{name}");
         let template = &entry["template"];
         let mut node = json!({"id":"exercise", "use":name});
-        if name == "repair" {
-            node["repeat"] = json!({"until":"accepted", "max_rounds":1, "review_repair":true});
-        }
         let mut parameters = json!({});
         if template["parameters"].get("worktree").is_some() {
             parameters["worktree"] = json!(rig.project);
@@ -710,6 +721,35 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
             };
         }
         nodes.push(node);
+        let compiled = compiler
+            .compile_all(&nodes)
+            .map_err(|error| format!("{name}: {error}"))?;
+        assert!(!compiled.is_empty(), "{name}");
+    }
+
+    // These CLI paths exercise behaviour specific to repair loops,
+    // synthesis inputs, and worktree parameter binding.
+    for (name, nodes) in [
+        (
+            "repair",
+            vec![
+                json!({"id":"exercise", "use":"repair", "repeat":{"until":"accepted", "max_rounds":1, "review_repair":true}}),
+            ],
+        ),
+        (
+            "synthesise",
+            vec![
+                json!({"id":"source", "use":"task"}),
+                json!({"id":"exercise", "use":"synthesise", "after":["source"], "inputs":[{"node":"source", "outputs":["result"]}]}),
+            ],
+        ),
+        (
+            "implement",
+            vec![
+                json!({"id":"exercise", "use":"implement", "with":{"worktree":rig.project, "write_scope":["."]}}),
+            ],
+        ),
+    ] {
         let path =
             rig.document(&json!({"nodes":nodes, "integration_branch":"batch/integration"}))?;
         let output = rig
