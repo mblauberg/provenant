@@ -85,9 +85,3 @@ issue = "#3299"
 owner = "chair"
 expires = 2026-12-14
 
-[[test]]
-package = "provenant-providers"
-name = "update::tests::hung_updater_kills_background_descendant_and_releases_lease"
-issue = "#3514"
-owner = "chair"
-expires = 2026-12-18
