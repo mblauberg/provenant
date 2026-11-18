@@ -196,7 +196,7 @@ recently used shared caches and the newest seed generation.
 The [disk spec](disk.md#bounded-sweeps) owns sweep budgets and resumption;
 [cache custody](disk.md#scratch-and-cache-custody) covers private and shared
 Cargo targets under `lanes.cargo_cache_max`.
-Admission command receipts become eligible only after their attempt is terminal and release is proven. Naming and post-create command receipts carry a declared age lifetime, defaulting to 30 days and stored on each receipt. GC resumes interrupted checkpoint collection under the graph lock when a reserved graph name has no checkpoint; remaining prompt blobs, sidecars and pending markers are collected while the name reservation survives.
+Admission command receipts become eligible only after their attempt is terminal and release is proven. Naming and post-create command receipts carry a declared age lifetime, defaulting to 30 days and stored on each receipt. Approval carry receipts (`state/landing/approval-carry/`) retain approval provenance across clean merges and formatting deltas; they become collectable after 30 days or when the pull request is closed or merged. GC resumes interrupted checkpoint collection under the graph lock when a reserved graph name has no checkpoint; remaining prompt blobs, sidecars and pending markers are collected while the name reservation survives.
 Removal records preserve subject, tip, subsumed or landed predicate and evidence source; shallow history, conflicted merge trees, offline forge and rewritten default branches remain typed kept outcomes.
 - Why: freeing space must not destroy evidence or a session in use.
 - Owner: `crates/config/src/gc.rs`; `worktrees.rs`; `crates/run/src/retention.rs`

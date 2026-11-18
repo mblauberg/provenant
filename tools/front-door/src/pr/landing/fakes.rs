@@ -93,6 +93,18 @@ impl Forge for FakeForge {
             .cloned()
             .unwrap_or_default())
     }
+    fn approved_commits(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
+        if self.fail_approvals.as_ref().is_some_and(|flag| flag.get()) {
+            return Err(LandingError::Failed("approvals unavailable".into()));
+        }
+        let mut commits = Vec::new();
+        for ((pr, head), approvals) in &self.approvals_at_head {
+            if *pr == number && !approvals.is_empty() && !commits.contains(head) {
+                commits.push(head.clone());
+            }
+        }
+        Ok(commits)
+    }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         if self.fail_checks.as_ref().is_some_and(|flag| flag.get()) {

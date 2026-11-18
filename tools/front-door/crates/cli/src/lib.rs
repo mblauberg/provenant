@@ -3000,6 +3000,50 @@ mod tests {
         };
         assert_eq!(inv.globals.state_dir.map(|v| v.into_os_string()), Some(raw));
     }
+
+    #[test]
+    fn did_you_mean_suggestions_for_unknown_subcommand_and_flag() {
+        // Unknown subcommand: suggests closest valid subcommand (e.g. lan -> provenant land)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["lan"]) else {
+            panic!("expected invalid outcome for unknown subcommand");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `provenant land`?"),
+            "expected suggestion for unknown subcommand, got: {message}"
+        );
+
+        // Unknown subcommand in a group: suggests full command path (e.g. pr syn -> provenant pr sync)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "syn"]) else {
+            panic!("expected invalid outcome for nested unknown subcommand");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `provenant pr sync`?"),
+            "expected suggestion for nested unknown subcommand, got: {message}"
+        );
+
+        // Unknown flag: suggests closest valid flag on the selected command (e.g. --jso -> --json)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "status", "--jso", "123"]) else {
+            panic!("expected invalid outcome for unknown flag");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `--json`?"),
+            "expected suggestion for unknown flag, got: {message}"
+        );
+
+        // Words with edit distance > 2 receive no suggestion
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "completelyunknownsubcommand"])
+        else {
+            panic!("expected invalid outcome");
+        };
+        let message = error.to_string();
+        assert!(
+            !message.contains("did you mean"),
+            "expected no suggestion for distant word, got: {message}"
+        );
+    }
 }
 
 pub mod hooks;

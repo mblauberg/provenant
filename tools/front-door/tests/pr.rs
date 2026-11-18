@@ -492,9 +492,9 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     Ok(())
 }
 
-fn pr_sync_command_accepts_multiple_numbers_and_repair_flag() -> Result {
+fn pr_sync_command_accepts_multiple_numbers_and_no_lane_flag() -> Result {
     let rig = self::rig()?;
-    let output = rig.command(&["pr", "sync", "1668", "1669", "--repair"])?;
+    let output = rig.command(&["pr", "sync", "1668", "1669", "--no-lane"])?;
     assert_ne!(
         code(&output),
         2,
@@ -605,17 +605,30 @@ fn pr_sync_conflict_aborts_cleanly_and_reports_repair_command() -> Result {
         serde_json::to_vec(&serde_json::json!({"headRefOid": head}))?,
     )?;
     bind_sync_project(&rig)?;
-    let output = rig.command(&["pr", "sync", "1668"])?;
-    assert_ne!(code(&output), 0, "conflict must fail sync");
-    let text = format!(
+    let output_no_lane = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_ne!(code(&output_no_lane), 0, "conflict must fail sync");
+    let text_no_lane = format!(
         "{}{}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
+        String::from_utf8_lossy(&output_no_lane.stdout.bytes),
+        String::from_utf8_lossy(&output_no_lane.stderr.bytes)
     );
-    assert!(text.contains("base.txt"), "{text}");
+    assert!(text_no_lane.contains("base.txt"), "{text_no_lane}");
     assert!(
-        text.contains("provenant run implement --worktree"),
-        "{text}"
+        text_no_lane.contains("provenant run implement --worktree"),
+        "{text_no_lane}"
+    );
+
+    let output_default = rig.command(&["pr", "sync", "1668"])?;
+    assert_ne!(code(&output_default), 0, "conflict must fail sync");
+    let text_default = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output_default.stdout.bytes),
+        String::from_utf8_lossy(&output_default.stderr.bytes)
+    );
+    assert!(text_default.contains("base.txt"), "{text_default}");
+    assert!(
+        text_default.contains("implement lane launched for"),
+        "{text_default}"
     );
     assert!(!rig.project.join(".git/MERGE_HEAD").exists());
     assert!(fixture_git(&rig, &["status", "--porcelain"])?.is_empty());
@@ -1204,9 +1217,16 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
                 return Ok(1);
             }
+            let sha = if Path::new("head.json").exists() {
+                let head_value: serde_json::Value =
+                    serde_json::from_slice(&fs::read("head.json")?)?;
+                head_value["headRefOid"].as_str().unwrap_or(HEAD).to_owned()
+            } else {
+                HEAD.to_owned()
+            };
             write!(
                 io::stdout(),
-                "{{\"merged\":{}}}",
+                "{{\"merged\":{},\"sha\":\"{sha}\"}}",
                 !Path::new("merge-queue").exists()
             )?;
         }
@@ -1283,8 +1303,8 @@ fn main() -> ExitCode {
                 pr_external_failures_and_invalid_arguments_fail_closed,
             ),
             (
-                "pr_sync_command_accepts_multiple_numbers_and_repair_flag",
-                pr_sync_command_accepts_multiple_numbers_and_repair_flag,
+                "pr_sync_command_accepts_multiple_numbers_and_no_lane_flag",
+                pr_sync_command_accepts_multiple_numbers_and_no_lane_flag,
             ),
             (
                 "pr_sync_merges_base_pushes_and_records_repository_scoped_carry",

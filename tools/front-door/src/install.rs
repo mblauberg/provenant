@@ -1887,11 +1887,11 @@ fn verify_graph_name() -> String {
     )
 }
 
-struct SmokeProject(PathBuf);
+struct SmokeProject(tempfile::TempDir);
 
-impl Drop for SmokeProject {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+impl SmokeProject {
+    fn path(&self) -> &Path {
+        self.0.path()
     }
 }
 
@@ -1924,9 +1924,12 @@ fn verify_smoke_with(
     scratch: &Path,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
-    let project = SmokeProject(scratch.join(format!("{}-project", verify_graph_name())));
-    std::fs::create_dir(&project.0).map_err(|error| error.to_string())?;
-    std::fs::write(project.0.join("fixture.txt"), "smoke fixture\n")
+    let project = tempfile::Builder::new()
+        .prefix("provenant-smoke-project-")
+        .tempdir_in(scratch)
+        .map_err(|error| error.to_string())?;
+    let project = SmokeProject(project);
+    std::fs::write(project.path().join("fixture.txt"), "smoke fixture\n")
         .map_err(|error| error.to_string())?;
     for args in [
         vec!["init", "-q"],
@@ -1947,14 +1950,14 @@ fn verify_smoke_with(
                 .into_os_string(),
         ];
         argv.extend(args.iter().map(std::ffi::OsString::from));
-        runner.execute_at(&argv, &project.0, None, 65_536, 30)?;
+        runner.execute_at(&argv, project.path(), None, 65_536, 30)?;
     }
     let program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
     let mut run = vec![
         program.clone(),
         "--project".into(),
-        project.0.as_os_str().to_owned(),
+        project.path().as_os_str().to_owned(),
         "--state-dir".into(),
         state_dir.as_os_str().to_owned(),
         "--json".into(),
@@ -1970,7 +1973,9 @@ fn verify_smoke_with(
     if !remote {
         run.extend([
             "--set".into(),
-            format!("worktree={}", project.0.display()).into(),
+            format!("worktree={}", project.path().display()).into(),
+            "--set".into(),
+            "smoke-write=true".into(),
         ]);
     }
     if let Some(host) = &args.host {

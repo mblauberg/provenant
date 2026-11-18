@@ -55,9 +55,9 @@ pub(crate) struct Line {
     checks_passed: Option<usize>,
     #[serde(default, deserialize_with = "display_default")]
     checks_total: Option<usize>,
-    #[serde(default, deserialize_with = "display_default")]
+    #[serde(default)]
     checks_failed: Option<usize>,
-    #[serde(default, deserialize_with = "display_default")]
+    #[serde(default)]
     checks_pending: Option<usize>,
     /// Failed or cancelled check names, when checks were readable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -65,13 +65,9 @@ pub(crate) struct Line {
     failing_checks: Vec<String>,
     #[serde(default, deserialize_with = "display_default")]
     merge: String,
-    #[serde(default, deserialize_with = "display_default")]
+    #[serde(default)]
     review: String,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default,
-        deserialize_with = "display_default"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     error: Option<String>,
 }
 fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
@@ -1142,5 +1138,40 @@ mod tests {
                 .summary
                 .contains("policy=configured")
         );
+    }
+
+    #[test]
+    fn display_fields_degrade_gracefully_while_verdict_fields_refuse_malformed_values() {
+        let display_degraded = r#"{
+            "number": 1,
+            "state": "OPEN",
+            "head": "abc",
+            "draft": false,
+            "checks_passed": "invalid",
+            "checks_total": 5,
+            "checks_failed": 0,
+            "checks_pending": 0,
+            "failing_checks": null,
+            "merge": 123,
+            "review": "approved"
+        }"#;
+        let line: super::Line =
+            serde_json::from_str(display_degraded).expect("display fields degrade");
+        assert_eq!(line.number, 1);
+        assert_eq!(line.checks_passed, None);
+        assert_eq!(line.failing_checks, Vec::<String>::new());
+        assert_eq!(line.verdict(), Some(true));
+
+        for malformed_verdict in [
+            r#"{"number":1,"state":"OPEN","head":"a","checks_failed":"bogus"}"#,
+            r#"{"number":1,"state":"OPEN","head":"a","checks_pending":"bogus"}"#,
+            r#"{"number":1,"state":"OPEN","head":"a","error":123}"#,
+            r#"{"number":1,"state":"OPEN","head":"a","review":123}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<super::Line>(malformed_verdict).is_err(),
+                "malformed verdict field must fail deserialization: {malformed_verdict}"
+            );
+        }
     }
 }

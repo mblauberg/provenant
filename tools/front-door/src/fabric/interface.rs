@@ -2021,24 +2021,26 @@ impl Factory {
                     .get("host")
                     .and_then(Value::as_str)
                     .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
-                let worktree = parameters
-                    .get("worktree")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let enabled = !is_remote && !worktree.is_empty();
-                parameters["smoke-write"] = json!(enabled);
                 if is_remote {
                     // A remote graph must not retain or transmit a caller path,
                     // even though the writer is skipped by its launch condition.
                     parameters["worktree"] = json!("");
                 }
-                if !enabled {
-                    let reason = if is_remote {
-                        "remote placement does not accept caller paths"
-                    } else {
-                        "no writer worktree supplied"
-                    };
-                    warn_operator(format!("smoke write node skipped: {reason}"));
+                if parameters.get("smoke-write").is_none() {
+                    let worktree = parameters
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let enabled = !is_remote && !worktree.is_empty();
+                    parameters["smoke-write"] = json!(enabled);
+                    if !enabled {
+                        let reason = if is_remote {
+                            "remote placement does not accept caller paths"
+                        } else {
+                            "no writer worktree supplied"
+                        };
+                        warn_operator(format!("smoke write node skipped: {reason}"));
+                    }
                 }
             }
             node["with"] = parameters;

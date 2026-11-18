@@ -127,6 +127,15 @@ pub enum ApprovalCarry {
     Format,
 }
 
+impl std::fmt::Display for ApprovalCarry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CleanMerge => write!(f, "clean_merge"),
+            Self::Format => write!(f, "format"),
+        }
+    }
+}
+
 /// Last matching target pattern wins, after project and before tier overrides.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

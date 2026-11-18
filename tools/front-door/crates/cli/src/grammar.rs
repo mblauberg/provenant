@@ -353,9 +353,9 @@ pub enum Pr {
     Sync {
         #[arg(required = true, catalog_u64_range = 1..)]
         numbers: Vec<u64>,
-        /// Launch an implement lane to repair a merge conflict
+        /// Do not launch an implement lane when a merge conflict occurs
         #[arg(long)]
-        repair: bool,
+        no_lane: bool,
     },
     /// List retained local attempt contributions and missing peer coverage
     Contributions {

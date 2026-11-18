@@ -30,7 +30,7 @@ struct Repository {
     full_name: String,
 }
 
-pub(crate) fn run(numbers: Vec<u64>, repair: bool, globals: &Globals) -> u8 {
+pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
     let project = match roots::selected_project(globals.project.as_deref(), true) {
         Ok(project) => project,
         Err(error) => {
@@ -100,7 +100,7 @@ pub(crate) fn run(numbers: Vec<u64>, repair: bool, globals: &Globals) -> u8 {
     for number in numbers {
         let result = sync_one(
             number,
-            repair,
+            no_lane,
             &project,
             &layout_root,
             resolved.roots.state.as_path(),
@@ -145,10 +145,39 @@ pub(crate) fn run(numbers: Vec<u64>, repair: bool, globals: &Globals) -> u8 {
     emit(&report, globals, &lines, true)
 }
 
+fn remote_url_for_repo(
+    git: &mut super::git::Git,
+    dir: &Path,
+    branch: &str,
+    target_repo: &str,
+) -> Result<String> {
+    let remote_name = git.remote_of(dir, branch)?;
+    let configured_url = git
+        .full(
+            dir,
+            &["config", "--get", &format!("remote.{remote_name}.url")],
+        )?
+        .map(|s| s.trim().to_owned());
+    if let Some(url) = configured_url {
+        if let Some((prefix, _)) = url.rsplit_once('/')
+            && let Some((owner_prefix, _)) = prefix.rsplit_once([':', '/'])
+        {
+            let sep = if prefix.contains(':') && !prefix.contains("://") {
+                ":"
+            } else {
+                "/"
+            };
+            return Ok(format!("{owner_prefix}{sep}{target_repo}.git"));
+        }
+        return Ok(url);
+    }
+    Ok(format!("https://github.com/{target_repo}.git"))
+}
+
 #[allow(clippy::too_many_arguments)] // Keep sync inputs explicit at the command boundary.
 fn sync_one(
     number: u64,
-    repair: bool,
+    no_lane: bool,
     project: &Path,
     layout_root: &Path,
     state: &Path,
@@ -170,7 +199,12 @@ fn sync_one(
         Some(head_repo) if head_repo.full_name.eq_ignore_ascii_case(repository) => {
             Some(git.remote_of(project, &pull.base.name)?)
         }
-        Some(head_repo) => Some(format!("https://github.com/{}.git", head_repo.full_name)),
+        Some(head_repo) => Some(remote_url_for_repo(
+            git,
+            project,
+            &pull.base.name,
+            &head_repo.full_name,
+        )?),
         None => None,
     };
     let path = branch_worktree(
@@ -182,15 +216,16 @@ fn sync_one(
         head_remote.as_deref(),
         git,
     )?;
-    let mut writer = Some(acquire_writer(
+    let mut writer = acquire_writer(
         project,
+        layout_root,
         state,
         project_id,
         &path,
         &pull.head.name,
         &pull.head.sha,
         git,
-    )?);
+    )?;
     let operation = (|| -> Result<(PathBuf, String, String)> {
         let observed = git
             .full(&path, &["rev-parse", "HEAD"])?
@@ -218,8 +253,10 @@ fn sync_one(
             Some(base_repo) if base_repo.full_name.eq_ignore_ascii_case(repository) => {
                 git.remote_of(&path, &pull.base.name)?
             }
-            Some(base_repo) => format!("https://github.com/{}.git", base_repo.full_name),
-            None => format!("https://github.com/{repository}.git"),
+            Some(base_repo) => {
+                remote_url_for_repo(git, &path, &pull.base.name, &base_repo.full_name)?
+            }
+            None => git.remote_of(&path, &pull.base.name)?,
         };
         let base_ref = format!("refs/provenant/pr-sync/{number}/base");
         let base_refspec = format!("+refs/heads/{}:{base_ref}", pull.base.name);
@@ -284,11 +321,10 @@ fn sync_one(
                 shell_quote(&path),
                 shell_quote_text(&brief)
             );
-            if repair {
-                writer
-                    .take()
-                    .ok_or("pull request writer custody was already released")?
-                    .withdraw_unlaunched()?;
+            if !no_lane {
+                if let Some(held) = writer.take() {
+                    held.withdraw_unlaunched()?;
+                }
                 launch_repair(project, &path, &base_ref, &base_head, &paths)?;
                 return Err(format!("merge conflict in {paths}; implement lane launched for {}; rerun `provenant pr sync {number}` after it finishes", path.display()).into());
             }
@@ -309,7 +345,9 @@ fn sync_one(
             Some(head_repo) if head_repo.full_name.eq_ignore_ascii_case(repository) => {
                 git.remote_of(&path, &pull.head.name)?
             }
-            Some(head_repo) => format!("https://github.com/{}.git", head_repo.full_name),
+            Some(head_repo) => {
+                remote_url_for_repo(git, &path, &pull.head.name, &head_repo.full_name)?
+            }
             None => git.remote_of(&path, &pull.head.name)?,
         };
         if !git.run(&path, &["push", &push_remote, &remote_branch])?.0 {
@@ -323,7 +361,7 @@ fn sync_one(
                 approved_head: approved_head.clone(),
                 current_head: current_head.clone(),
                 base_head,
-                kind: "clean_merge".into(),
+                kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
                 extra: Default::default(),
             },
         )?;
@@ -350,27 +388,37 @@ fn launch_repair(
     base_head: &str,
     conflicts: &str,
 ) -> Result<()> {
-    let executable = std::env::current_exe()?;
-    let executable = executable
+    let executable = std::env::var("PROVENANT_BIN")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_exe())?;
+    let executable_str = executable
         .to_str()
         .ok_or("provenant executable path is not UTF-8")?;
-    let worktree = worktree.to_str().ok_or("worktree path is not UTF-8")?;
+    let worktree_str = worktree.to_str().ok_or("worktree path is not UTF-8")?;
     let brief = format!(
         "Merge {base_ref} at {base_head} into this pull request worktree, resolve conflicted paths {conflicts}, commit the resolution, and leave the worktree clean."
     );
-    let argv = [
-        executable,
-        "run",
-        "implement",
-        "--worktree",
-        worktree,
-        "--brief",
-        &brief,
-    ];
-    let outcome = super::execute_for(project, &argv, Duration::from_secs(4 * 60 * 60), false)?;
-    if outcome.termination != provenant_os::exec::Termination::Exit(0) {
-        return Err("implement lane did not complete successfully".into());
-    }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "launch background repair lane subprocess"
+    )]
+    let mut command = std::process::Command::new(executable_str);
+    command
+        .args([
+            "run",
+            "implement",
+            "--worktree",
+            worktree_str,
+            "--brief",
+            &brief,
+        ])
+        .current_dir(project)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+        .spawn()
+        .map_err(|error| format!("failed to launch repair lane: {error}"))?;
     Ok(())
 }
 
@@ -532,15 +580,22 @@ fn child_directory(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn acquire_writer(
     project: &Path,
+    layout_root: &Path,
     state: &Path,
     project_id: provenant_core::ProjectId,
     worktree: &Path,
     branch: &str,
     head: &str,
     git: &super::git::Git,
-) -> Result<provenant_supervisor::custody::CustodyLease> {
+) -> Result<Option<provenant_supervisor::custody::CustodyLease>> {
+    let canonical_worktree = std::fs::canonicalize(worktree)?;
+    let canonical_layout = std::fs::canonicalize(layout_root)?;
+    if canonical_worktree == canonical_layout {
+        return Ok(None);
+    }
     let cancel = provenant_core::CancelToken::new();
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(10))?;
     let executable = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
@@ -578,7 +633,7 @@ fn acquire_writer(
         attempt: provenant_core::AttemptId::from_bytes(id),
         generation: 1,
     };
-    provenant_supervisor::custody::acquire_writer(
+    let lease = provenant_supervisor::custody::acquire_writer(
         slot,
         scope,
         binding,
@@ -586,5 +641,6 @@ fn acquire_writer(
         &cancel,
         &clock,
     )
-    .map_err(|error| format!("writer custody: {error:?}").into())
+    .map_err(|error| format!("writer custody: {error:?}"))?;
+    Ok(Some(lease))
 }

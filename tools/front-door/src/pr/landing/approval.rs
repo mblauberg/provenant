@@ -315,6 +315,7 @@ impl Approver<'_, '_> {
             None
         };
         let mut carry_context = None;
+        let mut refusal_approved_head = None;
         if let (Some(state), Some(repository)) = (approvals.carry_state, repository.as_deref()) {
             let receipt =
                 match super::receipt::read_approval_carry(state, repository, number, head)? {
@@ -323,16 +324,8 @@ impl Approver<'_, '_> {
                 };
             if let Some(receipt) = receipt {
                 carry_context = Some(receipt.clone());
-                let enabled = match receipt.kind.as_str() {
-                    "clean_merge" => approvals
-                        .carry_kinds
-                        .contains(&provenant_cli::domains::ApprovalCarry::CleanMerge),
-                    "format" => approvals
-                        .carry_kinds
-                        .contains(&provenant_cli::domains::ApprovalCarry::Format),
-                    _ => false,
-                };
-                let clean_merge = receipt.kind == "clean_merge"
+                let enabled = approvals.carry_kinds.contains(&receipt.kind);
+                let clean_merge = receipt.kind == provenant_cli::domains::ApprovalCarry::CleanMerge
                     && receipt.current_head == head
                     && clean_merge_preserves_diff(
                         self.repo,
@@ -341,7 +334,7 @@ impl Approver<'_, '_> {
                         head,
                         self.target,
                     )?;
-                let format_only = receipt.kind == "format"
+                let format_only = receipt.kind == provenant_cli::domains::ApprovalCarry::Format
                     && receipt.current_head == head
                     && format_delta_only(
                         state,
@@ -349,7 +342,7 @@ impl Approver<'_, '_> {
                         &receipt.approved_head,
                         head,
                     );
-                if receipt.kind == "format"
+                if receipt.kind == provenant_cli::domains::ApprovalCarry::Format
                     && !format_only
                     && let Some(warnings) = approvals.warnings
                 {
@@ -357,44 +350,17 @@ impl Approver<'_, '_> {
                 }
                 let mut carried = Vec::new();
                 if enabled && (clean_merge || format_only) {
-                    for source in approvals.sources {
-                        match source {
-                            ApprovalSource::Forge => {
-                                match forge.approvals(number, &receipt.approved_head) {
-                                    Ok(records) => carried.extend(
-                                        records
-                                            .into_iter()
-                                            .filter(|record| {
-                                                !record.reviewer.is_empty()
-                                                    && !record.reviewer.eq_ignore_ascii_case(author)
-                                            })
-                                            .map(|record| ApprovalEvidence {
-                                                source: *source,
-                                                reference: record.reference,
-                                                reviewer: record.reviewer,
-                                                head: receipt.approved_head.clone(),
-                                                extra: Default::default(),
-                                            }),
-                                    ),
-                                    Err(error) => unusable.push(format!("{source:?}: {error}")),
-                                }
-                            }
-                            ApprovalSource::ProvenantReview => {
-                                match approvals.records.reviews(number, &receipt.approved_head) {
-                                    Ok(reviews) => {
-                                        unusable.extend(reviews.unusable);
-                                        carried.extend(reviews.records.into_iter().filter(|record|
-                                            record.independent && record.head == receipt.approved_head
-                                            && matches!(record.verdict,
-                                                provenant_records::workflow::ReviewVerdict::Approve
-                                                | provenant_records::workflow::ReviewVerdict::ApproveWithNits))
-                                            .map(|record| ApprovalEvidence { source: *source, reference: record.reference, reviewer: record.reviewer, head: record.head, extra: Default::default() }));
-                                    }
-                                    Err(error) => unusable.push(format!("{source:?}: {error}")),
-                                }
-                            }
-                        }
-                    }
+                    let mut unavailable_sources = Vec::new();
+                    carried = approval_evidence_at(
+                        approvals.sources,
+                        approvals.records,
+                        forge,
+                        number,
+                        &receipt.approved_head,
+                        author,
+                        &mut unusable,
+                        &mut unavailable_sources,
+                    );
                 }
                 if let Some(first) = carried.first() {
                     if let Some(warnings) = approvals.warnings {
@@ -419,23 +385,32 @@ impl Approver<'_, '_> {
             let prior_approved_head = prior_receipt
                 .as_ref()
                 .map(|receipt| receipt.approved_head.clone());
-            let mut approved_head = None;
-            let mut carried = Vec::new();
-            let mut candidates = Vec::new();
-            if let Some(approved) = prior_approved_head.as_ref() {
-                candidates.push(approved.clone());
-            }
+            let merge_base = self.repo.merge_base(head, self.target).ok().flatten();
+            let mut ancestry = Vec::new();
             let mut candidate = Some(parent.clone());
             let mut seen = std::collections::BTreeSet::new();
             while let Some(commit) = candidate {
                 if !seen.insert(commit.clone()) {
                     break;
                 }
-                if !candidates.contains(&commit) {
-                    candidates.push(commit.clone());
+                if Some(&commit) == merge_base.as_ref() {
+                    break;
                 }
+                ancestry.push(commit.clone());
                 candidate = self.repo.parents(&commit)?.first().cloned();
             }
+            let approved_commits = forge.approved_commits(number)?;
+            let mut candidates = Vec::new();
+            if let Some(approved) = prior_approved_head.as_ref() {
+                candidates.push(approved.clone());
+            }
+            for commit in ancestry {
+                if approved_commits.contains(&commit) && !candidates.contains(&commit) {
+                    candidates.push(commit);
+                }
+            }
+            let mut approved_head = None;
+            let mut carried = Vec::new();
             let mut unavailable_sources = Vec::new();
             for commit in candidates {
                 let evidence = approval_evidence_at(
@@ -459,7 +434,7 @@ impl Approver<'_, '_> {
                 .or_else(|| prior_approved_head.clone())
                 .unwrap_or_else(|| parent.clone());
             let mut base_head = String::new();
-            let mut kind = "content";
+            let mut carry_kind: Option<provenant_cli::domains::ApprovalCarry> = None;
             if !carried.is_empty() && parents.len() > 1 {
                 base_head = parents[1].clone();
                 if approvals
@@ -473,7 +448,7 @@ impl Approver<'_, '_> {
                         self.target,
                     )?
                 {
-                    kind = "clean_merge";
+                    carry_kind = Some(provenant_cli::domains::ApprovalCarry::CleanMerge);
                 }
             } else if !carried.is_empty()
                 && approvals
@@ -488,12 +463,15 @@ impl Approver<'_, '_> {
                         head,
                     )
                 {
-                    kind = "format";
+                    carry_kind = Some(provenant_cli::domains::ApprovalCarry::Format);
                 } else if let Some(warnings) = approvals.warnings {
                     warnings.borrow_mut().push(format!("pull request {number}: format approval carry unavailable because the configured formatter is missing, failed, or does not reproduce the current tree; treating the delta as content"));
                 }
             }
-            if kind != "content" && !carried.is_empty() && repository.is_some() {
+            if let Some(kind) = carry_kind
+                && !carried.is_empty()
+                && repository.is_some()
+            {
                 if let (Some(state), Some(repository)) =
                     (approvals.carry_state, repository.as_deref())
                 {
@@ -505,7 +483,7 @@ impl Approver<'_, '_> {
                             approved_head: classification_head.clone(),
                             current_head: head.into(),
                             base_head: base_head.clone(),
-                            kind: kind.into(),
+                            kind,
                             extra: Default::default(),
                         },
                     )?;
@@ -520,29 +498,32 @@ impl Approver<'_, '_> {
                     accepted: None,
                 }));
             }
-            carry_context = Some(super::receipt::ApprovalCarryReceipt {
-                number,
-                repository: repository.clone().unwrap_or_default(),
-                approved_head: approved_head.or(prior_approved_head).unwrap_or_default(),
-                current_head: head.to_owned(),
-                base_head,
-                kind: kind.into(),
-                extra: Default::default(),
-            });
+            if let Some(kind) = carry_kind {
+                carry_context = Some(super::receipt::ApprovalCarryReceipt {
+                    number,
+                    repository: repository.clone().unwrap_or_default(),
+                    approved_head: approved_head.or(prior_approved_head).unwrap_or_default(),
+                    current_head: head.to_owned(),
+                    base_head,
+                    kind,
+                    extra: Default::default(),
+                });
+            } else {
+                refusal_approved_head = approved_head.or(prior_approved_head);
+            }
         }
-        let context = carry_context.as_ref();
-        let approved = context
+        let approved = carry_context
+            .as_ref()
             .map(|receipt| receipt.approved_head.as_str())
             .filter(|head| !head.is_empty())
+            .or(refusal_approved_head.as_deref())
             .unwrap_or("unknown");
-        let paths = match context {
-            Some(receipt) if !receipt.approved_head.is_empty() => self
-                .repo
-                .changed_paths(&receipt.approved_head, head)?
-                .join(", "),
-            Some(_) => "unavailable".to_owned(),
-            None if !parents.is_empty() => self.repo.changed_paths(&parents[0], head)?.join(", "),
-            None => "unavailable".to_owned(),
+        let paths = if approved != "unknown" {
+            self.repo.changed_paths(approved, head)?.join(", ")
+        } else if !parents.is_empty() {
+            self.repo.changed_paths(&parents[0], head)?.join(", ")
+        } else {
+            "unavailable".to_owned()
         };
         let reason = format!(
             "no independent approval for approved head {approved} and current head {head}; changed paths: {}{}",
@@ -664,8 +645,6 @@ fn format_delta_only(
     approved: &str,
     current: &str,
 ) -> bool {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     let Some(project) = project else { return false };
     let Ok(ports) = provenant_config::PortTable::read_for(Some(project), state) else {
         return false;
@@ -717,19 +696,17 @@ fn format_delta_only(
         _ => return false,
     }
     let workspace = |root: &std::path::Path| root.join(&ports.verify.workspace);
-    let root = std::env::temp_dir().join(format!(
-        "provenant-approval-format-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let left = root.join("approved");
-    let right = root.join("current");
-    if std::fs::create_dir_all(&root).is_err() {
-        return false;
-    }
+    let root = match tempfile::Builder::new()
+        .prefix("provenant-approval-format-")
+        .tempdir()
+    {
+        Ok(dir) => dir,
+        Err(_) => return false,
+    };
+    let left = root.path().join("approved");
+    let right = root.path().join("current");
     let git = provenant_os::git::git_executable().and_then(|path| path.to_str().map(str::to_owned));
     let Some(git) = git else {
-        let _ = std::fs::remove_dir_all(&root);
         return false;
     };
     let add = |path: &std::path::Path, commit: &str| {
@@ -797,7 +774,6 @@ fn format_delta_only(
             );
         }
     }
-    let _ = std::fs::remove_dir_all(root);
     same
 }
 
@@ -1031,7 +1007,11 @@ mod tests {
                 approved_head: "approved".into(),
                 current_head: current.clone(),
                 base_head: merge_base.into(),
-                kind: kind.into(),
+                kind: if kind == "clean_merge" {
+                    provenant_cli::domains::ApprovalCarry::CleanMerge
+                } else {
+                    provenant_cli::domains::ApprovalCarry::Format
+                },
                 extra: Default::default(),
             };
             if receipt_exists {
