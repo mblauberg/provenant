@@ -2569,9 +2569,6 @@ fn remove(
     {
         return Ok(Outcome::Busy);
     }
-    if dry_run {
-        return Ok(Outcome::Removed);
-    }
     let interrupted = std::cell::Cell::new(false);
     let guards = {
         let should_stop = std::cell::RefCell::new(&mut *should_stop);
@@ -2592,6 +2589,9 @@ fn remove(
             Outcome::Busy
         });
     };
+    if dry_run {
+        return Ok(Outcome::Removed);
+    }
     let target = cache.child(name).map_err(io::Error::other)?;
     if is_gc_tombstone(&candidate.target) {
         let mut remaining = MAX_ENTRIES;

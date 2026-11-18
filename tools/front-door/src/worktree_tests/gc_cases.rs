@@ -524,6 +524,12 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
         dirs["errors"].as_array().ok_or("errors")?.is_empty(),
         "{dirs}"
     );
+    assert_eq!(
+        names(&dirs["removed"]),
+        [stale.to_string_lossy(), fresh.to_string_lossy()],
+        "{dirs}"
+    );
+    assert_eq!(names(&dirs["busy"]), [building.to_string_lossy()], "{dirs}");
     assert!(stale.join("debug/deps/payload").is_file());
     assert!(building.join("release/deps/payload").is_file());
     assert!(fresh.join("fast/deps/payload").is_file());
