@@ -1514,18 +1514,34 @@ impl RunStore {
         {
             let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
         }
-        // Terminal publication is not proof that a read-only guardian has
-        // released its attempt. Try once under the same admission gate as GC.
-        let Ok(observation) = provenant_supervisor::custody::writer_admission_guard(&attempt_dir)
-        else {
-            let _ = self.set_temporary_retained(record.attempt_id, true, call);
-            return;
+        // Reuse verified same-scope custody, including a read-only guardian's
+        // attempt lock. A second open would contend with our own description.
+        let held = match recovery.filter(|recovery| recovery.scope() == Self::scope(record)) {
+            Some(recovery) => match recovery.holds_writer_lock(&attempt_dir) {
+                Ok(held) => held,
+                Err(_) => {
+                    let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                    return;
+                }
+            },
+            None => false,
         };
-        let lease = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive);
-        drop(observation);
-        let Ok(_lease) = lease else {
-            let _ = self.set_temporary_retained(record.attempt_id, true, call);
-            return;
+        let _lease = if held {
+            None
+        } else {
+            let Ok(observation) =
+                provenant_supervisor::custody::writer_admission_guard(&attempt_dir)
+            else {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                return;
+            };
+            let lease = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive);
+            drop(observation);
+            let Ok(lease) = lease else {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                return;
+            };
+            Some(lease)
         };
         if !matches!(
             provenant_supervisor::custody::reservation_present(&attempt_dir, Self::scope(record)),
