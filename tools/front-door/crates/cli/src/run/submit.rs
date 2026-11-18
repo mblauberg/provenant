@@ -19,6 +19,12 @@ pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
     action()
 }
 
+/// The fixture defers every launch edge, including replay of a queued admission.
+#[cfg(any(test, feature = "fixture"))]
+pub(super) fn provider_launch_deferred() -> bool {
+    TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get)
+}
+
 /// `ADAPTER/NAME` for a model-less adapter such as `command/fmt-check`.
 pub(super) fn adapter_entry(route: &str) -> Option<(&str, &str)> {
     let (provider, name) = route.split_once('/')?;
@@ -780,7 +786,7 @@ fn submit_with_launcher(
         }
     }
     #[cfg(any(test, feature = "fixture"))]
-    if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {
+    if provider_launch_deferred() {
         return Ok((record, Vec::new()));
     }
     let started = launch(&record, parent_attempt.is_some())?;

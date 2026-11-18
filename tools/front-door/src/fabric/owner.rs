@@ -3656,9 +3656,10 @@ impl BoundGraphOwner<'_> {
                 attempt.state,
                 provenant_records::run::AttemptState::Queued { .. }
             ) {
-                return Err(FacadeError::RepositoryLockBusy {
-                    path: None,
-                    operation: "relaunch queued attempt".into(),
+                // No launch occurred. Queued is an observation, not evidence
+                // of repository contention; retain its reference and backoff.
+                return Ok(AttemptObservation::Queued {
+                    attempt_ref: reference,
                 });
             }
         }

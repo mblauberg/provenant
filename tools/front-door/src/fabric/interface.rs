@@ -3774,6 +3774,11 @@ mod tests {
     // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
     #[test]
     fn graph_target_retry_resets_only_a_terminal_sole_node_and_resumes_unfinished_work() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::graph_target_retry_resets_only_a_terminal_sole_node_and_resumes_unfinished_work",
+        )? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph::{LaunchRetry, LaunchRetryPolicy, NodeState};
         for (state, cancelled, multiple, brief) in [
             (NodeState::Failed, false, false, false),
@@ -3795,19 +3800,67 @@ mod tests {
             let fixture: Value = serde_json::from_str(include_str!(
                 "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
             ))?;
-            let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
-                serde_json::from_value(fixture["checkpoint"].clone())?;
             let mut document: GraphDocument =
                 serde_json::from_value(fixture["execution"]["document"].clone())?;
+            if multiple {
+                let mut second = document.nodes[0].clone();
+                second.id = "second".into();
+                document.nodes.push(second);
+            }
+            // Seed through admission so the plan digest, submission patch and
+            // attempt reference belong to the same current graph contract.
+            provenant_cli::run::with_deferred_provider_launch(|| {
+                factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            })?;
+            let mut checkpoint = FileJournal::read_checkpoint(
+                &factory.context.roots.state,
+                project,
+                &document.graph_id,
+            )?
+            .ok_or("admitted checkpoint")?;
+            let document =
+                FileJournal::execution(&factory.context.roots.state, project, &document.graph_id)?
+                    .ok_or("admitted execution")?
+                    .document;
+            let call = provenant_run::Request {
+                clock: &factory.clock,
+                cancel: &cancel,
+            };
+            let context = provenant_run::ExecutionContext {
+                state_root: factory.context.roots.state.clone(),
+                project_id: project,
+                actor_id: factory.context.identity.inbox.actor,
+                read_prompts: false,
+            };
+            let store = provenant_run::RunStore::open(&context, &call)?;
+            // Only Running retains live queued work. Withdraw every admission
+            // whose graph row this state table removes or makes terminal.
+            for (index, progress) in checkpoint.nodes.iter().enumerate() {
+                if index == 0 && state == NodeState::Running {
+                    continue;
+                }
+                for attempt in &progress.attempts {
+                    let reference = attempt.attempt_ref.as_deref().ok_or("admitted reference")?;
+                    let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
+                    store.fence_graph_retry(id.parse()?, &attempt.key.work_key(project)?, &call)?;
+                }
+            }
             let node = &mut checkpoint.nodes[0];
+            node.attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+            node.attempts[0].outcome =
+                Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
             node.state = state;
+            node.attempts[0].launched = true;
+            node.launch_retry = None;
             node.cancelled_from = cancelled.then_some(NodeState::Running);
             match state {
                 NodeState::Pending | NodeState::Blocked | NodeState::Skipped => {
                     node.attempts.clear()
                 }
                 NodeState::Running => {
-                    node.attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Running;
+                    node.attempts[0].state =
+                        provenant_fabric_runtime::graph::AttemptState::Starting;
+                    node.attempts[0].launched = false;
                     node.attempts[0].outcome = None;
                 }
                 NodeState::Failed => {
@@ -3833,14 +3886,10 @@ mod tests {
             checkpoint.wake_at = node.launch_retry.as_ref().and_then(|retry| retry.wake_at);
             checkpoint.cancelled = cancelled;
             if multiple {
-                let mut second = checkpoint.nodes[0].clone();
-                second.id = "second".into();
+                let second = &mut checkpoint.nodes[1];
                 second.state = NodeState::Blocked;
                 second.attempts.clear();
-                checkpoint.nodes.push(second);
-                let mut second = document.nodes[0].clone();
-                second.id = "second".into();
-                document.nodes.push(second);
+                second.launch_retry = None;
             }
             let mut journal = FileJournal::open(
                 &factory.context.roots.state,
@@ -4565,8 +4614,14 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
     #[test]
     fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::a_named_launch_with_the_same_digest_returns_its_graph_without_launching",
+        )? {
+            return Ok(());
+        }
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();

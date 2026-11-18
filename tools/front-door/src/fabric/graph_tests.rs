@@ -3545,6 +3545,7 @@ mod provisioned_writer_submission_tests {
         }
     }
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
     #[test]
     fn provisioned_graph_writer_reaches_the_sealed_attempt_request()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3723,9 +3724,8 @@ mod provisioned_writer_submission_tests {
                     replay,
                 )
             })?;
-            let graph::AttemptObservation::Pending {
+            let graph::AttemptObservation::Queued {
                 attempt_ref: Some(reference),
-                ..
             } = observation
             else {
                 return Err(

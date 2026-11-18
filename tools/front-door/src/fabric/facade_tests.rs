@@ -715,8 +715,10 @@ pub(crate) mod peer_tests {
             environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
         }
         let cwd = std::env::current_dir()?;
-        // The graph-controls fixture now provisions and replays four variants.
-        let timeout = if name.ends_with("graph_run_controls_reach_the_sealed_attempt") {
+        // These tables provision and replay several independent variants.
+        let timeout = if name.ends_with("graph_run_controls_reach_the_sealed_attempt")
+            || name.ends_with("graph_target_retry_resets_only_a_terminal_sole_node_and_resumes_unfinished_work")
+        {
             120
         } else {
             30

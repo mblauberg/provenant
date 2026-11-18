@@ -376,7 +376,15 @@ impl VerifiedRepo {
             return Err(RepoError::InvalidRoot);
         }
 
-        let marker_identity = root.metadata_at(OsStr::new(GIT_MARKER), false)?;
+        let marker_identity = root
+            .metadata_at(OsStr::new(GIT_MARKER), false)
+            .map_err(|error| {
+                if error.is_not_found() {
+                    RepoError::InvalidGitMarker
+                } else {
+                    RepoError::Fs(error)
+                }
+            })?;
         if marker_identity.mode & 0o022 != 0 {
             return Err(RepoError::InvalidGitMarker);
         }

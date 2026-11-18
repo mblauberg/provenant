@@ -29,9 +29,18 @@ an indefinitely pending observation. The owner reports a custody-free, never-sta
 attempt as `AttemptObservation::Queued`; the graph retains `AttemptState::Starting`
 and its reference, and persists a bounded next wake within the original launch
 deadline without charging a launch failure. `Pending` represents active work and transitions to `Running`.
-A missing observation reference never erases a previously saved reference.
+A missing observation reference never erases a previously saved reference. A newly
+admitted queued reference is saved before the scheduler completes launch inline.
+If the launch edge still leaves it queued, the owner preserves that observation
+and its bounded wake. A queued observation alone does not charge a launch failure.
+Fixture launch deferral covers both admission and queued relaunch, so sealing
+an attempt never implicitly prepares its provider.
 - Why: one sibling's short repository mutation must not fail another writer or
   monopolise custody while waiting for it.
+
+A missing repository Git marker is a structural Git-isolation refusal, including
+at the early common-directory open. Other filesystem failures retain their I/O
+classification.
 
 Writer-binding I/O failures retain bounded operation, path-role and OS error
 metadata in the facade diagnostic and graph advance error. Raw paths, error

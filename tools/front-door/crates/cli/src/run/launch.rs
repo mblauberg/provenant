@@ -543,6 +543,10 @@ pub(super) fn launch_on_host_with_wait(
     provider_lease_wait: Option<u64>,
     preparation_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<Vec<run::Started>, Fail> {
+    #[cfg(any(test, feature = "fixture"))]
+    if super::submit::provider_launch_deferred() {
+        return Ok(Vec::new());
+    }
     // Provider fence waiting has its own budget. Its allowance only bounds
     // writer repository inspection when the caller supplies that separate
     // launch-preparation deadline.

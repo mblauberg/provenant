@@ -606,6 +606,7 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     assert_eq!(owner.calls.len(), 4);
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
 fn expired_launch_replays_an_accepted_operation() {
     let document = graph(vec![node("one", route("first"))]);
@@ -621,8 +622,11 @@ fn expired_launch_replays_an_accepted_operation() {
     owner.now = Some(at(3600));
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(owner.calls.len(), 3);
-    assert_eq!(owner.calls[0], owner.calls[1]);
+    // Expiry must replay the accepted operation under the original key,
+    // independently of how many observation passes the scheduler needs.
+    assert!(owner.calls.iter().all(|key| key == &owner.calls[0]));
+    assert_eq!(result.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(result.checkpoint.nodes[0].attempts[0].key, owner.calls[0]);
 }
 
 #[test]

@@ -847,12 +847,8 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
         &account_key,
         &rig.root.join("codex"),
     )?;
-    writeln!(
-        OpenOptions::new()
-            .append(true)
-            .open(rig.state.join("config.toml"))?,
-        "\n[domains.fabric.graph]\nlaunch_wait_seconds=5\nwriter_provision_seconds=5"
-    )?;
+    // This fixture pins session steering, not preparation throughput. Keep
+    // the configured launch allowance; deadline behavior has its own fixtures.
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let committed = rig.execute(
         &git,
@@ -2149,11 +2145,8 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
 /// Real repository-lock contention leaves concurrent launches retryable, then
 /// both launch after the lock holder releases the repository.
 fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
-    use provenant_core::{Clock, DurationMicros, RootInputs, WallTime};
-    use provenant_os::{
-        clock::SystemClock,
-        fs::{Directory, LockMode, SystemPathResolver},
-    };
+    use provenant_core::{RootInputs, WallTime};
+    use provenant_os::fs::{Directory, LockMode, SystemPathResolver};
 
     if !graph_fixture_available()? {
         return Ok(());
@@ -2247,24 +2240,33 @@ fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
                         let graph = response["data"]["checkpoint"]["graph_id"]
                             .as_str()
                             .ok_or("graph id")?;
-                        let wake: WallTime = serde_json::from_value(
-                            response["data"]["checkpoint"]["nodes"][0]["launch_retry"]["wake_at"]
+                        let deadline: WallTime = serde_json::from_value(
+                            response["data"]["checkpoint"]["nodes"][0]["launch_retry"]["deadline"]
                                 .clone(),
                         )?;
                         let waited = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
                         assert_eq!(code(&waited), 0, "{graph}: {waited:?}");
                         let checkpoint = rig.checkpoint(graph)?;
                         assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
+                        let attempts = checkpoint["nodes"][0]["attempts"]
+                            .as_array()
+                            .ok_or("attempts")?;
+                        assert_eq!(attempts.len(), 1, "{checkpoint}");
+                        let reference = attempts[0]["attempt_ref"]
+                            .as_str()
+                            .ok_or("attempt reference")?;
+                        let id = reference.rsplit_once('/').ok_or("attempt reference")?.1;
+                        let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+                        let bytes: Vec<u8> =
+                            db.query_row("SELECT record FROM attempts WHERE id=?1", [id], |row| {
+                                row.get(0)
+                            })?;
+                        let record: provenant_run::AttemptRecord = serde_json::from_slice(&bytes)?;
+                        // The persisted allowance bounds provider launch, not
+                        // later settlement or serialised fixture observations.
                         assert!(
-                            checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
-                            "{checkpoint}"
-                        );
-                        // Allow another retry if both setups collide after the first wake,
-                        // plus bounded process startup and settlement on a loaded host.
-                        let bound = wake.checked_add(DurationMicros::from_seconds(25)?)?;
-                        assert!(
-                            SystemClock::new().wall_now()? <= bound,
-                            "{graph} did not settle promptly after {wake}"
+                            record.started_at.ok_or("provider start")? <= deadline,
+                            "{graph} renewed its original launch allowance"
                         );
                         Ok(())
                     })()
