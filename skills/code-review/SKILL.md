@@ -8,7 +8,7 @@ description: "Use for independent read-only review of a pinned diff or pull requ
 Review independently at a pinned head and prove coverage alongside CI.
 
 The chair or lead chooses whether to review, the reviewers and their number.
-For routine, low-risk work, use one reviewer or none. For risky changes, prefer
+A small change needs no review; for routine work, use one reviewer. For risky changes, prefer
 a strong reviewer from another model family, optionally paired with one from
 the author's family. Avoid a lightweight cross-family slot; if only the same
 family is available, warn and proceed. These are overridable preferences, not
