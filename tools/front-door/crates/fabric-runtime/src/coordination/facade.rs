@@ -333,11 +333,6 @@ pub enum InvalidInputDetail {
         limit: usize,
     },
     FieldTitle(String),
-    /// Scanner facts contain only a bounded field name and a closed rule identifier.
-    ContentScan {
-        field: String,
-        assignment: bool,
-    },
     InputUnreadable,
     InputTooLarge,
     InputInvalidUtf8,
@@ -366,10 +361,6 @@ impl InvalidInputDetail {
                 limit: *limit,
             },
             Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
-            Self::ContentScan { field, assignment } => Self::ContentScan {
-                field: clean(field),
-                assignment: *assignment,
-            },
             Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.redacted())),
             other => other.clone(),
         }
@@ -416,7 +407,6 @@ impl InvalidInputDetail {
             Self::FieldTooLarge { field, limit } => safe_input_field(field)
                 .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
-            Self::ContentScan { field, assignment } => safe_input_field(field).map(|path| format!("input field `{path}` matches the {} rule; remove credential material and retry", if *assignment { "credential assignment" } else { "credential token or URL userinfo" })),
         }
     }
 }
