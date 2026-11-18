@@ -1318,8 +1318,9 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     settings["domains"]["fabric"]["graph"]["limits"]["node_prompt_bytes"] =
         toml_edit::value(1024 * 1024);
     std::fs::write(config, settings.to_string())?;
-    // JSON escaping exceeds the peer frame cap although the brief itself fits.
-    std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
+    // JSON escapes each control byte to six wire bytes. Cross the same real
+    // frame cap with less raw text to compile and normalise before dispatch.
+    std::fs::write(&prompt, "\u{0001}".repeat(180 * 1024))?;
     // The second identical launch replays the refused graph (cli.md "Names and
     // replay": exit 0 with its recorded state); neither contacts the peer.
     for replay in [false, true] {

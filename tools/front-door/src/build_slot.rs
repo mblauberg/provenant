@@ -670,43 +670,62 @@ mod tests {
     }
 
     #[test]
-    fn all_busy_build_slots_warn_once_and_still_run_the_child() {
+    fn busy_slot_waits_a_bounded_time_then_builds_without_one() {
         let state = tempfile::tempdir().unwrap();
         BuildSlots::provision(state.path(), 1).unwrap();
         let slots = BuildSlots::open(state.path()).unwrap();
         let held = slots.try_acquire(1).unwrap().unwrap();
-        let command = [OsString::from("cargo"), OsString::from("check")];
+        use std::os::unix::fs::PermissionsExt;
+        let cargo = state.path().join("cargo");
+        let log = state.path().join("built");
+        std::fs::write(
+            &cargo,
+            "#!/bin/sh\n[ \"$1\" = check ] || exit 9\nprintf end > \"$2\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let command = [
+            cargo.into_os_string(),
+            OsString::from("check"),
+            log.clone().into_os_string(),
+        ];
         let gate = Gate {
             settings: Some(Settings {
                 state: state.path().to_owned(),
                 slots: 1,
-                wait: std::time::Duration::ZERO,
+                wait: std::time::Duration::from_millis(1),
             }),
             local: Local::All,
             command: &command,
         };
         let mut warnings = Vec::new();
-        let mut ran = false;
         let code = run_with(
             gate,
             Vec::new(),
             false,
             provenant_config::PortBackend::Builtin,
             |settings| {
-                let slots = BuildSlots::open(&settings.state).map_err(|error| error.to_string())?;
-                slots
-                    .try_acquire(settings.slots)
-                    .map_err(|error| error.to_string())
+                // Use the real acquisition loop with a small injected budget.
+                // Process-level slot wiring is covered by the shim tests.
+                let taken = take_slot(settings)?;
+                assert!(
+                    taken
+                        .status
+                        .as_deref()
+                        .is_some_and(|status| status.contains("waiting for a host build slot"))
+                );
+                assert!(taken.guard.is_none());
+                Ok(taken.guard)
             },
-            |_, _, _| {
-                ran = true;
-                Ok(0)
+            |program, args, env| {
+                provenant_os::sys::run_wait(program, args, env).map_err(|error| error.to_string())
             },
             |message| warnings.push(message.to_owned()),
         );
         assert_eq!(code, 0);
-        assert!(ran);
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "end");
         assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("building without one"));
         drop(held);
     }
 

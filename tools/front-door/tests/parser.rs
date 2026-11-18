@@ -96,26 +96,29 @@ fn catalogue_commands_resolve_to_scoped_help_in_process() -> Result {
     use provenant_cli::{ParseOutcome, parse};
     use std::ffi::OsString;
 
+    let mut names = std::collections::BTreeSet::new();
     for args in [&["help", "--json"][..], &["help", "--all", "--json"][..]] {
         let ParseOutcome::Help { catalog, .. } = parse(args.iter().map(OsString::from)) else {
             panic!("expected catalogue help for {args:?}");
         };
         assert!(!catalog.commands.is_empty(), "empty catalogue for {args:?}");
-        for command in catalog.commands {
-            let name = command.command;
-            let argv = name
-                .split_whitespace()
-                .skip(1)
-                .chain(std::iter::once("--help"))
-                .map(OsString::from);
-            let ParseOutcome::Help { catalog, .. } = parse(argv) else {
-                panic!("expected help for {name}");
-            };
-            assert!(
-                catalog.commands.iter().any(|entry| entry.command == name),
-                "scoped help omits metadata for {name}"
-            );
-        }
+        names.extend(catalog.commands.into_iter().map(|command| command.command));
+    }
+    // Default and expanded help overlap. Each distinct public command needs
+    // one scoped parse, regardless of how many catalogues advertise it.
+    for name in names {
+        let argv = name
+            .split_whitespace()
+            .skip(1)
+            .chain(std::iter::once("--help"))
+            .map(OsString::from);
+        let ParseOutcome::Help { catalog, .. } = parse(argv) else {
+            panic!("expected help for {name}");
+        };
+        assert!(
+            catalog.commands.iter().any(|entry| entry.command == name),
+            "scoped help omits metadata for {name}"
+        );
     }
     Ok(())
 }
