@@ -84,6 +84,10 @@ struct Progress {
     boot_identity: Option<String>,
     budget_seconds: u64,
     released: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     cursor: Option<Cursor>,
 }
 
@@ -163,6 +167,35 @@ impl Lease {
 
     pub fn epoch(&self) -> u64 {
         self.progress.epoch
+    }
+
+    pub fn trigger(&self) -> Option<&str> {
+        self.progress.trigger.as_deref()
+    }
+
+    pub fn scope(&self) -> Option<&str> {
+        self.progress.scope.as_deref()
+    }
+
+    pub fn matches_identity(&self, trigger: &str, scope: &str) -> bool {
+        self.trigger().is_none_or(|saved| saved == trigger)
+            && self.scope().is_none_or(|saved| saved == scope)
+    }
+
+    pub fn set_identity(&mut self, trigger: &str, scope: &str) -> Result<(), io::Error> {
+        let _lock = metadata_lock(&self.directory).map_err(io::Error::other)?;
+        if !progress_has_epoch(&self.directory, self.progress.epoch) {
+            if let Some(cancel) = &self.fenced_cancel {
+                cancel.cancel();
+            }
+            return Err(io::Error::other(
+                "GC sweep lease was fenced by a newer owner",
+            ));
+        }
+        self.progress.trigger = Some(trigger.into());
+        self.progress.scope = Some(scope.into());
+        self.progress.released = false;
+        self.write_progress_locked()
     }
 
     /// Validate the fencing epoch at a collector's safe boundary.
@@ -317,6 +350,9 @@ pub(crate) fn acquire(
         return Ok(Acquire::Busy(None));
     }
     let warning = old.as_ref().and_then(|progress| {
+        if progress.released {
+            return None;
+        }
         if old_over_budget {
             Some(format!(
                 "taking over GC sweep owned by pid {} after gc.sweep_budget expired",
@@ -340,6 +376,8 @@ pub(crate) fn acquire(
         boot_identity: clock.boot_identity().ok(),
         budget_seconds: budget.as_secs().max(1),
         released: false,
+        trigger: old.as_ref().and_then(|progress| progress.trigger.clone()),
+        scope: old.as_ref().and_then(|progress| progress.scope.clone()),
         cursor: old.and_then(|progress| progress.cursor),
     };
     let lease = Lease {
@@ -484,6 +522,8 @@ mod tests {
             boot_identity: clock.boot_identity().ok(),
             budget_seconds: 5,
             released: false,
+            trigger: None,
+            scope: None,
             cursor: None,
         };
         assert!(!holder_over_budget(&progress, &clock));
@@ -563,6 +603,8 @@ mod tests {
             boot_identity: clock.boot_identity().ok(),
             budget_seconds: 30,
             released: false,
+            trigger: None,
+            scope: None,
             cursor: Some(Cursor {
                 class: "GitWorktrees".into(),
                 project: None,
@@ -609,6 +651,38 @@ mod tests {
             Acquire::Busy(_) => panic!("early exit must release its lease immediately"),
         };
         assert_eq!(resumed.cursor(), Some(&cursor));
+        assert!(resumed.warning.is_none());
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn saved_cursor_is_bound_to_its_trigger_and_selector_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let mut lease = match acquire(temp.path(), budget, &clock).unwrap() {
+            Acquire::Held(lease) => lease,
+            Acquire::Busy(_) => panic!("new sweep should acquire its lease"),
+        };
+        lease.set_identity("full_gc", "scheduled").unwrap();
+        let cursor = Cursor {
+            class: "GitWorktrees".into(),
+            project: Some("/repo/project".into()),
+            candidate: Some("/repo/project/.worktrees/lane".into()),
+            detail: None,
+        };
+        lease.checkpoint(cursor.clone()).unwrap();
+        drop(lease);
+
+        let resumed = match acquire(temp.path(), budget, &clock).unwrap() {
+            Acquire::Held(lease) => lease,
+            Acquire::Busy(_) => panic!("released sweep should resume"),
+        };
+        assert_eq!(resumed.cursor(), Some(&cursor));
+        assert!(resumed.warning.is_none());
+        assert!(resumed.matches_identity("full_gc", "scheduled"));
+        assert!(!resumed.matches_identity("pressure", "scheduled"));
+        assert!(!resumed.matches_identity("full_gc", "manual:repo-a"));
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps

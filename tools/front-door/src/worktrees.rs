@@ -1779,6 +1779,48 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .watch_fence(deadline.cancel().clone())
             .map_err(|error| Error::RetentionCollection(error.to_string()))?;
     }
+    let trigger_identity = if command.pressure {
+        "pressure"
+    } else {
+        "full_gc"
+    };
+    let scope_identity = if command.scheduled {
+        "scheduled".to_owned()
+    } else {
+        format!(
+            "manual:{}",
+            provenant_core::hex(project.as_os_str().as_encoded_bytes())
+        )
+    };
+    let identity_mismatch = lease
+        .as_ref()
+        .is_some_and(|lease| !lease.matches_identity(trigger_identity, &scope_identity));
+    if identity_mismatch {
+        let warning = lease
+            .as_ref()
+            .and_then(|lease| lease.warning.clone())
+            .map(|takeover| {
+                format!(
+                    "{takeover}; saved GC sweep belongs to a different trigger or project scope; skipped this request and preserved its cursor"
+                )
+            })
+            .unwrap_or_else(|| {
+                "saved GC sweep belongs to a different trigger or project scope; skipped this request and preserved its cursor".into()
+            });
+        return Ok(GcData {
+            sweep_budget_seconds,
+            sweep_budget_source,
+            sweep_cursor: lease.as_ref().and_then(|lease| lease.cursor().cloned()),
+            sweep_warning: Some(warning.clone()),
+            notice: Some(warning),
+            ..Default::default()
+        });
+    }
+    if let Some(lease) = &mut lease {
+        lease
+            .set_identity(trigger_identity, &scope_identity)
+            .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+    }
     let initial_cursor = lease.as_ref().and_then(|lease| lease.cursor().cloned());
     let takeover_warning = lease.as_ref().and_then(|lease| lease.warning.clone());
     if initial_cursor
