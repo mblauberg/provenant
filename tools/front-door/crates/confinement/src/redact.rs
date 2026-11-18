@@ -1085,27 +1085,7 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
-        let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
-        if secrets.len() > MAX_SECRETS {
-            return Err(RedactorError::TooManySecrets);
-        }
-        if secrets.iter().any(Vec::is_empty) {
-            return Err(RedactorError::EmptySecret);
-        }
-        if secrets
-            .iter()
-            .any(|secret| secret.len() > MAX_SECRET_LENGTH)
-        {
-            return Err(RedactorError::SecretTooLong);
-        }
-        let total = secrets
-            .iter()
-            .try_fold(0usize, |sum, secret| sum.checked_add(secret.len()));
-        if total.is_none_or(|total| total > MAX_SECRET_BYTES) {
-            return Err(RedactorError::SecretSetTooLarge);
-        }
-        secrets.sort();
-        secrets.dedup();
+        let secrets = validate_secrets(secrets)?;
 
         Ok(Self {
             literals: LiteralAutomaton::new(&secrets),
@@ -1284,6 +1264,58 @@ impl Redactor {
         }
         Ok(())
     }
+}
+
+/// Validate literal values before building a matcher, independently of shape scanning.
+fn validate_secrets(
+    secrets: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
+    if secrets.len() > MAX_SECRETS {
+        return Err(RedactorError::TooManySecrets);
+    }
+    if secrets.iter().any(Vec::is_empty) {
+        return Err(RedactorError::EmptySecret);
+    }
+    if secrets
+        .iter()
+        .any(|secret| secret.len() > MAX_SECRET_LENGTH)
+    {
+        return Err(RedactorError::SecretTooLong);
+    }
+    let total = secrets
+        .iter()
+        .try_fold(0usize, |sum, secret| sum.checked_add(secret.len()));
+    if total.is_none_or(|total| total > MAX_SECRET_BYTES) {
+        return Err(RedactorError::SecretSetTooLarge);
+    }
+    secrets.sort();
+    secrets.dedup();
+
+    Ok(secrets)
+}
+
+/// Mask known credential values without changing text that merely resembles one.
+pub fn known_values(
+    bytes: &[u8],
+    secrets: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<u8>, RedactorError> {
+    let secrets = validate_secrets(secrets)?;
+    let mut matcher = LiteralAutomaton::new(&secrets);
+    let mut decisions = Vec::with_capacity(bytes.len());
+    matcher.filter(bytes, &mut decisions);
+    matcher.finish(&mut decisions);
+    let mut safe = Vec::with_capacity(bytes.len());
+    let mut masked = false;
+    for (byte, secret) in decisions {
+        if secret && !masked {
+            safe.extend_from_slice(REDACTED);
+        } else if !secret {
+            safe.push(byte);
+        }
+        masked = secret;
+    }
+    Ok(safe)
 }
 
 /// Filter one bounded in-memory message or artifact using the same known
@@ -1710,6 +1742,22 @@ mod tests {
         }
         redactor.finish(&mut sink).expect("bounded finish");
         output
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn known_values_mask_literals_but_preserve_unregistered_shapes() {
+        let input = b"password=example-3391 actual=real-value-3391";
+        let safe = known_values(input, [b"real-value-3391".to_vec()]).unwrap();
+        assert_eq!(safe, b"password=example-3391 actual=[REDACTED]");
+        assert_eq!(
+            known_values(input, [Vec::new()]),
+            Err(RedactorError::EmptySecret)
+        );
+        assert_eq!(
+            known_values(b"abcde", [b"abc".to_vec(), b"cde".to_vec()]).unwrap(),
+            REDACTED
+        );
     }
 
     #[test]

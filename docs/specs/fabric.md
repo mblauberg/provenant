@@ -441,6 +441,9 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
+`redact::known_values` masks explicitly supplied credential values while
+preserving other text. Callers must supply the values before publication.
+
 Admission bounds the worst-case checkpoint before saving the plan.
 Graph text is normalised exactly once, at ingress, by schema path.
 `prompt_text::Context` enumerates identity positions (finding IDs, files and
