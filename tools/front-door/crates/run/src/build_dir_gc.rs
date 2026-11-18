@@ -40,16 +40,17 @@ const GC_TOMBSTONES: [(&str, &str); 2] = [
 ];
 const MAX_DEPTH: usize = 64;
 const MAX_ENTRIES: usize = 1_000_000;
-const MAX_CACHE_ROOT_ENTRIES: usize = 20_000;
 const MAX_PROTECTION_PROJECTS: usize = 10_000;
+const MAX_LRU_BATCH: usize = 128;
 const PROTECTION_SCAN_BUDGET: Duration = Duration::from_secs(5);
 const PREVIEW_ENTRIES: usize = 4096;
 const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
 const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
-const SURVEY_SNAPSHOT_VERSION: u8 = 4;
+const SURVEY_SNAPSHOT_VERSION: u8 = 5;
 const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
 const TARGET_LAST_USED: &str = ".provenant-last-used";
+const CACHE_ACTIVITY_MARKER: &str = ".provenant-cache-activity";
 /// How far ahead of now a modification time may be and still count as a
 /// recent write.
 const FUTURE_SKEW_NS: i128 = 5 * 60 * 1_000_000_000;
@@ -87,9 +88,11 @@ pub struct Report {
     /// Epoch-specific sidecar name for the next sweep to resume.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor_detail: Option<String>,
+    #[serde(skip)]
+    more_candidates: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 struct Candidate {
     kind: CacheKind,
     cache: String,
@@ -99,6 +102,83 @@ struct Candidate {
     newest: i128,
     target_modified_ns: i128,
     identity: (u64, u64),
+}
+
+impl serde::Serialize for Candidate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeTuple;
+
+        let mut tuple = serializer.serialize_tuple(7)?;
+        tuple.serialize_element(&self.kind)?;
+        tuple.serialize_element(&self.cache)?;
+        tuple.serialize_element(&self.target)?;
+        tuple.serialize_element(&self.bytes)?;
+        tuple.serialize_element(&self.newest)?;
+        tuple.serialize_element(&self.target_modified_ns)?;
+        tuple.serialize_element(&self.identity)?;
+        tuple.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Candidate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CandidateVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CandidateVisitor {
+            type Value = Candidate;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a compact Cargo target cache candidate")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                use serde::de::Error as _;
+
+                let kind = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let cache = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                let target = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(2, &self))?;
+                let bytes = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(3, &self))?;
+                let newest = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(4, &self))?;
+                let target_modified_ns = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(5, &self))?;
+                let identity = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(6, &self))?;
+                Ok(Candidate {
+                    kind,
+                    cache,
+                    target,
+                    display: PathBuf::new(),
+                    bytes,
+                    newest,
+                    target_modified_ns,
+                    identity,
+                })
+            }
+        }
+
+        deserializer.deserialize_tuple(7, CandidateVisitor)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -115,6 +195,9 @@ struct SurveySnapshot {
     lane_root: Option<RootIdentity>,
     shared_root: Option<RootIdentity>,
     completed: Vec<Candidate>,
+    census_bytes: u64,
+    census_complete: bool,
+    more_candidates: bool,
     root_cursor: Option<RootCursor>,
     prune_cursor: Option<PruneCursor>,
     measuring: Option<MeasureProgress>,
@@ -126,13 +209,16 @@ struct PruneCursor {
     kind: CacheKind,
     cache: String,
     target: String,
+    newest: i128,
+    display: PathBuf,
+    inclusive: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct RootCursor {
     kind: CacheKind,
     offset: provenant_os::fs::DirectoryPosition,
-    scanned: usize,
+    target_index: u8,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -191,7 +277,9 @@ impl MeasureBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 enum CacheKind {
     Lane,
     Shared,
@@ -245,21 +333,32 @@ pub fn target_protection_for_launch_while(
             .insert(crate::target_seed::project_key(common_dir));
     }
 
-    let projects = match provenant_config::registered_gc_projects(roots) {
-        Ok(projects) => projects,
+    let started = Instant::now();
+    let stop = std::cell::RefCell::new(should_stop);
+    let keep_going = || !stop.borrow_mut()() && started.elapsed() < PROTECTION_SCAN_BUDGET;
+    let mut selection_stop = || !keep_going();
+    let selection = match provenant_config::registered_gc_project_selection_with_progress(
+        roots,
+        None,
+        "0000000000000000",
+        false,
+        &mut selection_stop,
+    ) {
+        Ok(selection) => selection,
         Err(_) => {
             protection.unobserved = true;
             return protection;
         }
     };
+    if selection.interrupted_at.is_some() || !selection.warnings.is_empty() {
+        protection.unobserved = true;
+        return protection;
+    }
+    let projects = selection.projects;
     if projects.len() > MAX_PROTECTION_PROJECTS {
         protection.unobserved = true;
         return protection;
     }
-    let started = Instant::now();
-    let should_stop = std::cell::RefCell::new(should_stop);
-    let keep_going =
-        || !(*should_stop.borrow_mut())() && started.elapsed() < PROTECTION_SCAN_BUDGET;
     let git = match provenant_os::git::git_executable() {
         Some(git) => git,
         None => {
@@ -459,6 +558,9 @@ pub fn target_protection_for_launch_while(
                     protection
                         .shared_projects
                         .insert(crate::target_seed::project_key(binding.common_dir()));
+                    if let Some(writer) = canonical.task.writer {
+                        protection.worktrees.insert(writer.worktree);
+                    }
                 }
             }
             match page.next {
@@ -485,7 +587,7 @@ impl TargetProtection {
 enum Outcome {
     Removed,
     Busy,
-    Recent,
+    Recent(Option<(u64, i128)>),
     Interrupted {
         rechecking: Option<MeasureProgress>,
         detached: bool,
@@ -501,6 +603,7 @@ struct Survey {
     candidates: Vec<Candidate>,
     total: u64,
     free: u64,
+    more_candidates: bool,
     complete: bool,
 }
 
@@ -523,23 +626,34 @@ pub fn shared_cache_root(home: &Path) -> PathBuf {
     home.join("Library/Caches/provenant-shared-cargo")
 }
 
-/// Publish managed-target recency even when Cargo reuses every artifact.
-/// Custom paths have no cache authority and are left untouched.
+/// Publish managed-target recency even when Cargo reuses every artifact. The
+/// root marker also invalidates an in-progress census after a launch. Custom
+/// paths have no cache authority and are left untouched.
 pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
-    let managed = [cache_root(home), shared_cache_root(home)]
+    let roots = [cache_root(home), shared_cache_root(home)];
+    let Some(managed_root) = roots
         .iter()
-        .any(|root| managed_target_relative(target, root));
-    if !managed {
+        .find(|root| managed_target_relative(target, root))
+    else {
         return Ok(false);
-    }
+    };
+    let timestamp = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
+        .map_err(io::Error::other)?;
+    let bytes = format!("{}\n", timestamp.as_micros());
+    let root = Directory::open_anchor(managed_root).map_err(io::Error::other)?;
+    root.atomic_write(
+        OsStr::new(CACHE_ACTIVITY_MARKER),
+        ".provenant-cache-activity-",
+        bytes.as_bytes(),
+        provenant_os::fs::PublishMode::Replace,
+    )
+    .and_then(|publication| publication.require_durable())
+    .map_err(io::Error::other)?;
     let directory = match Directory::open_anchor(target) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(false),
         Err(error) => return Err(io::Error::other(error)),
     };
-    let timestamp = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
-        .map_err(io::Error::other)?;
-    let bytes = format!("{}\n", timestamp.as_micros());
     directory
         .atomic_write(
             OsStr::new(TARGET_LAST_USED),
@@ -710,7 +824,7 @@ pub fn collect_with_progress(
         report.errors.push("invalid GC survey epoch".into());
         return Ok(report);
     }
-    let mut snapshot = load_survey_snapshot(host, resume_detail, epoch, &mut report);
+    let mut snapshot = load_survey_snapshot(host, home, resume_detail, epoch, &mut report);
     let mut survey = survey_with_progress(home, &mut free, dry_run, &mut snapshot, should_stop);
     survey.report.budget_bytes = budget.bytes;
     survey.report.budget_setting = budget.setting.clone();
@@ -787,22 +901,94 @@ pub fn collect_with_progress(
             survey.free = free().unwrap_or(survey.free);
             let mut current_protection = protection.clone();
             current_protection.merge(&refresh_protection());
-            let mut report = prune_with_progress(
-                survey,
-                limits,
-                false,
-                wall_ns()?,
-                &mut free,
-                &current_protection,
-                should_stop,
-                Some(&mut snapshot),
-            );
-            if report.interrupted_at.is_some() {
-                save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
+            let mut aggregate = Report::default();
+            aggregate.budget_bytes = budget.bytes;
+            aggregate.budget_setting = budget.setting.clone();
+            aggregate.budget_source = budget.source.as_str().to_owned();
+            if protection.unobserved || current_protection.unobserved {
+                aggregate.warnings.push(
+                    "live Cargo target custody was not fully observed; preserving cache targets"
+                        .into(),
+                );
             }
-            Ok(report)
+            let mut current = survey;
+            loop {
+                let had_more = current.more_candidates;
+                let batch = prune_with_progress(
+                    current,
+                    limits,
+                    false,
+                    wall_ns()?,
+                    &mut free,
+                    &current_protection,
+                    should_stop,
+                    Some(&mut snapshot),
+                );
+                merge_report(&mut aggregate, batch);
+                if aggregate.interrupted_at.is_some() {
+                    save_survey_snapshot(host, &mut snapshot, epoch, &mut aggregate);
+                    return Ok(aggregate);
+                }
+                let free_now = free().unwrap_or(0);
+                if aggregate.cache_bytes <= limits.max_bytes && free_now >= limits.free_floor {
+                    snapshot.prune_cursor = None;
+                    snapshot.census_complete = false;
+                    snapshot.root_cursor = None;
+                    return Ok(aggregate);
+                }
+                if !had_more {
+                    snapshot.prune_cursor = None;
+                    snapshot.census_complete = false;
+                    snapshot.root_cursor = None;
+                    return Ok(aggregate);
+                }
+                if should_stop() {
+                    aggregate.measurement_skipped = true;
+                    aggregate.interrupted_at = Some(cache_root(home));
+                    save_survey_snapshot(host, &mut snapshot, epoch, &mut aggregate);
+                    return Ok(aggregate);
+                }
+                snapshot.completed.clear();
+                snapshot.census_bytes = 0;
+                snapshot.census_complete = false;
+                snapshot.more_candidates = false;
+                snapshot.root_cursor = None;
+                snapshot.measuring = None;
+                snapshot.rechecking = None;
+                let mut next =
+                    survey_with_progress(home, &mut free, false, &mut snapshot, should_stop);
+                let next_report = std::mem::take(&mut next.report);
+                aggregate.warnings.extend(next_report.warnings);
+                aggregate.errors.extend(next_report.errors);
+                if !next.complete {
+                    aggregate.cache_bytes = next.total;
+                    aggregate.measurement_skipped = true;
+                    aggregate.interrupted_at = next_report
+                        .interrupted_at
+                        .or_else(|| Some(cache_root(home)));
+                    save_survey_snapshot(host, &mut snapshot, epoch, &mut aggregate);
+                    return Ok(aggregate);
+                }
+                current = next;
+            }
         },
     )?
+}
+
+fn merge_report(into: &mut Report, mut next: Report) {
+    into.bytes = into.bytes.saturating_add(next.bytes);
+    into.cache_bytes = next.cache_bytes;
+    into.removed.append(&mut next.removed);
+    into.busy.append(&mut next.busy);
+    into.recent.append(&mut next.recent);
+    into.errors.append(&mut next.errors);
+    into.warnings.append(&mut next.warnings);
+    into.measurement_skipped |= next.measurement_skipped;
+    into.more_candidates = next.more_candidates;
+    into.interrupted_at = next.interrupted_at;
+    if next.cursor_detail.is_some() {
+        into.cursor_detail = next.cursor_detail;
+    }
 }
 
 fn valid_epoch(epoch: &str) -> bool {
@@ -832,6 +1018,7 @@ fn snapshot_directory(host: &Path, create: bool) -> Result<Directory, Box<dyn st
 
 fn load_survey_snapshot(
     host: &Path,
+    home: &Path,
     detail: Option<&str>,
     epoch: &str,
     report: &mut Report,
@@ -863,10 +1050,13 @@ fn load_survey_snapshot(
             serde_json::from_slice::<SurveySnapshot>(&bytes).map_err(|error| error.to_string())
         });
     match parsed {
-        Ok(snapshot)
+        Ok(mut snapshot)
             if snapshot.version == SURVEY_SNAPSHOT_VERSION
                 && snapshot.epoch == snapshot_epoch(name).unwrap_or_default() =>
         {
+            for candidate in &mut snapshot.completed {
+                candidate.display = candidate_display(home, candidate);
+            }
             snapshot
         }
         Ok(_) => {
@@ -890,6 +1080,18 @@ fn load_survey_snapshot(
             }
         }
     }
+}
+
+fn candidate_display(home: &Path, candidate: &Candidate) -> PathBuf {
+    let root = match candidate.kind {
+        CacheKind::Lane => cache_root(home),
+        CacheKind::Shared => shared_cache_root(home),
+    };
+    let logical_name = GC_TOMBSTONES
+        .iter()
+        .find_map(|(tombstone, logical)| (candidate.target == *tombstone).then_some(*logical))
+        .unwrap_or(&candidate.target);
+    root.join(&candidate.cache).join(logical_name)
 }
 
 fn save_survey_snapshot(
@@ -1135,7 +1337,7 @@ fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>, preview:
         u64::MAX
     });
     // Least recently used first; the path breaks ties deterministically.
-    candidates.sort_by(|a, b| (a.newest, &a.display).cmp(&(b.newest, &b.display)));
+    candidates.sort_by(compare_candidates);
     let complete = !budget.limited && report.errors.is_empty();
     Survey {
         report,
@@ -1144,6 +1346,7 @@ fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>, preview:
         candidates,
         total,
         free,
+        more_candidates: false,
         complete,
     }
 }
@@ -1171,15 +1374,46 @@ fn survey_with_progress(
                 .warnings
                 .push("GC survey roots changed; restarting census".into());
         }
+        snapshot.census_bytes = 0;
+        snapshot.census_complete = false;
+        snapshot.more_candidates = false;
         snapshot.completed.clear();
+        snapshot.census_bytes = 0;
+        snapshot.census_complete = false;
+        snapshot.more_candidates = false;
         snapshot.root_cursor = None;
         snapshot.prune_cursor = None;
         snapshot.measuring = None;
         snapshot.rechecking = None;
     }
+    if !snapshot.census_complete && snapshot.root_cursor.is_none() {
+        snapshot.completed.clear();
+        snapshot.census_bytes = 0;
+        snapshot.more_candidates = false;
+        snapshot.measuring = None;
+    }
     snapshot.version = SURVEY_SNAPSHOT_VERSION;
     snapshot.lane_root = lane_identity;
     snapshot.shared_root = shared_identity;
+
+    if snapshot.census_complete {
+        let candidates = snapshot.completed.clone();
+        let free = free_space().unwrap_or_else(|error| {
+            report.errors.push(format!("free space: {error}"));
+            u64::MAX
+        });
+        report.more_candidates = snapshot.more_candidates;
+        return Survey {
+            report,
+            lane_root,
+            shared_root,
+            candidates,
+            total: snapshot.census_bytes,
+            free,
+            more_candidates: snapshot.more_candidates,
+            complete: true,
+        };
+    }
 
     let mut measurement_budget = MeasureBudget::new(preview);
     let mut stop = || should_stop() || !measurement_budget.consume();
@@ -1215,14 +1449,12 @@ fn survey_with_progress(
     } else if !complete && report.interrupted_at.is_none() {
         report.interrupted_at = Some(cache_root(home));
     }
-    let total = candidates
-        .iter()
-        .fold(0_u64, |sum, item| sum.saturating_add(item.bytes));
+    let total = snapshot.census_bytes;
     let free = free_space().unwrap_or_else(|error| {
         report.errors.push(format!("free space: {error}"));
         u64::MAX
     });
-    candidates.sort_by(|a, b| (a.newest, &a.display).cmp(&(b.newest, &b.display)));
+    candidates.sort_by(compare_candidates);
     if complete {
         if snapshot.rechecking.as_ref().is_some_and(|state| {
             !candidates
@@ -1233,7 +1465,10 @@ fn survey_with_progress(
         }
         snapshot.completed = candidates.clone();
         snapshot.measuring = None;
+        snapshot.census_complete = true;
+        snapshot.root_cursor = None;
     }
+    report.more_candidates = snapshot.more_candidates;
     Survey {
         report,
         lane_root,
@@ -1241,6 +1476,7 @@ fn survey_with_progress(
         candidates,
         total,
         free,
+        more_candidates: snapshot.more_candidates,
         complete,
     }
 }
@@ -1296,19 +1532,22 @@ fn discover_with_progress(
             return true;
         }
     };
-    let (start_offset, mut seen) = match saved_cursor {
-        Some(cursor) if cursor.kind == kind => (cursor.offset, cursor.scanned),
-        _ => (Default::default(), 0),
+    let start_offset = match saved_cursor {
+        Some(cursor) if cursor.kind == kind => cursor.offset,
+        _ => Default::default(),
     };
     if let Err(error) = entries.seek(start_offset) {
         report
             .errors
             .push(format!("{}: {error}", cache_root.display()));
         snapshot.completed.clear();
+        snapshot.census_bytes = 0;
+        snapshot.census_complete = false;
+        snapshot.more_candidates = false;
         snapshot.root_cursor = Some(RootCursor {
             kind,
             offset: Default::default(),
-            scanned: 0,
+            target_index: 0,
         });
         snapshot.measuring = None;
         return false;
@@ -1328,7 +1567,7 @@ fn discover_with_progress(
                 CacheKind::Lane => Some(RootCursor {
                     kind: CacheKind::Shared,
                     offset: Default::default(),
-                    scanned: 0,
+                    target_index: 0,
                 }),
                 CacheKind::Shared => None,
             };
@@ -1336,14 +1575,6 @@ fn discover_with_progress(
             snapshot.measuring = None;
             return true;
         };
-        seen = seen.saturating_add(1);
-        if seen > MAX_CACHE_ROOT_ENTRIES {
-            report.errors.push(format!(
-                "{}: cache root entry limit exceeded",
-                cache_root.display()
-            ));
-            return true;
-        }
         let name = match entry {
             Ok(name) => name,
             Err(error) => {
@@ -1358,7 +1589,7 @@ fn discover_with_progress(
             snapshot.root_cursor = Some(RootCursor {
                 kind,
                 offset: entry_offset,
-                scanned: seen.saturating_sub(1),
+                target_index: 0,
             });
             *interrupted = Some(
                 name.to_str()
@@ -1387,20 +1618,22 @@ fn discover_with_progress(
         let Ok(cache) = PayloadTree::claim(root, &name, &metadata) else {
             continue;
         };
-        for (target_name, logical_name) in TARGETS
+        let target_start = saved_cursor
+            .filter(|cursor| cursor.kind == kind && cursor.offset == entry_offset)
+            .map_or(0, |cursor| usize::from(cursor.target_index));
+        for (target_index, (target_name, logical_name)) in TARGETS
             .into_iter()
             .map(|name| (name, name))
             .chain(GC_TOMBSTONES)
+            .enumerate()
+            .skip(target_start)
         {
-            candidates.retain(|saved| {
-                saved.kind != kind || saved.cache != digest || saved.target != target_name
-            });
             if should_stop() {
                 snapshot.completed = candidates.clone();
                 snapshot.root_cursor = Some(RootCursor {
                     kind,
                     offset: entry_offset,
-                    scanned: seen.saturating_sub(1),
+                    target_index: target_index as u8,
                 });
                 *interrupted = Some(cache_root.join(digest).join(logical_name));
                 return false;
@@ -1432,30 +1665,19 @@ fn discover_with_progress(
                 target_modified_ns: target_metadata.modified_ns,
                 identity: (target_metadata.device, target_metadata.inode),
             };
-            if let Some(completed) = snapshot
-                .completed
-                .iter()
-                .find(|saved| same_candidate(saved, &candidate))
-            {
-                if !candidates
-                    .iter()
-                    .any(|item| same_candidate(item, completed))
-                {
-                    candidates.push(completed.clone());
-                }
-                continue;
-            }
             let resumed = snapshot
                 .measuring
                 .take()
                 .filter(|state| state_matches(state, &candidate));
             match measure_resumable(&cache, &candidate, &target_metadata, resumed, should_stop) {
                 Ok(MeasureOutcome::Complete { bytes, newest }) => {
-                    candidates.push(Candidate {
+                    let measured = Candidate {
                         bytes,
                         newest,
                         ..candidate
-                    });
+                    };
+                    snapshot.census_bytes = snapshot.census_bytes.saturating_add(bytes);
+                    retain_lru_candidate(snapshot, candidates, measured);
                 }
                 Ok(MeasureOutcome::Interrupted(state)) => {
                     snapshot.measuring = Some(state);
@@ -1463,7 +1685,7 @@ fn discover_with_progress(
                     snapshot.root_cursor = Some(RootCursor {
                         kind,
                         offset: entry_offset,
-                        scanned: seen.saturating_sub(1),
+                        target_index: target_index as u8,
                     });
                     *interrupted = Some(candidate.display);
                     return false;
@@ -1477,7 +1699,7 @@ fn discover_with_progress(
                     snapshot.root_cursor = Some(RootCursor {
                         kind,
                         offset: entry_offset,
-                        scanned: seen.saturating_sub(1),
+                        target_index: target_index as u8,
                     });
                     *interrupted = Some(candidate.display);
                     return false;
@@ -1491,7 +1713,7 @@ fn discover_with_progress(
                     snapshot.root_cursor = Some(RootCursor {
                         kind,
                         offset: entry_offset,
-                        scanned: seen.saturating_sub(1),
+                        target_index: target_index as u8,
                     });
                     *interrupted = Some(candidate.display);
                     return false;
@@ -1510,7 +1732,7 @@ fn discover_with_progress(
         snapshot.root_cursor = Some(RootCursor {
             kind,
             offset,
-            scanned: seen,
+            target_index: 0,
         });
     }
 }
@@ -1521,6 +1743,47 @@ fn same_candidate(saved: &Candidate, current: &Candidate) -> bool {
         && saved.target == current.target
         && saved.target_modified_ns == current.target_modified_ns
         && saved.identity == current.identity
+}
+
+fn retain_lru_candidate(
+    snapshot: &mut SurveySnapshot,
+    candidates: &mut Vec<Candidate>,
+    candidate: Candidate,
+) {
+    if let Some(cursor) = snapshot.prune_cursor.as_ref() {
+        let ordering = compare_candidate_cursor(&candidate, cursor);
+        if ordering.is_lt() || (ordering.is_eq() && !cursor.inclusive) {
+            return;
+        }
+    }
+    candidates.push(candidate);
+    candidates.sort_by(compare_candidates);
+    if candidates.len() > MAX_LRU_BATCH {
+        candidates.pop();
+        snapshot.more_candidates = true;
+    }
+}
+
+fn compare_candidates(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    (a.newest, &a.display, a.kind, &a.cache, &a.target)
+        .cmp(&(b.newest, &b.display, b.kind, &b.cache, &b.target))
+}
+
+fn compare_candidate_cursor(candidate: &Candidate, cursor: &PruneCursor) -> std::cmp::Ordering {
+    (
+        candidate.newest,
+        &candidate.display,
+        candidate.kind,
+        &candidate.cache,
+        &candidate.target,
+    )
+        .cmp(&(
+            cursor.newest,
+            &cursor.display,
+            cursor.kind,
+            &cursor.cache,
+            &cursor.target,
+        ))
 }
 
 fn state_matches(state: &MeasureProgress, candidate: &Candidate) -> bool {
@@ -1695,18 +1958,34 @@ fn prune_with_progress(
         candidates,
         mut total,
         mut free,
+        more_candidates,
         complete: _,
     } = survey;
+    report.more_candidates = more_candidates;
+    if dry_run && more_candidates {
+        report.measurement_skipped = true;
+    }
     let grace = grace_ns(limits);
     let start = snapshot
         .as_deref()
         .and_then(|snapshot| snapshot.prune_cursor.as_ref())
         .and_then(|cursor| {
-            candidates
-                .iter()
-                .position(|candidate| matches_prune_cursor(cursor, candidate))
+            candidates.iter().position(|candidate| {
+                let ordering = compare_candidate_cursor(candidate, cursor);
+                ordering.is_gt() || (cursor.inclusive && ordering.is_eq())
+            })
         })
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            if snapshot
+                .as_deref()
+                .and_then(|snapshot| snapshot.prune_cursor.as_ref())
+                .is_some()
+            {
+                candidates.len()
+            } else {
+                0
+            }
+        });
     for candidate in candidates.into_iter().skip(start) {
         if total <= limits.max_bytes && free >= limits.free_floor {
             break;
@@ -1714,21 +1993,25 @@ fn prune_with_progress(
         if should_stop() {
             report.measurement_skipped = true;
             if let Some(snapshot) = snapshot.as_deref_mut() {
-                snapshot.prune_cursor = Some(prune_cursor(&candidate));
+                snapshot.prune_cursor = Some(prune_cursor(&candidate, true));
             }
             report.interrupted_at = Some(candidate.display);
             break;
         }
         let tombstone = is_gc_tombstone(&candidate.target);
         if !tombstone && within_grace(candidate.newest, now_ns, grace) {
-            report.recent.push(candidate.display);
+            report.recent.push(candidate.display.clone());
+            advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
             continue;
         }
         let root = match candidate.kind {
             CacheKind::Lane => lane_root.as_ref(),
             CacheKind::Shared => shared_root.as_ref(),
         };
-        let Some(root) = root else { continue };
+        let Some(root) = root else {
+            advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
+            continue;
+        };
         let resumed = snapshot
             .as_deref()
             .and_then(|snapshot| snapshot.rechecking.as_ref())
@@ -1754,13 +2037,20 @@ fn prune_with_progress(
                     snapshot.rechecking = None;
                 }
                 total = total.saturating_sub(candidate.bytes);
+                if let Some(snapshot) = snapshot.as_deref_mut() {
+                    snapshot.census_bytes = snapshot.census_bytes.saturating_sub(candidate.bytes);
+                    snapshot
+                        .completed
+                        .retain(|saved| !same_candidate(saved, &candidate));
+                }
                 report.bytes = report.bytes.saturating_add(candidate.bytes);
-                report.removed.push(candidate.display);
+                report.removed.push(candidate.display.clone());
                 free = if dry_run {
                     free.saturating_add(candidate.bytes)
                 } else {
                     free_space().unwrap_or(free.saturating_add(candidate.bytes))
                 };
+                advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
             }
             Ok(Outcome::Busy) => {
                 if let Some(snapshot) = snapshot.as_deref_mut()
@@ -1771,9 +2061,10 @@ fn prune_with_progress(
                 {
                     snapshot.rechecking = None;
                 }
-                report.busy.push(candidate.display)
+                report.busy.push(candidate.display.clone());
+                advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
             }
-            Ok(Outcome::Recent) => {
+            Ok(Outcome::Recent(measured)) => {
                 if let Some(snapshot) = snapshot.as_deref_mut()
                     && snapshot
                         .rechecking
@@ -1782,7 +2073,47 @@ fn prune_with_progress(
                 {
                     snapshot.rechecking = None;
                 }
-                report.recent.push(candidate.display)
+                match measured {
+                    Some((bytes, newest)) => {
+                        total = total.saturating_sub(candidate.bytes).saturating_add(bytes);
+                        let refreshed = Candidate {
+                            bytes,
+                            newest,
+                            ..candidate.clone()
+                        };
+                        if let Some(snapshot) = snapshot.as_deref_mut() {
+                            snapshot.census_bytes = snapshot
+                                .census_bytes
+                                .saturating_sub(candidate.bytes)
+                                .saturating_add(bytes);
+                            if let Some(saved) = snapshot
+                                .completed
+                                .iter_mut()
+                                .find(|saved| same_candidate(saved, &candidate))
+                            {
+                                saved.bytes = bytes;
+                                saved.newest = newest;
+                            }
+                        }
+                        report.recent.push(candidate.display.clone());
+                        advance_prune_cursor(snapshot.as_deref_mut(), &refreshed);
+                    }
+                    None => {
+                        report.measurement_skipped = true;
+                        report.interrupted_at = Some(candidate.display.clone());
+                        if let Some(snapshot) = snapshot.as_deref_mut() {
+                            snapshot.completed.clear();
+                            snapshot.census_bytes = 0;
+                            snapshot.census_complete = false;
+                            snapshot.more_candidates = false;
+                            snapshot.root_cursor = None;
+                            snapshot.prune_cursor = None;
+                            snapshot.measuring = None;
+                            snapshot.rechecking = None;
+                        }
+                        break;
+                    }
+                }
             }
             Ok(Outcome::Interrupted {
                 rechecking,
@@ -1790,12 +2121,18 @@ fn prune_with_progress(
             }) => {
                 if let Some(snapshot) = snapshot.as_deref_mut() {
                     if detached {
-                        // A target now lives under its deletion tombstone.
-                        // Revisit the root before trusting the saved inventory.
+                        snapshot.completed.clear();
+                        snapshot.census_bytes = 0;
+                        snapshot.census_complete = false;
+                        snapshot.more_candidates = false;
                         snapshot.root_cursor = None;
+                        snapshot.prune_cursor = None;
+                        snapshot.measuring = None;
+                        snapshot.rechecking = None;
+                    } else {
+                        snapshot.rechecking = rechecking;
+                        snapshot.prune_cursor = Some(prune_cursor(&candidate, true));
                     }
-                    snapshot.rechecking = rechecking;
-                    snapshot.prune_cursor = Some(prune_cursor(&candidate));
                 }
                 report.measurement_skipped = true;
                 report.interrupted_at = Some(candidate.display);
@@ -1814,30 +2151,40 @@ fn prune_with_progress(
                 report
                     .errors
                     .push(format!("{}: {error}", candidate.display.display()));
+                advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
             }
         }
-    }
-    if report.interrupted_at.is_none()
-        && let Some(snapshot) = snapshot.as_deref_mut()
-    {
-        snapshot.prune_cursor = None;
     }
     report.cache_bytes = total;
     report
 }
 
-fn prune_cursor(candidate: &Candidate) -> PruneCursor {
+fn prune_cursor(candidate: &Candidate, inclusive: bool) -> PruneCursor {
     PruneCursor {
         kind: candidate.kind,
         cache: candidate.cache.clone(),
         target: candidate.target.clone(),
+        newest: candidate.newest,
+        display: candidate.display.clone(),
+        inclusive,
     }
 }
 
-fn matches_prune_cursor(cursor: &PruneCursor, candidate: &Candidate) -> bool {
-    cursor.kind == candidate.kind
-        && cursor.cache == candidate.cache
-        && cursor.target == candidate.target
+fn advance_prune_cursor(snapshot: Option<&mut SurveySnapshot>, candidate: &Candidate) {
+    let Some(snapshot) = snapshot else { return };
+    let candidate_cursor = prune_cursor(candidate, false);
+    match snapshot.prune_cursor.as_ref() {
+        Some(current) if compare_candidate_cursor(candidate, current).is_gt() => {
+            snapshot.prune_cursor = Some(candidate_cursor);
+        }
+        Some(current)
+            if compare_candidate_cursor(candidate, current).is_eq() && current.inclusive =>
+        {
+            snapshot.prune_cursor = Some(candidate_cursor);
+        }
+        None => snapshot.prune_cursor = Some(candidate_cursor),
+        _ => {}
+    }
 }
 
 fn grace_ns(limits: Limits) -> i128 {
@@ -1865,7 +2212,7 @@ fn discover(
         if budget.preview {
             PREVIEW_ENTRIES
         } else {
-            MAX_CACHE_ROOT_ENTRIES
+            MAX_ENTRIES
         },
     ) {
         Ok(names) => names,
@@ -2066,19 +2413,20 @@ fn remove(
         return Ok(Outcome::Removed);
     }
 
-    let newest = match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)?
+    let (bytes, newest) =
+        match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)? {
+            MeasureOutcome::Complete { bytes, newest } => (bytes, newest),
+            MeasureOutcome::Interrupted(state) => {
+                return Ok(Outcome::Interrupted {
+                    rechecking: Some(state),
+                    detached: false,
+                });
+            }
+            MeasureOutcome::Changed => return Ok(Outcome::Recent(None)),
+        };
+    if bytes != candidate.bytes || newest != candidate.newest || within_grace(newest, now_ns, grace)
     {
-        MeasureOutcome::Complete { newest, .. } => newest,
-        MeasureOutcome::Interrupted(state) => {
-            return Ok(Outcome::Interrupted {
-                rechecking: Some(state),
-                detached: false,
-            });
-        }
-        MeasureOutcome::Changed => return Ok(Outcome::Recent),
-    };
-    if newest != candidate.newest || within_grace(newest, now_ns, grace) {
-        return Ok(Outcome::Recent);
+        return Ok(Outcome::Recent(Some((bytes, newest))));
     }
     if should_stop() {
         return Ok(Outcome::Interrupted {
@@ -2331,10 +2679,18 @@ mod tests {
         let other = fixture.profile('b', "debug", 4096, 1000);
         let payload = older.join("deps/payload");
         let before = fs::metadata(&payload).unwrap().modified().unwrap();
+        let root = Directory::open_anchor(&cache_root(fixture.home.path())).unwrap();
+        let root_before = root.metadata().unwrap().modified_ns;
 
         assert!(mark_managed_target_use(fixture.home.path(), &older).unwrap());
         let after = fs::metadata(&payload).unwrap().modified().unwrap();
         assert_eq!(before, after);
+        assert!(
+            cache_root(fixture.home.path())
+                .join(CACHE_ACTIVITY_MARKER)
+                .is_file()
+        );
+        assert_ne!(root_before, root.metadata().unwrap().modified_ns);
 
         let mut free = plenty;
         let survey = survey(fixture.home.path(), &mut free, false);
@@ -2461,6 +2817,40 @@ mod tests {
         );
         assert!(directory.join(&active).is_file());
         assert!(directory.join(&unrelated).is_file());
+    }
+
+    #[test]
+    fn compact_survey_inventory_keeps_more_than_fifty_thousand_cache_keys_bounded() {
+        let candidates = (0..100_002)
+            .map(|index| Candidate {
+                kind: CacheKind::Lane,
+                cache: format!("{:064x}", index / 2),
+                target: if index % 2 == 0 {
+                    "target".into()
+                } else {
+                    "target-lint".into()
+                },
+                display: PathBuf::new(),
+                bytes: index as u64,
+                newest: 1_700_000_000_000_000_000,
+                target_modified_ns: 1_700_000_000_000_000_000,
+                identity: (1_234_567, index as u64),
+            })
+            .collect::<Vec<_>>();
+        let snapshot = SurveySnapshot {
+            version: SURVEY_SNAPSHOT_VERSION,
+            epoch: "0000000000000001".into(),
+            completed: candidates,
+            ..SurveySnapshot::default()
+        };
+        let mut bounded = BoundedSidecar::new(SURVEY_SNAPSHOT_LIMIT as usize);
+
+        serde_json::to_writer(&mut bounded, &snapshot).unwrap();
+        let encoded = bounded.bytes;
+        let decoded: SurveySnapshot = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.completed.len(), 100_002);
+        assert!(encoded.len() < SURVEY_SNAPSHOT_LIMIT as usize);
     }
 
     #[test]
@@ -2706,6 +3096,105 @@ mod tests {
             assert!(detail.is_some(), "interrupted census must publish progress");
         }
         panic!("flat cache-root census failed to reach later cache keys");
+    }
+
+    #[test]
+    fn cache_root_with_more_than_twenty_thousand_entries_is_collectable() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        const CACHE_KEYS: usize = 20_001;
+        let root = cache_root(fixture.home.path());
+        let target = root.join(format!("{:064x}", CACHE_KEYS - 1)).join("target");
+        for index in 0..CACHE_KEYS {
+            let cache = root.join(format!("{index:064x}"));
+            fs::create_dir(&cache).unwrap();
+            fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::create_dir_all(target.join("deps")).unwrap();
+        fs::write(target.join(CARGO_LOCK), b"").unwrap();
+        fs::write(target.join("deps/payload"), vec![9_u8; 128]).unwrap();
+
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: u64::MAX,
+            setting: "100%".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut continue_scan = || false;
+        let mut refresh = TargetProtection::default;
+        let report = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000001",
+            &mut continue_scan,
+            &mut refresh,
+        )
+        .unwrap();
+
+        assert!(!report.measurement_skipped);
+        assert!(report.cache_bytes >= 128);
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn one_sweep_prunes_across_bounded_lru_batches() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        const CACHE_KEYS: usize = MAX_LRU_BATCH + 1;
+        let root = cache_root(fixture.home.path());
+        let mut targets = Vec::with_capacity(CACHE_KEYS);
+        for index in 0..CACHE_KEYS {
+            let cache = root.join(format!("{index:064x}"));
+            fs::create_dir(&cache).unwrap();
+            fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut owner = b"provenant-lane-cargo-owner-v2\n".to_vec();
+            owner.extend_from_slice(&0_u64.to_le_bytes());
+            owner.extend_from_slice(&0_u64.to_le_bytes());
+            owner.extend_from_slice(
+                Path::new(&format!("/fixture/worktree-{index}"))
+                    .as_os_str()
+                    .as_bytes(),
+            );
+            fs::write(cache.join(".provenant-worktree-owner"), owner).unwrap();
+            let target = cache.join("target");
+            fs::create_dir_all(target.join("deps")).unwrap();
+            for lock in LOCKS {
+                fs::write(target.join(lock), b"").unwrap();
+            }
+            fs::write(target.join("deps/payload"), vec![1_u8; 128]).unwrap();
+            targets.push(target);
+        }
+
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut continue_scan = || false;
+        let mut refresh = TargetProtection::default;
+        let report = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000002",
+            &mut continue_scan,
+            &mut refresh,
+        )
+        .unwrap();
+
+        assert_eq!(report.removed.len(), CACHE_KEYS);
+        assert_eq!(report.cache_bytes, 0);
+        assert!(targets.iter().all(|target| !target.exists()));
     }
 
     #[test]
