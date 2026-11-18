@@ -28,11 +28,9 @@ chair still picks the boundary and checks returned work against it.
 ## Review independence
 
 A reviewer gets the approved spec, base and pinned subject, never the author's
-diagnosis. Resolve a panel over named lenses and check it against the path
-floors. A missing required leg is replaced by an independent same-family
-reviewer through the same lens without reducing the count; record the
-substitution and never claim a family separation the attempt records do not
-show. Different model names do not prove different families.
+diagnosis. Choose lenses for the change. If a preferred family is unavailable,
+warn and proceed; record substitutions and never claim separation the attempt
+records do not show. Different model names do not prove different families.
 
 Cheaper scouts can gather claims for stronger judges, but a cheap finding does
 not satisfy a required review leg. A compiler, test or differential run
