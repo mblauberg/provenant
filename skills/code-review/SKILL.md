@@ -16,10 +16,9 @@ provenant run review-panel --brief-file brief.md --set subject=origin/branch --s
 
 The host computes the merge base, supplies pinned Git context and passes the
 brief through framing, every selected lens, verification and synthesis. A dotted
-leaf such as `review.security` selects only one lens; it is useful for a focused
-slice, not a substitute for the complete configured panel. Review each slice
-lightly and the integrated head with the full required panel. A changed subject
-gets a delta review against the prior findings and the invariant under repair.
+leaf such as `review.security` selects one lens. Choose coverage for the risk
+and applicable repository gates. A changed subject gets a delta review against
+the prior findings and the invariant under repair.
 
 ## Independence
 
@@ -44,5 +43,4 @@ config, persisted state), the checks that ran with their results, and what was n
 reachable. Never infer coverage from a green summary. Check that criteria map
 to evidence and that no test was loosened or deleted to mask a real defect
 (pruning rigid, redundant or implementation-pinned tests with stated reasons is
-welcome). For rendered UI, also inspect light and dark captures of changed screens
-(`ui-ux-design`).
+welcome). For rendered UI, use `ui-ux-design` to choose representative states.

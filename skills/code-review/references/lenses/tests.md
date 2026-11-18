@@ -1,8 +1,7 @@
 # Lens: tests
 
 Judge each test by the invariant it proves and the defect it would catch. Tests
-must be designed extensibly, flexibly and reliably so future code evolution
-does not require updating tests. Prefer invariants and property-style checks at
+should survive behaviour-preserving changes. Prefer invariants and property-style checks at
 public boundaries over rigid tests, example snapshots or exact string/count
 assertions.
 Use the test-design judgement and boundary references for the full standard.
@@ -12,10 +11,8 @@ Cite the exact command and result used for anything you ran.
 
 A test finding names the production change that would pass unnoticed: a
 surviving mutant, or an uncovered boundary invariant on a reachable path. It
-keeps its normal severity. Reviewers must never demand rigid tests, exact count
-or string pins, or regression tests when an invariant at the public boundary
-suffices. Regression tests remain minimal: at most one small test only where no
-invariant covers the defect.
+keeps its normal severity. Prefer focused regression coverage where an existing
+invariant leaves a gap.
 
 These also stay findings, because each leaves a check proving less than it
 claims:

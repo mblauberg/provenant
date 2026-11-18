@@ -28,8 +28,8 @@ senior and root constraints to principal; consult recorded cost per template.
 `implement` starts a junior writer directly; use `--plan` when the brief
 needs sizing. A junior writer with no plan input, write scope or explicit plan
 parameter emits an advisory warning. A long writer is for
-coupled work that cannot split. Review each slice lightly and the integrated
-head with the full panel. For a complete configured review, use:
+coupled work that cannot split. Choose review coverage for the risk and applicable
+repository gates. For a complete configured review, use:
 
 ```sh
 provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
