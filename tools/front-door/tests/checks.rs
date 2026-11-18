@@ -316,41 +316,15 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
     rig.assert_v1_root_untouched()
 }
 #[test]
-fn release_checks_the_running_binary_as_an_artifact() -> Result {
+fn release_checks_artifact_identity_and_required_public_files() -> Result {
+    // The three independent findings share one history and one executable scan.
+    // A planted source token must never be scanned, even alongside real defects.
     let rig = check_rig()?;
     legal(&rig)?;
     let base = commit(&rig, "public baseline")?;
     let token = format!("{}{}", "ghp_", "a".repeat(30));
     std::fs::write(rig.project.join("tracked-data"), token)?;
-    let head = commit(&rig, "data retained in current and historical tree")?;
-    let output = rig.command(&[
-        "check", "release", "--base", &base, "--head", &head, "--json",
-    ])?;
-    let page = json(&output)?;
-    let findings = page["data"]["findings"]
-        .as_array()
-        .ok_or("release findings")?;
-    // The fixture owns the Git evidence: the planted token lives only in tree
-    // and history bytes, and every commit carries the fixture identity. Nothing
-    // may be reported against either. The executable under scan is built
-    // elsewhere, so which byte rules it trips is not the fixture's to pin.
-    let from_fixture: Vec<_> = findings
-        .iter()
-        .filter(|finding| finding["path"]["path"] != "@artifact/provenant")
-        .collect();
-    assert!(
-        from_fixture.is_empty(),
-        "Git source and history bytes are outside the executable scan: {findings:?}"
-    );
-    assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
-    rig.assert_v1_root_untouched()
-}
-
-#[test]
-fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
-    let rig = check_rig()?;
-    legal(&rig)?;
-    commit(&rig, "public baseline")?;
+    git(&rig, &["add", "--all"])?;
     git(
         &rig,
         &[
@@ -358,18 +332,20 @@ fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
             "user.email=person@gmail.com",
             "commit",
             "-q",
-            "--allow-empty",
             "-m",
             "personal identity",
         ],
     )?;
-    let output = rig.command(&["check", "release", "--json"])?;
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    git(&rig, &["rm", "README.md"])?;
+    let output = rig.command(&[
+        "check", "release", "--base", &base, "--head", &head, "--json",
+    ])?;
     assert_eq!(code(&output), 1);
     let result = json(&output)?;
     let findings = result["data"]["findings"]
         .as_array()
         .ok_or("release findings")?;
-    let head = git(&rig, &["rev-parse", "HEAD"])?;
     let identities: Vec<_> = findings
         .iter()
         .filter(|finding| finding["rule"] == "release.personal-email")
@@ -395,28 +371,27 @@ fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
         .ok_or("expected identities")?
         .to_vec()
     );
+    let public: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding["rule"] == "release.public")
+        .collect();
+    assert_eq!(public.len(), 1, "{findings:?}");
+    assert_eq!(public[0]["path"]["path"], "README.md");
+    assert_eq!(public[0]["line"], 1);
+    assert_eq!(public[0]["message"], "required public file is not tracked");
+    // All remaining findings belong to the running executable. The token in
+    // the current and historical source trees produces no byte-rule finding.
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["rule"] == "release.personal-email"
+                || finding["rule"] == "release.public"
+                || finding["path"]["path"] == "@artifact/provenant"),
+        "{findings:?}"
+    );
     rig.assert_v1_root_untouched()
 }
-#[test]
-fn release_requires_tracked_public_files() -> Result {
-    let rig = check_rig()?;
-    legal(&rig)?;
-    commit(&rig, "public baseline")?;
-    git(&rig, &["rm", "README.md"])?;
-    let output = rig.command(&["check", "release", "--json"])?;
-    assert_eq!(code(&output), 1);
-    let result = json(&output)?;
-    let findings = result["data"]["findings"]
-        .as_array()
-        .ok_or("release findings")?;
-    assert!(findings.iter().any(|finding| {
-        finding["rule"] == "release.public"
-            && finding["path"]["path"] == "README.md"
-            && finding["line"] == 1
-            && finding["message"] == "required public file is not tracked"
-    }));
-    rig.assert_v1_root_untouched()
-}
+
 #[test]
 fn release_ranges_check_commit_identity_across_a_shallow_boundary() -> Result {
     let rig = check_rig()?;

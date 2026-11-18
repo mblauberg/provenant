@@ -4852,7 +4852,10 @@ mod tests {
         // checkpoint projection. Exercise the bundled replacement for that
         // workload, including submission metadata and sealed input manifests.
         let path = rig.root.join("acceptance.txt");
-        std::fs::write(&path, "Acceptance evidence.\n".repeat(38_000))?;
+        // Each control byte occupies six bytes in an inline JSON string. The
+        // same real checkpoint limit is crossed with much less ingress text
+        // to normalise, hash and retain in the prompt store.
+        std::fs::write(&path, "\u{0001}".repeat(90_000))?;
         let brief = std::fs::read_to_string(&path)?;
         let limits = &mut factory.context.config.graph.limits;
         limits.node_prompt_bytes = 1_048_576;
@@ -4935,7 +4938,19 @@ mod tests {
         );
         // Short node titles remain readable; the full file brief belongs only
         // in the prompt store, including its copies in submission metadata.
-        assert!(!String::from_utf8(stored)?.contains(&brief));
+        // Inspect decoded strings: a raw-byte absence check would always pass
+        // for escaped briefs, including those with ordinary newlines.
+        let mut values = vec![&envelope];
+        while let Some(value) = values.pop() {
+            match value {
+                Value::String(text) if text.len() >= brief.len() => {
+                    assert!(!text.contains(&brief));
+                }
+                Value::Array(items) => values.extend(items),
+                Value::Object(fields) => values.extend(fields.values()),
+                _ => {}
+            }
+        }
         assert_eq!(
             FileJournal::read_checkpoint(
                 &factory.context.roots.state,
