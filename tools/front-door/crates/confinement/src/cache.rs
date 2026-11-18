@@ -1729,8 +1729,13 @@ mod tests {
                 std::fs::create_dir(&owner)?;
                 let path = cache(home, &"a".repeat(64), &owner)?;
                 let locks = test_writer_lock(home)?;
+                // Idle at measurement; the concurrent write lands after "now".
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos()
+                    .try_into()?;
                 let policy = CacheGcPolicy {
-                    idle_before_ns: Some(i128::MAX),
+                    idle_before_ns: Some(now_ns),
                     free_floor_bytes: Some(1),
                     project_owners: [owner].into(),
                     ..CacheGcPolicy::default()

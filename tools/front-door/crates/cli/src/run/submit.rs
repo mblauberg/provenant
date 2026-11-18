@@ -384,6 +384,10 @@ pub(super) fn check_writer_disk(
 
 /// Start the host-wide GC worker. It acquires the shared single-flight lock
 /// before sweeping, without waiting on this launch.
+#[allow(
+    clippy::print_stderr,
+    reason = "a failed GC schedule is a launch warning"
+)]
 pub(super) fn schedule_low_space_gc(state: &Path, home: &Path, worktree: &Path) -> bool {
     let start = || -> Result<(), Box<dyn std::error::Error>> {
         let argv = [

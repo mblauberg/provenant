@@ -4118,7 +4118,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     Ok(())
 }
 
-fn agy_individual_quota_cools_model_until_reset() -> Result {
+fn agy_individual_quota_cools_model_until_revalidation() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
@@ -4175,15 +4175,17 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
         }
         .check(route)
     };
-    // Past the unknown-reset hour, the stated reset still holds the model.
-    for at in [now, now + 3600, resets - 1] {
+    // An agy refusal holds the model briefly, then revalidates even though the
+    // provider stated a later reset (docs/specs/routing.md).
+    for at in [now, now + 299] {
         assert!(matches!(
             admit(&route, at),
             Err(provenant_quota::QuotaError::Refused(reason))
                 if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
         ));
     }
-    admit(&route, resets)?;
+    assert!(now + 300 < resets);
+    admit(&route, now + 300)?;
     route.model = "gemini-3.8-pro".into();
     admit(&route, now)?;
     Ok(())
@@ -5611,8 +5613,8 @@ fn main() -> ExitCode {
                 opencode_free_reset_cools_pool_until_reset_and_restores,
             ),
             (
-                "agy_individual_quota_cools_model_until_reset",
-                agy_individual_quota_cools_model_until_reset,
+                "agy_individual_quota_cools_model_until_revalidation",
+                agy_individual_quota_cools_model_until_revalidation,
             ),
             (
                 "agy_denied_command_reaches_result_without_entering_terminal_diagnostics",
