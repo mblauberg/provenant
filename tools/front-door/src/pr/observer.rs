@@ -400,27 +400,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         clock: C,
         settings: provenant_cli::wait::Settings,
     ) -> Result<Self, ObserveError> {
-        let repository = repository
-            .strip_prefix("repos/")
-            .unwrap_or(repository)
-            .to_owned();
-        let parts: Vec<_> = repository.split('/').collect();
-        if parts.len() != 2
-            || parts.iter().any(|part| {
-                part.is_empty()
-                    || !part
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-            })
-        {
-            return Err(ObserveError::Unavailable(format!(
-                "not a GitHub repository: {repository}"
-            )));
-        }
-        let key = repository.to_ascii_lowercase().replace('/', "--");
-        let dir = open_state(state, &key).map_err(|error| {
-            ObserveError::Unavailable(format!("cannot open CI observer state: {error}"))
-        })?;
+        let dir = shared_dir(state, repository).map_err(ObserveError::Unavailable)?;
         let history = match cached_run_history(&dir) {
             Some(history) => history,
             None => {
@@ -856,6 +836,34 @@ fn open_state(state: &Path, key: &str) -> Result<Directory, Box<dyn std::error::
         dir = dir.open_verified_directory(OsStr::new(name))?;
     }
     Ok(dir)
+}
+
+/// The shared per-repository cache directory, keyed like every CI read.
+/// Batched forge reads and the per-commit observer cache share one home so a
+/// rate limit recorded by one transport holds off the other.
+pub(crate) fn shared_dir(state: &Path, repository: &str) -> Result<Directory, String> {
+    let repository = repository.strip_prefix("repos/").unwrap_or(repository);
+    let parts: Vec<_> = repository.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(format!("not a GitHub repository: {repository}"));
+    }
+    let key = repository.to_ascii_lowercase().replace('/', "--");
+    open_state(state, &key).map_err(|error| error.to_string())
+}
+
+/// The configured fast observation interval, the shared short TTL for batched
+/// reads that have no conditional revalidation.
+pub(crate) fn fast_interval(state: &Path, project: &Path) -> Option<Duration> {
+    let roots = settings_roots(state, project).ok()?;
+    let (settings, _) = provenant_cli::wait::Settings::resolve(&roots).ok()?;
+    Some(Duration::from_millis(settings.pr_interval_ms))
 }
 
 fn timestamp(second: i64) -> jiff::Timestamp {

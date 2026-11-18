@@ -298,3 +298,10 @@ worktree links without following them through the host filesystem.
 - Why: every published link must have one inspectable target in the tree being
   checked, independent of host files or link-chain behaviour.
 - Owner: `crates/cli/src/check/release.rs`
+
+## CI observations
+
+`pr status` reports the head, check rollup and failed check names for selected pull requests. `ci failures pr NUMBER` and `ci failures run ID` report failed test names, panic locations and messages, and error lines from failed job logs; JSON carries structured evidence. Unreadable and truncated evidence remains visible.
+
+- Owner: `src/pr/status.rs`, `src/pr/status/batch.rs`, `src/ci.rs`
+- Why: a chair needs actionable CI evidence without mistaking missing observations for success.

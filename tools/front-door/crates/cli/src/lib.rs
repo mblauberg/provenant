@@ -4,6 +4,7 @@ use provenant_core::edit_distance;
 pub mod accounts;
 pub mod brief;
 pub mod check;
+pub mod ci;
 pub mod cloud;
 pub mod config_reads;
 pub mod console;
