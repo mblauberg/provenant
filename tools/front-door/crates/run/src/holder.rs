@@ -4316,7 +4316,9 @@ mod writer_recovery_tests {
                     found.as_slice(),
                     [(
                         _,
-                        crate::Reconciled::Finished | crate::Reconciled::Withdrawn
+                        crate::Reconciled::Finished
+                            | crate::Reconciled::Withdrawn
+                            | crate::Reconciled::WriterLeaseReleased { .. }
                     )]
                 ),
                 "{mode}: {found:?}"
@@ -6866,7 +6868,12 @@ mod writer_recovery_tests {
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver,
             )?;
-            assert_eq!(found, vec![(id, crate::Reconciled::Finished)]);
+            assert!(matches!(
+                found.as_slice(),
+                [
+                    (attempt, crate::Reconciled::WriterLeaseReleased { locks })
+                ] if *attempt == id && !locks.is_empty()
+            ));
             let record = store.record(id, &call)?;
             assert!(
                 matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
@@ -6890,7 +6897,11 @@ mod writer_recovery_tests {
     #[test]
     fn reconcile_settles_failed_import_once_and_keeps_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        settlement_fault_modes(&["reconcile_failed", "reconcile_new", "reconcile_reboot"])
+        for mode in ["reconcile_failed", "reconcile_new", "reconcile_reboot"] {
+            settlement_fault_modes(&[mode])
+                .map_err(|error| std::io::Error::other(format!("{mode}: {error}")))?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -6950,7 +6961,9 @@ mod writer_recovery_tests {
             )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
-            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            // Fixture commands must bypass the active lane's private Git binding.
+            let git =
+                provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
             crate::objects::prepare_bound(
                 &git,
                 launch.worktree.repo(),
@@ -7090,7 +7103,14 @@ mod writer_recovery_tests {
                     &provenant_supervisor::census::SystemProcessObserver,
                 );
                 crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
-                assert!(found?.contains(&(id, crate::Reconciled::Finished)));
+                assert!(found?.iter().any(|(attempt, state)| {
+                    *attempt == id
+                        && matches!(
+                            state,
+                            crate::Reconciled::Finished
+                                | crate::Reconciled::WriterLeaseReleased { .. }
+                        )
+                }));
                 assert!(
                     matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
                     EffectDisposition::Failed { retryable: false, ref reason }
@@ -7098,7 +7118,12 @@ mod writer_recovery_tests {
                 );
                 assert!(store.writer_fences()?.is_empty());
                 let (_, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
-                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    &std::fs::read(path).map_err(|error| {
+                        std::io::Error::other(format!("retained private commit after GC: {error}"))
+                    })?,
+                    bytes
+                );
                 assert_eq!(
                     crate::objects::resolve_ref(
                         &git,
@@ -7347,7 +7372,14 @@ mod writer_recovery_tests {
                         .reconcile_with_observer(run.attempt_id, &providers, &call, observer)
                         .expect("recovery");
                     assert!(
-                        found.contains(&(id, crate::Reconciled::Finished)),
+                        found.iter().any(|(attempt, state)| {
+                            *attempt == id
+                                && matches!(
+                                    state,
+                                    crate::Reconciled::Finished
+                                        | crate::Reconciled::WriterLeaseReleased { .. }
+                                )
+                        }),
                         "{found:?}"
                     );
                     Ok(())
@@ -7368,7 +7400,14 @@ mod writer_recovery_tests {
                     read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?,
                     sealed
                 );
-                assert_eq!(std::fs::read(candidate.join("git-common/HEAD"))?, retained);
+                assert_eq!(
+                    std::fs::read(candidate.join("git-common/HEAD")).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "retained candidate HEAD after reconcile: {error}"
+                        ))
+                    })?,
+                    retained
+                );
                 assert_eq!(read_sealed(&attempt, "result.md", RESULT_LIMIT)?, result);
                 let (head, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
                 let recovery_info =
@@ -7385,7 +7424,12 @@ mod writer_recovery_tests {
                     false,
                     &call,
                 )?;
-                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    &std::fs::read(path).map_err(|error| {
+                        std::io::Error::other(format!("retained private commit after GC: {error}"))
+                    })?,
+                    bytes
+                );
                 assert_eq!(
                     crate::objects::resolve_ref(
                         &git,
@@ -7467,7 +7511,14 @@ mod writer_recovery_tests {
                         &provenant_supervisor::census::SystemProcessObserver,
                     )?;
                     assert!(
-                        found.contains(&(id, crate::Reconciled::Finished)),
+                        found.iter().any(|(attempt, state)| {
+                            *attempt == id
+                                && matches!(
+                                    state,
+                                    crate::Reconciled::Finished
+                                        | crate::Reconciled::WriterLeaseReleased { .. }
+                                )
+                        }),
                         "{found:?}"
                     );
                     assert!(

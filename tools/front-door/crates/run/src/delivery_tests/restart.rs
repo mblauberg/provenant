@@ -587,7 +587,11 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
     )?;
-    assert_eq!(found, vec![(id, Reconciled::Finished)]);
+    assert!(matches!(
+        found.as_slice(),
+        [(attempt, Reconciled::WriterLeaseReleased { locks })]
+            if *attempt == id && locks.iter().any(|lock| lock.ends_with("writer.lock"))
+    ));
     let refusal =
         crate::holder::object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
     assert!(matches!(

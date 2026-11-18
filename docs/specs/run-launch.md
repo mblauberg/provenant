@@ -11,7 +11,7 @@ Admission commits the reservation and attempt together. A verified worktree has
 at most one writer; resource probes do not hold the shared registry lock or run
 inside the transaction. Busy capacity is not a queue. Direct-run custody uses
 the same captured project and actor identity as the run store. Uncertain custody
-keeps its ownership until release is proved.
+keeps its ownership until release is proved. Writer-bind refusals identify the durable lease holder, branch, worktree, reservation age and observed liveness. Reservation age is measured from its last durable update. Reconciliation reports released custody only after exclusion and native absence evidence prove it safe; an unknown or live holder retains custody. Stable lock inodes remain in place so concurrent observers cannot split exclusion.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
 Before entering handoff or spawning a guardian, the launcher durably prepares

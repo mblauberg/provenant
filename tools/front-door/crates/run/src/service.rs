@@ -754,6 +754,7 @@ error_kinds! {
     Timeout => "TIMEOUT", "The wait budget expired.";
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
+    WriterLeaseHeld => "writer_lease_held", "Another attempt holds the writer lease.";
     WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
     WriterLockBusy => "WRITER_LOCK_BUSY", "The writer registry lock is held by another operation.";
     WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
@@ -813,6 +814,7 @@ impl ErrorKind {
             | Self::Refused
             | Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLeaseHeld
             | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::RetainedWriterImport
@@ -843,7 +845,7 @@ impl ErrorKind {
         match self {
             Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
             Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::RetainedWriterImport => B::LaneGit,
+            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::LaneGit,
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
@@ -858,6 +860,7 @@ impl ErrorKind {
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
+            RunError::StoredRecordRead { source, .. } => Self::from(source.as_ref()),
             RunError::Input { kind, .. } => *kind,
             RunError::ContinuationRefused { .. } => Self::ContinuationUnsupported,
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
@@ -879,6 +882,9 @@ impl From<&RunError> for ErrorKind {
                 | provenant_confinement::worktrees::WorktreeError::UnknownOccupancy { .. }
                 | provenant_confinement::worktrees::WorktreeError::IncompleteCensus { .. },
             ) => Self::WriterUnknown,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld { .. },
+            ) => Self::WriterLeaseHeld,
             RunError::Writer(_) => Self::WriterScope,
             RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialRoot
@@ -923,9 +929,15 @@ impl From<&RunError> for ErrorKind {
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
             RunError::Contention => Self::Contention,
-            RunError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-                found, ..
-            }) if *found > 1 => Self::UpgradeRequired,
+            RunError::Decode(error)
+                if matches!(
+                    error.root_cause(),
+                    provenant_records::DecodeError::UnsupportedVersion { found, .. }
+                        if *found > 1
+                ) =>
+            {
+                Self::UpgradeRequired
+            }
             RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
             _ => Self::Io,
         }

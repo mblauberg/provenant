@@ -636,6 +636,9 @@ pub enum Reconciled {
     Abandoned { reason: String },
     /// A durable exit was committed and released.
     Finished,
+    /// Reconcile removed a provably stale writer reservation and released its
+    /// worktree lock. The path identifies the stable lock slot it inspected.
+    WriterLeaseReleased { locks: Vec<std::path::PathBuf> },
     /// Leftover temporary data was removed from a terminal attempt.
     TemporaryRemoved,
     /// The attempt is terminal, but temporary data could not be removed.
@@ -651,6 +654,14 @@ pub enum Reconciled {
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: UncertainReason },
 }
+fn reservation_issue_blocks_report(reservation: &std::path::Path, issue: &std::path::Path) -> bool {
+    reservation.starts_with(issue)
+        || reservation
+            .parent()
+            .and_then(std::path::Path::parent)
+            .is_some_and(|slot| issue == slot.join("reservation.json"))
+}
+
 impl std::fmt::Display for Reconciled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -669,6 +680,15 @@ impl std::fmt::Display for Reconciled {
             }
             Self::Abandoned { reason } => write!(f, "abandoned: {reason}"),
             Self::Finished => f.write_str("finished"),
+            Self::WriterLeaseReleased { locks } => write!(
+                f,
+                "writer_lease_released {}",
+                locks
+                    .iter()
+                    .map(|lock| lock.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::TemporaryRemoved => f.write_str("temporary_removed"),
             Self::TemporaryRetained { path, reason } => {
                 write!(f, "temporary_retained {}: {reason}", path.display())
@@ -5152,6 +5172,24 @@ impl RunStore {
         self.open_attempts_readonly(limit, call)
     }
 
+    pub(crate) fn writer_issue_candidate(
+        &self,
+        issue: &provenant_supervisor::custody::ReservationIssue,
+        call: &Request<'_>,
+    ) -> Option<(AttemptId, std::path::PathBuf)> {
+        if issue.reservation.file_name() != Some(std::ffi::OsStr::new("reservation.json")) {
+            return None;
+        }
+        let parent = issue.reservation.parent()?;
+        let name = parent.file_name()?.to_str()?;
+        let id = AttemptId::parse(name).ok()?;
+        if id.to_string() != name {
+            return None;
+        }
+        let expected_slot = self.attempt_writer_slot(id, call).ok()??;
+        (parent.parent() == Some(expected_slot.as_path())).then(|| (id, issue.reservation.clone()))
+    }
+
     /// Inspect pending recovery without mutating Run state.
     pub fn open_attempts_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
@@ -5170,14 +5208,22 @@ impl RunStore {
             .iter()
             .map(|id| AttemptId::parse(id).map_err(|_| RunError::Validation("attempt index ID")))
             .collect::<Result<Vec<_>>>()?;
-        let fences = match self.writer_fence_listing() {
-            Ok(listing) => listing.reservations,
-            Err(_) if !runs.is_empty() => Vec::new(),
+        let (fences, issues) = match self.writer_fence_listing() {
+            Ok(listing) => (listing.reservations, listing.issues),
+            Err(_) if !runs.is_empty() => (Vec::new(), Vec::new()),
             Err(error) => return Err(error),
         };
         for fence in fences {
             if !runs.contains(&fence.scope.attempt) && runs.len() < limit as usize {
                 runs.push(fence.scope.attempt);
+            }
+        }
+        for issue in issues {
+            if let Some((id, _)) = self.writer_issue_candidate(&issue, call)
+                && !runs.contains(&id)
+                && runs.len() < limit as usize
+            {
+                runs.push(id);
             }
         }
         // A closed run whose reactions are still owed needs a drain too.
@@ -5473,8 +5519,8 @@ impl RunStore {
             )?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        let (fences, listing_error) = match self.writer_fence_listing() {
-            Ok(listing) => (listing.reservations, None),
+        let (fences, issues, listing_error) = match self.writer_fence_listing() {
+            Ok(listing) => (listing.reservations, listing.issues, None),
             Err(error) => {
                 if self.reaction_pending(attempt, call)? && !ids.contains(&attempt.to_string()) {
                     ids.push(attempt.to_string());
@@ -5482,12 +5528,27 @@ impl RunStore {
                 if ids.is_empty() {
                     return Err(error);
                 }
-                (Vec::new(), Some(error.to_string()))
+                (Vec::new(), Vec::new(), Some(error.to_string()))
             }
         };
         for id in self.pending_effect_attempts(attempt, call)? {
             if !ids.contains(&id.to_string()) {
                 ids.push(id.to_string());
+            }
+        }
+        let mut prior_fences: Vec<_> = fences
+            .iter()
+            .map(|fence| (fence.scope.attempt, fence.reservation.clone()))
+            .collect();
+        // Reboot recovery can validate records whose old device numbers make
+        // ordinary listing fail. Their paths are candidates for reporting,
+        // never authority to release: recovery still proves that separately.
+        for issue in issues {
+            if let Some((id, reservation)) = self.writer_issue_candidate(&issue, call) {
+                prior_fences.push((id, reservation));
+                if id == attempt && !ids.contains(&id.to_string()) {
+                    ids.push(id.to_string());
+                }
             }
         }
         for fence in fences {
@@ -5519,6 +5580,39 @@ impl RunStore {
             }
             if let Some(state) = state {
                 found.push((id, self.track_reconcile_progress(id, state, call)));
+            }
+        }
+        if let Ok(remaining) = self.writer_fence_listing() {
+            for (id, state) in &mut found {
+                if !matches!(
+                    state,
+                    Reconciled::Finished | Reconciled::Withdrawn | Reconciled::TemporaryRemoved
+                ) {
+                    continue;
+                }
+                let mut locks = Vec::new();
+                for (attempt, reservation) in &prior_fences {
+                    if *attempt != *id
+                        || remaining
+                            .reservations
+                            .iter()
+                            .any(|fence| &fence.reservation == reservation)
+                        || remaining.issues.iter().any(|issue| {
+                            reservation_issue_blocks_report(reservation, &issue.reservation)
+                        })
+                    {
+                        continue;
+                    }
+                    if let Some(slot) = reservation.parent().and_then(std::path::Path::parent) {
+                        let lock = slot.join("writer.lock");
+                        if !locks.contains(&lock) {
+                            locks.push(lock);
+                        }
+                    }
+                }
+                if !locks.is_empty() {
+                    *state = Reconciled::WriterLeaseReleased { locks };
+                }
             }
         }
         // A peer may have completed an earlier busy record while this pass
@@ -6303,7 +6397,15 @@ mod tests {
             &call,
             &SystemProcessObserver,
         )?;
-        assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
+        assert!(
+            matches!(
+                found.as_slice(),
+                [(attempt, Reconciled::WriterLeaseReleased { locks })]
+                    if *attempt == id
+                        && locks.iter().any(|lock| lock.ends_with("interrupted/writer.lock"))
+            ),
+            "{found:?}"
+        );
         assert!(store.writer_fences()?.is_empty());
         let terminal = store.record(id, &call)?;
         let AttemptState::Terminal {
@@ -6324,6 +6426,204 @@ mod tests {
             projected.reason.as_deref(),
             Some(Outcome::Rejected.diagnostic_reason())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn settled_writer_issues_are_discovered_only_in_their_persisted_slot() -> TestResult {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_core::Clock as _;
+        let fixture = PrepareFixture::new()?;
+        let context = registered_landed_writer_fixture(&fixture)?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut run = crate::tests::input();
+        let writer = fixture.writer.clone();
+        run.request.task.writer = Some(writer.clone());
+        store.create(&run, &call)?;
+        let starting = store.mark_starting(
+            &store.record(run.attempt_id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.withdraw(
+            run.attempt_id,
+            starting.state.clone(),
+            Outcome::Rejected,
+            "fixture",
+            clock.wall_now()?,
+            &call,
+        )?;
+        store.set_temporary_retained(run.attempt_id, false, &call)?;
+        crate::dispatch_tests::finish_reactions(&store)?;
+        assert!(
+            store.open_attempts_readonly(10, &call)?.is_empty(),
+            "pending effects: {:?}, receipts: {:?}",
+            store.pending_effect_attempts(run.attempt_id, &call)?,
+            store.record(run.attempt_id, &call)?.settlement_receipts
+        );
+
+        let slot = store.writer_slot(&writer)?;
+        std::fs::create_dir_all(&slot)?;
+        drop(provenant_supervisor::fixture::acquire_writer(
+            provenant_os::fs::Directory::open_anchor(&slot)?,
+            RunStore::scope(&starting),
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let reservation = slot
+            .join(run.attempt_id.to_string())
+            .join("reservation.json");
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+        value["reservation_device"] =
+            (value["reservation_device"].as_u64().ok_or("device")? + 1).into();
+        std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+        let listing = store.writer_fence_listing()?;
+        assert!(listing.reservations.is_empty());
+        let issue = listing
+            .issues
+            .iter()
+            .find(|issue| issue.reservation == reservation)
+            .ok_or("issue")?;
+        assert!(store.writer_issue_candidate(issue, &call).is_some());
+        let foreign = provenant_supervisor::custody::ReservationIssue {
+            reservation: context
+                .state_root
+                .as_path()
+                .join("worktrees")
+                .join(provenant_core::ProjectId::from_bytes([99; 16]).to_string())
+                .join(slot.file_name().ok_or("slot")?)
+                .join(run.attempt_id.to_string())
+                .join("reservation.json"),
+            reason: "foreign fixture".into(),
+        };
+        assert!(store.writer_issue_candidate(&foreign, &call).is_none());
+        assert_eq!(
+            store.open_attempts_readonly(10, &call)?,
+            vec![run.attempt_id]
+        );
+        let mut queued = false;
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
+            queued = true;
+            Ok(())
+        })?;
+        assert!(
+            queued,
+            "the async control must queue the settled writer issue"
+        );
+        let found = store.reconcile_with_observer(
+            run.attempt_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(found.iter().any(|(id, _)| *id == run.attempt_id));
+        assert!(matches!(
+            store.record(run.attempt_id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn related_unreadable_slots_block_only_their_release_report() {
+        let reservation =
+            std::path::Path::new("/state/worktrees/project/slot/attempt/reservation.json");
+        for related in [
+            "/state/worktrees/project/slot/attempt/reservation.json",
+            "/state/worktrees/project/slot/reservation.json",
+            "/state/worktrees/project/slot",
+            "/state/worktrees/project",
+        ] {
+            assert!(reservation_issue_blocks_report(
+                reservation,
+                std::path::Path::new(related)
+            ));
+        }
+        for unrelated in [
+            "/state/worktrees/project/other/reservation.json",
+            "/state/worktrees/project/slot/other-attempt/reservation.json",
+            "/state/worktrees/other-project/slot/reservation.json",
+        ] {
+            assert!(!reservation_issue_blocks_report(
+                reservation,
+                std::path::Path::new(unrelated)
+            ));
+        }
+    }
+
+    #[test]
+    fn reconcile_keeps_a_live_worktree_lease_and_its_reservation() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let mut run = crate::tests::input();
+        run.request.task.writer = Some(WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(crate::tests::writer_project()),
+            project: temp.path().join("checkout"),
+            worktree: temp.path().join("checkout/.worktrees/live"),
+        });
+        store.create(&run, &call)?;
+        let starting = store.mark_starting(
+            &store.record(run.attempt_id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let custody = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("live");
+        std::fs::create_dir_all(&custody)?;
+        let lease = provenant_supervisor::fixture::acquire_writer(
+            provenant_os::fs::Directory::open_anchor(&custody)?,
+            RunStore::scope(&starting),
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        let reservation = custody
+            .join(starting.attempt_id.to_string())
+            .join("reservation.json");
+        let before = std::fs::read(&reservation)?;
+
+        let found = store.reconcile_with_observer(
+            starting.attempt_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+
+        assert!(matches!(
+            found.as_slice(),
+            [(attempt, Reconciled::Uncertain { .. } | Reconciled::Held)]
+                if *attempt == starting.attempt_id
+        ));
+        assert_eq!(std::fs::read(&reservation)?, before);
+        assert!(
+            store
+                .writer_fences()?
+                .iter()
+                .any(|fence| fence.scope == RunStore::scope(&starting))
+        );
+        drop(lease);
         Ok(())
     }
 

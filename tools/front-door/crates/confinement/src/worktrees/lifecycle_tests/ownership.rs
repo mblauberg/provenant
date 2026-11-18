@@ -1374,3 +1374,93 @@ fn unknown_unrelated_process_does_not_block_a_writer() -> Result<(), Box<dyn Err
     drop(writer);
     Ok(())
 }
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn writer_bind_refusal_names_the_durable_holder() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "named-holder".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let scope = provenant_records::custody::Scope {
+        attempt: AttemptId::from_bytes([53; 16]),
+        generation: 1,
+    };
+    let binding = WriterBinding::from_verified(
+        tree.repo().root_dir(),
+        tree.repo().private_dir(),
+        "refs/heads/named-holder",
+        info.head,
+    )?;
+    let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+        slot,
+        scope,
+        binding,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let mut lease = Some(lease);
+    for held in [true, false] {
+        if !held {
+            drop(lease.take());
+        }
+        let error = claim_writer_guard(&context, &info.path, &cancel())
+            .err()
+            .ok_or("writer bind succeeded")?;
+        let WorktreeError::WriterLeaseHeld {
+            holder,
+            branch,
+            worktree,
+            age,
+            live: actual_live,
+        } = error
+        else {
+            return Err(format!("unnamed refusal: {error}").into());
+        };
+        assert_eq!(holder, scope.attempt);
+        assert_eq!(branch, "refs/heads/named-holder");
+        assert_eq!(worktree, info.path);
+        assert!(!age.is_empty());
+        assert_ne!(age, "unknown");
+        // The fixture records an earlier boot. A lock held by this test
+        // does not make that recorded holder live.
+        assert_ne!(actual_live, Some(true));
+    }
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let recovery = provenant_supervisor::custody::acquire_recovery(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let refused = claim_writer_guard(&context, &info.path, &cancel())
+        .err()
+        .ok_or("recovery did not exclude writer")?;
+    assert!(
+        matches!(refused, WorktreeError::WriterLeaseHeld { live, .. } if live != Some(true)),
+        "recovery exclusion cannot make the recorded holder live"
+    );
+    drop(recovery);
+    let _observer = provenant_supervisor::custody::writer_observation_guard(&slot)?;
+    let refusal = name_writer_lease(context.project_state, &info.path, WorktreeError::LockBusy);
+    assert!(
+        matches!(
+            refusal,
+            WorktreeError::WriterLeaseHeld { live, .. } if live != Some(true)
+        ),
+        "a busy observer cannot make a dead reservation holder live"
+    );
+
+    Ok(())
+}

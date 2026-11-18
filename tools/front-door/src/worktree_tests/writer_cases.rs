@@ -575,7 +575,11 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
     )?;
     let found = store.reconcile_for_fixture(record.attempt_id, &provider, &call)?;
     // Recovery refuses the unfinished operation, settles once and releases custody.
-    assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
+    assert!(matches!(
+        found.as_slice(),
+        [(reconciled_attempt, provenant_run::Reconciled::WriterLeaseReleased { locks })]
+            if *reconciled_attempt == attempt && !locks.is_empty()
+    ));
     let terminal = store.record(attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
     assert!(matches!(

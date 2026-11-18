@@ -2966,14 +2966,23 @@ impl crate::RunStore {
                     .map_err(|_| RunError::Validation("attempt index ID"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let listing_error = match self.writer_fences() {
-            Ok(fences) => {
+        let listing_error = match self.writer_fence_listing() {
+            Ok(listing) => {
+                let fences = listing.reservations;
                 for fence in fences
                     .into_iter()
                     .filter(|fence| fence.scope.attempt == attempt)
                 {
                     if !ids.contains(&fence.scope.attempt) {
                         ids.push(fence.scope.attempt);
+                    }
+                }
+                for issue in listing.issues {
+                    if let Some((id, _)) = self.writer_issue_candidate(&issue, call)
+                        && id == attempt
+                        && !ids.contains(&id)
+                    {
+                        ids.push(id);
                     }
                 }
                 None

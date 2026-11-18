@@ -421,7 +421,15 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             &provenant_supervisor::census::SystemProcessObserver,
         )?;
         if prepared {
-            assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [(attempt, Reconciled::WriterLeaseReleased { locks })]
+                        if *attempt == id
+                            && locks.iter().any(|lock| lock.ends_with("lane/writer.lock"))
+                ),
+                "{found:?}"
+            );
             assert!(store.writer_fences()?.is_empty());
             finish_reactions(&store)?;
             assert_eq!(

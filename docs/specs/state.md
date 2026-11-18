@@ -135,7 +135,7 @@ discard unknown fields; records with explicit extension maps preserve their
 extensions. Host-owned semantics belong to typed fields on their owning record;
 malformed values fail decoding instead of becoming absent facts. Extension maps
 preserve only unknown fields, so a newer writer's data can survive a round trip.
-Edge-built facts are `Serialize` only.
+Edge-built facts are `Serialize` only. Stored-record read failures name the path and record type, with the schema version when readable; typed decode failures retain the missing field name without echoing rejected values. Additive optional exit evidence defaults to absence when reading earlier records within the same state-root major.
 - Why: a forged file must not become evidence.
 - Lint: `scripts/check-extra-fields` rejects host literal and constant keys in
   non-test extension-map reads and writes, with no allowlist.
