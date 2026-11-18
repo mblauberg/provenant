@@ -4104,7 +4104,7 @@ pub(super) fn prepare_candidates_inner(
             &plan,
         );
         let common_git_dir = match &plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir().to_path_buf()),
             AccessMode::ReadOnly => None,
         };
         let private_cache = match &plan.permissions().mode {
@@ -4112,7 +4112,7 @@ pub(super) fn prepare_candidates_inner(
             AccessMode::ReadOnly => &plan.permissions().scratch.path,
         };
         let (cargo_target_dir, cargo_target_lint) =
-            cargo_target.target_paths(&home, common_git_dir, private_cache);
+            cargo_target.target_paths(&home, common_git_dir.as_deref(), private_cache);
         // A shared or configured target lies outside the lane cache. Create it
         // here so a sandboxed lane's grants can anchor to it; Cargo would
         // create it itself only after the profile is fixed.
@@ -4817,7 +4817,7 @@ pub(super) fn prepare_candidates_inner(
         let cargo_target_protection = run::build_dir_gc::target_protection_for_launch(
             roots,
             writer.as_ref().map(|writer| writer.worktree.path()),
-            common_git_dir,
+            common_git_dir.as_deref(),
         );
         return Ok(run::PreparedLaunch {
             limits,

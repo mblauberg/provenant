@@ -269,27 +269,6 @@ impl Outcome {
     }
 }
 
-pub(crate) fn seed_target(
-    state: &Path,
-    cache: &Path,
-    worktree: &Path,
-    project_key: &str,
-    home: &Path,
-    environment: &[(std::ffi::OsString, std::ffi::OsString)],
-    cancel: &provenant_core::CancelToken,
-) -> Outcome {
-    seed_target_with_reservation(
-        state,
-        cache,
-        worktree,
-        project_key,
-        home,
-        environment,
-        cancel,
-        |_| {},
-    )
-}
-
 pub(crate) fn seed_target_with_reservation(
     state: &Path,
     cache: &Path,
@@ -619,12 +598,8 @@ fn allocated_tree_bytes(
                 if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
                     return None;
                 }
-                bytes = bytes.saturating_add(walk(
-                    &entry.ok()?.path(),
-                    depth + 1,
-                    deadline,
-                    cancel,
-                )?);
+                bytes =
+                    bytes.saturating_add(walk(&entry.ok()?.path(), depth + 1, deadline, cancel)?);
             }
         }
         Some(bytes)
@@ -1204,7 +1179,7 @@ mod tests {
         provenant_confinement::cargo::CargoHome::resolve(&home, |_| None)
             .unwrap()
             .lane_cargo_environment(&home, &cache, &mut env);
-        let outcome = seed_target(
+        let outcome = seed_target_with_reservation(
             &state,
             &cache,
             &worktree,
@@ -1212,6 +1187,7 @@ mod tests {
             &home,
             &env,
             &provenant_core::CancelToken::new(),
+            |_| {},
         );
         assert_eq!(
             (outcome.status.as_str(), outcome.reason.as_str()),
@@ -1220,7 +1196,7 @@ mod tests {
         assert!(cache.join("target").is_dir());
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
-        let outcome = seed_target(
+        let outcome = seed_target_with_reservation(
             &state,
             &cache,
             &worktree,
@@ -1228,6 +1204,7 @@ mod tests {
             &home,
             &refused,
             &provenant_core::CancelToken::new(),
+            |_| {},
         );
         assert_eq!(
             outcome,

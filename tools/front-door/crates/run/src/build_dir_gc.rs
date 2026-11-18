@@ -28,7 +28,9 @@ use std::{
 
 /// Cargo's per-profile lock files. `.cargo-lock` marks a profile directory;
 /// the other two exist only under newer Cargo and are probed when present.
+#[cfg(test)]
 const CARGO_LOCK: &str = ".cargo-lock";
+#[cfg(test)]
 const LOCKS: [&str; 3] = [CARGO_LOCK, ".cargo-build-lock", ".cargo-artifact-lock"];
 const TARGETS: [&str; 2] = ["target", "target-lint"];
 const GC_TOMBSTONES: [(&str, &str); 2] = [
@@ -42,7 +44,7 @@ const PREVIEW_ENTRIES: usize = 4096;
 const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
 const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
-const SURVEY_SNAPSHOT_VERSION: u8 = 3;
+const SURVEY_SNAPSHOT_VERSION: u8 = 4;
 const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
 const TARGET_LAST_USED: &str = ".provenant-last-used";
 /// How far ahead of now a modification time may be and still count as a
@@ -111,8 +113,16 @@ struct SurveySnapshot {
     shared_root: Option<RootIdentity>,
     completed: Vec<Candidate>,
     root_cursor: Option<RootCursor>,
+    prune_cursor: Option<PruneCursor>,
     measuring: Option<MeasureProgress>,
     rechecking: Option<MeasureProgress>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PruneCursor {
+    kind: CacheKind,
+    cache: String,
+    target: String,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -575,7 +585,9 @@ pub fn collect_with_progress(
         let interrupted = survey.report.interrupted_at.clone();
         let mut partial = survey.finish();
         partial.interrupted_at = interrupted;
-        save_survey_snapshot(host, &mut snapshot, epoch, &mut partial);
+        if !dry_run {
+            save_survey_snapshot(host, &mut snapshot, epoch, &mut partial);
+        }
         return Ok(partial);
     }
 
@@ -586,19 +598,27 @@ pub fn collect_with_progress(
     }
 
     if dry_run {
+        if should_stop() {
+            let mut report = survey.finish();
+            report.measurement_skipped = true;
+            report.interrupted_at = snapshot
+                .completed
+                .first()
+                .map(|candidate| candidate.display.clone());
+            return Ok(report);
+        }
+        let mut current_protection = protection.clone();
+        current_protection.merge(&refresh_protection());
         let mut report = prune_with_progress(
             survey,
             limits,
             true,
             wall_ns()?,
             &mut free,
-            protection,
+            &current_protection,
             should_stop,
-            Some(&mut snapshot),
+            None,
         );
-        if report.interrupted_at.is_some() {
-            save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
-        }
         return Ok(report);
     }
 
@@ -1012,6 +1032,7 @@ fn survey_with_progress(
         }
         snapshot.completed.clear();
         snapshot.root_cursor = None;
+        snapshot.prune_cursor = None;
         snapshot.measuring = None;
         snapshot.rechecking = None;
     }
@@ -1536,12 +1557,24 @@ fn prune_with_progress(
         complete: _,
     } = survey;
     let grace = grace_ns(limits);
-    for candidate in candidates {
+    let start = snapshot
+        .as_deref()
+        .and_then(|snapshot| snapshot.prune_cursor.as_ref())
+        .and_then(|cursor| {
+            candidates
+                .iter()
+                .position(|candidate| matches_prune_cursor(cursor, candidate))
+        })
+        .unwrap_or(0);
+    for candidate in candidates.into_iter().skip(start) {
         if total <= limits.max_bytes && free >= limits.free_floor {
             break;
         }
         if should_stop() {
             report.measurement_skipped = true;
+            if let Some(snapshot) = snapshot.as_deref_mut() {
+                snapshot.prune_cursor = Some(prune_cursor(&candidate));
+            }
             report.interrupted_at = Some(candidate.display);
             break;
         }
@@ -1613,6 +1646,7 @@ fn prune_with_progress(
             Ok(Outcome::Interrupted(rechecking)) => {
                 if let Some(snapshot) = snapshot.as_deref_mut() {
                     snapshot.rechecking = rechecking;
+                    snapshot.prune_cursor = Some(prune_cursor(&candidate));
                 }
                 report.measurement_skipped = true;
                 report.interrupted_at = Some(candidate.display);
@@ -1634,8 +1668,27 @@ fn prune_with_progress(
             }
         }
     }
+    if report.interrupted_at.is_none()
+        && let Some(snapshot) = snapshot.as_deref_mut()
+    {
+        snapshot.prune_cursor = None;
+    }
     report.cache_bytes = total;
     report
+}
+
+fn prune_cursor(candidate: &Candidate) -> PruneCursor {
+    PruneCursor {
+        kind: candidate.kind,
+        cache: candidate.cache.clone(),
+        target: candidate.target.clone(),
+    }
+}
+
+fn matches_prune_cursor(cursor: &PruneCursor, candidate: &Candidate) -> bool {
+    cursor.kind == candidate.kind
+        && cursor.cache == candidate.cache
+        && cursor.target == candidate.target
 }
 
 fn grace_ns(limits: Limits) -> i128 {
@@ -2224,6 +2277,81 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_dry_run_preview_does_not_write_resume_state() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = fixture.profile('a', "debug", 1, 100);
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut calls = 0;
+        let mut stop = || {
+            calls += 1;
+            calls > 5
+        };
+        let mut refresh = TargetProtection::default;
+
+        let report = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            true,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000001",
+            &mut stop,
+            &mut refresh,
+        )
+        .unwrap();
+
+        assert!(report.measurement_skipped);
+        assert!(report.cursor_detail.is_none());
+        assert!(target.exists());
+        assert!(!state.path().join("tick").exists());
+    }
+
+    #[test]
+    fn dry_run_uses_refreshed_shared_target_custody_for_reclaim_preview() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = fixture.shared_profile('a', "debug", 4096, 100);
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut stop = || false;
+        let mut refresh = || TargetProtection {
+            shared_projects: ["a".repeat(64)].into(),
+            ..TargetProtection::default()
+        };
+
+        let report = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            true,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000001",
+            &mut stop,
+            &mut refresh,
+        )
+        .unwrap();
+
+        assert!(report.removed.is_empty());
+        assert!(report.busy.iter().any(|path| path == &target));
+        assert!(target.join("deps/payload").is_file());
+        assert!(!state.path().join("tick").exists());
+    }
+
+    #[test]
     fn an_interrupted_cache_root_walk_resumes_after_completed_keys() {
         let fixture = Fixture::new();
         let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
@@ -2267,6 +2395,65 @@ mod tests {
             assert!(detail.is_some(), "interrupted census must publish progress");
         }
         panic!("flat cache-root census failed to reach later cache keys");
+    }
+
+    #[test]
+    fn prune_resume_cursor_advances_past_busy_targets() {
+        let fixture = Fixture::new();
+        for digit in ['a', 'b', 'c', 'd'] {
+            fixture.profile(digit, "debug", 4096, 100);
+        }
+        let mut free = plenty;
+        let first_survey = survey(fixture.home.path(), &mut free, false);
+        let expected = first_survey
+            .candidates
+            .iter()
+            .map(|candidate| candidate.display.clone())
+            .collect::<Vec<_>>();
+        let mut snapshot = SurveySnapshot {
+            version: SURVEY_SNAPSHOT_VERSION,
+            completed: first_survey.candidates.clone(),
+            ..SurveySnapshot::default()
+        };
+        let protection = TargetProtection {
+            unobserved: true,
+            ..TargetProtection::default()
+        };
+        let mut calls = 0;
+        let mut stop_after_two = || {
+            calls += 1;
+            calls > 2
+        };
+        let first = prune_with_progress(
+            first_survey,
+            limits(0, 0),
+            false,
+            now(),
+            &mut free,
+            &protection,
+            &mut stop_after_two,
+            Some(&mut snapshot),
+        );
+        assert_eq!(first.interrupted_at.as_ref(), expected.get(2));
+
+        let second_survey = survey(fixture.home.path(), &mut free, false);
+        let mut calls = 0;
+        let mut stop_after_one = || {
+            calls += 1;
+            calls > 1
+        };
+        let second = prune_with_progress(
+            second_survey,
+            limits(0, 0),
+            false,
+            now(),
+            &mut free,
+            &protection,
+            &mut stop_after_one,
+            Some(&mut snapshot),
+        );
+        assert_eq!(second.interrupted_at.as_ref(), expected.get(3));
+        assert!(second.removed.is_empty());
     }
 
     #[test]
