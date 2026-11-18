@@ -4556,12 +4556,82 @@ fn detached_graph_retry_reports_discarded_exclusion() -> Result {
                 "route":{"adapter":"codex", "model":"gpt-6-luna"}}]
         }))?,
     )?;
+    // The author's own unresolved exclusion on first launch must error visibly at admission.
+    let refusal = rig.command(&["run", "--file", document.to_str().ok_or("document")?])?;
+    assert_ne!(code(&refusal), 0, "{refusal:?}");
+    let refusal_text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&refusal.stdout.bytes),
+        String::from_utf8_lossy(&refusal.stderr.bytes)
+    );
+    assert!(
+        refusal_text.contains("legacy-bare-model"),
+        "{refusal_text}"
+    );
+
+    // Initial launch succeeds without the unresolvable exclusion.
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "stale-exclusion",
+            "nodes": [{"id":"reader", "prompt":"fixture read only", "access":"read_only",
+                "route":{"adapter":"codex", "model":"gpt-6-luna"}}]
+        }))?,
+    )?;
     let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], "30s")?;
     assert_eq!(
         settled.checkpoint["nodes"][0]["state"], "succeeded",
         "{}",
         settled.checkpoint
     );
+
+    // Carry over a stale exclusion into the admitted journal record for retry.
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+    use provenant_os::clock::SystemClock;
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let resolved_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &resolved_roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut execution = FileJournal::execution(&resolved_roots.state, project, "stale-exclusion")?
+        .ok_or("execution not found")?;
+    execution.document.exclude = vec!["legacy-bare-model".into()];
+    let mut checkpoint = FileJournal::read_checkpoint(&resolved_roots.state, project, "stale-exclusion")?
+        .ok_or("checkpoint not found")?;
+    checkpoint.plan_digest =
+        provenant_fabric_runtime::graph::graph_plan_digest(&execution.document)?.to_string();
+
+    let graphs_dir = resolved_roots
+        .state
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
+    let _ = fs::remove_file(graphs_dir.join("graph-stale-exclusion.json"));
+    let _ = fs::remove_file(graphs_dir.join("graph-stale-exclusion.reserved"));
+    let _ = fs::remove_file(graphs_dir.join("stale-exclusion.events.jsonl"));
+
+    let mut journal = FileJournal::open(
+        &resolved_roots.state,
+        project,
+        "stale-exclusion",
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
     let retry = rig.command(&["retry", "stale-exclusion/reader", "--json"])?;
     assert_eq!(code(&retry), 0, "{retry:?}");
     let wait = rig.command(&["wait", "stale-exclusion", "--timeout", "30s", "--json"])?;

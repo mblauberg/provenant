@@ -370,6 +370,13 @@ pub(crate) fn exclusion_rules(
         .collect()
 }
 
+/// Validate graph exclusions at admission time.
+pub fn validate_graph_exclusions(texts: &[String], roots: &Roots) -> Result<(), String> {
+    exclusion_rules(texts, provenant_routing::ExclusionSource::Graph, roots)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Diagnostics for carried graph selectors that routing will discard. The graph
 /// host retains these before detached preparation, whose stderr is not inherited.
 pub fn discarded_graph_exclusion_warnings(texts: &[String], roots: &Roots) -> Vec<String> {
