@@ -19,8 +19,9 @@ second description. Failed steps before import share a durable three-failure
 budget. A resumed worker honours `retry_after_ms` before its first pass and
 paces every subsequent pending pass even if that deadline has expired. Exhausted
 retries retain their cause and stop automatic recovery; status reports settlement
-blocked and calls for explicit reconciliation. A pending retry older than three
-minutes is flagged as stalled in the existing status reason.
+blocked and calls for explicit reconciliation. A retry deadline overdue by three
+minutes is flagged as stalled in the existing status reason, including failures
+before a driver is claimed.
 - Why: a retained writer must not contend with itself or spend CPU retrying an
   unchanged failure indefinitely.
 

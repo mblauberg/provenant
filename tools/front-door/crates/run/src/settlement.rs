@@ -193,29 +193,25 @@ pub fn diagnostic_for(
     let attempt =
         Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id))).ok()?;
     let journal = read(&attempt, crate::RunStore::scope(record)).ok()?;
-    let since = match record.state {
-        crate::AttemptState::Terminal { finished_at, .. } => {
-            u64::try_from(finished_at.unix_millis()).ok()
-        }
-        _ => Some(journal.owner_since_ms).filter(|since| *since > 0),
-    };
     diagnostic(
         &journal,
-        since,
         now.and_then(|at| u64::try_from(at.unix_millis()).ok()),
     )
 }
 
-fn diagnostic(journal: &Journal, since_ms: Option<u64>, now_ms: Option<u64>) -> Option<String> {
+fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
     let reason = journal.blocking_reason.as_deref()?;
     if journal.recovery_failures >= LIMIT {
         return Some(format!(
             "settlement blocked after {LIMIT} failures: {reason}; correct the cause and reconcile explicitly"
         ));
     }
-    let elapsed = since_ms
-        .zip(now_ms)
-        .map(|(since, now)| now.saturating_sub(since));
+    // A retry deadline exists even when custody failed before a driver could
+    // claim an owner. Age overdue work from that deadline, not provider runtime
+    // or a driver timestamp that may never have been recorded.
+    let elapsed = now_ms
+        .filter(|_| journal.retry_after_ms > 0)
+        .map(|now| now.saturating_sub(journal.retry_after_ms));
     if let Some(elapsed) = elapsed.filter(|elapsed| *elapsed >= STALLED_RETRY_MS) {
         return Some(format!(
             "settlement retry stalled for {}s: {reason}",
@@ -2173,7 +2169,7 @@ mod tests {
             "preimport errors must have their own cap"
         );
         assert!(journal.owner.is_none());
-        let status = diagnostic(&journal, Some(0), Some(now_ms(&clock)?)).ok_or("status reason")?;
+        let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status reason")?;
         assert!(status.contains("settlement blocked"));
         assert!(status.contains("preimport step failed"));
         resume_reconcile(&attempt, scope(), &clock, || {
@@ -2210,23 +2206,72 @@ mod tests {
 
     // Spec: docs/specs/run-settlement.md#settlement
     #[test]
-    fn settlement_status_flags_old_retries_and_retains_the_cause() -> TestResult {
-        let mut journal = Journal::new(scope());
-        journal.blocking_reason = Some("writer lock busy".into());
-        journal.recovery_failures = 1;
-        let recent = diagnostic(&journal, Some(0), Some(179_999)).ok_or("recent reason")?;
-        assert!(recent.contains("retry pending"));
-        let stale = diagnostic(&journal, Some(0), Some(180_000)).ok_or("stalled reason")?;
-        assert!(stale.contains("retry stalled for 180s"));
-        assert!(stale.contains("writer lock busy"));
-        journal.recovery_failures = LIMIT;
+    fn status_flags_overdue_recovery_before_a_driver_is_claimed() -> TestResult {
+        let mut clock = clock();
+        let temp = tempfile::tempdir()?;
+        let cancel = CancelToken::new();
+        let context = crate::tests::context(temp.path())?;
+        let call = crate::tests::call(&clock, &cancel);
+        let store = crate::RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let record = store.mark_starting(
+            &store.record(run.attempt_id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let scope = crate::RunStore::scope(&record);
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        blocked(&attempt, scope, "writer recovery lock busy", &clock)?;
+        let journal = read(&attempt, scope)?;
+        assert!(journal.owner.is_none());
+        assert_eq!(journal.owner_since_ms, 0);
+        let reason = diagnostic_for(
+            context.state_root.as_path(),
+            &record,
+            Some(clock.wall_now()?),
+        )
+        .ok_or("pending diagnostic")?;
+        assert!(reason.contains("retry pending"));
+        advance_to(&mut clock, journal.retry_after_ms + STALLED_RETRY_MS - 1)?;
         assert!(
-            diagnostic(&journal, None, None)
-                .ok_or("blocked reason")?
+            diagnostic_for(
+                context.state_root.as_path(),
+                &record,
+                Some(clock.wall_now()?)
+            )
+            .ok_or("pending diagnostic before threshold")?
+            .contains("retry pending")
+        );
+        advance_to(&mut clock, journal.retry_after_ms + STALLED_RETRY_MS)?;
+        let reason = diagnostic_for(
+            context.state_root.as_path(),
+            &record,
+            Some(clock.wall_now()?),
+        )
+        .ok_or("stalled diagnostic")?;
+        assert!(reason.contains("retry stalled"));
+        assert!(reason.contains("writer recovery lock busy"));
+        for _ in 1..LIMIT {
+            blocked(&attempt, scope, "writer recovery lock busy", &clock)?;
+        }
+        assert!(
+            diagnostic_for(context.state_root.as_path(), &record, None)
+                .ok_or("blocked diagnostic without clock")?
                 .contains("settlement blocked")
         );
-        journal.blocking_reason = None;
-        assert!(diagnostic(&journal, Some(0), Some(180_000)).is_none());
+        clear_blocked(&attempt, scope)?;
+        assert!(
+            diagnostic_for(
+                context.state_root.as_path(),
+                &record,
+                Some(clock.wall_now()?)
+            )
+            .is_none()
+        );
         Ok(())
     }
 
