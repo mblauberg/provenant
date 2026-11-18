@@ -1394,6 +1394,7 @@ fn survey_with_progress(
     snapshot.shared_root = shared_identity;
 
     if snapshot.census_complete {
+        snapshot.completed.sort_by(compare_candidates);
         let candidates = snapshot.completed.clone();
         let free = free_space().unwrap_or_else(|error| {
             report.errors.push(format!("free space: {error}"));
@@ -2073,11 +2074,6 @@ fn prune_with_progress(
                 match measured {
                     Some((bytes, newest)) => {
                         total = total.saturating_sub(candidate.bytes).saturating_add(bytes);
-                        let refreshed = Candidate {
-                            bytes,
-                            newest,
-                            ..candidate.clone()
-                        };
                         if let Some(snapshot) = snapshot.as_deref_mut() {
                             snapshot.census_bytes = snapshot
                                 .census_bytes
@@ -2093,7 +2089,7 @@ fn prune_with_progress(
                             }
                         }
                         report.recent.push(candidate.display.clone());
-                        advance_prune_cursor(snapshot.as_deref_mut(), &refreshed);
+                        advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
                     }
                     None => {
                         report.measurement_skipped = true;
