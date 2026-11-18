@@ -7,10 +7,7 @@ use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, LockMode};
 use provenant_records::{CanonicalV1, ExtraFields, Limits, decode_v1};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
+use std::{ffi::OsStr, path::PathBuf};
 
 pub const ENTRY_LIMIT: usize = 16 * 1024;
 pub const PAGE_LIMIT: usize = 100;
@@ -83,7 +80,7 @@ pub struct Page {
     pub total_pruned: u64,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GcProgress {
     pub pruned: u64,
     pub interrupted: bool,
