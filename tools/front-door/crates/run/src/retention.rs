@@ -74,7 +74,57 @@ pub struct ProviderStateIssue {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RetentionPass {
     ProviderState { days: u64, logs_days: u64 },
-    AttemptScratch { days: u64 },
+    AttemptScratch,
+}
+
+/// Work ownership is independent of an attempt's terminal/released state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScratchOwner {
+    Finished,
+    Owned,
+    Unowned,
+}
+
+pub struct ScratchPolicy<'a> {
+    pub idle_seconds: u64,
+    pub projects: Option<&'a [provenant_core::ProjectId]>,
+    pub attempts: Option<&'a [AttemptId]>,
+    pub owner: Option<&'a dyn Fn(&AttemptRecord, &CanonicalRequest) -> ScratchOwner>,
+}
+impl ScratchPolicy<'_> {
+    pub fn new(idle_seconds: u64) -> Self {
+        Self {
+            idle_seconds,
+            projects: None,
+            attempts: None,
+            owner: None,
+        }
+    }
+}
+
+pub(crate) fn scratch_owner(record: &AttemptRecord, request: &CanonicalRequest) -> ScratchOwner {
+    if record.superseded_by.is_some() {
+        return ScratchOwner::Finished;
+    }
+    let path = request.task.writer.as_ref().map(|w| &w.worktree).or(request
+        .task
+        .access
+        .source_root
+        .as_ref());
+    match path {
+        Some(path) => match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ScratchOwner::Finished,
+            _ => ScratchOwner::Owned,
+        },
+        None if record
+            .context
+            .as_ref()
+            .is_some_and(|context| context.graph_id.is_some()) =>
+        {
+            ScratchOwner::Owned
+        }
+        None => ScratchOwner::Unowned,
+    }
 }
 
 impl RunStore {
@@ -149,11 +199,11 @@ impl RunStore {
         )
     }
 
-    /// Collect temporary payload from settled attempts after its declared age.
+    /// Collect released scratch only with finished-work proof, or an unowned idle lifetime.
     pub fn gc_temporary(
         &self,
         expected: &Directory,
-        days: u64,
+        policy: &ScratchPolicy<'_>,
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
@@ -162,28 +212,8 @@ impl RunStore {
             expected,
             now,
             dry_run,
-            RetentionPass::AttemptScratch { days },
-            None,
-            call,
-        )
-    }
-
-    /// Restrict attempt scratch collection to selected project identities.
-    pub fn gc_temporary_for_projects(
-        &self,
-        expected: &Directory,
-        days: u64,
-        now: WallTime,
-        dry_run: bool,
-        projects: &[provenant_core::ProjectId],
-        call: &Request<'_>,
-    ) -> Result<ProviderStateGc> {
-        self.gc_retention(
-            expected,
-            now,
-            dry_run,
-            RetentionPass::AttemptScratch { days },
-            Some(projects),
+            RetentionPass::AttemptScratch,
+            Some(policy),
             call,
         )
     }
@@ -194,7 +224,7 @@ impl RunStore {
         now: WallTime,
         dry_run: bool,
         pass: RetentionPass,
-        projects: Option<&[provenant_core::ProjectId]>,
+        scratch: Option<&ScratchPolicy<'_>>,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
@@ -207,9 +237,9 @@ impl RunStore {
                 }
                 (days, Some(logs_days))
             }
-            RetentionPass::AttemptScratch { days } => (days, None),
+            RetentionPass::AttemptScratch => (0, None),
         };
-        if !(1..=3650).contains(&days) {
+        if scratch.is_none() && !(1..=3650).contains(&days) {
             return Err(RunError::Validation("provider_state_days_range"));
         }
         if !dry_run && let Some(logs_days) = logs_days {
@@ -219,10 +249,29 @@ impl RunStore {
                 call,
             )?;
         }
-        let rows: Vec<(String, String, Vec<u8>)> = {
-            let mut query = self.db.prepare(
-                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
-            )?;
+        let rows: Vec<(String, String, Vec<u8>)> = if let Some(ids) =
+            scratch.and_then(|policy| policy.attempts)
+        {
+            let mut query = self.db.prepare("SELECT id,project,record FROM attempts WHERE id=?1 AND terminal=1 AND refused=0 AND tmp_retained=1")?;
+            let mut rows = Vec::new();
+            for id in ids {
+                use rusqlite::OptionalExtension;
+                if let Some(row) = query
+                    .query_row([id.to_string()], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .optional()?
+                {
+                    rows.push(row);
+                }
+            }
+            rows
+        } else {
+            let mut query = self.db.prepare(if scratch.is_some() {
+                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 AND tmp_retained=1 ORDER BY sequence"
+            } else {
+                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence"
+            })?;
             let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
@@ -244,7 +293,9 @@ impl RunStore {
                 });
                 break;
             }
-            if projects.is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
+            if scratch
+                .and_then(|policy| policy.projects)
+                .is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
             {
                 continue;
             }
@@ -256,8 +307,9 @@ impl RunStore {
             let first_removal = report.removed.len();
             let first_tightened = report.tightened.len();
             let result = (|| -> Result<()> {
-                let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+                let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
+                record.superseded_by = self.same_session_successor(record.attempt_id)?;
                 if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
                     return Err(RunError::Validation("retention attempt index identity"));
                 }
@@ -272,7 +324,7 @@ impl RunStore {
                     continuing,
                     _publication,
                     _writer,
-                }) = self.hold_attempt(&record, &id)?
+                }) = self.hold_attempt(&record)?
                 else {
                     return Ok(());
                 };
@@ -285,10 +337,32 @@ impl RunStore {
                         ..
                     }
                 ) && record.exit_evidence.is_none();
-                if matches!(pass, RetentionPass::AttemptScratch { .. })
-                    && age >= DAY_MICROS.saturating_mul(days as i64)
-                    && !uncertain_loss
-                {
+                let scratch_eligible = if let Some(policy) = scratch {
+                    let raw = crate::artifacts::read_sealed(
+                        &attempt,
+                        "request.json",
+                        crate::RECORD_LIMIT,
+                    )?
+                    .ok_or(RunError::Validation("scratch request unavailable"))?;
+                    let request: CanonicalRequest = crate::db::decode(&raw)?;
+                    let owner = policy.owner.map_or_else(
+                        || scratch_owner(&record, &request),
+                        |owner| owner(&record, &request),
+                    );
+                    !continuing
+                        && match owner {
+                            ScratchOwner::Finished => true,
+                            ScratchOwner::Owned => false,
+                            ScratchOwner::Unowned => {
+                                age >= i64::try_from(policy.idle_seconds)
+                                    .unwrap_or(i64::MAX)
+                                    .saturating_mul(1_000_000)
+                            }
+                        }
+                } else {
+                    false
+                };
+                if scratch_eligible && !uncertain_loss {
                     let temporary = path.with_file_name("tmp");
                     let collection = (|| -> Result<()> {
                         collect_temporary(
@@ -351,7 +425,7 @@ impl RunStore {
                         record_issue(&mut report, temporary, &error);
                     }
                 }
-                if matches!(pass, RetentionPass::AttemptScratch { .. }) {
+                if matches!(pass, RetentionPass::AttemptScratch) {
                     return Ok(());
                 }
                 if continuing {
@@ -433,7 +507,14 @@ struct Held {
 }
 
 impl RunStore {
-    fn hold_attempt(&self, record: &AttemptRecord, id: &str) -> Result<Option<Held>> {
+    pub(crate) fn scratch_in_use(&self, id: AttemptId) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1 AND terminal=0) OR EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1 AND resolved=0)",
+            [id.to_string()], |row| row.get(0),
+        )?)
+    }
+
+    fn hold_attempt(&self, record: &AttemptRecord) -> Result<Option<Held>> {
         let run = match self.attempt_dir(record.attempt_id, false) {
             Ok(run) => run,
             Err(error) if missing_directory(&error) => return Ok(None),
@@ -441,58 +522,43 @@ impl RunStore {
         };
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
-        let continuing: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1 AND terminal=0) OR EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1 AND resolved=0)",
-            [&id],
-            |row| row.get(0),
-        )?;
+        if record.provider_launched == Some(true)
+            && crate::artifacts::read_sealed(
+                &run,
+                AttemptFile::Release.name(),
+                crate::RECORD_LIMIT,
+            )?
+            .is_none()
+        {
+            return Err(RunError::Validation("attempt release receipt unavailable"));
+        }
+        let continuing = self.scratch_in_use(record.attempt_id)?;
         // Host retention spans attribution projects. Verify the sealed
         // request against its own indexed run before following a writer's
         // persisted source-project custody namespace.
-        let custody_project =
-            match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)? {
-                Some(raw) => {
-                    let indexed: String = self.db.query_row(
-                        "SELECT digest FROM attempts WHERE id=?1 AND project=?2",
-                        rusqlite::params![id, record.project_id.to_string()],
-                        |row| row.get(0),
-                    )?;
-                    let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
-                    if indexed != digest.to_string() {
-                        return Err(RunError::Validation("retention request identity"));
-                    }
-                    let request: CanonicalRequest = crate::db::decode(&raw)?;
-                    request
-                        .task
-                        .writer
-                        .as_ref()
-                        .map(crate::writer::writer_project_id)
-                        .transpose()?
-                        .unwrap_or(record.project_id)
-                }
-                None => return Err(RunError::Validation("retention request unavailable")),
-            };
-        let reservations = self
-            .writer_registry
-            .join("worktrees")
-            .join(custody_project.to_string());
-        match Directory::open_anchor(&reservations) {
-            Ok(directory) => {
-                let listing = provenant_supervisor::custody::list_writer_reservations(&directory)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-                if !listing.issues.is_empty()
-                    || listing
-                        .reservations
-                        .iter()
-                        .any(|reservation| reservation.scope.attempt == record.attempt_id)
-                {
-                    return Err(RunError::Validation(
-                        "writer reservation retained or unreadable",
-                    ));
-                }
-            }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
+        let mut context = self.context.clone();
+        context.project_id = record.project_id;
+        let scoped = RunStore::open_disk_read_only(
+            &context,
+            &Request {
+                clock: &provenant_os::clock::SystemClock,
+                cancel: &provenant_core::CancelToken::new(),
+            },
+        )?;
+        let Some(scoped) = scoped else {
+            return Ok(None);
+        };
+        let scoped = scoped.with_writer_registry(&self.writer_registry);
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        if !scoped.custody_released(
+            record,
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+            },
+        )? {
+            return Err(RunError::Validation("attempt custody is not released"));
         }
         let attempt = match self.attempt_dir(record.attempt_id, false) {
             Ok(attempt) => attempt,
@@ -857,7 +923,7 @@ impl RunStore {
                     Err(error) if error.is_not_found() => {}
                     Err(error) => return Err(error.into()),
                 }
-                let (held, pinned) = match self.hold_attempt(&record, &id) {
+                let (held, pinned) = match self.hold_attempt(&record) {
                     Ok(Some(held)) => {
                         let pinned = held.continuing || pinned_payload(&held.attempt, &record)?;
                         (Some(held), pinned)
@@ -917,7 +983,7 @@ impl RunStore {
         {
             return Ok(false);
         }
-        let Some(held) = self.hold_attempt(&record, id)? else {
+        let Some(held) = self.hold_attempt(&record)? else {
             return Ok(false);
         };
         if held.continuing || pinned_payload(&held.attempt, &record)? {
@@ -1057,30 +1123,26 @@ fn collect_temporary(
         }
         Err(error) => return Err(error.into()),
     }
-    let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
-    let measured = if dry_run {
+    let bytes = if dry_run {
         // A preview must not repair permissions or restart its walk budget for
         // each attempt. Size errors are explicit lower bounds only.
         preview_sizes.entries.clear();
-        preview_sizes
+        let measured = preview_sizes;
+        measured.measure_at("attempt_tmp", attempt, name, path);
+        for error in measured.errors.drain(..) {
+            report.errors.push(ProviderStateIssue {
+                path: error.path,
+                reason: format!("temporary size estimate incomplete: {}", error.reason),
+            });
+        }
+        measured.entries.iter().fold(0_u64, |sum, entry| {
+            sum.saturating_add(entry.allocated_bytes)
+        })
     } else {
-        restore_owned_temporary_directories(attempt, name);
-        &mut measured
-    };
-    measured.measure_at("attempt_tmp", attempt, name, path);
-    for error in measured.errors.drain(..) {
-        report.errors.push(ProviderStateIssue {
-            path: error.path,
-            reason: format!("temporary size estimate incomplete: {}", error.reason),
-        });
-    }
-    let bytes = measured.entries.iter().fold(0_u64, |sum, entry| {
-        sum.saturating_add(entry.allocated_bytes)
-    });
-    if !dry_run {
-        crate::artifacts::remove_unreserved_terminal_temporary(attempt)?;
+        let bytes = crate::artifacts::remove_unreserved_terminal_temporary(attempt)?;
         attempt.sync()?;
-    }
+        bytes
+    };
     report.attempt_tmp.push(AttemptTmpRemoval {
         path: path.into(),
         bytes,
@@ -1674,7 +1736,13 @@ mod tests {
             dry_run,
             call,
         )?;
-        let mut scratch = store.gc_temporary(&root, scratch_days, now, dry_run, call)?;
+        let mut scratch = store.gc_temporary(
+            &root,
+            &ScratchPolicy::new(scratch_days.saturating_mul(86_400)),
+            now,
+            dry_run,
+            call,
+        )?;
         report.removed.append(&mut scratch.removed);
         report.tightened.append(&mut scratch.tightened);
         report.attempt_tmp.append(&mut scratch.attempt_tmp);
@@ -1984,19 +2052,21 @@ mod tests {
             .create(attempt.join("tmp"))?;
         fs::write(attempt.join("tmp/payload"), vec![1; 8192])?;
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
-        let scoped = store.gc_temporary_for_projects(
+        let other_project = [provenant_core::ProjectId::from_bytes([99; 16])];
+        let mut scoped_policy = ScratchPolicy::new(7 * 86_400);
+        scoped_policy.projects = Some(&other_project);
+        let scoped = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
-            7,
+            &scoped_policy,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
-            &[provenant_core::ProjectId::from_bytes([99; 16])],
             &call,
         )?;
         assert!(scoped.attempt_tmp.is_empty());
         assert!(attempt.join("tmp/payload").is_file());
         let report = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
-            7,
+            &ScratchPolicy::new(7 * 86_400),
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,
@@ -2091,13 +2161,70 @@ mod tests {
         assert!(report.attempt_tmp.is_empty());
         let scratch = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
-            1,
+            &ScratchPolicy::new(86_400),
             WallTime::from_micros(clock.wall_now()?.as_micros() + DAY_MICROS)?,
             false,
             &call,
         )?;
         assert!(scratch.attempt_tmp.is_empty());
         assert!(temporary.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scratch_gc_requires_release_and_free_attempt_custody_even_when_work_is_finished()
+    -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let temporary = attempt.join("tmp");
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+        fs::write(temporary.join("payload"), b"must survive until release")?;
+        let finished = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Finished;
+        let policy = ScratchPolicy {
+            owner: Some(&finished),
+            ..ScratchPolicy::new(0)
+        };
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+
+        // A queued attempt is never eligible, regardless of the owner callback.
+        let collection_time = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+        let before_release = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
+        assert!(before_release.attempt_tmp.is_empty());
+        assert_eq!(
+            fs::read(temporary.join("payload"))?,
+            b"must survive until release"
+        );
+
+        withdraw(&store, &input, &call)?;
+        let owned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Owned;
+        let owned_policy = ScratchPolicy {
+            owner: Some(&owned),
+            ..ScratchPolicy::new(0)
+        };
+        let while_owned =
+            store.gc_temporary(&root, &owned_policy, collection_time, false, &call)?;
+        assert!(while_owned.attempt_tmp.is_empty());
+        assert_eq!(
+            fs::read(temporary.join("payload"))?,
+            b"must survive until release"
+        );
+
+        let attempt_dir = Directory::open_anchor(&attempt)?;
+        let busy = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+        let while_busy = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
+        assert!(while_busy.attempt_tmp.is_empty());
+        assert_eq!(
+            fs::read(temporary.join("payload"))?,
+            b"must survive until release"
+        );
+        drop(busy);
+
+        let terminal = fs::read(attempt.join("terminal-pending.json"))?;
+        let after_release = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
+        assert_eq!(after_release.attempt_tmp.len(), 1);
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, terminal);
         Ok(())
     }
 
@@ -2116,12 +2243,8 @@ mod tests {
         );
         assert!(temporary.exists());
         withdraw(&store, &input, &call)?;
-        // Recreate the leak after settlement's best-effort removal.
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&temporary)?;
-        fs::write(temporary.join("payload"), vec![1; 8192])?;
+        // Terminal release preserves scratch while the work has no completion proof.
+        assert!(temporary.join("payload").is_file());
         fs::create_dir(temporary.join("candidate-0"))?;
         fs::write(temporary.join("candidate-0/payload.lock"), "payload")?;
         assert!(
@@ -2204,7 +2327,11 @@ mod tests {
         let applied = sweep_with_days(&store, &context, 30, 7, 7 * DAY_MICROS, false, &call)?;
         assert_eq!(applied.attempt_tmp.len(), 1);
         assert!(applied.attempt_tmp[0].bytes >= 8192);
-        assert!(!applied.errors.is_empty());
+        assert!(
+            applied.errors.is_empty(),
+            "deletion accounts bytes in its removal walk: {:?}",
+            applied.errors
+        );
         assert!(!temporary.exists());
         assert!(!candidate.join("auth.json").exists());
         assert!(!candidate.join("cache").exists());

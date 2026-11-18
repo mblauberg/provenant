@@ -692,6 +692,25 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         self.record_row(id, call, read)
     }
+    pub(crate) fn same_session_successor(&self, id: AttemptId) -> Result<Option<AttemptId>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT id FROM attempts WHERE continues=?1 AND (operation=?2 OR operation=?3) AND refused=0",
+                params![
+                    id.to_string(),
+                    format!("budget-wrap-up-{id}"),
+                    format!("graph-steer-{id}")
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|id| {
+                AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
+            })
+            .transpose()?)
+    }
+
     /// A terminal row may precede the guardian releasing writer custody.
     pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
         use provenant_os::fs::FsError;
@@ -794,22 +813,7 @@ impl RunStore {
         validate_attempt(&record)?;
         // Budget wrap-up and graph steering are host-owned same-session
         // successors. Graph observations wait for the successor to settle.
-        record.superseded_by = self
-            .db
-            .query_row(
-                "SELECT id FROM attempts WHERE continues=?1 AND (operation=?2 OR operation=?3) AND refused=0",
-                params![
-                    id.to_string(),
-                    format!("budget-wrap-up-{id}"),
-                    format!("graph-steer-{id}")
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|id| {
-                AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
-            })
-            .transpose()?;
+        record.superseded_by = self.same_session_successor(id)?;
         // Steering text stays in its private ledger; status carries only
         // stable operation/message IDs and the graph-owned successor.
         record.steering = self.steering_status(id, call)?;

@@ -169,6 +169,15 @@ only after archiving history. It skips busy items, protects active reservations
 and continuations, and uses identity-checked deletion without following links.
 Usage retention belongs to [telemetry](telemetry.md#the-usage-ledger-outlives-the-run-store).
 `RETENTION_CLASSES` is the executable declaration of every retention class: a typed owner and adapter, triggers, eligibility and effective schema settings. Required collection and measurement methods are generated from that declaration; there is no wildcard adapter. Scheduled tick and explicit GC execute the same registry path. Each scheduled class runs its own adapter, including payload cap, attempt scratch, graph checkpoints and port receipts; byte rows come from adapter measurements, with complete, partial or unavailable observations and visible collection failures.
+`gc.idle` defaults to `6h` for artifacts with no finished-work owner state.
+Attempt `tmp` survives release for resume, steering and follow-up. It becomes
+immediately collectable when its branch is merged or PR closed, its graph is
+cancelled or superseded, or its worktree is removed. Collection retains durable
+results, handoffs, logs and process records, and never removes files from busy
+or unreleased attempts. After merge, cleanup targets only the merged branch's
+worktree and attempt scratch. At lane launch, space below `gc.free_floor`
+triggers a best-effort single-flight full sweep; full sweeps preserve busy or
+recently used shared caches and the newest seed generation.
 Admission command receipts become eligible only after their attempt is terminal and release is proven. Naming and post-create command receipts carry a declared age lifetime, defaulting to 30 days and stored on each receipt. GC resumes interrupted checkpoint collection under the graph lock when a reserved graph name has no checkpoint; remaining prompt blobs, sidecars and pending markers are collected while the name reservation survives.
 Removal records preserve subject, tip, subsumed or landed predicate and evidence source; shallow history, conflicted merge trees, offline forge and rewritten default branches remain typed kept outcomes.
 - Why: freeing space must not destroy evidence or a session in use.

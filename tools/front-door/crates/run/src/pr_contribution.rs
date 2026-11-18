@@ -212,6 +212,42 @@ impl Contributions {
         Ok(Self(db))
     }
 
+    /// Exact branch index for targeted cleanup; never enumerate the run store.
+    pub fn attempts_for_branch(
+        &self,
+        project: ProjectId,
+        branch: &str,
+        call: &Request<'_>,
+    ) -> Result<Vec<AttemptId>> {
+        call.check()?;
+        let mut query = self
+            .0
+            .prepare("SELECT attempt FROM branch_attempts WHERE project=?1 AND branch=?2")?;
+        let rows = query.query_map(params![project.to_string(), branch], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| {
+            AttemptId::parse(&row?).map_err(|_| RunError::Validation("branch attempt identity"))
+        })
+        .collect()
+    }
+    pub fn branch_for_attempt(
+        &self,
+        project: ProjectId,
+        attempt: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<String>> {
+        call.check()?;
+        Ok(self
+            .0
+            .query_row(
+                "SELECT branch FROM branch_attempts WHERE attempt=?1 AND project=?2",
+                params![attempt.to_string(), project.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Snapshot a registered local worktree at dispatch, independent of outcome.
     pub(crate) fn capture(
         &self,

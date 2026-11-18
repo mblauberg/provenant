@@ -1166,7 +1166,12 @@ pub(super) fn prepare_retirement_step(
     }
 }
 
-fn allocated_tree(directory: &Directory, depth: usize) -> Result<u64, FsError> {
+fn allocated_tree(
+    directory: &Directory,
+    depth: usize,
+    preview_walk: &PreviewWalk,
+) -> Result<u64, FsError> {
+    preview_walk.step()?;
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -1174,7 +1179,11 @@ fn allocated_tree(directory: &Directory, depth: usize) -> Result<u64, FsError> {
     for name in entry_names(directory, 100_000)? {
         let metadata = directory.metadata_at(&name, false)?;
         bytes = bytes.saturating_add(if metadata.kind == FileKind::Directory {
-            allocated_tree(&directory.open_verified_directory(&name)?, depth + 1)?
+            allocated_tree(
+                &directory.open_verified_directory(&name)?,
+                depth + 1,
+                preview_walk,
+            )?
         } else {
             metadata.allocated
         });
@@ -1492,15 +1501,19 @@ fn collect_impl(
             let locked = lock_worktree(context, entry, cancel, dry)?;
             // A preview shares one census across candidates; applying re-reads.
             census_free(context, &lane.path, !dry)?;
-            let tree_bytes = match allocated_tree(locked.verified.repo().root_dir(), 0) {
-                Ok(bytes) => Some(bytes),
-                Err(error) => {
-                    report.byte_errors.push(RetentionIssue {
-                        path: lane.path.clone(),
-                        operation: "measure worktree allocated bytes".into(),
-                        cause: error.to_string(),
-                    });
-                    None
+            let tree_bytes = if !dry {
+                None
+            } else {
+                match allocated_tree(locked.verified.repo().root_dir(), 0, &preview_walk) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        report.byte_errors.push(RetentionIssue {
+                            path: lane.path.clone(),
+                            operation: "measure worktree allocated bytes".into(),
+                            cause: error.to_string(),
+                        });
+                        None
+                    }
                 }
             };
             let effective = WorktreeGcPolicy {
@@ -1662,7 +1675,7 @@ fn collect_impl(
                     ),
                 )
             };
-            let planned_cache = if dry {
+            let planned_cache = if dry && policy.mode != CollectionMode::LandingCleanup {
                 match crate::cache::preview_worktree_cargo_cache(context.home, &locked.verified) {
                     Ok(entry) => entry,
                     Err(error) => {
@@ -1859,7 +1872,9 @@ fn collect_impl(
                     active_retirement = Some(retirement.clone());
                 }
                 removed.repository = None;
-                if let Some(cache) = removed.lane_cache.as_deref() {
+                if policy.mode != CollectionMode::LandingCleanup
+                    && let Some(cache) = removed.lane_cache.as_deref()
+                {
                     match crate::cache::prune_worktree_cargo_cache(context.home, cache) {
                         Ok(bytes) => {
                             if bytes > 0 {
@@ -2262,8 +2277,7 @@ fn walk_output(
                     .ancestors()
                     .any(|ancestor| protected.ignored.contains(ancestor))
             {
-                let bytes = allocated_tree(&child, 0)?;
-                prune_output(directory, &name, policy, preview_walk)?;
+                let bytes = prune_output(directory, &name, policy, preview_walk)?;
                 Ok(Some(bytes))
             } else {
                 walk_output(
@@ -2399,7 +2413,7 @@ fn prune_output(
     name: &OsStr,
     policy: &WorktreeGcPolicy<'_>,
     preview_walk: &PreviewWalk,
-) -> Result<(), FsError> {
+) -> Result<u64, FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
     if policy.dry_run {
@@ -2409,7 +2423,7 @@ fn prune_output(
                 name: "recent output".into(),
             });
         }
-        return Ok(());
+        return allocated_tree(&directory, 0, preview_walk);
     }
     check_output_before(&directory, policy.written_before_ns)?;
     let staging_name = temporary_name()?;
@@ -2422,22 +2436,29 @@ fn prune_output(
         parent.rmdir(&staging_name)?;
         return Err(error);
     }
-    let removed = || -> Result<(), FsError> {
+    let removed = || -> Result<u64, FsError> {
         let detached = payload.child(OsStr::new("output"))?;
         if !identity.same_identity(&detached.metadata()?) {
             return Err(FsError::RaceRefused { name: name.into() });
         }
         check_output_before(detached.directory(), policy.written_before_ns)?;
-        remove_output(&detached, 0)?;
-        payload.rmdir(OsStr::new("output"))
+        let bytes = identity
+            .allocated
+            .saturating_add(remove_output(&detached, 0)?);
+        payload.rmdir(OsStr::new("output"))?;
+        Ok(bytes)
     };
-    if let Err(error) = removed() {
-        staging.rename_noreplace(OsStr::new("output"), parent, name)?;
-        parent.rmdir(&staging_name)?;
-        return Err(error);
-    }
+    let bytes = match removed() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            staging.rename_noreplace(OsStr::new("output"), parent, name)?;
+            parent.rmdir(&staging_name)?;
+            return Err(error);
+        }
+    };
     parent.rmdir(&staging_name)?;
-    parent.sync()
+    parent.sync()?;
+    Ok(bytes)
 }
 
 pub(super) fn dispose_archive_tree(tree: &PayloadTree) -> Result<(), FsError> {
@@ -2455,7 +2476,7 @@ pub(super) fn dispose_archive_tree(tree: &PayloadTree) -> Result<(), FsError> {
     Ok(())
 }
 
-fn remove_output(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
+fn remove_output(tree: &PayloadTree, depth: usize) -> Result<u64, FsError> {
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2464,16 +2485,19 @@ fn remove_output(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
             name: ".git".into(),
         });
     }
+    let mut bytes = 0_u64;
     tree.make_writable()?;
     for name in entry_names(tree.directory(), 100_000)? {
-        if tree.metadata_at(&name)?.kind == FileKind::Directory {
-            remove_output(&tree.child(&name)?, depth + 1)?;
+        let metadata = tree.metadata_at(&name)?;
+        bytes = bytes.saturating_add(metadata.allocated);
+        if metadata.kind == FileKind::Directory {
+            bytes = bytes.saturating_add(remove_output(&tree.child(&name)?, depth + 1)?);
             tree.rmdir(&name)?;
         } else {
             tree.unlink(&name)?;
         }
     }
-    Ok(())
+    Ok(bytes)
 }
 
 /// Prove all ignored paths are disposable before removing any output.

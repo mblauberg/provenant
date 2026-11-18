@@ -2503,7 +2503,7 @@ fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
 }
 
 #[test]
-fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult {
+fn publication_postcommit_effect_failure_preserves_temporary_for_follow_up() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2526,7 +2526,11 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
     let published = store.publish_terminal(id, 1, &publication(), &exit(), &call);
     crate::store::FAIL_EFFECT_WRITE.with(|fault| fault.set(false));
     assert!(matches!(published?.state, AttemptState::Terminal { .. }));
-    assert!(!temporary.exists());
+    assert!(
+        temporary.exists(),
+        "release preserves scratch while its worktree is live"
+    );
+    assert_eq!(std::fs::read(temporary.join("payload"))?, b"temporary");
     assert_eq!(admission_count(&store)?, 0);
     Ok(())
 }

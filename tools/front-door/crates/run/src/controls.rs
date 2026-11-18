@@ -5966,6 +5966,18 @@ impl RunStore {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);
         }
+        let request = self.request(id, call)?;
+        if crate::retention::scratch_owner(record, &request) != crate::ScratchOwner::Finished {
+            // Release does not finish the work. A follow-up may still need scratch.
+            return Ok(None);
+        }
+        let _publication = attempt.try_lock_existing(
+            std::ffi::OsStr::new("publication.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        if !self.custody_released(record, call)? || self.scratch_in_use(id)? {
+            return Ok(None);
+        }
         let remove = || -> Result<()> {
             match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),
