@@ -456,6 +456,7 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
         notice_done: true,
         log_done: true,
         ledger_done: true,
+        observation_done: true,
     };
     store.owe_reaction(&reaction, &call)?;
     store.save_reaction(&reaction, &call)?;

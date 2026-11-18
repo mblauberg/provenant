@@ -349,11 +349,14 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         toml_edit::value(50_i64),
     )?;
     let _cleanup = rig.process_cleanup();
-    for (name, foreign) in [
+    let cases = [
         ("memory", false),
         ("memory-foreign", true),
         ("memory-sandboxed", false),
-    ] {
+    ];
+    // Each lane owns its sample and FIFO. Submit all three before waiting so
+    // their independent sample intervals and process lifetimes overlap.
+    for (name, foreign) in cases {
         rig.env
             .retain(|(key, _)| key != provenant_core::consumer_env::PROCESS_TREE);
         if foreign {
@@ -362,7 +365,13 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
                 "/foreign/process-tree.json".into(),
             ));
         }
-        let submitted = dispatch(&rig, name, 15)?;
+        dispatch_with(&rig, name, 15, None, false)?;
+    }
+    for (name, _) in cases {
+        let wait = rig.command(&["wait", name, "--timeout", "30s", "--json"])?;
+        assert_eq!(code(&wait), 0, "{wait:?}");
+        let checkpoint = rig.checkpoint(name)?;
+        let submitted = json!({"data":{"checkpoint":checkpoint}});
         let id = attempt_id(&submitted)?;
         let lane = settled(&rig, id)?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
@@ -424,10 +433,11 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
     if !available()? {
         return Ok(());
     }
+    // The successful lane also crosses the capture limit, retaining the tail;
+    // a separate successful launch would repeat the same settlement invariant.
     let rig = rig(json!({
-        "pass":{"argv":["/bin/sh","-c","printf 'hello\\n'; printf 'diagnostic\\n' >&2; test ! -w .git/config; ! touch forbidden;"]},
+        "pass":{"argv":["/bin/sh","-c","printf 'hello\\n'; printf 'diagnostic\\n' >&2; test ! -w .git/config; ! touch forbidden || exit 1; /usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "fail":{"argv":["/bin/sh","-c","printf 'failed\\n'; exit 7"]},
-        "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
     // This test exercises denied checkout writes as well as command settlement.
@@ -436,7 +446,6 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),
         ("fail", "failed", "FAIL"),
-        ("tail", "succeeded", "PASS"),
         ("missing", "rejected", ""),
     ] {
         // A batch whose every lane is refused exits non-zero, with its receipt.
@@ -457,7 +466,7 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         if !verdict.is_empty() {
             let result = fs::read_to_string(attempt_dir(&rig, id)?.join("result.md"))?;
             assert!(result.contains(&format!("VERDICT: {verdict}")), "{result}");
-            if name == "tail" {
+            if name == "pass" {
                 assert!(result.contains("last-output"), "{result}");
                 assert!(result.contains("retained tail"), "{result}");
             }

@@ -33,6 +33,7 @@ provenant-config = { path = "crates/config" }
 provenant-os = { path = "crates/os" }
 provenant-supervisor = { path = "crates/supervisor" }
 provenant-confinement = { path = "crates/confinement" }
+provenant-redact = { path = "crates/redact" }
 provenant-providers = { path = "crates/providers" }
 provenant-quota = { path = "crates/quota" }
 provenant-telemetry = { path = "crates/telemetry" }
@@ -65,7 +66,8 @@ disallowed_methods = "deny"
 
 [package]
 name = "provenant"
-version = "2.1.0"
+autotests = false
+version = "2.1.1"
 default-run = "provenant"
 edition.workspace = true
 rust-version.workspace = true
@@ -94,6 +96,7 @@ fixture = [
     "provenant-config/fixture",
     "provenant-supervisor/fixture",
     "provenant-confinement/fixture",
+    "provenant-redact/fixture",
     "provenant-sqlite/fixture",
 ]
 
@@ -120,6 +123,7 @@ provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
 provenant-confinement = { workspace = true }
+provenant-redact = { workspace = true }
 provenant-sqlite = { workspace = true }
 
 [build-dependencies]
@@ -157,7 +161,7 @@ opt-level = 3
 # Redaction scans every provider byte and every graph envelope through
 # per-byte state machines; unoptimised, large briefs and frames take tens of
 # seconds and time out suites. Overflow checks and debug assertions stay on.
-[profile.dev.package.provenant-confinement]
+[profile.dev.package.provenant-redact]
 opt-level = 2
 
 # Optimise proc-macros and their dependencies without emitting build-script DWARF.
@@ -200,3 +204,11 @@ harness = false
 name = "pr"
 path = "tests/pr.rs"
 harness = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "command_adapter"
+path = "tests/command_adapter.rs"

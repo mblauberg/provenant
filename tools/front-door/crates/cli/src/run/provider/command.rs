@@ -427,6 +427,7 @@ pub(super) fn prepare_command(
             state_root: roots.state.as_path().to_owned(),
             sandbox,
             backend: None,
+            cargo_target: Default::default(),
         }),
     })
 }

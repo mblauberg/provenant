@@ -231,7 +231,7 @@ impl From<run::RunError> for Fail {
                 projection
                     .fact
                     .is_none()
-                    .then(|| provenant_confinement::redact::bounded_line(&error.to_string(), 4096))
+                    .then(|| provenant_redact::bounded_line(&error.to_string(), 4096))
             } else {
                 safe_cause(&error)
             };
@@ -897,7 +897,7 @@ impl Registry<'_> {
             let line = line.max(1) as u64;
             let mut decoded = unproven(&format!(
                 "provider capture evidence defect at stdout.log line {line}; replay incomplete: {}",
-                provenant_confinement::redact::bounded_line(error, 512)
+                provenant_redact::bounded_line(error, 512)
             ));
             decoded.terminal_cause = Some(run::TerminalCause::ProviderCaptureDefect { line });
             decoded
@@ -905,10 +905,7 @@ impl Registry<'_> {
         // Only lost framing is missing evidence. A complete frame that reports a
         // provider failure, or a stream past its bound, is a definite outcome.
         let provider_failed = |error: &provenant_providers::ProviderError| {
-            failed(&provenant_confinement::redact::bounded_line(
-                &error.to_string(),
-                512,
-            ))
+            failed(&provenant_redact::bounded_line(&error.to_string(), 512))
         };
         let Some(adapter) = REGISTRY
             .iter()
@@ -1016,7 +1013,7 @@ impl Registry<'_> {
             Err(error) => return Ok(provider_failed(&error)),
         };
         if outcome.status() == OutcomeStatus::Malformed && !outcome.framing_loss() {
-            return Ok(failed(&provenant_confinement::redact::bounded_line(
+            return Ok(failed(&provenant_redact::bounded_line(
                 outcome
                     .protocol_error()
                     .unwrap_or("provider protocol is malformed"),
@@ -1472,7 +1469,7 @@ impl Registry<'_> {
             } else {
                 format!(
                     "unclassified provider error: {}",
-                    provenant_confinement::redact::bounded_line(message, 512)
+                    provenant_redact::bounded_line(message, 512)
                 )
             });
         }
@@ -1898,7 +1895,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
         }
         _ => return None,
     };
-    Some(provenant_confinement::redact::bounded_line(&cause, 512))
+    Some(provenant_redact::bounded_line(&cause, 512))
 }
 
 /// Partial-signal counts, or a named unavailable field with its cause.

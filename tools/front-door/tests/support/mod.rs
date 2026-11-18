@@ -523,6 +523,26 @@ impl TestRig {
         self.execute_os_locked(program, args, stdin)
     }
 
+    /// Spawn a long-lived fixture process whose stdout is consumed as a stream.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "streaming integration fixtures need a live child process"
+    )]
+    pub fn spawn_stream(&self, program: &Path, args: &[OsString]) -> Result<std::process::Child> {
+        use std::process::{Command, Stdio};
+
+        self.with_process_spawn_lock(|| {
+            Ok(Command::new(program)
+                .current_dir(&self.project)
+                .env_clear()
+                .envs(self.env.iter().map(|(key, value)| (key, value)))
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()?)
+        })
+    }
+
     /// Run a child while `PROCESS_SPAWN_LOCK` is already held.
     pub fn execute_os_locked(
         &self,
@@ -566,6 +586,16 @@ impl TestRig {
     /// wait's own outcome and the graph's checkpoint as the wait left it.
     pub fn run_and_wait(&self, args: &[&str], timeout: &str) -> Result<Settled> {
         let (launch, launch_value) = self.launch(args)?;
+        self.wait_launched(launch, launch_value, timeout)
+    }
+
+    /// Wait for a previously launched graph, allowing independent launches to overlap.
+    pub fn wait_launched(
+        &self,
+        launch: ExecOutcome,
+        launch_value: serde_json::Value,
+        timeout: &str,
+    ) -> Result<Settled> {
         let graph = launch_value["data"]["checkpoint"]["graph_id"]
             .as_str()
             .ok_or_else(|| format!("launch named no graph: {launch_value}"))?

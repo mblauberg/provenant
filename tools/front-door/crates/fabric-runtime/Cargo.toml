@@ -1,6 +1,6 @@
 [package]
 name = "provenant-fabric-runtime"
-version = "2.1.0"
+version = "2.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -10,6 +10,7 @@ publish = false
 provenant-os = { workspace = true }
 provenant-config = { workspace = true }
 provenant-confinement = { workspace = true }
+provenant-redact = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-routing = { workspace = true }
@@ -27,6 +28,7 @@ fixture = [
     "provenant-os/fixture",
     "provenant-config/fixture",
     "provenant-confinement/fixture",
+    "provenant-redact/fixture",
     "provenant-core/fixture",
     "provenant-records/fixture",
     "provenant-routing/fixture",

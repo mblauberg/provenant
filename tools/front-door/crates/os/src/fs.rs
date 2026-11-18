@@ -519,6 +519,12 @@ thread_local! {
     static DIRECTORY_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(any(test, feature = "fixture"))]
+thread_local! {
+    pub(crate) static EXISTING_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Directory enumerations started by this thread, so a caller can show that a
 /// view scans a number of directories bounded by what it displays.
 pub fn directory_scans() -> u64 {
@@ -932,6 +938,10 @@ impl Directory {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(FsError::LockTimeout { path, timeout });
+            }
+            #[cfg(any(test, feature = "fixture"))]
+            if let Some(hook) = EXISTING_LOCK_WAIT_HOOK.with(|hook| hook.borrow_mut().take()) {
+                hook();
             }
             wait(remaining.min(Duration::from_millis(5)));
         }

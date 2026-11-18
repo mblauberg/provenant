@@ -1827,6 +1827,9 @@ mod tests {
         if let Some(path) = std::env::var_os(MARKER) {
             let project = PathBuf::from(path);
             let mut forge = GhForge::new(&project, &project);
+            // The fake forge returns the completed operation immediately; the
+            // production polling cadence only delays this protocol fixture.
+            forge.poll_interval_override = Some(Duration::from_millis(1));
             assert_eq!(
                 forge.merge_stack(7, HEAD, MergeMethod::Merge).unwrap(),
                 "f9c664e1f37e3afb6e899701acc85805db124757"

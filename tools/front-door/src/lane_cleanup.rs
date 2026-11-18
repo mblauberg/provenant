@@ -239,9 +239,31 @@ fn evidence_refs_for_branch(
     targets: &[LandingTarget],
     patterns: &[String],
     feeds: &dyn worktrees::RetirementFeeds,
+    cached_base_refs: Option<&[worktrees::EvidenceRef]>,
     cancel: &CancelToken,
 ) -> Result<Vec<worktrees::EvidenceRef>, worktrees::WorktreeError> {
-    let mut refs = worktrees::retained_refs(context, Some(reference), None, patterns, cancel)?;
+    let mut refs = if let Some(base) = cached_base_refs {
+        base.iter()
+            .filter(|r| &r.reference != reference)
+            .cloned()
+            .collect()
+    } else {
+        let mut refs = worktrees::retained_refs(context, Some(reference), None, patterns, cancel)?;
+        for (base, base_tip) in feeds.integration_bases() {
+            for retained in &mut refs {
+                let full = retained.reference.as_str();
+                let names_base = full.strip_prefix("refs/heads/") == Some(base.as_str())
+                    || (full.starts_with("refs/remotes/") && full.ends_with(&format!("/{base}")));
+                if names_base
+                    && (base_tip == retained.commit
+                        || worktrees::is_ancestor(context, base_tip, retained.commit, cancel)?)
+                {
+                    retained.integration = true;
+                }
+            }
+        }
+        refs
+    };
     for target in targets {
         if let Some(reference) = &target.reference {
             refs.push(worktrees::EvidenceRef {
@@ -249,19 +271,6 @@ fn evidence_refs_for_branch(
                 commit: target.tip,
                 integration: true,
             });
-        }
-    }
-    for (base, base_tip) in feeds.integration_bases() {
-        for retained in &mut refs {
-            let full = retained.reference.as_str();
-            let names_base = full.strip_prefix("refs/heads/") == Some(base.as_str())
-                || (full.starts_with("refs/remotes/") && full.ends_with(&format!("/{base}")));
-            if names_base
-                && (base_tip == retained.commit
-                    || worktrees::is_ancestor(context, base_tip, retained.commit, cancel)?)
-            {
-                retained.integration = true;
-            }
         }
     }
     Ok(refs)
@@ -420,6 +429,7 @@ pub(crate) fn sweep_local(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
+        None,
         cancel,
     );
     warn(&outcome);
@@ -435,6 +445,7 @@ fn local_outcome(
     sweep: &Sweep<'_>,
     lookup: &dyn RetirementLookup,
     retirement: Option<&dyn RetirementPort>,
+    cached_base_refs: Option<&[worktrees::EvidenceRef]>,
     cancel: &CancelToken,
 ) -> ArtefactOutcome {
     if record.endpoint != RefEndpoint::Local {
@@ -457,6 +468,7 @@ fn local_outcome(
         sweep,
         lookup,
         retirement,
+        cached_base_refs,
         cancel,
     )
 }
@@ -471,6 +483,7 @@ fn local_candidate_outcome(
     sweep: &Sweep<'_>,
     lookup: &dyn RetirementLookup,
     retirement: Option<&dyn RetirementPort>,
+    cached_base_refs: Option<&[worktrees::EvidenceRef]>,
     cancel: &CancelToken,
 ) -> ArtefactOutcome {
     local_outcome_for_ref(
@@ -485,6 +498,7 @@ fn local_candidate_outcome(
         sweep,
         lookup,
         retirement,
+        cached_base_refs,
         cancel,
     )
 }
@@ -502,6 +516,7 @@ fn local_outcome_for_ref(
     sweep: &Sweep<'_>,
     lookup: &dyn RetirementLookup,
     retirement: Option<&dyn RetirementPort>,
+    cached_base_refs: Option<&[worktrees::EvidenceRef]>,
     cancel: &CancelToken,
 ) -> ArtefactOutcome {
     let name = reference_name.to_owned();
@@ -596,11 +611,18 @@ fn local_outcome_for_ref(
         .settings
         .map(|settings| settings.integration_branches.as_slice())
         .unwrap_or(&[]);
-    let evidence_refs =
-        match evidence_refs_for_branch(context, &reference, targets, patterns, feeds, cancel) {
-            Ok(refs) => refs,
-            Err(error) => return out(ArtefactState::Retained).with_reason(error.to_string()),
-        };
+    let evidence_refs = match evidence_refs_for_branch(
+        context,
+        &reference,
+        targets,
+        patterns,
+        feeds,
+        cached_base_refs,
+        cancel,
+    ) {
+        Ok(refs) => refs,
+        Err(error) => return out(ArtefactState::Retained).with_reason(error.to_string()),
+    };
     let (forge, forge_evidence) = forge_landing(feeds, &reference, tip);
     if matches!(forge, worktrees::ForgeObservation::Open { .. }) {
         return out(ArtefactState::Retained)
@@ -826,6 +848,7 @@ pub(crate) fn sweep_remote(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
+        None,
         cancel,
     );
     outcomes.iter().for_each(warn);
@@ -842,6 +865,7 @@ fn remote_outcomes(
     sweep: &Sweep<'_>,
     lookup: &dyn RetirementLookup,
     retirement: Option<&dyn RetirementPort>,
+    cached_base_refs: Option<&[worktrees::EvidenceRef]>,
     cancel: &CancelToken,
 ) -> Vec<ArtefactOutcome> {
     let RefEndpoint::Remote { remote, push_url } = &record.endpoint else {
@@ -877,11 +901,25 @@ fn remote_outcomes(
             Ok(state) => state,
             Err(error) => return vec![out(ArtefactState::Failed).with_reason(error.to_string())],
         };
-    let tip = match remote_tip(context, push_url, &reference) {
-        Ok(tip) => tip,
-        Err(error) => return vec![out(ArtefactState::Failed).with_reason(error)],
+    let tip = if sweep.dry_run {
+        tracking.as_ref().and_then(|t| {
+            context
+                .facts
+                .resolve_commit(context, t.clone(), cancel)
+                .ok()
+        })
+    } else {
+        match remote_tip(context, push_url, &reference) {
+            Ok(tip) => tip,
+            Err(error) => return vec![out(ArtefactState::Failed).with_reason(error)],
+        }
     };
     let Some(tip) = tip else {
+        if sweep.dry_run {
+            return vec![
+                out(ArtefactState::Retained).with_reason("remote tip unavailable in dry run"),
+            ];
+        }
         let expected_tip = retirement_state.expected_tip;
         let mut recovered = recovered_ref_outcome(
             retirement,
@@ -929,11 +967,18 @@ fn remote_outcomes(
         reference: Some(edge.target.clone()),
         tip: edge.integrated,
     }));
-    let evidence_refs =
-        match evidence_refs_for_branch(context, &reference, &targets, patterns, feeds, cancel) {
-            Ok(refs) => refs,
-            Err(error) => return vec![out(ArtefactState::Retained).with_reason(error.to_string())],
-        };
+    let evidence_refs = match evidence_refs_for_branch(
+        context,
+        &reference,
+        &targets,
+        patterns,
+        feeds,
+        cached_base_refs,
+        cancel,
+    ) {
+        Ok(refs) => refs,
+        Err(error) => return vec![out(ArtefactState::Retained).with_reason(error.to_string())],
+    };
     let (forge, forge_evidence) = forge_landing(feeds, &reference, tip);
     if matches!(forge, worktrees::ForgeObservation::Open { .. }) {
         return vec![
@@ -1466,12 +1511,38 @@ pub(crate) fn collect(
                 .iter()
                 .any(|(endpoint, _)| endpoint == &record.endpoint)
         {
-            let target = remote_default(context, remote, push_url, cancel).ok();
+            let target = if sweep.dry_run {
+                None
+            } else {
+                remote_default(context, remote, push_url, cancel).ok()
+            };
             endpoints.push((record.endpoint.clone(), target));
         }
     }
     let mut outcomes = observation_failures;
     outcomes.extend(adoption_failures);
+    let patterns = sweep
+        .settings
+        .map(|settings| settings.integration_branches.as_slice())
+        .unwrap_or(&[]);
+    let cached_base_refs = sweep.feeds.filter(|_| sweep.dry_run).and_then(|feeds| {
+        let mut refs = worktrees::retained_refs(context, None, None, patterns, cancel).ok()?;
+        for (base, base_tip) in feeds.integration_bases() {
+            for retained in &mut refs {
+                let full = retained.reference.as_str();
+                let names_base = full.strip_prefix("refs/heads/") == Some(base.as_str())
+                    || (full.starts_with("refs/remotes/") && full.ends_with(&format!("/{base}")));
+                if names_base
+                    && (base_tip == retained.commit
+                        || worktrees::is_ancestor(context, base_tip, retained.commit, cancel)
+                            .unwrap_or(false))
+                {
+                    retained.integration = true;
+                }
+            }
+        }
+        Some(refs)
+    });
     // Remote refs first, so a branch whose remote copy just went is judged
     // against the same fetched targets.
     for record in &created {
@@ -1491,6 +1562,7 @@ pub(crate) fn collect(
             sweep,
             lookup,
             retirement,
+            cached_base_refs.as_deref(),
             cancel,
         ));
     }
@@ -1505,7 +1577,16 @@ pub(crate) fn collect(
     if !requested_apply || first_foreign {
         for (reference, tip) in &untracked_local {
             let outcome = local_candidate_outcome(
-                context, &ledger, reference, *tip, &targets, sweep, lookup, retirement, cancel,
+                context,
+                &ledger,
+                reference,
+                *tip,
+                &targets,
+                sweep,
+                lookup,
+                retirement,
+                cached_base_refs.as_deref(),
+                cancel,
             );
             warn(&outcome);
             outcomes.push(outcome);
@@ -1514,7 +1595,15 @@ pub(crate) fn collect(
     for record in &created {
         if record.endpoint == RefEndpoint::Local {
             let outcome = local_outcome(
-                context, &ledger, record, &targets, sweep, lookup, retirement, cancel,
+                context,
+                &ledger,
+                record,
+                &targets,
+                sweep,
+                lookup,
+                retirement,
+                cached_base_refs.as_deref(),
+                cancel,
             );
             warn(&outcome);
             outcomes.push(outcome);
@@ -1577,6 +1666,7 @@ pub(crate) fn settle_integrated(
         sweep,
         &PortLookup(retirement),
         Some(retirement),
+        None,
         cancel,
     );
     outcomes.iter().for_each(warn);

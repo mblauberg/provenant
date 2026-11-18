@@ -180,6 +180,8 @@ pub struct FileJournal {
     /// Envelope extensions sit outside the checkpoint digest.
     pub(super) extra: provenant_records::ExtraFields,
     pub(super) graph_id: String,
+    state_root: StateRoot,
+    project: ProjectId,
     pub(super) directory: Directory,
     pub(super) execution: Option<GraphExecution>,
     pub(super) _lock: LockGuard,
@@ -216,6 +218,54 @@ impl FileJournal {
             ])
         })()
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
+    }
+
+    /// Replay the latest committed checkpoint marker into the shared journal.
+    /// A failed index is retryable and never changes the authoritative graph.
+    pub fn index_observation(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::lane_contract::{
+            Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
+        };
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId.into());
+        }
+        let directory = graph_directory(root, project)?;
+        let Some(stored) = load_checkpoint(&directory, graph_id)? else {
+            return Ok(());
+        };
+        let source_digest =
+            CanonicalV1::record_digest("fabric-graph-event", 1, &stored.checkpoint)?.to_string();
+        let source_index = events::read(&directory, graph_id)?
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, event)| {
+                event.kind == GraphEventKind::Checkpoint && event.digest == source_digest
+            })
+            .map(|(index, _)| index + 1)
+            .unwrap_or(0);
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = CancelToken::new();
+        let request = provenant_fabric_store::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = provenant_fabric_store::Store::open(root, &request)?;
+        store.append_observation(&ObservationEvent {
+            header: provenant_records::RecordHeader::V1,
+            id: format!("graph-checkpoint:{graph_id}:{source_index}:{}", stored.digest),
+            cursor: ObservationCursor { project, seq: 0 },
+            lineage: ObservationLineage { attempt: None, parent_attempt: None, work: None, extra: Default::default() },
+            kind: ObservationKind::GraphCheckpoint,
+            coverage: Coverage::Partial,
+            detail: serde_json::json!({"graph":graph_id,"digest":stored.digest,"source":"graph_checkpoint","source_index":source_index}),
+            extra: Default::default(),
+        }, provenant_core::WallTime::from_micros(0)?, &request)?;
+        Ok(())
     }
 
     /// Persist cancellation without waiting for the graph's journal lock.
@@ -379,6 +429,8 @@ impl FileJournal {
             Ok(Self {
                 extra,
                 graph_id: graph_id.to_owned(),
+                state_root: root.clone(),
+                project,
                 directory: graphs_dir,
                 execution,
                 _lock: lock,
@@ -413,6 +465,8 @@ impl FileJournal {
             Ok(Self {
                 extra,
                 graph_id: graph_id.to_owned(),
+                state_root: root.clone(),
+                project,
                 directory: graphs_dir,
                 execution,
                 _lock: lock,
@@ -1335,6 +1389,18 @@ impl GraphJournal for FileJournal {
                 #[cfg(test)]
                 inject_crash(CrashPoint::TerminalCheckpoint);
                 remove_pending_marker(&markers, &self.graph_id)?;
+            }
+            // Index only after authoritative checkpoint publication. Failed
+            // hints are healed by the host tick and waiter gap reconciliation.
+            #[allow(clippy::disallowed_methods)]
+            if let Err(error) =
+                Self::index_observation(&self.state_root, self.project, &self.graph_id)
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: graph observation indexing deferred: {error}"
+                );
             }
             Ok(())
         })()

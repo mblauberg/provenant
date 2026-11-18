@@ -11,6 +11,8 @@ pub use completion::{
 };
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};
+mod cargo_target;
+pub use cargo_target::{CargoTargetSetting, KNOB as CARGO_TARGET_KNOB, ResolvedCargoTarget};
 mod controls;
 pub use controls::release_progress;
 mod correlation;

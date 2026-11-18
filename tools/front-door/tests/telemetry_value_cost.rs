@@ -1,6 +1,6 @@
 // Integration fixtures use real UTC timestamps in their filesystem records.
 #![allow(clippy::disallowed_methods)]
-mod support;
+use crate::support;
 use provenant_core::{ProjectId, WallTime};
 use provenant_records::AccountIdentity;
 use provenant_telemetry::ledger::{self, Cost, Row, Source, Tokens};

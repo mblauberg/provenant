@@ -5,13 +5,13 @@ use crate::{
     WriterDeliveryReceipt, WriterDeliveryRequest, WriterDeliveryStage as Stage,
     WriterDeliveryState, WriterIntegration, WriterRequest,
 };
-use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
 use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
+use provenant_redact::Redactor;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
@@ -1895,7 +1895,7 @@ impl HostDeliveryContext {
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
-                provenant_confinement::redact::delivery_diagnostics(&String::from_utf8_lossy(
+                provenant_redact::delivery_diagnostics(&String::from_utf8_lossy(
                     &output.stderr.bytes,
                 ))
             };
@@ -3049,7 +3049,7 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
 
 fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
-    let redacted = provenant_confinement::redact::delivery_diagnostics(&detail);
+    let redacted = provenant_redact::delivery_diagnostics(&detail);
     let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > PREPARE_REASON_LIMIT {
         reason.truncate(reason.floor_char_boundary(PREPARE_REASON_LIMIT));

@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 // Exercise the binary-only tick rendering seam without registering a real service.
 #[path = "../src/tick_agent.rs"]
 #[allow(dead_code)]

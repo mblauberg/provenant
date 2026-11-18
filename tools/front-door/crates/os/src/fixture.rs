@@ -7,6 +7,14 @@ pub use fixture_git::{
     fixture_git_settings, git_command, git_command_at, git_env, run_git, scrub_git_env,
 };
 
+/// Run once on this thread after an existing lock has contended and before
+/// its bounded wait pauses. A nonblocking try never invokes this hook.
+pub fn on_existing_lock_wait(hook: impl FnOnce() + 'static) {
+    crate::fs::EXISTING_LOCK_WAIT_HOOK.with(|pending| {
+        assert!(pending.borrow_mut().replace(Box::new(hook)).is_none());
+    });
+}
+
 /// Create a fixture state root with the private permissions required by stores.
 ///
 /// Missing parents are created private too, and the leaf is set explicitly, so

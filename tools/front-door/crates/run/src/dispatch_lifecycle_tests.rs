@@ -104,7 +104,7 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
         .ok_or("safe reason missing")?;
     assert_eq!(
         String::from_utf8(output.bytes)?,
-        provenant_confinement::redact::bounded_line(&safe_reason, 256)
+        provenant_redact::bounded_line(&safe_reason, 256)
     );
     Ok(())
 }

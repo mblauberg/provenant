@@ -177,7 +177,7 @@ pub(crate) fn blocked(
         return Ok(());
     }
     journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
-    journal.blocking_reason = Some(provenant_confinement::redact::bounded_line(reason, 4096));
+    journal.blocking_reason = Some(provenant_redact::bounded_line(reason, 4096));
     journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
     write(attempt, &journal)
 }
@@ -611,8 +611,7 @@ impl Driver<'_> {
     }
     pub(crate) fn record_failure(&mut self, reason: &str) -> Result<()> {
         self.update(|journal| {
-            journal.blocking_reason =
-                Some(provenant_confinement::redact::bounded_line(reason, 4096));
+            journal.blocking_reason = Some(provenant_redact::bounded_line(reason, 4096));
             Ok(())
         })
     }
@@ -1333,6 +1332,7 @@ mod tests {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
         let registry = temp.path().join("broken-registry");
@@ -1458,6 +1458,7 @@ mod tests {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
         assert!(!store.reaction_pending(run.attempt_id, &call)?);
@@ -1547,6 +1548,7 @@ mod tests {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
         store.set_temporary_retained(id, true, &call)?;
@@ -2538,7 +2540,7 @@ impl crate::RunStore {
                 "abandonment reason must contain 1..4096 bytes",
             ));
         }
-        let reason = provenant_confinement::redact::bounded_line(reason, 4096);
+        let reason = provenant_redact::bounded_line(reason, 4096);
         let mut record = self.record(id, call)?;
         let attempt = self.attempt_dir(id, false)?;
         let _driver = try_progress_lock(&attempt, "settlement-driver.lock").map_err(|error| {

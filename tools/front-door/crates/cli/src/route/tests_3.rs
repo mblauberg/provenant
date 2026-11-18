@@ -535,6 +535,19 @@
         Ok(())
     }
 
+    // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+    #[test]
+    fn stale_graph_exclusions_do_not_refuse_dispatch() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        let overrides = vec![format!("routing.graph_exclude={}", serde_json::json!(["nonesuch", "claude"]))];
+        let profile = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?.dispatch_profile(&overrides)?;
+        let rules = super::task_exclusion_rules(&profile, &roots)?;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].selector, provenant_routing::ExclusionSelector::Provider("claude".into()));
+        Ok(())
+    }
+
     #[test]
     fn explain_reads_the_same_union_of_standing_and_flag_exclusions() -> Result<(), Box<dyn Error>>
     {
