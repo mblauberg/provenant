@@ -44,7 +44,7 @@ impl From<Metadata> for DirectoryStamp {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Cursor {
     version: u8,
     phase: Phase,
