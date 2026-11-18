@@ -440,9 +440,6 @@ pub fn target_protection_for_launch_while(
                         return protection;
                     }
                 };
-                let Some(writer) = canonical.task.writer else {
-                    continue;
-                };
                 let terminal = matches!(
                     &record.state,
                     provenant_records::run::AttemptState::Terminal { .. }
@@ -456,7 +453,6 @@ pub fn target_protection_for_launch_while(
                 };
                 let held = !terminal || !released;
                 if held {
-                    protection.worktrees.insert(writer.worktree);
                     protection
                         .shared_projects
                         .insert(crate::target_seed::project_key(binding.common_dir()));
@@ -551,6 +547,9 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
         .and_then(|publication| publication.require_durable())
         .map_err(io::Error::other)?;
     Ok(true)
+                    if let Some(writer) = canonical.task.writer {
+                        protection.worktrees.insert(writer.worktree);
+                    }
 }
 
 fn managed_target_relative(target: &Path, root: &Path) -> bool {
