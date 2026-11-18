@@ -133,6 +133,10 @@ pub struct ProviderOutcome {
     final_events: Vec<ProviderEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     protocol_error: Option<String>,
+    /// A malformed outcome lost framing (undecodable or cut-off bytes), as
+    /// opposed to a complete frame whose content the adapter rejects.
+    #[serde(skip)]
+    framing_loss: bool,
 }
 impl ProviderOutcome {
     pub fn adapter(&self) -> &str {
@@ -149,6 +153,11 @@ impl ProviderOutcome {
     }
     pub fn protocol_error(&self) -> Option<&str> {
         self.protocol_error.as_deref()
+    }
+    /// True when a malformed outcome is missing evidence rather than a
+    /// complete provider frame reporting a failure.
+    pub fn framing_loss(&self) -> bool {
+        self.framing_loss
     }
     pub fn status(&self) -> OutcomeStatus {
         self.status
@@ -407,7 +416,9 @@ impl StreamState {
                         return Err(ProviderError::IdentityMismatch);
                     }
                     if model.is_empty() {
-                        return Err(ProviderError::Malformed);
+                        return Err(ProviderError::MalformedResult(
+                            "provider reported an empty model".into(),
+                        ));
                     }
                     if self.model.as_ref().is_some_and(|old| old != model) {
                         self.model_conflict = true;
@@ -416,7 +427,9 @@ impl StreamState {
                 }
                 ProviderEvent::AnswerModel { model, digest } => {
                     if model.is_empty() || model.len() > 4096 {
-                        return Err(ProviderError::Malformed);
+                        return Err(ProviderError::MalformedResult(
+                            "provider answer model is empty or longer than 4096 bytes".into(),
+                        ));
                     }
                     if self.answer_models.len() == 1024 {
                         self.answer_models.remove(0);
@@ -533,12 +546,17 @@ impl StreamState {
             self.terminal = true;
             final_events.push(ProviderEvent::Text(text));
         }
+        let mut framing_loss = self.malformed;
         if !self.pending.is_empty() && !self.malformed {
             let line = std::mem::take(&mut self.pending);
             match self.line(&line) {
                 Ok(events) => final_events.extend(events),
                 Err(error) => {
                     self.malformed = true;
+                    framing_loss = matches!(
+                        error,
+                        ProviderError::Malformed | ProviderError::IncompleteFrame
+                    );
                     let error = match error {
                         ProviderError::IncompleteFrame | ProviderError::Malformed => {
                             let line = self.line_count + 1;
@@ -603,6 +621,7 @@ impl StreamState {
             exit,
             final_events,
             protocol_error,
+            framing_loss,
         })
     }
 }

@@ -721,8 +721,8 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
     );
     assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
-    // Exercise scratch cleanup after its declared age; the retained pin has
-    // its own retry marker and must survive that independent collection.
+    // An aged scratch directory remains while its live worktree owns it; the
+    // retained pin has its own retry marker and must survive that same pass.
     let scratch_days = 7_u64;
     let AttemptState::Terminal { finished_at, .. } = store.record(input.attempt_id, &call)?.state
     else {
@@ -733,13 +733,16 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     )?;
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
-        scratch_days,
+        &crate::ScratchPolicy::new(scratch_days.saturating_mul(86_400)),
         collection_time,
         false,
         &call,
     )?;
     assert!(gc.errors.is_empty(), "{:?}", gc.errors);
-    assert!(!temporary.exists());
+    assert!(
+        temporary.exists(),
+        "the live worktree still owns attempt scratch"
+    );
     let retained: bool = store.db.query_row(
         "SELECT tmp_retained FROM attempts WHERE id=?1",
         [id.to_string()],
@@ -777,7 +780,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         [id.to_string()],
         |row| row.get(0),
     )?;
-    assert!(!retained);
+    assert!(retained);
 
     // Exercise the actual launch path too: damage the verified marker after
     // provider preparation and before handoff obtains writer custody.

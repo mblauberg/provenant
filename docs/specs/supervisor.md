@@ -169,12 +169,12 @@ replayable authority.
 
 ### Build admission is a sourced port
 
-Sandboxed Cargo shims use `PortTable.build_admission`, independently of attempt
+Lane Cargo shims, including native launches, use `PortTable.build_admission`, independently of attempt
 admission: builtin uses host slots and the effective disk policy, command runs
 the repository wrapper around Cargo, and none omits admission. The host freezes
 the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
-`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain;
-no shim is installed for them. Local-Cargo policy still applies to every shim
+`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain
+behind the shim. Local-Cargo policy still applies to every shim
 backend. Wrapper execution streams Cargo output without a host-state receipt.
 - Why: build coordination varies by repository without changing attempt custody.
 - Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
@@ -209,7 +209,9 @@ credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
-files. Roots carry declarations; launch preparation classifies built-in,
+files. For HOME-rooted accounts, the stores are the adapter's client state
+below HOME and its declared credential files; registration does not make
+the entire account HOME a credential store. Roots carry declarations; launch preparation classifies built-in,
 provider, host-variable and account declarations once, using the actual launch
 source and cwd, scratch, and the derived writer cache, without unioning an
 earlier project classification. Scratch and the writer cache are lane roots
@@ -386,7 +388,7 @@ The sample is periodic observation, not an atomic census or a memory limit.
 (1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
-available from `provenant config show`.
+available from `provenant config show --full`.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
 - Owner: `crates/supervisor/src/process_tree.rs`, `src/process_tree.rs`
@@ -398,12 +400,22 @@ context remains lossless; external publication projects known credential values
 and typed secret fields, and withholds publication if projection fails. Raw and
 exported bytes have separate lengths and digests.
 
+A prompt snapshot with a known secret is refused before sealing. Host-local
+provider captures preserve raw bytes for settlement replay; decoded results and
+artifact text are redacted at publication and disclosure boundaries. Quoted credential values
+are masked until a definite closing quote: one that every plausible escape layer,
+from the opener's own up to the length of the backslash run, agrees is a close.
+No fixed depth cap applies, because a value can be escaped one layer deeper than
+any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
+after a definite close or the line end. An assignment value that is exactly
+`[REDACTED]` stays unchanged across chunks and rescans; further value bytes are
+masked. Marker recognition never changes the input to token scanning.
+
 Provider stdout and stderr are retained losslessly within bounded, host-owned
 private capture. Provider JSONL frames are decoded without rewriting their bytes;
 malformed retained frames remain evidence defects. Capture and local settlement
 do not modify provider continuation state.
 - Owner: `src/lib.rs`, `crates/run/src/holder.rs`
-
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

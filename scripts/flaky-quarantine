@@ -61,7 +61,7 @@ def read_tests(raw):
     return tests
 
 
-def make_filter(config, tests, today):
+def make_filter(config, tests, today, partial_inventory=False):
     entries = config.get("test", [])
     errors = []
     filters = []
@@ -98,8 +98,12 @@ def make_filter(config, tests, today):
         if identity in seen:
             errors.append(f"{label}: duplicate test {package}::{name}")
         seen.add(identity)
-        if package and name and identity not in tests:
-            errors.append(f"{label}: unknown test {package}::{name}")
+        if tests is not None and package and name and identity not in tests:
+            message = f"{label}: unknown test {package}::{name}"
+            if partial_inventory:
+                print(f"warning: {message}; native list was not built on this run", file=sys.stderr)
+            else:
+                errors.append(message)
         if package and name:
             filters.append(f"(package(={package}) & test(={name}))")
     if errors:
@@ -111,6 +115,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--test-list", type=Path, action="append", help="Use saved nextest JSON listings")
+    parser.add_argument("--partial-inventory", action="store_true", help="Warn for identities missing from an incomplete inventory")
+    parser.add_argument("--filter-only", action="store_true", help="Validate entries without resolving test identities")
     parser.add_argument("--today", type=dt.date.fromisoformat, default=dt.date.today())
     args = parser.parse_args()
 
@@ -120,7 +126,11 @@ def main():
         if not entries:
             print("")
             return 0
-        if args.test_list:
+        if args.filter_only and args.test_list:
+            raise ValueError("--filter-only cannot be combined with --test-list")
+        if args.filter_only:
+            tests = None
+        elif args.test_list:
             tests = set().union(*(read_tests(path.read_text(encoding="utf-8")) for path in args.test_list))
         else:
             command = [
@@ -131,7 +141,7 @@ def main():
             raw_tests = subprocess.run(command, cwd=DEFAULT_CONFIG.parents[1], check=True,
                                        capture_output=True, text=True).stdout
             tests = read_tests(raw_tests)
-        print(make_filter(config, tests, args.today))
+        print(make_filter(config, tests, args.today, args.partial_inventory))
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError, ValueError) as error:
         print(f"flaky quarantine check failed: {error}", file=sys.stderr)
         return 1

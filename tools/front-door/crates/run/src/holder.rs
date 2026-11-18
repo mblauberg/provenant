@@ -121,8 +121,22 @@ mod codex_usage_tests {
 fn apply_provider_identity(
     exit: &ExitObservation,
     decoded: &mut Decoded,
-    _policy: &provenant_records::policy::Policy,
+    policy: &provenant_records::policy::Policy,
 ) {
+    let unsettle = |decoded: &mut Decoded, reason: &str| {
+        decoded.outcome = Outcome::Unsettled;
+        decoded.complete = false;
+        // Replay identified the precise defect already. Identity uncertainty
+        // must retain that safe typed location, not replace it with a generic
+        // message. Conflicting identity still takes priority below.
+        if !matches!(
+            decoded.terminal_cause,
+            Some(TerminalCause::ProviderCaptureDefect { .. })
+        ) {
+            decoded.terminal_cause = None;
+            decoded.reason = Some(reason.into());
+        }
+    };
     if exit.provider_identity_conflict {
         decoded.outcome = Outcome::Failed;
         decoded.complete = false;
@@ -131,23 +145,32 @@ fn apply_provider_identity(
     } else if exit.provider_identity_evidence_incomplete
         && matches!(
             decoded.outcome,
-            Outcome::Succeeded
-                | Outcome::ReviewRequired
-                | Outcome::Uncommitted
-                | Outcome::Cancelled
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         )
     {
-        // Live identity checks run before retained-tail truncation. If a
-        // delimiter-complete frame was oversized, undecodable, or
-        // unreadable, or capture drain timed out, the terminal owner
-        // cannot prove that the provider stayed in the admitted session.
-        // Do not continue on incomplete evidence.
-        decoded.outcome = Outcome::Unsettled;
-        decoded.complete = false;
-        decoded.terminal_cause = None;
-        decoded.reason =
-            Some("provider identity evidence was incomplete; continuation refused".into());
-    } else if exit.provider_identity_eof_fragment
+        use provenant_records::policy::{Effect, Facts};
+        match policy.check(
+            "PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE",
+            Facts::violation("provider identity evidence was incomplete"),
+        ) {
+            Effect::Proceed => {}
+            Effect::Warn(warning) => {
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {warning}"),
+                    None => warning,
+                });
+            }
+            // Live identity checks run before retained-tail truncation. If a
+            // delimiter-complete frame was oversized, undecodable or
+            // unreadable, or capture drain timed out, the terminal owner
+            // cannot prove that the provider stayed in the admitted session.
+            Effect::Refuse(_) => unsettle(
+                decoded,
+                "provider identity evidence was incomplete; continuation refused by policy",
+            ),
+        }
+    }
+    if exit.provider_identity_eof_fragment
         && !(exit.cancel_delivered_before_exit == Some(true)
             && matches!(
                 exit.stop_reason,
@@ -158,11 +181,63 @@ fn apply_provider_identity(
         // Only a fragment from an actual EOF is eligible for the
         // intentional-stop exception. Natural completion and uncertain
         // delivery cannot use it to claim a complete provider result.
-        decoded.outcome = Outcome::Unsettled;
-        decoded.complete = false;
-        decoded.terminal_cause = None;
-        decoded.reason =
-            Some("provider ended with an incomplete final frame; continuation refused".into());
+        unsettle(
+            decoded,
+            "provider ended with an incomplete final frame; continuation refused",
+        );
+    }
+}
+
+#[cfg(test)]
+mod identity_policy_tests {
+    use super::*;
+    use provenant_records::policy::{Policy, Source, Strength};
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn incomplete_identity_evidence_respects_policy_and_conflicts_remain_fatal() {
+        for (strength, conflict, expected) in [
+            (Strength::Warn, false, Outcome::Succeeded),
+            (Strength::Off, false, Outcome::Succeeded),
+            (Strength::Refuse, false, Outcome::Unsettled),
+            (Strength::Warn, true, Outcome::Failed),
+            (Strength::Off, true, Outcome::Failed),
+            (Strength::Refuse, true, Outcome::Failed),
+        ] {
+            let mut policy = Policy::default();
+            policy.overlay(
+                &[("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE".to_owned(), strength)].into(),
+                Source::Host,
+            );
+            let mut exit = crate::tests::exit();
+            exit.provider_identity_evidence_incomplete = true;
+            exit.provider_identity_conflict = conflict;
+            let mut decoded = Decoded {
+                terminal_cause: None,
+                outcome: Outcome::Succeeded,
+                result: "valid result".into(),
+                complete: true,
+                observed_route: None,
+                usage: UsageRecord::default(),
+                session: Some("session".into()),
+                reason: None,
+                partial_signals: vec![],
+                turns: vec![],
+            };
+            apply_provider_identity(&exit, &mut decoded, &policy);
+            assert_eq!(decoded.outcome, expected);
+            if !conflict && strength == Strength::Warn {
+                let reason = decoded.reason.as_deref().unwrap();
+                assert!(reason.contains("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"));
+                assert!(reason.contains("Host"));
+            }
+            if conflict {
+                assert_eq!(
+                    decoded.terminal_cause,
+                    Some(TerminalCause::IdentityMismatch)
+                );
+            }
+        }
     }
 }
 
@@ -2128,9 +2203,11 @@ impl RunStore {
                 baseline_unknown,
             );
         }
-        // A signal is a crash only when the host sent no stop: a deadline,
+        // Missing capture evidence keeps its precise diagnostic. Otherwise a
+        // signal is a crash only when the host sent no stop: a deadline,
         // budget or handoff kill keeps the stop's own cause (#3078).
         if !cancelled
+            && decoded.outcome != Outcome::Unsettled
             && exit.stop_reason.is_none()
             && matches!(exit.termination, Some(Termination::Signal(_)))
         {
@@ -2180,7 +2257,10 @@ impl RunStore {
                     .and_then(|capture| path_denial_hint(&capture))
             })
         });
-        let clean_budget = exit.stop_reason == Some(StopReason::TokenBudget)
+        // A clean Git point proves the writer's changes, not an unread
+        // provider result. Missing replay evidence remains unsettled.
+        let clean_budget = decoded.outcome != Outcome::Unsettled
+            && exit.stop_reason == Some(StopReason::TokenBudget)
             && read_sealed(
                 attempt,
                 provenant_records::AttemptFile::BudgetCleanPoint.name(),
@@ -2234,7 +2314,7 @@ impl RunStore {
             decoded.reason = Some("token target reached at a clean pushed point; retained the lane's handoff without a budget snapshot".into());
         }
         // Valid natural completion wins over a late stop request.
-        if decoded.outcome != Outcome::Succeeded
+        if !matches!(decoded.outcome, Outcome::Succeeded | Outcome::Unsettled)
             && !clean_budget
             && !(exit.stop_reason == Some(StopReason::TokenBudget) && decoded.complete)
         {
@@ -2299,7 +2379,8 @@ impl RunStore {
         // A writer that passed its token budget was stopped by the host: say
         // so, with the budget and where it came from. Settlement records
         // whether its work could be committed.
-        if exit.stop_reason == Some(StopReason::TokenBudget)
+        if decoded.outcome != Outcome::Unsettled
+            && exit.stop_reason == Some(StopReason::TokenBudget)
             && (decoded.outcome == Outcome::TimedOut
                 || exit.termination != Some(Termination::Exit(0)))
         {
@@ -3099,7 +3180,11 @@ impl RunStore {
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
         ) && !matches!(
             decoded.terminal_cause,
-            Some(TerminalCause::Steered | TerminalCause::IdentityMismatch)
+            Some(
+                TerminalCause::Steered
+                    | TerminalCause::IdentityMismatch
+                    | TerminalCause::ProviderCaptureDefect { .. }
+            )
         ) {
             decoded.terminal_cause = None;
         }
@@ -4326,7 +4411,11 @@ mod writer_recovery_tests {
             [id.to_string()],
             |row| row.get(0),
         )?;
-        assert!(!retained);
+        assert!(
+            retained,
+            "unfinished work retains scratch after custody release"
+        );
+        assert!(candidate.exists());
         Ok(())
     }
 

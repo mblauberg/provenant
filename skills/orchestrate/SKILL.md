@@ -5,12 +5,12 @@ description: "Use to delegate or parallelise work: lanes, graphs, templates, rev
 
 # Orchestrate
 
-Use `provenant templates NAME --json` to inspect bundled, user, repository
+Use `provenant templates show NAME --json` to inspect bundled, user, repository
 and inline templates. Dotted names select flavours such as `review.security`.
 
 ## Commands
 
-Use `provenant help --all` for commands and options. Explain a graph before
+Use `provenant help --all` for commands and options; pin a PR with `provenant run review-panel --pr 123 --brief-file brief.md`. Explain a graph before
 submitting it; check its authority, write scope and gates first.
 
 ## Divide the work
@@ -20,6 +20,8 @@ subscription; keep small, coupled and user-facing steps with the chair. Split
 by context and dependency, settle shared interfaces first, and budget roughly
 1.4–3.3 times the tokens for concurrent work. Integrate each return as it
 finishes and land ready work independently. Any lane may launch child lanes.
+`implement` starts a junior writer by default; `--route` picks another tier and
+`--plan` sizes the brief first.
 
 Sources: [dynamic concurrency](https://arxiv.org/abs/2610.10263),
 [agent loop](https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop),

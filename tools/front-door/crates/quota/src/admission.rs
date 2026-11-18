@@ -23,17 +23,35 @@ impl Refusal {
         self.pool.as_deref() == Some(ACCOUNT_ROUTE)
     }
     /// When the refusal stops holding: its reset, or one hour after it was
-    /// observed when the provider named no reset.
+    /// observed when the provider named no reset. Agy reset estimates are
+    /// revalidated after five minutes, even when they claim a multi-day wait.
     pub fn expires_unix_seconds(&self) -> Result<i64, QuotaError> {
-        match self.resets_unix_seconds {
-            Some(resets) => Ok(resets),
-            None => self
-                .observed_unix_seconds
-                .checked_add(3600)
-                .ok_or(QuotaError::TimeRange),
-        }
+        refusal_expiry(
+            &self.account.adapter,
+            self.observed_unix_seconds,
+            self.resets_unix_seconds,
+        )
     }
 }
+/// Shared by account records and already-published readiness observations.
+pub(crate) fn refusal_expiry(
+    adapter: &str,
+    observed: i64,
+    reset: Option<i64>,
+) -> Result<i64, QuotaError> {
+    let revalidation = provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.refusal_revalidation_seconds);
+    if revalidation.is_none()
+        && let Some(reset) = reset
+    {
+        return Ok(reset);
+    }
+    let bounded = observed
+        .checked_add(revalidation.unwrap_or(3600))
+        .ok_or(QuotaError::TimeRange)?;
+    Ok(reset.map_or(bounded, |reset| reset.min(bounded)))
+}
+
 /// Short-lived provider capacity evidence, separate from quota admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityCooldown {
@@ -111,6 +129,7 @@ pub fn record_capacity_cooldown(
         account: record.account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     }))
@@ -275,40 +294,64 @@ impl Admission<'_> {
     /// persisted refusals.
     /// Partial coverage is advisory; explicit provider refusals are checked separately.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
-        match route.readiness {
+        self.check_with_policy(route, self.policy)
+    }
+
+    /// Check with explicit policy enforcement for non-boundary quota rules.
+    pub fn check_with_policy(
+        &self,
+        route: &ResolvedRoute,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<(), QuotaError> {
+        let ready = matches!(route.readiness,
             RouteReadiness::Ready {
                 expires_unix_seconds,
                 ..
-            } if expires_unix_seconds > self.now_unix_seconds => {}
-            _ => return Err(QuotaError::Refused("provider readiness")),
+            } if expires_unix_seconds > self.now_unix_seconds
+        );
+        if !ready {
+            policy.warn_or(
+                "QUOTA_READINESS_STALE",
+                provenant_records::policy::Facts::violation("provider readiness expired"),
+                |_| QuotaError::Refused("provider readiness"),
+            )?;
         }
-        let key = route
-            .account_key
-            .as_ref()
-            .ok_or(QuotaError::Refused("account identity unknown"))?;
-        if let Some(block) = self.account_block(&route.adapter, key, &route.model)? {
-            return Err(QuotaError::Refused(block.repair()));
-        }
-        let record = self
-            .records
-            .iter()
-            .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
-        let snapshot = self.fresh_snapshot(&route.adapter, record);
-        if let Some(snapshot) = snapshot {
-            if snapshot.status == QuotaStatus::AuthRequired {
-                return Err(QuotaError::Refused(
-                    "authentication required; sign in to the selected account",
-                ));
+        let key = match route.account_key.as_ref() {
+            Some(key) => Some(key),
+            None => {
+                policy.warn_or(
+                    "QUOTA_IDENTITY_UNKNOWN",
+                    provenant_records::policy::Facts::violation("account identity unknown"),
+                    |_| QuotaError::Refused("account identity unknown"),
+                )?;
+                None
             }
-            if partial_headroom(
-                snapshot,
-                &route.adapter,
-                &route.model,
-                self.pools,
-                self.now_unix_seconds,
-            ) == PartialHeadroom::Exhausted
-            {
-                return Err(QuotaError::AllowanceExhausted);
+        };
+        if let Some(key) = key {
+            if let Some(block) = self.account_block(&route.adapter, key, &route.model)? {
+                return Err(QuotaError::Refused(block.repair()));
+            }
+            let record = self
+                .records
+                .iter()
+                .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
+            let snapshot = self.fresh_snapshot(&route.adapter, record);
+            if let Some(snapshot) = snapshot {
+                if snapshot.status == QuotaStatus::AuthRequired {
+                    return Err(QuotaError::Refused(
+                        "authentication required; sign in to the selected account",
+                    ));
+                }
+                if partial_headroom(
+                    snapshot,
+                    &route.adapter,
+                    &route.model,
+                    self.pools,
+                    self.now_unix_seconds,
+                ) == PartialHeadroom::Exhausted
+                {
+                    return Err(QuotaError::AllowanceExhausted);
+                }
             }
         }
         Ok(())
@@ -447,6 +490,7 @@ pub fn record_refusal(
         account: record.account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     })
@@ -665,6 +709,7 @@ mod admission_tests {
         record
     }
     #[test]
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
     fn stale_availability_warning_does_not_bypass_exhaustion() {
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
@@ -696,7 +741,19 @@ mod admission_tests {
             availability_ref: "fixture".into(),
             expires_unix_seconds: 950,
         };
-        assert!(admission(&[]).check(&route).is_err());
+        assert!(admission(&[]).check(&route).is_ok());
+        assert!(admission(&exhausted).check(&route).is_err());
+        assert!(admission(&auth).check(&route).is_err());
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(
+            &[(
+                "QUOTA_READINESS_STALE".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into(),
+            provenant_records::policy::Source::Project,
+        );
+        assert!(admission(&[]).check_with_policy(&route, &strict).is_err());
     }
     #[test]
     fn account_mismatch_blocks_until_identity_verifies_again() {
@@ -1054,6 +1111,76 @@ mod admission_tests {
         }
         assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
     }
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn agy_refusal_revalidates_instead_of_holding_a_multi_day_reset() {
+        let mut account = record(QuotaStatus::Available).account;
+        account.adapter = "agy".into();
+        let other = AccountScope {
+            account_key: "other".into(),
+            ..account.clone()
+        };
+        let intent = record_refusal(
+            None,
+            &account,
+            "agy/gemini-3.8-flash",
+            None,
+            1000,
+            Some(1000 + 7 * 86400),
+        )
+        .expect("refusal");
+        let record = intent.replacement.expect("account record");
+        let refusal = &record.refusals[0];
+        for (now, holds) in [(1000, true), (1299, true), (1300, false)] {
+            let admission = Admission {
+                policy: crate::source::test_policy(),
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(&record),
+                pools: &[],
+            };
+            assert_eq!(
+                admission
+                    .refusal_holds("agy", Some(&record), refusal)
+                    .unwrap(),
+                holds
+            );
+            assert_eq!(
+                admission
+                    .account_block("agy", &other.account_key, "gemini-3.8-flash")
+                    .unwrap(),
+                None
+            );
+            // Published observations from older versions carry the long expiry;
+            // reading them must apply the same freshness boundary immediately.
+            let scope = crate::ReadinessScope {
+                extra: Default::default(),
+                host: "host".into(),
+                adapter: "agy".into(),
+                account_key: account.account_key.clone(),
+                route: "agy/gemini-3.8-flash".into(),
+            };
+            let file = crate::ReadinessFile {
+                records: vec![crate::RouteReadiness {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    scope: scope.clone(),
+                    state: crate::ReadinessState::Unavailable,
+                    reason: Some(crate::ReadinessReason::ProviderRefusal),
+                    observed_unix_seconds: 1000,
+                    expires_unix_seconds: 1000 + 7 * 86400,
+                    reset_unix_seconds: Some(1000 + 7 * 86400),
+                    evidence_ref: Some("provider-refusal".into()),
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                file.get(&scope, now).state == crate::ReadinessState::Unavailable,
+                holds
+            );
+        }
+    }
+
     #[test]
     fn account_usage_limit_holds_every_model_until_its_reset() {
         let account = AccountScope {
@@ -1064,7 +1191,7 @@ mod admission_tests {
         };
         let mut route = route();
         route.adapter = account.adapter.clone();
-        route.model = "gpt-6.1-sol".into();
+        route.model = "fixture-model".into();
         route.readiness = RouteReadiness::Ready {
             availability_warning: None,
             extra: Default::default(),
@@ -1430,6 +1557,53 @@ mod admission_tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn stale_readiness_and_unknown_identity_warn_or_refuse_by_policy() {
+        use provenant_records::policy::{Policy, Source, Strength};
+
+        let default_policy = Policy::default();
+        let admission = Admission {
+            policy: &default_policy,
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 1000,
+            records: &[],
+            pools: &[],
+        };
+        let mut stale = route();
+        stale.readiness = RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 500,
+        };
+        assert!(admission.check(&stale).is_ok());
+
+        let mut strict = Policy::default();
+        strict.overlay(
+            &std::collections::BTreeMap::from([("QUOTA_READINESS_STALE".into(), Strength::Refuse)]),
+            Source::Project,
+        );
+        assert!(matches!(
+            admission.check_with_policy(&stale, &strict),
+            Err(QuotaError::Refused("provider readiness"))
+        ));
+
+        let mut unknown = route();
+        unknown.account_key = None;
+        assert!(admission.check(&unknown).is_ok());
+        strict.overlay(
+            &std::collections::BTreeMap::from([(
+                "QUOTA_IDENTITY_UNKNOWN".into(),
+                Strength::Refuse,
+            )]),
+            Source::Project,
+        );
+        assert!(matches!(
+            admission.check_with_policy(&unknown, &strict),
+            Err(QuotaError::Refused("account identity unknown"))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1632,10 +1806,7 @@ mod refusal_scope_tests {
             details: None,
             windows: vec![window("quota", 10000)],
         });
-        for (model, pool) in [
-            ("gemini-3.8-flash", "gemini"),
-            ("claude-sonnet-4-6", "claude"),
-        ] {
+        for (model, pool) in [("gemini-fixture", "gemini"), ("claude-fixture", "claude")] {
             assert!(
                 Admission {
                     policy: crate::source::test_policy(),
@@ -1666,10 +1837,7 @@ mod refusal_scope_tests {
                     window("claude.weekly", claude),
                 ],
             });
-            for (model, pool) in [
-                ("gemini-3.8-flash", "gemini"),
-                ("claude-sonnet-4-6", "claude"),
-            ] {
+            for (model, pool) in [("gemini-fixture", "gemini"), ("claude-fixture", "claude")] {
                 let admitted = Admission {
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,

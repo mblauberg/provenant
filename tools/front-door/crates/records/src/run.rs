@@ -1304,6 +1304,10 @@ pub enum TerminalCause {
     CommandUnavailable,
     HostNativeUnconfigured,
     IdentityMismatch,
+    /// A retained provider frame could not be replayed; no task result was read.
+    ProviderCaptureDefect {
+        line: u64,
+    },
     /// A writer declared unfinished work and its pinned head equals its base.
     StoppedNoWork,
     /// A writer finished without a final message.
@@ -1354,12 +1358,25 @@ impl TerminalCause {
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
             Self::IdentityMismatch => "provider identity mismatch; provenant output ID",
+            Self::ProviderCaptureDefect { .. } => {
+                "provider capture evidence defect; provenant output ID"
+            }
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
             Self::Steered => "steering interruption; provenant output ID",
+        }
+    }
+
+    /// Render only typed host facts, never the terminal state's free text.
+    pub fn diagnostic(self, detail: bool) -> String {
+        match self {
+            Self::ProviderCaptureDefect { line } if detail => format!(
+                "provider capture evidence defect at stdout.log line {line}; replay incomplete"
+            ),
+            _ => if detail { self.detail() } else { self.reason() }.to_owned(),
         }
     }
 
@@ -1439,6 +1456,9 @@ impl TerminalCause {
             }
             Self::IdentityMismatch => {
                 "observed provider identity differs from the requested route; inspect the local session evidence"
+            }
+            Self::ProviderCaptureDefect { .. } => {
+                "provider capture evidence defect; replay incomplete; inspect the raw local stdout.log"
             }
             Self::StoppedNoWork => {
                 "the writer stopped with no work: its branch has no new commit; acceptance remains unmet"

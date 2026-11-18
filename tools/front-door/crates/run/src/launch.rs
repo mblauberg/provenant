@@ -303,6 +303,8 @@ pub struct PrepareRefusal {
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
     pub message: String,
+    /// Host-authored routing explanation, never provider or OS diagnostics.
+    pub host_message: Option<String>,
     pub skipped_routes: Vec<SkippedRoute>,
     pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
 }
@@ -337,6 +339,7 @@ impl PrepareRefusal {
             terminal_cause: cause,
             terminal_note: None,
             message: message.into(),
+            host_message: None,
             skipped_routes: Vec::new(),
             fallback_outcome: None,
         })
@@ -2155,9 +2158,19 @@ impl RunStore {
                                     diagnostic.next.unwrap_or_default()
                                 ))
                             }
-                            // The refusal's own message, bounded for local diagnostics.
-                            None => Some(provenant_core::bounded_line(&refusal.message, 240)),
+                            None => None,
                         },
+                    };
+                    let terminal_note = if let Some(host_message) = refusal.host_message.as_deref()
+                    {
+                        let host_message =
+                            provenant_confinement::redact::bounded_line(host_message, 160);
+                        Some(match terminal_note {
+                            Some(note) => format!("{host_message}; {note}"),
+                            None => host_message,
+                        })
+                    } else {
+                        terminal_note
                     };
                     let terminal_note = if continuation_reason.is_some() {
                         continuation_reason.clone()

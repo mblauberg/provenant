@@ -1276,6 +1276,347 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     Ok(safe)
 }
 
+/// Classify a known-shape match without exposing any matched bytes.
+pub fn known_shape_rule(bytes: &[u8]) -> Result<Option<&'static str>, FilterError> {
+    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut sink = |_: &[u8]| {};
+    for chunk in bytes.chunks(8192) {
+        redactor.filter(chunk, &mut sink)?;
+    }
+    redactor.finish(&mut sink)?;
+    Ok(if redactor.tokens.matched {
+        Some("credential token or URL userinfo")
+    } else if redactor.assignments.matched {
+        Some("credential assignment")
+    } else {
+        None
+    })
+}
+
+const SESSION_CHUNK: usize = 32 * 1024;
+const SESSION_DEPTH: u8 = 8;
+const SESSION_ENTRIES: usize = 100_000;
+const SESSION_CANDIDATES: usize = 64;
+const SESSION_STAGING: &str = ".session-redact-";
+static SESSION_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Refusals seen during one scrub. A refusal is recorded and the scrub goes on
+/// to the remaining entries, so one bad file never leaves another unscrubbed.
+#[derive(Default)]
+struct Scrub {
+    rewritten: usize,
+    failed: bool,
+    text_only: bool,
+}
+
+impl Scrub {
+    /// Keep a value that was read, or record the refusal and move on.
+    fn keep<T>(&mut self, result: Result<T, FilterError>) -> Option<T> {
+        result.inspect_err(|_| self.failed = true).ok()
+    }
+
+    fn file(&mut self, dir: &Directory, name: &OsStr) {
+        match scrub_file(dir, name, self.text_only) {
+            Ok(rewritten) => self.rewritten += usize::from(rewritten),
+            Err(_) => self.failed = true,
+        }
+    }
+
+    fn finish(self) -> Result<usize, FilterError> {
+        if self.failed {
+            Err(FilterError)
+        } else {
+            Ok(self.rewritten)
+        }
+    }
+}
+
+/// Post-process provider-owned session text under an attempt's private state.
+///
+/// Codex writes rollouts and history files and Claude writes project sessions
+/// there, so a credential a lane printed can survive in a transcript even when
+/// captures and the result are filtered. `.jsonl` transcripts in the known
+/// session layouts are rewritten in place. Claude's `projects` roots also hold
+/// large tool output as regular `.txt` and `.json` files, so those are scrubbed
+/// too. Cursor chats and OpenCode data text are scrubbed best effort with the
+/// same traversal bounds; failures there do not fail settlement. SQLite files
+/// (including journals) and other binary stores remain unscrubbed.
+/// Credentials, cache trees and links are never touched. A
+/// file without a known shape is only read and left as it is.
+///
+/// Every entry is visited even when another one is refused: a link, a hard
+/// link, a file that changes while it is read, a line over the frame bound, a
+/// tree deeper than the bound, or more candidates than the bound. Each refusal
+/// is recorded and the call returns an error once the walk is done. Candidates
+/// past the bound are not descended into. Returns the number of rewritten files
+/// when every entry was scrubbed.
+pub fn scrub_session_history(root: &Path) -> Result<usize, FilterError> {
+    let state = match Directory::open_anchor(root) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(0),
+        Err(_) => return Err(FilterError),
+    };
+    let mut scrub = Scrub::default();
+    scrub_layout(&state, &mut scrub);
+    let Some(entries) = scrub.keep(state.entries().map_err(|_| FilterError)) else {
+        return scrub.finish();
+    };
+    let mut candidates = 0;
+    for candidate in entries {
+        let Some(candidate) = scrub.keep(candidate.map_err(|_| FilterError)) else {
+            break;
+        };
+        let is_candidate = candidate.to_str().is_some_and(|name| {
+            name.strip_prefix("candidate-")
+                .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if !is_candidate {
+            continue;
+        }
+        candidates += 1;
+        if candidates > SESSION_CANDIDATES {
+            scrub.failed = true;
+            break;
+        }
+        let candidate = scrub.keep(
+            state
+                .open_verified_directory(&candidate)
+                .map_err(|_| FilterError),
+        );
+        if let Some(candidate) = candidate {
+            scrub_layout(&candidate, &mut scrub);
+        }
+    }
+    scrub.finish()
+}
+
+fn scrub_layout(dir: &Directory, scrub: &mut Scrub) {
+    for name in ["sessions", "archived_sessions"] {
+        if let Some(Some(sessions)) = scrub.keep(subdirectory(dir, name)) {
+            scrub_tree(&sessions, 0, is_jsonl, scrub);
+        }
+    }
+    // These formerly host-backed stores are best effort: an unreadable or
+    // over-bound store must not turn a successful settlement into a failure.
+    let mut stores = Scrub {
+        text_only: true,
+        ..Scrub::default()
+    };
+    for (parent, child) in [(".cursor", "chats"), ("data", "opencode")] {
+        if let Some(Some(parent)) = stores.keep(subdirectory(dir, parent))
+            && let Some(Some(tree)) = stores.keep(subdirectory(&parent, child))
+        {
+            scrub_tree(&tree, 0, is_store_candidate, &mut stores);
+        }
+    }
+    scrub.rewritten += stores.rewritten;
+    scrub_files(dir, scrub);
+    if let Some(Some(config)) = scrub.keep(subdirectory(dir, "claude-config")) {
+        if let Some(Some(projects)) = scrub.keep(subdirectory(&config, "projects")) {
+            scrub_tree(&projects, 0, is_projects_text, scrub);
+        }
+        scrub_files(&config, scrub);
+    }
+}
+
+fn scrub_files(dir: &Directory, scrub: &mut Scrub) {
+    for name in ["history.jsonl", "session_index.jsonl"] {
+        if let Some(Some(file)) = scrub.keep(regular_file(dir, name)) {
+            scrub.file(dir, &file);
+        }
+    }
+}
+
+fn scrub_tree(dir: &Directory, depth: u8, wanted: fn(&OsStr) -> bool, scrub: &mut Scrub) {
+    if depth > SESSION_DEPTH {
+        scrub.failed = true;
+        return;
+    }
+    let Some(entries) = scrub.keep(dir.entries().map_err(|_| FilterError)) else {
+        return;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= SESSION_ENTRIES {
+            scrub.failed = true;
+            return;
+        }
+        let Some(entry) = scrub.keep(entry.map_err(|_| FilterError)) else {
+            return;
+        };
+        let Some(metadata) = scrub.keep(dir.metadata_at(&entry, false).map_err(|_| FilterError))
+        else {
+            continue;
+        };
+        match metadata.kind {
+            FileKind::Directory => {
+                let child =
+                    scrub.keep(dir.open_verified_directory(&entry).map_err(|_| FilterError));
+                if let Some(child) = child {
+                    scrub_tree(&child, depth + 1, wanted, scrub);
+                }
+            }
+            FileKind::Regular if wanted(&entry) => scrub.file(dir, &entry),
+            _ => {}
+        }
+    }
+}
+
+fn subdirectory(dir: &Directory, name: &str) -> Result<Option<Directory>, FilterError> {
+    match dir.metadata_at(OsStr::new(name), false) {
+        Ok(metadata) if metadata.kind == FileKind::Directory => dir
+            .open_verified_directory(OsStr::new(name))
+            .map(Some)
+            .map_err(|_| FilterError),
+        Ok(_) => Ok(None),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(_) => Err(FilterError),
+    }
+}
+
+fn regular_file(dir: &Directory, name: &str) -> Result<Option<std::ffi::OsString>, FilterError> {
+    match dir.metadata_at(OsStr::new(name), false) {
+        Ok(metadata) if metadata.kind == FileKind::Regular => Ok(Some(OsStr::new(name).into())),
+        Ok(_) => Ok(None),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(_) => Err(FilterError),
+    }
+}
+
+fn is_jsonl(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| name.ends_with(".jsonl"))
+}
+
+/// Claude keeps large tool output as plain text beside its transcripts.
+fn is_projects_text(name: &OsStr) -> bool {
+    is_jsonl(name)
+        || name
+            .to_str()
+            .is_some_and(|name| name.ends_with(".txt") || name.ends_with(".json"))
+}
+
+// SQLite and its sidecars remain binary stores even if a fixture or empty
+// journal happens to contain only text. Other files are checked as streamed UTF-8.
+fn is_store_candidate(name: &OsStr) -> bool {
+    !name.to_str().is_some_and(|name| {
+        name == "auth.json"
+            || name.starts_with(SESSION_STAGING)
+            || [".sqlite", ".sqlite3", ".db"].iter().any(|extension| {
+                name.rsplit_once(extension)
+                    .is_some_and(|(_, tail)| matches!(tail, "" | "-wal" | "-shm" | "-journal"))
+            })
+    })
+}
+
+/// Rewrite one transcript through the streaming filter, replacing the entry
+/// only when a shape matched. A clean file is read once and never staged,
+/// copied or synced. A file that changes while it is read fails closed; a link
+/// or hard link is refused rather than followed.
+fn scrub_file(dir: &Directory, name: &OsStr, text_only: bool) -> Result<bool, FilterError> {
+    let before = dir.metadata_at(name, false).map_err(|_| FilterError)?;
+    if before.kind != FileKind::Regular || before.links != 1 {
+        return Err(FilterError);
+    }
+    if !filter_pass(dir, name, &before, None, text_only)? {
+        return Ok(false);
+    }
+    let staging = staging_name();
+    let staging = OsStr::new(&staging);
+    let mut target = dir.create_new(staging).map_err(|_| FilterError)?;
+    let staged =
+        filter_pass(dir, name, &before, Some(&mut target), text_only).and_then(|matched| {
+            target.sync().map_err(|_| FilterError)?;
+            Ok(matched)
+        });
+    if !matches!(staged, Ok(true)) {
+        let _ = dir.unlink(staging);
+        return staged;
+    }
+    if dir.replace(staging, dir, name).is_err() {
+        let _ = dir.unlink(staging);
+        return Err(FilterError);
+    }
+    dir.sync().map_err(|_| FilterError)?;
+    Ok(true)
+}
+
+/// Stream one transcript through a fresh redactor, writing the filtered bytes
+/// to `staged` when one is given. Returns whether any shape matched. The file
+/// must match `before` when it is opened and must not change while it is read.
+fn filter_pass(
+    dir: &Directory,
+    name: &OsStr,
+    before: &Metadata,
+    mut staged: Option<&mut FileHandle>,
+    text_only: bool,
+) -> Result<bool, FilterError> {
+    let mut source = dir.open_read(name).map_err(|_| FilterError)?;
+    let opened = source.metadata().map_err(|_| FilterError)?;
+    if !before.unchanged(&opened) {
+        return Err(FilterError);
+    }
+    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut utf8_tail = Vec::new();
+    let mut buffer = [0_u8; SESSION_CHUNK];
+    loop {
+        let read = source.read(&mut buffer).map_err(|_| FilterError)?;
+        if read == 0 {
+            break;
+        }
+        if text_only {
+            let bytes = &buffer[..read];
+            if bytes.contains(&0) {
+                return Ok(false);
+            }
+            utf8_tail.extend_from_slice(bytes);
+            match std::str::from_utf8(&utf8_tail) {
+                Ok(_) => utf8_tail.clear(),
+                Err(error) if error.error_len().is_none() => {
+                    let valid = error.valid_up_to();
+                    utf8_tail.drain(..valid);
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+        let mut write_err = Ok(());
+        redactor.filter(&buffer[..read], &mut |frame| {
+            if write_err.is_ok() {
+                write_err = write_staged(staged.as_deref_mut(), frame);
+            }
+        })?;
+        write_err?;
+    }
+    if !utf8_tail.is_empty() {
+        return Ok(false);
+    }
+    let mut write_err = Ok(());
+    redactor.finish(&mut |frame| {
+        if write_err.is_ok() {
+            write_err = write_staged(staged.as_deref_mut(), frame);
+        }
+    })?;
+    write_err?;
+    let after = source.metadata().map_err(|_| FilterError)?;
+    if !opened.unchanged(&after) {
+        return Err(FilterError);
+    }
+    Ok(redactor.has_redaction())
+}
+
+fn write_staged(staged: Option<&mut FileHandle>, bytes: &[u8]) -> Result<(), FilterError> {
+    match staged {
+        Some(target) => target.write_all(bytes).map_err(|_| FilterError),
+        None => Ok(()),
+    }
+}
+
+fn staging_name() -> String {
+    format!(
+        "{SESSION_STAGING}{}-{}",
+        std::process::id(),
+        SESSION_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Redact delivery diagnostics, including every URL or scp-style remote
 /// username. Those fields can contain credentials even when no password is
 /// present. The common filter handles the other credential shapes first.

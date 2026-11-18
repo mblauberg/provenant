@@ -3073,7 +3073,7 @@ impl BoundGraphOwner<'_> {
                     .task
                     .base_ref
                     .clone()
-            } else if review_subject_missing {
+            } else if review_subject_missing && node.review_base.is_none() {
                 None
             } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                 && source_commit.is_some()
@@ -3922,7 +3922,7 @@ mod journal_error_tests {
         )? {
             return Ok(());
         }
-        for scenario in ["node-base", "graph-base", "behaviour"] {
+        for scenario in ["node-base", "graph-base", "behaviour", "parent-missing"] {
             review_launch_fixture(scenario)?;
         }
         Ok(())
@@ -4021,6 +4021,9 @@ mod journal_error_tests {
                 "access":"read_only","route":{"alias":"senior"},"attempt":{"preset":"light"},
                 "source":{"type":"commit","commit":subject}}]
         });
+        if scenario == "parent-missing" {
+            document["review_subject_missing"] = serde_json::json!(true);
+        }
         let graph_base = scenario == "graph-base" || scenario == "behaviour";
         if graph_base {
             document["review_base"] = serde_json::json!("review-target");

@@ -23,10 +23,10 @@ If a worktree is refused, inspect it with `provenant worktree doctor PATH`.
 
 ## Ownership and cleanup
 
-Remove a clean merged worktree with the helper, not raw Git. Before discarding
-an unmerged branch or detached commit, obtain authority and record its tip.
-The chair decides which other worktrees may be removed. For collection and
-retention, see [GC](runbooks/gc.md); for uncertain custody, use
+Remove a clean merged worktree with the helper. The chair promptly removes
+landed, superseded or abandoned worktrees and branches under the global Git
+rule; record removed tips and preserve live writers and uncommitted edits. For
+collection and retention, see [GC](runbooks/gc.md); for uncertain custody, use
 [lane recovery](runbooks/lane-lifecycle.md#recovery). Never delete a lock or
 reservation to bypass custody.
 

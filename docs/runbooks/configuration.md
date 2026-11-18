@@ -4,15 +4,15 @@ Anchor: [`config/harness-knobs.json`](../../config/harness-knobs.json); [`LaneBu
 
 Settings live in the selected state root's `<state>/config.toml`; `provenant config
 schema [--all]` lists every key with its table, default, bounds and effect,
-`config show` the effective values and sources, `config check` every warning
+`config show --full` the effective values and sources, `config check` every warning
 with its file and key. This page covers only what those cannot: safety rules
-and operator decisions. Edit with `config set|unset|apply` (one lock, whole-file
-validation, `apply --expect-revision`); tables outside `[knobs]`, such as
+and operator decisions. Edit with `config set|unset|apply` (whole-file validation and
+`apply --expect-revision`); tables outside `[knobs]`, such as
 `[domains.fabric.lanes]` and `[gc]`, are edited by hand.
 
 ## Precedence and refusals
 
-Use `provenant config show` to inspect effective settings and their sources, and
+Use `provenant config show --full` to inspect effective settings and their sources, and
 `provenant config check` after editing. Resolve reported errors before retrying
 the operation. See the [supervisor spec](../specs/supervisor.md) for boundary
 behaviour and [GC](gc.md) for retention configuration.
@@ -31,7 +31,7 @@ routing. Providers without a compiled or configured list are unrestricted. Set
 `out_of_scope_pin` to `"warn"` (default), `"refuse"`, or `"allow"` to control
 explicit primary pins outside the effective scope. Fallback models are automatic
 alternatives and do not use this pin policy. Warnings name the model and setting.
-Host settings replace the provider's default list; `provenant config show`
+Host settings replace the provider's default list; `provenant config show --full`
 displays the values and sources, and `provenant check config` reports invalid
 settings.
 
@@ -86,7 +86,7 @@ If setup fails, inspect its output and retry manually in the new worktree.
 ## Run host policy
 
 Set `[domains.run.host_policy]` to restrict host paths or network access. Inspect
-the effective settings with `provenant config show`; the boundaries are in
+the effective settings with `provenant config show --full`; the boundaries are in
 [ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md) and the
 [supervisor spec](../specs/supervisor.md).
 

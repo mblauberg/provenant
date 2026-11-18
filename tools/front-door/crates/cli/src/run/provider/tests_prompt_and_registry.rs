@@ -368,18 +368,304 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         .ok_or("fixture AdapterSpec is missing")?;
     assert!(spec.local_login);
     assert_eq!(spec.local_account, ("fixture", "work"));
-    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work")
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", false)
 }
 
 #[test]
 fn registry_spec_drives_local_provider_preparation_and_quota()
 -> Result<(), Box<dyn std::error::Error>> {
-    registry_provider_resolves_prepares_and_reports_quota("cursor", "local")
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    let catalogue = provenant_routing::Catalogue::bundled()?;
+    let config = provenant_routing::RoutingConfig::default();
+    let model = provenant_routing::ModelId::parse("cursor/composer-2.5")?;
+    let now = provenant_core::WallTime::from_unix_seconds(100)?;
+    let assess = |account| {
+        provenant_routing::monthly_allowance_assessment(
+            &catalogue,
+            &config,
+            now,
+            &model,
+            Some(account),
+            None,
+        )
+        .expect("Cursor declares a monthly allowance")
+    };
+    assert!(!assess("local").constrained);
+    assert!(assess("registered").constrained);
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "local".into(),
+    };
+    let snapshot = provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 90,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: None,
+        windows: vec![provenant_quota::QuotaWindow {
+            extra: Default::default(),
+            pool: "billing_cycle".into(),
+            window_seconds: Some(30 * 86400),
+            resets_unix_seconds: Some(30 * 86400),
+            used_basis_points: 9000,
+        }],
+    };
+    let mut allowance = provenant_quota::AllowanceLedger::default();
+    allowance.observe(&snapshot);
+    let observation = provenant_routing::QuotaObservation {
+        model: model.clone(),
+        snapshot,
+        allowance,
+        expires_unix_seconds: 200,
+    };
+    assert!(
+        provenant_routing::monthly_allowance_assessment(
+            &catalogue,
+            &config,
+            now,
+            &model,
+            Some("local"),
+            Some(&observation),
+        )
+        .expect("monthly assessment")
+        .constrained
+    );
+    registry_provider_resolves_prepares_and_reports_quota("cursor", "local", false)
+}
+
+#[test]
+// Spec: docs/specs/routing.md#accounts-and-credentials
+fn unknown_identity_policy_reaches_provider_preparation() -> Result<(), Box<dyn std::error::Error>> {
+    // Keep monthly eligibility out of this identity-policy fixture.
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work", true)
+}
+
+// Spec: docs/specs/routing.md#monthly-allowance-ledger
+#[test]
+fn local_login_preparation_booking_survives_ordinary_quota_tick()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_in_clean_environment("local_login_preparation_booking_survives_ordinary_quota_tick")? {
+        return Ok(());
+    }
+
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[domains.routing.pacing.accounts.\"cursor/local\".monthly]\ninitial_launch_cost_basis_points=5100\n",
+    )?;
+
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    let account = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "Local".into(),
+    };
+    let snapshot = provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: account.clone(),
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: now,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: None,
+        windows: vec![provenant_quota::QuotaWindow {
+            extra: Default::default(),
+            pool: "billing_cycle".into(),
+            window_seconds: Some(30 * 86400),
+            resets_unix_seconds: Some(now + 3 * 86400),
+            used_basis_points: 0,
+        }],
+    };
+    let mut record = provenant_quota::AccountRecord::empty(account);
+    record.revision = 1;
+    record.snapshot = Some(snapshot);
+    let quota = state.join("quota");
+    let account_dir = quota.join("local");
+    std::fs::create_dir(&quota)?;
+    std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir(&account_dir)?;
+    std::fs::set_permissions(&account_dir, std::fs::Permissions::from_mode(0o700))?;
+    let quota_record = account_dir.join("cursor.json");
+    std::fs::write(&quota_record, serde_json::to_vec(&record)?)?;
+    std::fs::set_permissions(&quota_record, std::fs::Permissions::from_mode(0o600))?;
+
+    let executable = assets.join("cursor/bin/agent");
+    std::fs::create_dir_all(executable.parent().ok_or("cursor executable parent")?)?;
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{}'; else printf 'fixture-cursor 1.0\\n'; fi\n",
+            include_str!("../../../../../tests/fixtures/providers/cursor/status.stdout")
+        ),
+    )?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+
+    let prompt = "local pacing fixture";
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        limit_extensions: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: None,
+        head: None,
+        source_head: None,
+        base_ref: None,
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            required_family: None,
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/composer-2.5".into(),
+            effort: None,
+        },
+        account: Some("local".into()),
+        authority_digest: Digest::from_bytes([4; 32]),
+        writer: None,
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+        repo_facts: Default::default(),
+    };
+    let prepare = |attempt_bytes: [u8; 16], operation: &str| {
+        let attempt_id = AttemptId::from_bytes(attempt_bytes);
+        let attempt = state.join(format!("attempts/{attempt_id}"));
+        let paths = run::LaunchPaths {
+            attempt_id,
+            operation_id: OperationId::parse(operation).expect("fixture operation id"),
+            task_index: 0,
+            lane_depth: 1,
+            deadline_unix_ms: u64::MAX,
+            scratch: attempt.join("scratch"),
+            provider_state: attempt.join("provider-state"),
+            temporary: attempt.join("tmp"),
+            temporary_alias: None,
+        };
+        for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .expect("private launch directory");
+        }
+        super::preparation::prepare_with(
+            &registry,
+            &task,
+            prompt,
+            &paths,
+            None,
+            |name| {
+                if name == "cursor" {
+                    Ok(executable.clone())
+                } else {
+                    Err("fixture provider unavailable".into())
+                }
+            },
+            None,
+        )
+    };
+
+    let first = prepare([1; 16], "local-pacing-first")?;
+    assert_eq!(first.route.account_key.as_deref(), Some("local"));
+
+    let effects = provenant_providers::quota_live::LiveQuota::new(
+        &roots,
+        &home,
+        &provenant_providers::accounts::Settings::default(),
+    )?;
+    crate::quota::execute(
+        &crate::quota::Quota::Tick {
+            adapter: crate::quota::Filter {
+                adapter: Some("cursor".into()),
+            },
+            trigger: crate::quota::Trigger::Timer,
+            power: crate::quota::Power::Ac,
+        },
+        &roots,
+        provenant_providers::REGISTRY,
+        &effects,
+    )?;
+
+    let retained: provenant_quota::AccountRecord =
+        serde_json::from_slice(&std::fs::read(&quota_record)?)?;
+    assert_eq!(retained.allowance.launches, 1);
+    assert!(retained.snapshot.is_none(), "quota observations must be dropped");
+    assert!(
+        prepare([2; 16], "local-pacing-second").is_err(),
+        "the retained local-login booking must constrain another prepared launch"
+    );
+    // Prove the second preparation was constrained by monthly debt, rather
+    // than an unrelated setup or login failure after the tick.
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[domains.routing.pacing.accounts.\"cursor/local\".monthly]\nenabled=false\n",
+    )?;
+    let bypassed = prepare([3; 16], "local-pacing-bypass")?;
+    assert_eq!(bypassed.route.account_key.as_deref(), Some("local"));
+    let unchanged: provenant_quota::AccountRecord =
+        serde_json::from_slice(&std::fs::read(&quota_record)?)?;
+    assert_eq!(unchanged.allowance, retained.allowance);
+    Ok(())
 }
 
 fn registry_provider_resolves_prepares_and_reports_quota(
     adapter_name: &'static str,
     account_key: &'static str,
+    unknown_identity: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
@@ -652,7 +938,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         readiness_dir.join(format!("{adapter_name}.json")),
         serde_json::to_vec(&stale)?,
     )?;
-    let task = run::TaskRequest {
+    let mut task = run::TaskRequest {
         context: None,
         extra: Default::default(),
         limit_extensions: Default::default(),
@@ -670,7 +956,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             model,
             effort: None,
         },
-        account: Some(account_key.into()),
+        account: (!unknown_identity).then(|| account_key.into()),
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
         deliver: None,
@@ -689,27 +975,43 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
-    let prepared = super::preparation::prepare_candidates(
+    let locate = |name: &str| {
+        if name == adapter_name { Ok(executable.clone()) } else { Err("unavailable".into()) }
+    };
+    let alter = |records: &mut Vec<provenant_providers::AvailabilityRecord>| {
+        for record in records { record.account_key = None; }
+    };
+    if unknown_identity {
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), provenant_records::policy::Strength::Refuse)].into(), provenant_records::policy::Source::Project);
+        task.profile.launch_policy = Some(strict);
+        let result = super::preparation::prepare_candidates_inner(
+            &registry, &providers, &task, prompt, &paths, None, Some(&locate), None, None,
+            Some(&alter),
+        );
+        assert!(matches!(
+            result,
+            Err(super::preparation::PrepareError::Candidates { skipped_routes, .. })
+                if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::UnknownAccount))
+        ), "strict unknown identity must refuse preparation for that reason");
+        task.profile.launch_policy = None;
+    }
+    let prepared = super::preparation::prepare_candidates_inner(
         &registry,
         &providers,
         &task,
         prompt,
         &paths,
         None,
-        Some(&|name| {
-            if name == adapter_name {
-                Ok(executable.clone())
-            } else {
-                Err("unavailable".into())
-            }
-        }),
+        Some(&locate),
         None,
         None,
+        if unknown_identity { Some(&alter) } else { None },
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
-    assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
+    assert_eq!(prepared.route.account_key.as_deref(), (!unknown_identity).then_some(account_key));
     assert!(!prepared.argv.is_empty());
-    assert!(
+    assert!(unknown_identity ||
         prepared
             .route
             .availability_warning

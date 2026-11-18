@@ -294,11 +294,21 @@ impl ReadinessFile {
             {
                 return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
             }
-            if now >= r.expires_unix_seconds {
+            let expires = if r.reason == Some(ReadinessReason::ProviderRefusal) {
+                crate::admission::refusal_expiry(
+                    &r.scope.adapter,
+                    r.observed_unix_seconds,
+                    Some(r.expires_unix_seconds),
+                )
+                .unwrap_or(r.observed_unix_seconds)
+            } else {
+                r.expires_unix_seconds
+            };
+            if now >= expires {
                 return ReadinessRead {
                     observed_scope: Some(r.scope.clone()),
                     observed_unix_seconds: Some(r.observed_unix_seconds),
-                    expires_unix_seconds: Some(r.expires_unix_seconds),
+                    expires_unix_seconds: Some(expires),
                     evidence_ref: r.evidence_ref.clone(),
                     ..ReadinessRead::unknown(ReadinessReason::Stale)
                 };
@@ -307,7 +317,7 @@ impl ReadinessFile {
                 return ReadinessRead {
                     observed_scope: Some(r.scope.clone()),
                     observed_unix_seconds: Some(r.observed_unix_seconds),
-                    expires_unix_seconds: Some(r.expires_unix_seconds),
+                    expires_unix_seconds: Some(expires),
                     evidence_ref: r.evidence_ref.clone(),
                     ..ReadinessRead::unknown(r.reason.unwrap_or(ReadinessReason::NotProbed))
                 };
@@ -317,7 +327,7 @@ impl ReadinessFile {
                 state: r.state,
                 reason: r.reason,
                 observed_unix_seconds: Some(r.observed_unix_seconds),
-                expires_unix_seconds: Some(r.expires_unix_seconds),
+                expires_unix_seconds: Some(expires),
                 reset_unix_seconds: r.reset_unix_seconds,
                 evidence_ref: r.evidence_ref.clone(),
             }

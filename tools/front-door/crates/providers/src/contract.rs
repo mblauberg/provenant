@@ -588,7 +588,8 @@ mod tests {
 
     #[test]
     fn test_model_matches_offered() {
-        let flash_only = vec!["Gemini Flash".to_string()];
+        // Spec: docs/specs/routing.md#provider-model-scope
+        let flash_only = vec!["Gemini 3.8 Flash (High/Medium/Low)".to_string()];
         assert!(!model_matches_offered("gemini-3.8-pro", &flash_only));
         assert!(!model_matches_offered("agy/gemini-3.8-pro", &flash_only));
         assert!(model_matches_offered("gemini-3.8-flash", &flash_only));

@@ -35,6 +35,8 @@ pub enum SetupStep {
     WriteFile { path: PathBuf, bytes: Vec<u8> },
     /// Like `WriteFile`, then mark the file owner-executable.
     WriteExecutable { path: PathBuf, bytes: Vec<u8> },
+    /// Create or open a stable advisory lock in a setup root.
+    CreateLock(PathBuf),
     /// Create `link` as a symbolic link to `target`, replacing nothing.
     Symlink { link: PathBuf, target: PathBuf },
 }

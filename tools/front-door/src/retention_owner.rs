@@ -9,7 +9,7 @@ use provenant_records::custody::*;
 use serde::Deserialize;
 use std::{
     cell::RefCell,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -37,16 +37,16 @@ struct Pull {
 pub(crate) struct Owner<'a> {
     roots: &'a Roots,
     home: &'a Path,
-    project: &'a Path,
+    project: PathBuf,
     pulls: RefCell<Option<Result<Vec<Pull>, String>>>,
     observed_merge: Option<LandedEvidence>,
 }
 impl<'a> Owner<'a> {
-    pub(crate) fn new(roots: &'a Roots, home: &'a Path, project: &'a Path) -> Self {
+    pub(crate) fn new(roots: &'a Roots, home: &'a Path, project: &Path) -> Self {
         Self {
             roots,
             home,
-            project,
+            project: project.to_path_buf(),
             pulls: RefCell::new(None),
             observed_merge: None,
         }
@@ -84,14 +84,14 @@ impl<'a> Owner<'a> {
         if self.pulls.borrow().is_none() {
             let result = (|| {
                 let ports = provenant_config::PortTable::read_for(
-                    Some(self.project),
+                    Some(self.project.as_path()),
                     self.roots.state.as_path(),
                 )
                 .map_err(|error| error.to_string())?;
                 let mut forge = provenant_config::ForgePort::new(
                     ports.forge,
                     "forge",
-                    self.project,
+                    self.project.as_path(),
                     self.roots.state.as_path(),
                     // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
                     std::sync::Arc::new(provenant_records::policy::Policy::default()),
@@ -169,7 +169,7 @@ impl<'a> Owner<'a> {
             return Err("open PR uses the remote branch as head or base".into());
         }
         let result = crate::gc_support::host_git_with_stderr(
-            self.project,
+            self.project.as_path(),
             context.executor,
             &["show", "-s", "--format=%ct", &tip.to_string(), "--"],
             Duration::from_secs(5),
@@ -198,8 +198,12 @@ impl<'a> Owner<'a> {
         Ok(())
     }
     fn context(&self) -> Result<provenant_cli::fabric::Context, String> {
-        provenant_cli::fabric::Context::open_read_only(self.roots.clone(), self.home, self.project)
-            .map_err(|e| e.to_string())
+        provenant_cli::fabric::Context::open_read_only(
+            self.roots.clone(),
+            self.home,
+            self.project.as_path(),
+        )
+        .map_err(|e| e.to_string())
     }
     fn subjects(&self, lane: &WorktreeInfo) -> Result<Vec<Subject>, String> {
         let mut subjects = if lane.primary {

@@ -84,7 +84,12 @@ impl LiveQuota {
             stamp_before,
             &models,
         );
-        if key != account.scope.account_key {
+        // The synthetic local key deliberately names the current HOME login;
+        // registered keys must still match the probed Google identity exactly.
+        let local = probe_home.path() == self.home
+            && provenant_records::AdapterSpec::get("agy")
+                .is_some_and(|spec| spec.is_unregistered_local(&account.scope.account_key));
+        if key != account.scope.account_key && !local {
             if let Some(roots) = &self.roots {
                 // Failure to save never makes the stale identity routable. A
                 // later quota probe retries under the normal mismatch backoff.

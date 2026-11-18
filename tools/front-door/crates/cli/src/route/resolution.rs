@@ -236,8 +236,9 @@ pub(super) fn snapshot_governs(adapter: &str, plan: Option<&str>, model: &ModelI
     provenant_records::AdapterSpec::get(adapter)
         .is_none_or(|spec| spec.account_serves_model(plan, model.model()))
 }
-pub(super) fn quota_observations(
+pub(crate) fn quota_observations(
     catalogue: &Catalogue,
+    config: &provenant_routing::RoutingConfig,
     availability: &[AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
     policies: &[provenant_quota::QuotaPolicy],
@@ -246,9 +247,7 @@ pub(super) fn quota_observations(
     let mut observations = Vec::new();
     for record in records {
         let adapter = record.account.adapter.as_str();
-        let Some(snapshot) = record.snapshot.as_ref() else {
-            continue;
-        };
+        let snapshot = record.snapshot.as_ref();
         let Some(ttl) = provenant_quota::schedule::interval(
             policies,
             adapter,
@@ -257,15 +256,12 @@ pub(super) fn quota_observations(
         ) else {
             continue;
         };
-        let expires_unix_seconds = snapshot
-            .observed_unix_seconds
-            .checked_add(i64::try_from(ttl).map_err(|_| provenant_quota::QuotaError::TimeRange)?)
-            .ok_or(provenant_quota::QuotaError::TimeRange)?;
         let mut models: BTreeSet<ModelId> = catalogue
-            .models()
-            .iter()
-            .filter(|entry| entry.model.adapter() == adapter)
-            .map(|entry| entry.model.clone())
+            .pool_models()
+            .chain(config.pools.values().flatten().map(|member| &member.model))
+            .chain(config.routes.values().map(|route| &route.model))
+            .filter(|model| model.adapter() == adapter)
+            .cloned()
             .collect();
         for observed_model in availability
             .iter()
@@ -291,7 +287,9 @@ pub(super) fn quota_observations(
         models.retain(|model| {
             snapshot_governs(
                 adapter,
-                snapshot.details.as_ref().and_then(|d| d.plan.as_deref()),
+                snapshot
+                    .and_then(|s| s.details.as_ref())
+                    .and_then(|d| d.plan.as_deref()),
                 model,
             )
         });
@@ -299,11 +297,11 @@ pub(super) fn quota_observations(
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
         for model in models {
-            observations.push(QuotaObservation {
+            observations.push(QuotaObservation::from_record(
                 model,
-                snapshot: snapshot.clone(),
-                expires_unix_seconds,
-            });
+                record,
+                i64::try_from(ttl).map_err(|_| provenant_quota::QuotaError::TimeRange)?,
+            ));
         }
     }
     Ok(observations)
@@ -313,6 +311,14 @@ pub(super) fn resolve_account_reference(
     field: &str,
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<String, EdgeError> {
+    // The canonical local login is an account too, even without a registered
+    // credential tree. Require adapter/key to avoid introducing ambiguous aliases.
+    if let Some((adapter, key)) = name.split_once('/')
+        && provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|s| s.local_login && s.local_account.1 == key)
+    {
+        return Ok(name.to_owned());
+    }
     let valid = settings
         .entries
         .iter()
@@ -468,7 +474,7 @@ pub(super) fn with_context<T>(
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
     let mut quota_records = match crate::quota::read_cache(roots) {
@@ -537,6 +543,7 @@ pub(super) fn with_context<T>(
     }
     let quota = quota_observations(
         &catalogue,
+        &config,
         availability,
         &quota_records,
         &policies,
@@ -688,7 +695,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
     selection_evidence: Option<&provenant_routing::SelectionEvidence>,
     launch_policy: Option<&provenant_records::policy::Policy>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     let (excluded_families, required, preferred) = match excluded_families {
         Some((families, required, preferred)) => (Some(families), required, preferred),
         None => (None, false, &[][..]),
@@ -1123,7 +1130,7 @@ pub(crate) fn check_dispatch_candidate(
     registry: &[provenant_providers::Registration],
     policy: &provenant_records::policy::Policy,
 ) -> Result<(), EdgeError> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
     let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let domains = resolved_config.domains;
@@ -1241,14 +1248,56 @@ pub fn resolve_review_family(
                             pools: &pools,
                         };
                         let selected_account = route.get("account").and_then(serde_json::Value::as_str);
-                        let recorded = recorded_model_readiness(settings, &model, &pools, selected_account, None, |scope| {
+                        let mut recorded = recorded_model_readiness(settings, &model, &pools, selected_account, None, |scope| {
                             context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now))
                         });
+                        let local = provenant_records::AdapterSpec::get(&selected.adapter)
+                            .filter(|spec| spec.local_login);
+                        if let Some(spec) = local {
+                            let key = spec.local_account.1;
+                            let mut scope = provenant_quota::ReadinessScope {
+                                extra: Default::default(),
+                                host: provenant_quota::LOCAL_HOST.into(),
+                                adapter: selected.adapter.clone(),
+                                account_key: key.into(),
+                                route: model.as_str().into(),
+                            };
+                            let lookup = |scope: &provenant_quota::ReadinessScope| context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now));
+                            let mut observation = lookup(&scope);
+                            if observation.state != provenant_quota::ReadinessState::Unavailable {
+                                for pool in &pools {
+                                    scope.route.clone_from(pool);
+                                    let pool_observation = lookup(&scope);
+                                    if pool_observation.state == provenant_quota::ReadinessState::Unavailable {
+                                        observation = pool_observation;
+                                        break;
+                                    }
+                                }
+                            }
+                            if observation.observed_scope.is_some()
+                                && !recorded.iter().any(|read| read.account_key == key)
+                            {
+                                recorded.push(RecordedReadiness {
+                                    host: scope.host,
+                                    account: spec.local_account.0.into(),
+                                    account_key: key.into(),
+                                    model: model.as_str().into(),
+                                    observation,
+                                });
+                            }
+                        }
                         let keys: BTreeSet<_> = recorded.iter().map(|read| read.account_key.as_str())
-                            .chain(records.iter().filter(|record| record.account.adapter == selected.adapter).map(|record| record.account.account_key.as_str()))
+                            // Debt holders do not establish a provider identity.
+                            .chain(records.iter().filter(|record| record.account.adapter == selected.adapter
+                                && (record.snapshot.is_some() || record.last_error.is_some()
+                                    || record.auth_state.is_some() || record.auth_verified_unix_seconds.is_some()))
+                                .map(|record| record.account.account_key.as_str()))
                             .filter(|key| selected_account.is_none_or(|selected| selected == *key))
                             .collect();
                         let mut accounts = Vec::new();
+                        if keys.is_empty() && local.is_some() {
+                            accounts.push("no observed local login".into());
+                        }
                         for key in keys {
                             if matches!(request.choice, RouteChoice::NamedRoute(_))
                                 && let Some(rule) = rules.iter().find(|rule| matches!(&rule.selector, provenant_routing::ExclusionSelector::Account { adapter, key: excluded } if adapter == &selected.adapter && excluded == key))
@@ -1320,7 +1369,7 @@ pub fn depletion_facts(
     routing_config.provider_scopes = resolved.providers.clone();
     routing_config.explicit_provider_model_scopes =
         explicit_provider_model_scopes(&resolved.origins);
-    let catalogue = Catalogue::bundled().map_err(|error| text(&error))?;
+    let catalogue = crate::model_discovery::effective(roots).map_err(|error| text(&error))?;
     let route = stopped
         .applied_route
         .as_ref()

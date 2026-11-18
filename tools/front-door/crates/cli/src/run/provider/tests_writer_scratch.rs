@@ -1,17 +1,22 @@
 #[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false)
+    writer_preparation_fixture(false, false)
 }
 
 // Medium: real provider fences, routing and preparation, with synthetic CLIs.
 #[test]
 fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(true)
+    writer_preparation_fixture(true, false)
 }
 
-fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn build_slot_preparation_does_not_require_a_target() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, true)
+}
+
+fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget};
     use provenant_os::clock::SystemClock;
@@ -35,6 +40,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
                 "provider_fence_preparation_reports_causes_and_selects_available_candidate",
                 &["missing"],
             )
+        } else if gate_only {
+            ("build_slot_preparation_does_not_require_a_target", &["missing"])
         } else {
             (
                 "writer_plan_stages_scratch_in_private_temporary_directory",
@@ -1183,6 +1190,9 @@ printf 'agy 1.0.0\n'
         codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
         "the lane builds into its own target"
     );
+    // A writer may receive its target later; admission must not depend on it.
+    let target = codex.env.iter().find(|(key, _)| key == "CARGO_TARGET_DIR").cloned().unwrap();
+    codex.env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
     let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
@@ -1205,6 +1215,7 @@ printf 'agy 1.0.0\n'
             .iter()
             .any(|root| root.path.ends_with("slot-0.lock"))
     );
+    codex.env.push(target);
     // An unrepresentable shim input warns and leaves preparation intact without new grants.
     let env_before = codex.env.clone();
     let profile_before = codex.profile.spec.clone();
@@ -1250,6 +1261,9 @@ printf 'agy 1.0.0\n'
             grant.path.display(),
             slots.display()
         );
+    }
+    if gate_only {
+        return Ok(());
     }
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.

@@ -43,7 +43,7 @@
     "settings": {
       "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
-      "idle_days": {"type": "int", "allowed": "1 to 3650 days", "default": "7", "effect": "Minimum idle age before a lane cache or declared output is collected"},
+      "idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "6h", "effect": "Idle age for unowned artifacts and standalone caches; finished attempt scratch is immediate, and a busy or unreleased attempt is always kept"},
       "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "1% of the state volume, capped at 5 GiB", "effect": "Advisory free-space floor for admission, new builds and pressure collection; below it GC removes further eligible caches oldest first"},
       "critical_free": {"type": "size", "allowed": "same syntax as free_floor; 0B disables the critical decision", "default": "2G", "effect": "Critical free space for dispatch and new builds. Below free_floor, warn and proceed. Both effective thresholds and sources are reported."},
       "lane_cargo_cache_max": {"type": "size", "allowed": "same syntax as free_floor", "default": "32G", "effect": "Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody"},
@@ -71,6 +71,15 @@
     "settings": {
       "max_parallel": {"type": "int", "allowed": "1 to 16", "default": "3", "effect": "Accounts per quota probe batch; batches and probes currently run sequentially. Out-of-range values refuse the file"},
       "wall_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "default": "55", "effect": "Wall-clock budget for a whole quota tick. Out-of-range values refuse the file"}
+    }
+  },
+  "host_monthly_pacing_settings": {
+    "path": "domains.routing.pacing.monthly",
+    "account_override": "domains.routing.pacing.accounts.<adapter/key>.monthly",
+    "settings": {
+      "enabled": {"type": "bool", "default": true, "effect": "Under pace, admit monthly-allowance accounts only while estimated spend including the next launch fits elapsed cycle time plus burst_percent. Missing or stale cycle evidence is constrained. false, spend or max bypasses this preference; diagnostics name the effective source and knob."},
+      "burst_percent": {"type": "int", "min": 0, "max": 100, "default": 10, "effect": "Percentage points of monthly allowance available ahead of elapsed cycle time, capped at the full allowance."},
+      "initial_launch_cost_basis_points": {"type": "int", "min": 1, "max": 10000, "default": 100, "effect": "Conservative allowance cost per launch before calibration. Positive provider-reported usage deltas calibrate and smooth the account-local estimate; unchanged reports retain pending launch estimates."}
     }
   },
   "host_opencode_go_settings": {
@@ -491,6 +500,11 @@
     }
   },
   "knobs": {
+    "quota.model_discovery": {
+      "type": "bool", "default": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/quota.rs",
+      "effect": "Refresh eligible provider model listings during normal-power quota ticks."
+    },
     "confinement.census_exclude_ancestors": {
         "type": "bool",
         "default": true,

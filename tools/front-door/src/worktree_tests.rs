@@ -266,7 +266,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_settled_lane_store_error_and_continues",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
             "graph_run_refuses_low_disk_writers",
-            "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
+            "gc_reports_terminal_tmp_details_and_compact_text_count",
             "lane_prepare_isolates_nested_state",
             "lane_prepare_isolates_nested_claude_state",
             "lane_prepare_isolates_nested_writer_state",
@@ -348,7 +348,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_reports_settled_lane_store_error_and_continues" => gc_reports_settled_lane_store_error_and_continues(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
                 "graph_run_refuses_low_disk_writers" => graph_run_refuses_low_disk_writers(),
-                "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
+                "gc_reports_terminal_tmp_details_and_compact_text_count" => gc_reports_terminal_tmp_details_and_compact_text_count(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
                 "lane_prepare_isolates_nested_writer_state" => {

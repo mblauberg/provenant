@@ -159,7 +159,7 @@ retention_classes! {
         adapter: lane_cargo_caches,
         eligibility: Declared,
         detail: "settled lane; verified cache owner and free writer custody",
-        settings: ["gc.idle_days", "gc.lane_cargo_cache_max"],
+        settings: ["gc.idle", "gc.lane_cargo_cache_max"],
         triggers: GC_SETTLEMENT
     },
     ObservationLedgers => {
@@ -191,7 +191,7 @@ retention_classes! {
         adapter: staging,
         eligibility: Declared,
         detail: "free ingest/install item lock and idle age",
-        settings: ["gc.idle_days"],
+        settings: ["gc.idle"],
         triggers: GC
     },
     ProviderState => {
@@ -231,7 +231,7 @@ retention_classes! {
         adapter: git_worktrees,
         eligibility: Declared,
         detail: "free custody and census; clean Git; subsumed tip or idle retirement",
-        settings: ["gc.idle_days", "gc.projects.{project}.regenerable", "gc.projects.{project}.keep", "gc.projects.{project}.foreign_worktrees", "gc.projects.{project}.integration_branches", "gc.projects.{project}.keep_paths", "gc.projects.{project}.remote_branches", "gc.projects.{project}.remote_min_tip_age_days"],
+        settings: ["gc.idle", "gc.projects.{project}.regenerable", "gc.projects.{project}.keep", "gc.projects.{project}.foreign_worktrees", "gc.projects.{project}.integration_branches", "gc.projects.{project}.keep_paths", "gc.projects.{project}.remote_branches", "gc.projects.{project}.remote_min_tip_age_days"],
         triggers: GC_SETTLEMENT_MERGE
     },
     QuotaHistory => {
@@ -278,9 +278,9 @@ retention_classes! {
         owner: Run,
         adapter: attempt_scratch,
         eligibility: Declared,
-        detail: "settled attempt; evidence captured and private Git import complete",
-        settings: ["retention.provider_state_days"],
-        triggers: GC_SETTLEMENT
+        detail: "released, unreserved attempt; finished work or unowned idle lifetime",
+        settings: ["gc.idle"],
+        triggers: GC
     },
     PortReceipts => {
         owner: Config,
@@ -716,7 +716,7 @@ impl StoreSettings {
 #[serde(default, deny_unknown_fields)]
 pub struct GcSettings {
     pub schedule: bool,
-    pub idle_days: u64,
+    pub idle: String,
     pub graph_checkpoint_days: u64,
     pub discard_archive_days: u64,
     pub free_floor: Option<String>,
@@ -732,7 +732,7 @@ impl Default for GcSettings {
     fn default() -> Self {
         Self {
             schedule: true,
-            idle_days: 7,
+            idle: "6h".into(),
             graph_checkpoint_days: 90,
             discard_archive_days: 90,
             free_floor: None,
@@ -832,6 +832,11 @@ impl DiskGate {
 }
 
 impl GcSettings {
+    /// Resolve the idle-only retention age, expressed in seconds.
+    pub fn idle_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.idle)
+    }
+
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
         Ok(DiskLimits {
@@ -902,9 +907,7 @@ impl GcSettings {
     }
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        if !(1..=3650).contains(&self.idle_days) {
-            return Err("idle_days_range");
-        }
+        self.idle_seconds()?;
         if !(1..=3650).contains(&self.discard_archive_days) {
             return Err("discard_archive_days_range");
         }
@@ -928,6 +931,29 @@ impl GcSettings {
         }
         Ok(())
     }
+}
+
+/// Parse a GC age duration. Unsuffixed numbers are seconds; supported suffixes
+/// are s, m, h, d and w. Zero is valid for an immediate idle-age cutoff.
+pub fn parse_gc_idle_duration(text: &str) -> Result<u64, &'static str> {
+    let (digits, multiplier) = match text.as_bytes().last() {
+        Some(b's') => (&text[..text.len() - 1], 1_u64),
+        Some(b'm') => (&text[..text.len() - 1], 60),
+        Some(b'h') => (&text[..text.len() - 1], 3_600),
+        Some(b'd') => (&text[..text.len() - 1], 86_400),
+        Some(b'w') => (&text[..text.len() - 1], 604_800),
+        _ => (text, 1),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid_gc_idle_duration");
+    }
+    let seconds = digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| value.checked_mul(multiplier))
+        .filter(|seconds| *seconds <= i64::MAX as u64)
+        .ok_or("invalid_gc_idle_duration")?;
+    Ok(seconds)
 }
 
 fn default_free_floor(total_bytes: u64) -> u64 {
@@ -1045,6 +1071,21 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn gc_idle_duration_accepts_zero_and_units_without_overflow() {
+        for (input, expected) in [
+            ("0", 0),
+            ("6h", 21_600),
+            ("14d", 1_209_600),
+            ("2w", 1_209_600),
+        ] {
+            assert_eq!(super::parse_gc_idle_duration(input), Ok(expected));
+        }
+        for input in ["", "-1", "1x", "18446744073709551615w"] {
+            assert!(super::parse_gc_idle_duration(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
     fn cargo_build_profile_resolves_config_and_preserves_explicit_environment() {
         use super::*;
 
@@ -1160,10 +1201,10 @@ mod tests {
         let temp = tempfile::tempdir()?;
         std::fs::write(
             temp.path().join("config.toml"),
-            "schema_version=1\n[gc]\nidle_days=0\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\ncargo_build_jobs=-2\nmax_concurrent_builds=3\nmemory_pressure_threshold='unknown'\n",
+            "schema_version=1\n[gc]\nidle='invalid'\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\ncargo_build_jobs=-2\nmax_concurrent_builds=3\nmemory_pressure_threshold='unknown'\n",
         )?;
         let gc = super::GcSettings::read(temp.path())?;
-        assert_eq!(gc.idle_days, super::GcSettings::default().idle_days);
+        assert_eq!(gc.idle, super::GcSettings::default().idle);
         assert!(!gc.schedule);
         let lanes = super::LaneBuildSettings::read(temp.path())?;
         assert_eq!(lanes.cargo_build_jobs, None);

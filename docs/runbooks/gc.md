@@ -20,6 +20,8 @@ provenant --project /absolute/path/to/repo gc --apply --json
   Apply takes fresh custody and census evidence; a preview does not authorise
   deletion. Inspect JSON for per-item outcomes.
 - For free-space and scheduling settings, see `provenant config schema`.
+- `gc --idle 6h` overrides the configured idle lifetime for this run; `--idle 0`
+  makes ownerless idle artifacts eligible immediately.
 
 ## What is removed and when
 
@@ -30,18 +32,33 @@ ageing provider state or collecting checkpoints. Tick enters the same path.
 Provider state, scratch and payload-cap policies run as separate scheduled
 adapters. The declaration
 also owns settings and subsystem ownership; adding a class requires collection
-and measurement implementations. Preview and apply measure allocated tree bytes
-without following links; APFS clones may share physical blocks, so the change in
-volume free space can differ. Partial observations and failed paths remain
-visible in JSON and text. Byte rows come from each adapter; unavailable
-observations remain explicit rather than appearing as zero. Checkpoint bytes are the allocated journal tree before the
-pass; the other existing removal adapters report reclaimed or reclaimable bytes.
+and measurement implementations. Preview measures allocated tree bytes without
+following links; APFS clones may share physical blocks, so the change in volume
+free space can differ. Apply removes eligible attempt scratch without a separate
+pre-deletion size walk. Partial observations and failed paths remain visible in
+JSON and text. Byte rows come from each adapter; unavailable observations remain
+explicit rather than appearing as zero.
+
+`gc.idle` defaults to `6h` and accepts `0` or a duration in seconds, minutes,
+hours, days or weeks. It applies to ownerless idle artifacts and standalone
+caches. Attempt scratch survives release so a lane can be resumed, steered or
+followed up. Scratch is eligible immediately when its work is finished: its
+branch is merged or its PR closed, its graph is cancelled or superseded, or its
+worktree is removed. Result, handoff, log and process records remain durable.
+Unreleased or busy attempts are never collected.
+
+After a merge, background cleanup targets only that branch's worktree and its
+attempt scratch. It does not scan the run store or collect shared caches. At lane
+launch, free space below `gc.free_floor` starts a best-effort background full
+sweep; a shared single-flight lock prevents parallel sweeps. Full GC protects
+busy and recently used shared caches and the newest Cargo seed generation.
 
 `gc.free_floor` is an advisory collection target. Below it, and below
 `gc.critical_free` (2 GiB by default), dispatch, admission and new builds warn
 and continue; diagnostics show the effective thresholds and sources. A host that
-wants a hard floor sets the `policy.DISK_FLOOR` knob to `refuse`. Settlement releases private Cargo output and attempt scratch
-without waiting for worktree removal. Registry and Git downloads live in the host CARGO_HOME and are owned by Cargo,
+wants a hard floor sets the `policy.DISK_FLOOR` knob to `refuse`. Settlement
+releases private Cargo output without waiting for worktree removal; attempt
+scratch remains available for continuation. Registry and Git downloads live in the host CARGO_HOME and are owned by Cargo,
 not lane retention. Lanes fetch into those stores by default; with
 `domains.fabric.lanes.cargo_source_writes = false` they are read-only and a missing
 dependency requires a host fetch.

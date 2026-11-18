@@ -17,12 +17,6 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
     Ok(dir)
 }
 
-pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
-    // Terminal, unreserved scratch is a payload: fixture lock files no longer
-    // guard live data. The same no-follow owner-mode repair is used by GC.
-    remove_unreserved_terminal_temporary(attempt)
-}
-
 /// Reconcile and retention GC may dispose of lock-named payloads after proving the
 /// attempt terminal and unreserved. It checks worktree reservations first,
 /// then holds the attempt's writer lock, which excludes read-only guardians.
@@ -30,27 +24,32 @@ pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os:
 /// The exception is rooted at the literal tmp entry, never the attempt itself.
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
-) -> provenant_os::fs::Result<()> {
+) -> provenant_os::fs::Result<u64> {
     crate::short_temporary::remove(attempt);
     let name = OsStr::new("tmp");
     let metadata = match attempt.metadata_at(name, false) {
         Ok(metadata) => metadata,
-        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) if error.is_not_found() => return Ok(0),
         Err(error) => return Err(error),
     };
     if metadata.kind != FileKind::Directory {
-        return attempt.unlink(name);
+        attempt.unlink(name)?;
+        return Ok(metadata.allocated);
     }
     attempt.make_owner_accessible_at(name)?;
     let metadata = attempt.metadata_at(name, false)?;
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
-    remove_payload_contents(&tree)?;
+    let bytes = metadata
+        .allocated
+        .saturating_add(remove_payload_contents(&tree)?);
     drop(tree);
     // tmp itself is not lock-named, so ordinary removal suffices.
-    attempt.rmdir(name)
+    attempt.rmdir(name)?;
+    Ok(bytes)
 }
 
-fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<()> {
+fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<u64> {
+    let mut bytes = 0_u64;
     if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
         directory.make_writable()?;
     }
@@ -58,15 +57,17 @@ fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<
         .entries()?
         .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for entry in entries {
-        if directory.metadata_at(&entry)?.kind == FileKind::Directory {
+        let metadata = directory.metadata_at(&entry)?;
+        bytes = bytes.saturating_add(metadata.allocated);
+        if metadata.kind == FileKind::Directory {
             directory.directory().make_owner_accessible_at(&entry)?;
-            remove_payload_contents(&directory.child(&entry)?)?;
+            bytes = bytes.saturating_add(remove_payload_contents(&directory.child(&entry)?)?);
             directory.rmdir(&entry)?;
         } else {
             directory.unlink(&entry)?;
         }
     }
-    Ok(())
+    Ok(bytes)
 }
 
 pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_os::fs::Result<()> {

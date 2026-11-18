@@ -1,4 +1,6 @@
 //! Quota arguments, composition through OS crate's safe filesystem, and render.
+#[path = "quota_deferred.rs"]
+mod deferred;
 #[path = "quota_notice.rs"]
 mod notice;
 use crate::metadata::CatalogueArg;
@@ -260,6 +262,7 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
             }
         }
     }
+    deferred::overlay(dir, &mut records)?;
     records.sort_by(|a, b| {
         (&a.account.adapter, &a.account.account_key)
             .cmp(&(&b.account.adapter, &b.account.account_key))
@@ -297,9 +300,147 @@ pub(crate) fn read_cache_at(state: &Path) -> Result<Vec<AccountRecord>, EdgeErro
     read_records(&directory)
 }
 
-/// Persist only typed quota scope from a provider event; its message stays in
-/// the redacted attempt reason and is never copied into quota state. Without a
-/// pool the refusal holds only the route's model.
+/// Recheck monthly spend; lock contention is advisory, with durable deferred debt.
+pub(crate) fn reserve_allowance_launch(
+    roots: &Roots,
+    route: &provenant_records::ResolvedRoute,
+    launch_id: &str,
+    config: &provenant_routing::RoutingConfig,
+    catalogue: &provenant_routing::Catalogue,
+    policies: &[QuotaPolicy],
+    now: provenant_core::WallTime,
+) -> Result<Option<String>, EdgeError> {
+    let Some(key) = &route.account_key else {
+        return Ok(None);
+    };
+    let model = provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+        .map_err(|e| EdgeError::Display(e.to_string()))?;
+    let ttl = schedule::interval(
+        policies,
+        &route.adapter,
+        schedule::Trigger::Timer,
+        schedule::Power::Ac,
+    )
+    .and_then(|ttl| i64::try_from(ttl).ok())
+    .unwrap_or(0);
+    let assess = |record: Option<&AccountRecord>| {
+        let observation =
+            record.map(|r| provenant_routing::QuotaObservation::from_record(model.clone(), r, ttl));
+        provenant_routing::monthly_allowance_assessment(
+            catalogue,
+            config,
+            now,
+            &model,
+            Some(key),
+            observation.as_ref(),
+        )
+    };
+    if assess(None).is_some_and(|a| !a.active) {
+        return Ok(None);
+    }
+    let records = read_cache(roots)?;
+    let current = records
+        .iter()
+        .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
+    let Some(assessment) = assess(current).filter(|a| a.active) else {
+        return Ok(None);
+    };
+    if current.is_some_and(|r| r.allowance.contains_launch(launch_id)) {
+        return Ok(None);
+    }
+    if assessment.constrained {
+        return Err(EdgeError::Display(assessment.detail));
+    }
+    let scope = AccountScope {
+        extra: Default::default(),
+        adapter: route.adapter.clone(),
+        account_key: key.clone(),
+        label: key.clone(),
+    };
+    scope.validate()?;
+    let root = private(roots.state.as_path())?;
+    let directory = child(&root, OsStr::new("quota"))?;
+    let clock = SystemClock::new();
+    let lock = directory.lock(
+        OsStr::new("quota.lock"),
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(50_000),
+        ),
+        &provenant_core::CancelToken::new(),
+        &clock,
+    );
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(FsError::LockTimeout { .. }) => {
+            deferred::record(
+                &directory,
+                &scope,
+                launch_id,
+                now.unix_seconds(),
+                assessment
+                    .windows
+                    .iter()
+                    .map(|w| w.cost_basis_points)
+                    .max()
+                    .unwrap_or(assessment.initial_launch_cost_basis_points),
+            )?;
+            return Ok(Some("monthly allowance ledger busy; admitted with deferred reservation for next publication".into()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|r| r.account.adapter == scope.adapter && r.account.account_key == scope.account_key)
+        .cloned();
+    let mut next = current
+        .clone()
+        .unwrap_or_else(|| AccountRecord::empty(scope.clone()));
+    if next.allowance.contains_launch(launch_id) {
+        return Ok(None);
+    }
+    if let Some(snapshot) = &next.snapshot {
+        next.allowance.observe(snapshot);
+    }
+    let Some(assessment) = assess(Some(&next)).filter(|a| a.active) else {
+        return Ok(None);
+    };
+    if assessment.constrained {
+        return Err(EdgeError::Display(assessment.detail));
+    }
+    next.allowance.record_launch(
+        launch_id,
+        now.unix_seconds(),
+        assessment
+            .windows
+            .iter()
+            .map(|w| w.cost_basis_points)
+            .max()
+            .unwrap_or(assessment.initial_launch_cost_basis_points),
+    )?;
+    next.revision = next
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    next.validate()?;
+    write_intent(
+        &directory,
+        roots.state.as_path(),
+        &UpdateIntent {
+            account: scope,
+            expected: current,
+            replacement: Some(next),
+            clear_provider_observations: false,
+            readiness_probe_result: None,
+            login_probe_expiry: None,
+        },
+        &mut records,
+    )?;
+    Ok(None)
+}
+
 pub(crate) fn persist_provider_refusal(
     state_root: &Path,
     route: &provenant_records::run::RouteRecord,
@@ -516,6 +657,7 @@ pub(crate) fn persist_provider_success(
         account: next.account.clone(),
         expected: current,
         replacement: Some(next),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     };
@@ -744,7 +886,10 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         None => None,
     };
     let mut file = current.clone().unwrap_or_default();
-    if let Some(record) = &intent.replacement {
+    if intent.clear_provider_observations {
+        file.records.clear();
+        file.login = None;
+    } else if let Some(record) = &intent.replacement {
         // Default policies date the clearing reading; a custom probe interval
         // only moves when a fresh reading stops counting as fresh.
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
@@ -845,6 +990,7 @@ fn write_intent(
                 0o600,
                 PublishMode::Replace,
             )?)?;
+            deferred::retire(dir, record)?;
             if let Some(p) = pos {
                 records[p] = record.clone();
             } else {
@@ -1068,6 +1214,7 @@ fn refresh_auth_metadata(
                 account: next.account.clone(),
                 expected: current,
                 replacement: Some(next),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -1488,6 +1635,7 @@ fn probe_account(
                     account: next.account.clone(),
                     expected: current,
                     replacement: Some(next),
+                    clear_provider_observations: false,
                     readiness_probe_result: None,
                     login_probe_expiry: None,
                 },
@@ -2446,7 +2594,7 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         .iter()
         .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
         .then(|| "provenant quota tick".to_owned());
-    crate::Summary::complete(
+    crate::Summary::new(
         format!(
             "quota {}/{} current{}{}",
             report.coverage.known,
@@ -2458,6 +2606,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         next,
     )
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "quota command is a real-time boundary"
+)]
 pub fn run(
     command: Quota,
     globals: &crate::Globals,
@@ -2474,6 +2626,7 @@ pub fn run(
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
+    let started = std::time::Instant::now();
     let mut summary = None;
     let result = match &command {
         Quota::History {
@@ -2491,11 +2644,51 @@ pub fn run(
             *limit,
         ),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
-            let human = quota_human(&report);
+            let mut human = quota_human(&report);
+            let mut data = serde_json::to_value(&report)?;
+            if let Quota::Tick { adapter, power, .. } = &command
+                && !matches!(power, Power::Low)
+            {
+                let config = crate::config_reads::read_for(roots, "quota")?;
+                let enabled = config
+                    .knobs
+                    .get("quota.model_discovery")
+                    .and_then(|value| value.value.as_bool())
+                    .unwrap_or(true);
+                let accounts = effects.accounts()?;
+                let eligible: Vec<String> = registry
+                    .iter()
+                    .filter(|entry| {
+                        let id = entry.adapter.id();
+                        enabled
+                            && entry.quota_source.is_some()
+                            && provenant_records::AdapterSpec::get(id).is_some_and(|spec| {
+                                spec.quota_probe != provenant_records::QuotaProbeKind::None
+                            })
+                            && adapter.adapter.as_deref().is_none_or(|filter| filter == id)
+                            && accounts.iter().any(|account| account.adapter == id)
+                    })
+                    .map(|entry| entry.adapter.id().to_owned())
+                    .collect();
+                let budget =
+                    std::time::Duration::from_secs(config.domains.quota.wall_budget_seconds)
+                        .saturating_sub(started.elapsed())
+                        .saturating_sub(std::time::Duration::from_secs(1));
+                let changes = crate::model_discovery::refresh(
+                    roots,
+                    &eligible,
+                    report.generated_unix_seconds,
+                    budget,
+                );
+                for change in &changes {
+                    human.push_str(&format!("{change}\n"));
+                }
+                data["model_discovery"] = serde_json::to_value(changes)?;
+            }
             if matches!(command, Quota::Show(_)) {
                 summary = Some(quota_summary(&report));
             }
-            Ok((serde_json::to_value(report)?, human))
+            Ok((data, human))
         }),
     };
     let (envelope, human) = match result {
@@ -2544,6 +2737,342 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn local_login_tick_clears_published_provider_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let mut inputs =
+            provenant_core::RootInputs::new(home.clone(), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let root = private(roots.state.as_path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            account_key: "local".into(),
+            label: "default".into(),
+        };
+        let now = SystemClock::new().unix_seconds();
+        let mut observed = AccountRecord::empty(account.clone());
+        observed.revision = 1;
+        observed.allowance.record_launch("first", now, 600)?;
+        observed.last_error = Some(ProbeFailure::Network);
+        observed.failures = 1;
+        observed.auth_state = Some(provenant_quota::AuthState {
+            signed_in: Some(true),
+            observed_unix_seconds: Some(now),
+            ..Default::default()
+        });
+        let allowance = observed.allowance.clone();
+        let mut records = Vec::new();
+        write_intent(
+            &directory,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(observed),
+                clear_provider_observations: false,
+                readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
+                login_probe_expiry: Some((Some(now + 600), 300)),
+            },
+            &mut records,
+        )?;
+        let scope = ReadinessScope {
+            extra: Default::default(),
+            host: LOCAL_HOST.into(),
+            adapter: account.adapter.clone(),
+            account_key: account.account_key.clone(),
+            route: "cursor/composer-2.5".into(),
+        };
+        assert_eq!(
+            read_readiness(roots.state.as_path(), &scope, now).reason,
+            Some(ReadinessReason::ProbeTimeout)
+        );
+        let readiness_path = roots.state.as_path().join("readiness/local/cursor.json");
+        let stale_readiness = std::fs::read(&readiness_path)?;
+        let published: ReadinessFile = serde_json::from_slice(&stale_readiness)?;
+        assert!(published.login.is_some());
+        let effects = provenant_providers::quota_live::LiveQuota::new(
+            &roots,
+            &home,
+            &provenant_providers::accounts::Settings::default(),
+        )?;
+        let tick = Quota::Tick {
+            adapter: Filter { adapter: None },
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        for already_ledger_only in [false, true] {
+            if already_ledger_only {
+                // A prior failed derived publication must be repaired on the
+                // next ordinary tick even when the account is already stripped.
+                let dir = child(
+                    &private(roots.state.as_path())?,
+                    OsStr::new(READINESS_DIRECTORY),
+                )?;
+                let account_dir = child(&dir, OsStr::new("local"))?;
+                durable(Directory::atomic_write_with_permissions(
+                    &account_dir,
+                    OsStr::new("cursor.json"),
+                    ".readiness",
+                    &stale_readiness,
+                    0o600,
+                    PublishMode::Replace,
+                )?)?;
+            }
+            execute(&tick, &roots, provenant_providers::REGISTRY, &effects)?;
+            let records = read_cache(&roots)?;
+            let mut ledger_only = AccountRecord::empty(account.clone());
+            ledger_only.revision = records[0].revision;
+            ledger_only.allowance = allowance.clone();
+            assert_eq!(records, vec![ledger_only]);
+            assert!(!readiness_path.exists());
+            assert_eq!(
+                read_readiness(roots.state.as_path(), &scope, now).state,
+                ReadinessState::Unknown
+            );
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn monthly_launch_reservation_persists_and_rechecks_shared_account_spend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::{
+            ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility,
+            RouteReadiness,
+        };
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let catalogue = provenant_routing::Catalogue::bundled()?;
+        let config = provenant_routing::RoutingConfig::default();
+        let policies = provenant_providers::scheduling_policies(
+            &Settings::default(),
+            provenant_providers::REGISTRY,
+        );
+        let now = provenant_core::WallTime::from_unix_seconds(100)?;
+        let mut route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            model: "composer-2.5".into(),
+            effort: None,
+            catalogue_revision: catalogue.revision().to_owned(),
+            account_key: Some("work".into()),
+            host: "fixture".into(),
+            alternatives: RouteAlternatives::default(),
+            exclusions: vec![],
+            eligibility: RouteEligibility::Eligible,
+            readiness: RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_warning: None,
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 200,
+            },
+            confidentiality: RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        };
+        let scope = AccountScope {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            account_key: "work".into(),
+            label: "Work".into(),
+        };
+        let mut record = AccountRecord::empty(scope.clone());
+        record.revision = 1;
+        record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 80,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![QuotaWindow {
+                extra: Default::default(),
+                pool: "billing_cycle".into(),
+                window_seconds: Some(30 * 86400),
+                resets_unix_seconds: Some(30 * 86400),
+                used_basis_points: 900,
+            }],
+        });
+        let root = private(roots.state.as_path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        write_intent(
+            &directory,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: scope,
+                expected: None,
+                replacement: Some(record),
+                clear_provider_observations: false,
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut vec![],
+        )?;
+        let reserve =
+            |route: &ResolvedRoute, id: &str, config: &provenant_routing::RoutingConfig| {
+                reserve_allowance_launch(&roots, route, id, config, &catalogue, &policies, now)
+            };
+        reserve(&route, "attempt-a", &config)?;
+        reserve(&route, "attempt-a", &config)?; // Preparation replay.
+        assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
+        assert!(reserve(&route, "attempt-b", &config).is_err());
+        route.model = "grok-4.7".into();
+        assert!(reserve(&route, "attempt-c", &config).is_err()); // Same allowance across models.
+        assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
+        route.account_key = Some("other".into());
+        assert!(reserve(&route, "attempt-d", &config).is_err()); // Missing monthly cycle.
+        let relaxed: provenant_routing::RoutingConfig =
+            serde_json::from_value(serde_json::json!({
+                "pacing":{"accounts":{"cursor/other":{"monthly":{"enabled":false}}}}
+            }))?;
+        reserve(&route, "attempt-d", &relaxed)?;
+        // Bypassed accounts never wait on a quota publication or book monthly debt.
+        assert!(
+            !read_cache(&roots)?
+                .iter()
+                .any(|r| r.account.account_key == "other")
+        );
+        let held = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
+        assert!(reserve(&route, "attempt-e", &relaxed)?.is_none());
+        route.adapter = "codex".into();
+        route.model = "gpt-6-luna".into();
+        assert!(reserve(&route, "non-monthly", &config)?.is_none());
+        route.adapter = "cursor".into();
+        route.model = "composer-2.5".into();
+        route.account_key = Some("local".into());
+        let warning = reserve(&route, "contended", &config)?.expect("contention is advisory");
+        assert!(warning.contains("deferred reservation"));
+        let local = read_cache(&roots)?
+            .into_iter()
+            .find(|r| r.account.account_key == "local")
+            .unwrap();
+        assert_eq!(local.allowance.launches, 1);
+        // The route composition must retain reservations before any provider snapshot.
+        let observations =
+            crate::route::quota_observations(&catalogue, &config, &[], &[local], &policies, &[])?;
+        assert!(observations.iter().any(|q| q.allowance.launches == 1));
+        drop(held);
+        reserve(&route, "after-contention", &config)?;
+        reserve(&route, "contended", &config)?; // Replaying the deferred ID cannot spend twice.
+        let local = read_cache(&roots)?
+            .into_iter()
+            .find(|r| r.account.account_key == "local")
+            .unwrap();
+        assert_eq!(local.allowance.launches, 2);
+        // Publication absorbed the receipt, so subsequent reads cannot duplicate it.
+        assert_eq!(
+            read_cache(&roots)?
+                .into_iter()
+                .find(|r| r.account.account_key == "local")
+                .unwrap()
+                .allowance
+                .launches,
+            2
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn deferred_allowance_receipts_survive_journal_eviction_and_publication_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        let scope = AccountScope {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            account_key: "local".into(),
+            label: "Local".into(),
+        };
+        deferred::record(&directory, &scope, "receipt-0", 100, 1)?;
+        let pending = temp.path().join("quota/.allowance-pending/local");
+        // Fixture writes seed a backlog beyond the bounded replay journal without
+        // paying for thousands of per-file production durability barriers.
+        for n in 1..4100 {
+            let item = serde_json::json!({"account": scope, "launch": {"id":format!("receipt-{n}"), "unix_seconds":100+n,"cost_basis_points":1}});
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(pending.join(format!("cursor-receipt-{n}.json")))?
+                .write_all(&serde_json::to_vec(&item)?)?;
+        }
+        let mut records = read_records(&directory)?;
+        assert_eq!(records[0].allowance.launches, 4100);
+        assert_eq!(records[0].allowance.receipt_launch_ids.len(), 4100);
+        assert!(records[0].allowance.recent_launches.len() < 4100);
+        // Simulate a crash after durable account replacement, before retiring receipts.
+        let mut committed = records[0].clone();
+        committed.revision = 1;
+        assert!(
+            !committed
+                .allowance
+                .recent_launches
+                .iter()
+                .any(|l| l.id == "receipt-0")
+        );
+        committed.allowance.record_launch("receipt-0", 5000, 1)?;
+        assert_eq!(committed.allowance.launches, 4100); // Acked replays bypass the rolling horizon.
+        committed.validate()?;
+        let account = child(&directory, OsStr::new("local"))?;
+        durable(account.atomic_write_with_permissions(
+            OsStr::new("cursor.json"),
+            ".quota",
+            &serde_json::to_vec(&committed)?,
+            0o600,
+            PublishMode::Replace,
+        )?)?;
+        for _ in 0..2 {
+            assert_eq!(read_records(&directory)?[0].allowance.launches, 4100);
+        }
+        records = read_records(&directory)?;
+        let expected = records[0].clone();
+        let mut next = expected.clone();
+        next.revision += 1;
+        write_intent(
+            &directory,
+            temp.path(),
+            &UpdateIntent {
+                account: scope,
+                expected: Some(expected),
+                replacement: Some(next),
+                clear_provider_observations: false,
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut records,
+        )?;
+        assert_eq!(std::fs::read_dir(pending)?.count(), 0);
+        for _ in 0..2 {
+            let current = read_records(&directory)?;
+            assert_eq!(current[0].allowance.launches, 4100);
+            assert!(current[0].allowance.receipt_launch_ids.is_empty());
+        }
+        Ok(())
+    }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]
@@ -2614,6 +3143,7 @@ mod tests {
             account,
             expected: None,
             replacement: Some(record),
+            clear_provider_observations: false,
             readiness_probe_result: Some(Some(ReadinessReason::LoginExpired)),
             login_probe_expiry: Some((Some(now - 1), 300)),
         };
@@ -2889,7 +3419,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_summary_shows_every_configured_account() {
+    fn quota_summary_bounds_rows_and_counts_omitted_accounts() {
         let row = |status| AccountRow {
             account: AccountScope {
                 extra: Default::default(),
@@ -2954,17 +3484,11 @@ mod tests {
         for _ in 0..14 {
             report.accounts.push(row(QuotaStatus::Stale));
         }
+        report.coverage.total = report.accounts.len().try_into().unwrap();
         let summary = quota_summary(&report);
-        assert_eq!(summary.lines.len(), 19); // more than the shared summary row limit
-        assert!(
-            summary
-                .lines
-                .iter()
-                .filter(|line| line.contains("[test]:"))
-                .count()
-                == 17
-        );
-        assert_eq!(summary.omitted, 0);
+        assert_eq!(summary.lines.len(), 1 + crate::limits::SUMMARY_ROWS);
+        assert_eq!(summary.omitted, 18 - crate::limits::SUMMARY_ROWS);
+        assert!(summary.lines[0].contains("quota 3/17"));
         assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
     }
 
@@ -3265,6 +3789,7 @@ mod tests {
                 account,
                 expected: None,
                 replacement: Some(record),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3406,6 +3931,7 @@ mod tests {
                 account: account.clone(),
                 expected: None,
                 replacement: Some(record),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3473,6 +3999,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(reserved.clone()),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3488,6 +4015,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(failed),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3569,6 +4097,7 @@ mod tests {
                     account,
                     expected: None,
                     replacement: Some(record),
+                    clear_provider_observations: false,
                     readiness_probe_result: None,
                     login_probe_expiry: None,
                 },
@@ -3967,6 +4496,7 @@ mod tests {
                 account,
                 expected: Some(current),
                 replacement: Some(next),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3982,6 +4512,7 @@ mod tests {
             account: records[0].account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
@@ -4334,6 +4865,7 @@ mod tests {
                 account: account.clone(),
                 expected: None,
                 replacement: Some(initial),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -4348,6 +4880,7 @@ mod tests {
             account: account.clone(),
             expected: Some(current),
             replacement: Some(failed),
+            clear_provider_observations: false,
             readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
             login_probe_expiry: None,
         };
@@ -4371,6 +4904,7 @@ mod tests {
             account,
             expected: Some(current),
             replacement: Some(succeeded),
+            clear_provider_observations: false,
             readiness_probe_result: Some(None),
             login_probe_expiry: None,
         };
@@ -4411,6 +4945,7 @@ mod tests {
             account: account.clone(),
             expected: None,
             replacement: Some(initial),
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
@@ -4424,6 +4959,7 @@ mod tests {
             account: account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
@@ -4860,6 +5396,7 @@ mod tests {
                 account: previous.account.clone(),
                 expected: Some(previous),
                 replacement: Some(replacement),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },

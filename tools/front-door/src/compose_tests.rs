@@ -7,9 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
-fn guardian_capture_retains_split_output_losslessly() {
+fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
     struct Capture;
     impl super::Process for Capture {
         fn supervise(
@@ -20,26 +20,47 @@ fn guardian_capture_retains_split_output_losslessly() {
             use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
             assert!(hooks.stdout_filter.is_none());
             assert!(hooks.stderr_filter.is_none());
-            let mut stdout = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
-                .map_err(std::io::Error::other)?;
-            let mut stderr = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
-                .map_err(std::io::Error::other)?;
-            for bytes in [
-                b"credential gh".as_slice(),
-                b"p_abcdefghijklmnop",
-                b"qrstuvwxyz0123456789 end",
-            ] {
-                assert!(stdout.push(bytes).is_ok());
-                assert!(stderr.push(bytes).is_ok());
+            let frames = [
+                serde_json::json!({"type":"item.completed", "item":{
+                    "type":"command_execution", "aggregated_output":
+                    "TOKEN=\"unterminated credential\nnext line"}}),
+                serde_json::json!({"type":"item.completed", "item":{
+                    "type":"agent_message", "text":"Final review answer"}}),
+                serde_json::json!({"type":"turn.completed"}),
+            ]
+            .map(|frame| format!("{frame}\n"))
+            .concat();
+            // Exercise production hook composition, interleaving both streams
+            // with splits inside escaped strings and credential markers.
+            let mut stdout = StreamCapture::new(
+                StreamPolicy::Capture { limit: 4096 },
+                None,
+                hooks.stdout_filter,
+            )
+            .map_err(std::io::Error::other)?;
+            let mut stderr = StreamCapture::new(
+                StreamPolicy::Capture { limit: 4096 },
+                None,
+                hooks.stderr_filter,
+            )
+            .map_err(std::io::Error::other)?;
+            for bytes in frames.as_bytes().chunks(7) {
+                stdout.push(bytes).map_err(std::io::Error::other)?;
+                stderr.push(bytes).map_err(std::io::Error::other)?;
             }
             stdout.finish();
             stderr.finish();
             for capture in [&stdout, &stderr] {
-                assert_eq!(
-                    capture.outcome().bytes,
-                    b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end"
-                );
+                assert_eq!(capture.outcome().bytes, frames.as_bytes());
                 assert!(!capture.outcome().filter_failed);
+                for line in capture
+                    .outcome()
+                    .bytes
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                {
+                    assert!(serde_json::from_slice::<serde_json::Value>(line).is_ok());
+                }
             }
             Ok(())
         }

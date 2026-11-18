@@ -220,6 +220,8 @@ pub(super) struct Fake {
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
     pub(super) terminal_cause: Option<TerminalCause>,
+    /// Evidence diagnostic for outcomes such as `Unsettled` that require one.
+    pub(super) reason: Option<String>,
     /// Provider session the decode reports, for terminal continuation tests.
     pub(super) session: Option<String>,
     /// The answer a decode reports, instead of the captured stdout.
@@ -315,7 +317,7 @@ impl Providers for Fake {
             observed_route: self.observed.clone(),
             usage: self.codex_usage.clone().unwrap_or_default(),
             session: self.session.clone(),
-            reason: None,
+            reason: self.reason.clone(),
             partial_signals: self.partial.clone(),
             turns: self.turns.clone(),
         })
@@ -1434,7 +1436,12 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
     }
     assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
     finish_reactions(&store)?;
-    assert!(store.open_attempts(10, &call)?.is_empty());
+    // Recovery may still owe terminal effects; retained scratch alone must
+    // not cause the attempt to be queued for recovery.
+    assert_eq!(
+        store.open_attempts(10, &call)?,
+        store.pending_effect_attempts(id, &call)?
+    );
     Ok(())
 }
 

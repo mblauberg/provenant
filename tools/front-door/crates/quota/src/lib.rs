@@ -3,6 +3,8 @@
 pub mod chair;
 mod source;
 pub use source::*;
+mod allowance;
+pub use allowance::*;
 mod calibration;
 mod history;
 pub use history::*;

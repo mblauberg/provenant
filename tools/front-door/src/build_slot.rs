@@ -1,5 +1,5 @@
 //! `provenant internal build-slot`: the lane's `cargo` shim runs this. Cargo
-//! commands that compile and test runs take one host build slot first, then this process
+//! commands take one host build slot first, then this process
 //! runs cargo as its child and waits, so the slot is held until cargo exits
 //! and not a moment longer. Test runs hold a slot even when they reuse build metadata. The slot descriptor is
 //! close-on-exec: a daemon or
@@ -143,8 +143,8 @@ pub(crate) struct Gate<'a> {
     pub command: &'a [OsString],
 }
 
-/// Cargo subcommands that compile. Aliases and subcommands not named here run
-/// without a slot. `run` is gated because it compiles first.
+/// Known compiling subcommands, subject to disk refusal and local-Cargo advice.
+/// Every Cargo invocation takes a slot, including aliases and unlisted commands.
 const GATED: &[&str] = &[
     "build", "b", "check", "c", "clippy", "test", "t", "bench", "doc", "d", "run", "r", "rustc",
     "rustdoc", "fix", "install", "package", "publish", "nextest", "llvm-cov", "miri",
@@ -152,26 +152,9 @@ const GATED: &[&str] = &[
 /// Cargo options that take their value as the next argument.
 const VALUED: &[&str] = &["-C", "-Z", "--config", "--color"];
 
-/// Whether `args` (the arguments after `cargo`) name a compiling subcommand.
-pub(crate) fn gated(args: &[OsString]) -> bool {
-    let mut args = args.iter().map(OsString::as_os_str);
-    while let Some(arg) = args.next() {
-        let Some(arg) = arg.to_str() else {
-            return false;
-        };
-        if arg.starts_with('+') {
-            continue;
-        }
-        if VALUED.contains(&arg) {
-            args.next();
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        return GATED.contains(&arg);
-    }
-    false
+/// Cargo aliases and external subcommands may compile, so admit every call.
+pub(crate) fn gated(_args: &[OsString]) -> bool {
+    true
 }
 
 /// The process a nested build's marker must name.
@@ -282,6 +265,20 @@ fn take_slot(settings: &Settings) -> Result<Taken, String> {
         slots.held(settings.slots),
         settings.slots
     );
+    // This advisory marker is separate from the host slot. Kernel locks clear
+    // it even if the waiting process is killed; simultaneous waiters share it.
+    let _waiting =
+        std::env::var_os(provenant_core::consumer_env::BUILD_WAIT_DIR).and_then(|path| {
+            match provenant_os::build_slots::mark_waiting(Path::new(&path)) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    warn(&format!(
+                        "cannot publish build-slot wait to status: {error}"
+                    ));
+                    None
+                }
+            }
+        });
     say(&status);
     let guard = slots
         .acquire_within(settings.slots, settings.wait)
@@ -430,6 +427,7 @@ fn run_with(
     }
     let gate_this = gated(args) && !nested;
     if gate_this
+        && subcommand(args).is_some_and(|command| GATED.contains(&command))
         && matches!(&backend, provenant_config::PortBackend::Builtin)
         && let Err(message) = check_disk(&env)
     {
@@ -536,8 +534,7 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
     }
 }
 
-/// The lane's own stderr is the only place a wait shows; a closed stream is
-/// not an error.
+/// Report an advisory message; a closed stream is not an error.
 fn say(message: &str) {
     let _ = writeln!(std::io::stderr().lock(), "provenant: {message}");
 }
@@ -820,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn other_subcommands_and_bare_options_are_not_gated() {
+    fn aliases_and_other_cargo_invocations_are_gated() {
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
         for list in [
             &[][..],
@@ -831,7 +828,7 @@ mod tests {
             &["-C", "dir"],
             &["xtask", "build"],
         ] {
-            assert!(!gated(&args(list)), "{list:?}");
+            assert!(gated(&args(list)), "{list:?}");
         }
     }
 
