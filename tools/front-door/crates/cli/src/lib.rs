@@ -1657,8 +1657,12 @@ mod tests {
             let Command::Gc(gc) = valid(&["gc", "--idle", input]).command else {
                 panic!("gc")
             };
-            assert_eq!(gc.idle, expected);
+            assert_eq!(gc.idle, Some(expected));
         }
+        let Command::Gc(gc) = valid(&["gc"]).command else {
+            panic!("gc")
+        };
+        assert_eq!(gc.idle, None);
         valid(&["result", "fix/task"]);
         invalid(&["gc", "--idle", "wrong"]);
         for words in [

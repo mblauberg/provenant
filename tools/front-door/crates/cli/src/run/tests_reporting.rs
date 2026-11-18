@@ -277,7 +277,10 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             let reply = output_from_session(output_command(), edge, &session, attempt, &call);
             assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
             assert_eq!(reply.result.data["reason"], expected);
-            assert!(reply.human.contains(&expected));
+            assert_eq!(
+                reply.human.trim(),
+                provenant_core::bounded_line(&expected, 256)
+            );
             assert!(!serde_json::to_string(&reply.result.data)?.contains("PROVIDER_SENTINEL"));
             let mut bytes = Vec::new();
             crate::render(

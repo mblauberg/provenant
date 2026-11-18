@@ -170,7 +170,7 @@ handoff. `--json` retains the structured evidence and `--full` shows the complet
 human view. Missing or unavailable evidence is not proof of a check.
 `retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
 `gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
-idle age; scheduled GC continues to use the configured `gc.idle_days`.
+idle age; scheduled GC uses the configured `gc.idle`.
 `templates show NAME` inspects an effective template. Configuration edits report the changed key, its effective value and source, and the previous value. A pre-launch refusal retains a redacted cause and names a retry command.
 
 `config show` summarises the effective configuration; `--full` shows its values

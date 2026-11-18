@@ -73,7 +73,7 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
 }
 
 #[test]
-fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> Result {
+fn compact_view_bounds_rows_and_full_view_shows_all_configured_accounts() -> Result {
     use std::os::unix::fs::PermissionsExt;
 
     let rig = quota_rig()?;
@@ -129,10 +129,15 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     let compact = String::from_utf8(output.stdout.bytes)?;
+    assert!(compact.contains("work-0 [claude]: exhausted"), "{compact}");
+    assert!(compact.contains("more not shown; use --full"), "{compact}");
+    let full = rig.command(&["quota", "--full"])?;
+    assert_eq!(code(&full), 0, "{full:?}");
+    let full = String::from_utf8(full.stdout.bytes)?;
     for (label, _) in &accounts {
         assert!(
-            compact.contains(&format!("{label} [claude]")),
-            "missing {label} row in {compact}"
+            full.contains(&format!("{label} [claude]:")),
+            "missing {label} in {full}"
         );
     }
     let structured = rig.command(&["quota", "--json"])?;
