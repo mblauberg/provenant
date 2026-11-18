@@ -721,6 +721,10 @@ mod terminal_cause_tests {
                     "{reason}"
                 );
                 assert!(reason.contains("fixture scoped note"));
+            } else if let TerminalCause::WriterPinMismatch { pinned, head } = cause {
+                assert!(reason.contains(&pinned.to_string()), "{reason}");
+                assert!(reason.contains(&head.to_string()), "{reason}");
+                assert!(reason.contains("fixture scoped note"));
             } else {
                 assert_eq!(reason, format!("{}; fixture scoped note", cause.detail()));
             }
