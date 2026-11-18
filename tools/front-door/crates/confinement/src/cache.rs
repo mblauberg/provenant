@@ -929,7 +929,9 @@ fn prune_worktree_cache(
     Ok(())
 }
 
-fn lock_cargo_profiles(cache: &Directory) -> Option<Vec<LockGuard>> {
+/// Hold all Cargo profile and target owner locks under one cache root. Shared
+/// project targets use the same probe as private lane caches.
+pub fn lock_cargo_profiles(cache: &Directory) -> Option<Vec<LockGuard>> {
     fn visit(dir: &Directory, depth: usize, guards: &mut Vec<LockGuard>) -> Option<()> {
         let mut profile = false;
         for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
@@ -967,6 +969,13 @@ fn lock_cargo_profiles(cache: &Directory) -> Option<Vec<LockGuard>> {
         }
     }
     Some(guards)
+}
+
+/// Read the verified worktree path that owns a private lane cache.
+pub fn lane_cargo_cache_owner_path(
+    cache: &Directory,
+) -> Result<Option<std::path::PathBuf>, PermissionError> {
+    Ok(read_cache_owner(cache, Path::new("."))?.map(|owner| owner.path))
 }
 
 fn verify_detached_cache(

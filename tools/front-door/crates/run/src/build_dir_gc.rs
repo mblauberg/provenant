@@ -1,11 +1,9 @@
-//! Bounded retention for the Cargo profile directories of lane build output.
+//! Bounded retention for managed private and shared Cargo target directories.
 //!
-//! A lane's target lives in its private cache under
-//! `Library/Caches/provenant-lane-cargo/<digest>/`, in `target/` and
-//! `target-lint/`. A profile directory (`target/debug`, `target/<triple>/debug`)
-//! is idle when a non-blocking exclusive flock succeeds on all of Cargo's
+//! Targets live in per-worktree lane caches and per-project shared caches. A
+//! target directory is idle when a non-blocking exclusive flock succeeds on all of Cargo's
 //! `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. The cap counts
-//! every profile directory, idle and busy. Idle directories are removed least
+//! every managed target directory, idle and busy. Idle targets are removed least
 //! recently used first until the cap and the free-space floor both hold; when
 //! busy directories alone exceed the cap, every eligible idle directory goes and
 //! the total stays over. A directory whose locks are held, or cannot be probed,
@@ -15,13 +13,16 @@
 //! probe covers that case. A write dated more than a few minutes in the future
 //! is clock skew, not recent activity, and does not earn the grace.
 //!
-//! Sizes are allocated bytes (`st_blocks * 512`) throughout. Explicit GC owns
-//! collection; ordinary admission records pressure and follows policy.
+//! Sizes are allocated bytes (`st_blocks * 512`) throughout. Both target roots
+//! are counted, including payload outside a recognised profile, so incomplete
+//! seeds and first builds cannot escape the budget. Explicit GC and launch
+//! admission share the same collector.
 use provenant_confinement::cache::is_cache_digest;
 use provenant_os::fs::{
     Directory, FileKind, ForeignLock, LockGuard, LockMode, Metadata, PayloadTree, effective_uid,
 };
 use std::{
+    collections::BTreeSet,
     ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
@@ -34,11 +35,19 @@ const LOCKS: [&str; 3] = [CARGO_LOCK, ".cargo-build-lock", ".cargo-artifact-lock
 const TARGETS: [&str; 2] = ["target", "target-lint"];
 const MAX_DEPTH: usize = 64;
 const MAX_ENTRIES: usize = 1_000_000;
+const MAX_CACHE_ROOT_ENTRIES: usize = 20_000;
+const PREVIEW_ENTRIES: usize = 4096;
+const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
+const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
+const SURVEY_SNAPSHOT_VERSION: u8 = 2;
+const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
+const TARGET_LAST_USED: &str = ".provenant-last-used";
 /// How far ahead of now a modification time may be and still count as a
 /// recent write.
 const FUTURE_SKEW_NS: i128 = 5 * 60 * 1_000_000_000;
 
-/// Size cap on all profile directories, the free-space floor to restore, and
+/// Size cap on all target directories, the free-space floor to restore, and
 /// the seconds after its newest write that a directory is spared.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -52,24 +61,278 @@ pub struct Report {
     pub removed: Vec<PathBuf>,
     /// Bytes reclaimed, or reclaimable on a dry run.
     pub bytes: u64,
-    /// Allocated bytes in all profile directories after the sweep.
+    /// Allocated bytes under managed target roots after the sweep.
     pub cache_bytes: u64,
+    pub budget_bytes: u64,
+    pub budget_setting: String,
+    pub budget_source: String,
     /// Profile directories kept because their locks are held or unprobeable.
     pub busy: Vec<PathBuf>,
     /// Profile directories kept because they were written within the grace.
     pub recent: Vec<PathBuf>,
     pub errors: Vec<String>,
+    pub warnings: Vec<String>,
     /// Preview omitted the recursive profile census.
     pub measurement_skipped: bool,
+    /// Inclusive target path to resume after the sweep budget expires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<PathBuf>,
+    /// Epoch-specific sidecar name for the next sweep to resume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_detail: Option<String>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Candidate {
-    cache: OsString,
-    /// Components below the cache: `target`, optionally a triple, the profile.
-    path: Vec<OsString>,
+    kind: CacheKind,
+    cache: String,
+    target: String,
     display: PathBuf,
     bytes: u64,
     newest: i128,
+    target_modified_ns: i128,
+    identity: (u64, u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RootIdentity {
+    device: u64,
+    inode: u64,
+    modified_ns: i128,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct SurveySnapshot {
+    version: u8,
+    epoch: String,
+    lane_root: Option<RootIdentity>,
+    shared_root: Option<RootIdentity>,
+    completed: Vec<Candidate>,
+    root_cursor: Option<RootCursor>,
+    measuring: Option<MeasureProgress>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+struct RootCursor {
+    kind: CacheKind,
+    offset: i64,
+    scanned: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct MeasureProgress {
+    kind: CacheKind,
+    cache: String,
+    target: String,
+    identity: (u64, u64),
+    stack: Vec<MeasureFrame>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct MeasureFrame {
+    /// Hex-encoded native path components below the target root.
+    path: Vec<String>,
+    device: u64,
+    inode: u64,
+    modified_ns: i128,
+    /// Opaque `telldir` cookie, valid while this directory remains unchanged.
+    offset: i64,
+    bytes: u64,
+    newest: i128,
+}
+
+struct MeasureBudget {
+    preview: bool,
+    remaining: usize,
+    started: std::time::Instant,
+    limited: bool,
+}
+
+impl MeasureBudget {
+    fn new(preview: bool) -> Self {
+        Self {
+            preview,
+            remaining: if preview { PREVIEW_ENTRIES } else { usize::MAX },
+            started: std::time::Instant::now(),
+            limited: false,
+        }
+    }
+
+    fn consume(&mut self) -> bool {
+        if self.preview
+            && (self.remaining == 0 || self.started.elapsed() >= PREVIEW_BUDGET)
+        {
+            self.limited = true;
+            return false;
+        }
+        self.remaining = self.remaining.saturating_sub(1);
+        true
+    }
+
+    fn preview_limited(&mut self) -> bool {
+        if self.preview
+            && (self.remaining == 0 || self.started.elapsed() >= PREVIEW_BUDGET)
+        {
+            self.limited = true;
+        }
+        self.limited
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum CacheKind {
+    Lane,
+    Shared,
+}
+
+/// Active target owners observed before cache eviction. Unknown custody
+/// protects all targets until a later observation can name the owners.
+#[derive(Clone, Debug, Default)]
+pub struct TargetProtection {
+    pub worktrees: BTreeSet<PathBuf>,
+    pub shared_projects: BTreeSet<String>,
+    pub unobserved: bool,
+}
+
+impl TargetProtection {
+    fn merge(&mut self, observed: &Self) {
+        self.worktrees.extend(observed.worktrees.iter().cloned());
+        self.shared_projects
+            .extend(observed.shared_projects.iter().cloned());
+        self.unobserved |= observed.unobserved;
+    }
+}
+
+/// Snapshot live writer custody across every registered project for launch
+/// eviction. Any unreadable registration, run store or request makes the whole
+/// cache set conservative until a later observation succeeds.
+pub fn target_protection_for_launch(
+    roots: &provenant_core::Roots,
+    current_worktree: Option<&Path>,
+    current_common_dir: Option<&Path>,
+) -> TargetProtection {
+    let mut protection = TargetProtection::default();
+    if let Some(worktree) = current_worktree {
+        protection.worktrees.insert(worktree.to_owned());
+    }
+    if let Some(common_dir) = current_common_dir {
+        protection
+            .shared_projects
+            .insert(crate::target_seed::project_key(common_dir));
+    }
+
+    let projects = match provenant_config::registered_projects(roots) {
+        Ok(projects) => projects,
+        Err(_) => {
+            protection.unobserved = true;
+            return protection;
+        }
+    };
+    if projects.len() > 10_000 {
+        protection.unobserved = true;
+        return protection;
+    }
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let request = crate::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let mut records_observed = 0_usize;
+    for binding in projects {
+        let context = crate::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: binding.project_id(),
+            actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+            read_prompts: false,
+        };
+        let Some(store) = (match crate::RunStore::open_disk_read_only(&context, &request) {
+            Ok(store) => store,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        }) else {
+            continue;
+        };
+        let store = store.with_writer_registry(roots.state.as_path());
+        let mut after = 0;
+        loop {
+            let page = match store.lanes(
+                &crate::LaneQuery {
+                    targets: Vec::new(),
+                    all: true,
+                    limit: 100,
+                    after,
+                    newest_first: false,
+                    owner: None,
+                    unseen_after: None,
+                },
+                &request,
+            ) {
+                Ok(page) => page,
+                Err(_) => {
+                    protection.unobserved = true;
+                    return protection;
+                }
+            };
+            if page.lanes.is_empty() {
+                break;
+            }
+            if records_observed.saturating_add(page.lanes.len()) > 10_000 {
+                protection.unobserved = true;
+                return protection;
+            }
+            records_observed = records_observed.saturating_add(page.lanes.len());
+            for record in page.lanes {
+                let canonical = match store.request_observed(record.attempt_id, &request) {
+                    Ok(canonical) => canonical,
+                    Err(_) => {
+                        protection.unobserved = true;
+                        return protection;
+                    }
+                };
+                let Some(writer) = canonical.task.writer else {
+                    continue;
+                };
+                let terminal = matches!(
+                    &record.state,
+                    provenant_records::run::AttemptState::Terminal { .. }
+                );
+                let released = match store.custody_released(&record, &request) {
+                    Ok(released) => released,
+                    Err(_) => {
+                        protection.unobserved = true;
+                        return protection;
+                    }
+                };
+                let held = !terminal || !released;
+                if held {
+                    protection.worktrees.insert(writer.worktree);
+                    protection.shared_projects.insert(
+                        crate::target_seed::project_key(binding.common_dir()),
+                    );
+                }
+            }
+            match page.next {
+                Some(next) if next > after => after = next,
+                _ => break,
+            }
+        }
+    }
+    protection
+}
+
+impl TargetProtection {
+    fn protects(&self, kind: CacheKind, key: &OsStr, owner: Option<&Path>) -> bool {
+        self.unobserved
+            || match kind {
+                CacheKind::Lane => owner.is_some_and(|path| self.worktrees.contains(path)),
+                CacheKind::Shared => key
+                    .to_str()
+                    .is_some_and(|key| self.shared_projects.contains(key)),
+            }
+    }
 }
 
 enum Outcome {
@@ -81,11 +344,13 @@ enum Outcome {
 /// What a walk of the lane caches found, before anything is removed.
 struct Survey {
     report: Report,
-    root: Option<Directory>,
+    lane_root: Option<Directory>,
+    shared_root: Option<Directory>,
     /// Least recently used first.
     candidates: Vec<Candidate>,
     total: u64,
     free: u64,
+    complete: bool,
 }
 
 impl Survey {
@@ -103,6 +368,54 @@ pub fn cache_root(home: &Path) -> PathBuf {
     home.join("Library/Caches/provenant-lane-cargo")
 }
 
+pub fn shared_cache_root(home: &Path) -> PathBuf {
+    home.join("Library/Caches/provenant-shared-cargo")
+}
+
+/// Publish managed-target recency even when Cargo reuses every artifact.
+/// Custom paths have no cache authority and are left untouched.
+pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
+    let managed = [cache_root(home), shared_cache_root(home)]
+        .iter()
+        .any(|root| managed_target_relative(target, root));
+    if !managed {
+        return Ok(false);
+    }
+    let directory = match Directory::open_anchor(target) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    let timestamp = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
+        .map_err(io::Error::other)?;
+    let bytes = format!("{}\n", timestamp.as_micros());
+    directory
+        .atomic_write(
+            OsStr::new(TARGET_LAST_USED),
+            ".provenant-target-use-",
+            bytes.as_bytes(),
+            provenant_os::fs::PublishMode::Replace,
+        )
+        .and_then(|publication| publication.require_durable())
+        .map_err(io::Error::other)?;
+    Ok(true)
+}
+
+fn managed_target_relative(target: &Path, root: &Path) -> bool {
+    let Ok(relative) = target.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts = relative.components();
+    let (Some(std::path::Component::Normal(cache)), Some(std::path::Component::Normal(target))) =
+        (parts.next(), parts.next())
+    else {
+        return false;
+    };
+    parts.next().is_none()
+        && cache.to_str().is_some_and(is_cache_digest)
+        && matches!(target.to_str(), Some("target" | "target-lint"))
+}
+
 /// Collect. The walk that measures every profile directory runs without any
 /// lock, and nothing more happens when the cap and the floor already hold. Only
 /// removal takes the host admission lock, so no lane starts mid-removal, and it
@@ -114,16 +427,86 @@ pub fn collect(
     limits: Limits,
     dry_run: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
-    if dry_run {
-        return Ok(Report {
-            measurement_skipped: true,
-            ..Report::default()
-        });
-    }
+    collect_with_protection(
+        host,
+        home,
+        limits,
+        dry_run,
+        &provenant_config::CargoCacheBudget {
+            bytes: limits.max_bytes,
+            setting: "unspecified".into(),
+            source: provenant_records::LimitSource::Default,
+        },
+        &TargetProtection::default(),
+    )
+}
+
+/// Collect private and shared targets under one budget. Unobserved owners are
+/// retained conservatively; an over-budget result is reported for the caller
+/// to warn about, never refused.
+pub fn collect_with_protection(
+    host: &Path,
+    home: &Path,
+    limits: Limits,
+    dry_run: bool,
+    budget: &provenant_config::CargoCacheBudget,
+    protection: &TargetProtection,
+) -> Result<Report, Box<dyn std::error::Error>> {
+    let mut refresh = || protection.clone();
+    collect_with_protection_refresh(
+        host,
+        home,
+        limits,
+        dry_run,
+        budget,
+        protection,
+        &mut refresh,
+    )
+}
+
+/// Like `collect_with_protection`, but refresh live custody after acquiring
+/// lane admission and immediately before the pruning boundary.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cache budget and custody refresh are explicit at admission"
+)]
+pub fn collect_with_protection_refresh(
+    host: &Path,
+    home: &Path,
+    limits: Limits,
+    dry_run: bool,
+    budget: &provenant_config::CargoCacheBudget,
+    protection: &TargetProtection,
+    refresh_protection: &mut dyn FnMut() -> TargetProtection,
+) -> Result<Report, Box<dyn std::error::Error>> {
     let mut free = || free_bytes(home);
-    let mut survey = survey(home, &mut free);
+    let mut survey = survey(home, &mut free, dry_run);
+    survey.report.budget_bytes = budget.bytes;
+    survey.report.budget_setting = budget.setting.clone();
+    survey.report.budget_source = budget.source.as_str().to_owned();
+    if protection.unobserved {
+        survey.report.warnings.push(
+            "live Cargo target custody was not fully observed; preserving cache targets".into(),
+        );
+    }
+    if !survey.complete {
+        return Ok(survey.finish());
+    }
     if survey.satisfied(limits) {
         return Ok(survey.finish());
+    }
+    if dry_run {
+        if survey.report.measurement_skipped {
+            return Ok(survey.finish());
+        }
+        return Ok(prune(
+            survey,
+            limits,
+            true,
+            wall_ns()?,
+            &mut free,
+            protection,
+        ));
     }
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
@@ -137,9 +520,352 @@ pub fn collect(
         || -> Result<Report, Box<dyn std::error::Error>> {
             // The walk may have been long, and a lane may have settled meanwhile.
             survey.free = free().unwrap_or(survey.free);
-            Ok(prune(survey, limits, false, wall_ns()?, &mut free))
+            let mut current_protection = protection.clone();
+            current_protection.merge(&refresh_protection());
+            Ok(prune(
+                survey,
+                limits,
+                false,
+                wall_ns()?,
+                &mut free,
+                &current_protection,
+            ))
         },
     )?
+}
+
+/// Collect with a caller-owned deadline and resumable census. A partial census
+/// never authorises deletion; completed measurements live in an epoch-specific
+/// sidecar and are revalidated before pruning.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GC admission, cache protection and continuation state stay explicit"
+)]
+pub fn collect_with_progress(
+    host: &Path,
+    home: &Path,
+    limits: Limits,
+    dry_run: bool,
+    budget: &provenant_config::CargoCacheBudget,
+    protection: &TargetProtection,
+    resume_detail: Option<&str>,
+    epoch: &str,
+    should_stop: &mut dyn FnMut() -> bool,
+    refresh_protection: &mut dyn FnMut() -> TargetProtection,
+) -> Result<Report, Box<dyn std::error::Error>> {
+    let mut free = || free_bytes(home);
+    let mut report = Report::default();
+    if !valid_epoch(epoch) {
+        report.errors.push("invalid GC survey epoch".into());
+        return Ok(report);
+    }
+    let mut snapshot = load_survey_snapshot(host, resume_detail, epoch, &mut report);
+    let mut survey = survey_with_progress(home, &mut free, dry_run, &mut snapshot, should_stop);
+    survey.report.budget_bytes = budget.bytes;
+    survey.report.budget_setting = budget.setting.clone();
+    survey.report.budget_source = budget.source.as_str().to_owned();
+    if protection.unobserved {
+        survey.report.warnings.push(
+            "live Cargo target custody was not fully observed; preserving cache targets".into(),
+        );
+    }
+
+    if !survey.complete {
+        survey.report.measurement_skipped = true;
+        let interrupted = survey.report.interrupted_at.clone();
+        let mut partial = survey.finish();
+        partial.interrupted_at = interrupted;
+        save_survey_snapshot(host, &mut snapshot, epoch, &mut partial);
+        return Ok(partial);
+    }
+
+    snapshot.completed = survey.candidates.clone();
+    snapshot.measuring = None;
+    if survey.satisfied(limits) {
+        return Ok(survey.finish());
+    }
+
+    if dry_run {
+        let mut report = prune_with_progress(
+            survey,
+            limits,
+            true,
+            wall_ns()?,
+            &mut free,
+            protection,
+            should_stop,
+        );
+        if report.interrupted_at.is_some() {
+            save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
+        }
+        return Ok(report);
+    }
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let request = crate::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    crate::ledger::while_admission_held(
+        host,
+        &request,
+        || -> Result<Report, Box<dyn std::error::Error>> {
+            if should_stop() {
+                let next_candidate = snapshot
+                    .completed
+                    .first()
+                    .map(|candidate| candidate.display.clone());
+                let mut report = survey.finish();
+                report.measurement_skipped = true;
+                report.interrupted_at = next_candidate;
+                save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
+                return Ok(report);
+            }
+            survey.free = free().unwrap_or(survey.free);
+            let mut current_protection = protection.clone();
+            current_protection.merge(&refresh_protection());
+            let mut report = prune_with_progress(
+                survey,
+                limits,
+                false,
+                wall_ns()?,
+                &mut free,
+                &current_protection,
+                should_stop,
+            );
+            if report.interrupted_at.is_some() {
+                save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
+            }
+            Ok(report)
+        },
+    )?
+}
+
+fn valid_epoch(epoch: &str) -> bool {
+    epoch.len() == 16
+        && epoch
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn snapshot_name(epoch: &str) -> Option<String> {
+    valid_epoch(epoch).then(|| format!("{SURVEY_SNAPSHOT_PREFIX}{epoch}.json"))
+}
+
+fn snapshot_epoch(name: &str) -> Option<&str> {
+    let epoch = name
+        .strip_prefix(SURVEY_SNAPSHOT_PREFIX)?
+        .strip_suffix(".json")?;
+    valid_epoch(epoch).then_some(epoch)
+}
+
+fn snapshot_directory(
+    host: &Path,
+    create: bool,
+) -> Result<Directory, Box<dyn std::error::Error>> {
+    Ok(provenant_config::private_directory(&host.join("tick"), create)?)
+}
+
+fn load_survey_snapshot(
+    host: &Path,
+    detail: Option<&str>,
+    epoch: &str,
+    report: &mut Report,
+) -> SurveySnapshot {
+    let Some(name) = detail.filter(|name| snapshot_epoch(name).is_some()) else {
+        return SurveySnapshot {
+            version: SURVEY_SNAPSHOT_VERSION,
+            epoch: epoch.into(),
+            ..SurveySnapshot::default()
+        };
+    };
+    let directory = match snapshot_directory(host, false) {
+        Ok(directory) => directory,
+        Err(error) => {
+            report.warnings.push(format!("GC survey sidecar unavailable: {error}"));
+            return SurveySnapshot {
+                version: SURVEY_SNAPSHOT_VERSION,
+                epoch: epoch.into(),
+                ..SurveySnapshot::default()
+            };
+        }
+    };
+    let parsed = directory
+        .read_stable(OsStr::new(name), SURVEY_SNAPSHOT_LIMIT)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice::<SurveySnapshot>(&bytes).map_err(|error| error.to_string())
+        });
+    match parsed {
+        Ok(snapshot)
+            if snapshot.version == SURVEY_SNAPSHOT_VERSION
+                && snapshot.epoch == snapshot_epoch(name).unwrap_or_default() =>
+        {
+            snapshot
+        }
+        Ok(_) => {
+            report.warnings.push("GC survey sidecar identity changed; restarting census".into());
+            SurveySnapshot {
+                version: SURVEY_SNAPSHOT_VERSION,
+                epoch: epoch.into(),
+                ..SurveySnapshot::default()
+            }
+        }
+        Err(error) => {
+            report.warnings.push(format!("GC survey sidecar ignored: {error}"));
+            SurveySnapshot {
+                version: SURVEY_SNAPSHOT_VERSION,
+                epoch: epoch.into(),
+                ..SurveySnapshot::default()
+            }
+        }
+    }
+}
+
+fn save_survey_snapshot(
+    host: &Path,
+    snapshot: &mut SurveySnapshot,
+    epoch: &str,
+    report: &mut Report,
+) {
+    let Some(name) = snapshot_name(epoch) else {
+        report.errors.push("invalid GC survey epoch".into());
+        return;
+    };
+    snapshot.version = SURVEY_SNAPSHOT_VERSION;
+    snapshot.epoch = epoch.into();
+    let mut bounded = BoundedSidecar::new(SURVEY_SNAPSHOT_LIMIT as usize);
+    let bytes = match serde_json::to_writer(&mut bounded, snapshot) {
+        Ok(()) => bounded.bytes,
+        Err(_) if bounded.exceeded => {
+            report
+                .errors
+                .push("GC survey sidecar exceeded its size limit".into());
+            return;
+        }
+        Err(error) => {
+            report.errors.push(format!("GC survey sidecar encode: {error}"));
+            return;
+        }
+    };
+    let directory = match snapshot_directory(host, true) {
+        Ok(directory) => directory,
+        Err(error) => {
+            report.warnings.push(format!("GC survey sidecar unavailable: {error}"));
+            return;
+        }
+    };
+    let write = directory
+        .atomic_write(
+            OsStr::new(&name),
+            ".gc-cache-survey-",
+            &bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )
+        .and_then(|publication| publication.require_durable());
+    if let Err(error) = write {
+        report.warnings.push(format!("GC survey checkpoint failed: {error}"));
+        return;
+    }
+    report.cursor_detail = Some(name.clone());
+}
+
+struct BoundedSidecar {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl BoundedSidecar {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit.min(4096)),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl io::Write for BoundedSidecar {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+            self.exceeded = true;
+            return Err(io::Error::other("GC survey sidecar size limit exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Remove old epoch snapshots after the caller has acquired the GC lease and
+/// read the active cursor. The current cursor sidecar remains available for
+/// the collector to validate and resume.
+pub fn prune_stale_survey_snapshots(host: &Path, active_detail: Option<&str>) -> Vec<String> {
+    let Ok(directory) = snapshot_directory(host, false) else {
+        return Vec::new();
+    };
+    let keep = active_detail
+        .filter(|name| snapshot_epoch(name).is_some())
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut report = Report::default();
+    let mut never_stop = || false;
+    prune_survey_snapshots(&directory, &keep, &mut never_stop, &mut report);
+    report.warnings
+}
+
+fn prune_survey_snapshots(
+    directory: &Directory,
+    keep: &BTreeSet<&str>,
+    should_stop: &mut dyn FnMut() -> bool,
+    report: &mut Report,
+) {
+    let mut scanned = 0;
+    let entries = match directory.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.warnings.push(format!("GC survey sidecar scan: {error}"));
+            return;
+        }
+    };
+    for entry in entries {
+        if should_stop() || scanned >= MAX_SNAPSHOT_FILES_PER_SWEEP {
+            report
+                .warnings
+                .push("GC survey sidecar cleanup deferred to the next sweep".into());
+            break;
+        }
+        scanned += 1;
+        let name = match entry {
+            Ok(name) => name,
+            Err(error) => {
+                report.warnings.push(format!("GC survey sidecar entry: {error}"));
+                continue;
+            }
+        };
+        let Some(name_text) = name.to_str() else { continue };
+        if snapshot_epoch(name_text).is_none() || keep.contains(name_text) {
+            continue;
+        }
+        match directory.metadata_at(&name, false) {
+            Ok(metadata)
+                if metadata.kind == FileKind::Regular && metadata.uid == effective_uid() =>
+            {
+                if let Err(error) = directory.unlink(&name) {
+                    report.warnings.push(format!("GC survey sidecar cleanup: {error}"));
+                }
+            }
+            Ok(_) => report
+                .warnings
+                .push(format!("GC survey sidecar retained: {}", name_text)),
+            Err(error) => report.warnings.push(format!("GC survey sidecar stat: {error}")),
+        }
+    }
 }
 
 fn free_bytes(home: &Path) -> io::Result<u64> {
@@ -161,30 +887,65 @@ pub fn sweep(
     now_ns: i128,
     free_space: &mut dyn FnMut() -> io::Result<u64>,
 ) -> Report {
-    let survey = survey(home, free_space);
-    prune(survey, limits, dry_run, now_ns, free_space)
+    let survey = survey(home, free_space, dry_run);
+    if !survey.complete {
+        return survey.finish();
+    }
+    prune(
+        survey,
+        limits,
+        dry_run,
+        now_ns,
+        free_space,
+        &TargetProtection::default(),
+    )
 }
 
-/// Measure every profile directory and sample free space. No lock is needed:
+/// Measure every managed target directory and sample free space. No lock is needed:
 /// removal probes each candidate again.
-fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>) -> Survey {
+fn survey(
+    home: &Path,
+    free_space: &mut dyn FnMut() -> io::Result<u64>,
+    preview: bool,
+) -> Survey {
     let mut report = Report::default();
-    let root = match Directory::open_anchor(&cache_root(home)) {
-        Ok(root) => root,
+    let lane_root = match Directory::open_anchor(&cache_root(home)) {
+        Ok(root) => Some(root),
         Err(error) => {
             if !error.is_not_found() {
                 report.errors.push(error.to_string());
             }
-            return Survey {
-                report,
-                root: None,
-                candidates: Vec::new(),
-                total: 0,
-                free: u64::MAX,
-            };
+            None
         }
     };
-    let mut candidates = discover(&root, &cache_root(home), &mut report);
+    let shared_root = match Directory::open_anchor(&shared_cache_root(home)) {
+        Ok(root) => Some(root),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => {
+            report.errors.push(error.to_string());
+            None
+        }
+    };
+    let mut budget = MeasureBudget::new(preview);
+    let mut candidates = lane_root.as_ref().map_or_else(Vec::new, |root| {
+        discover(
+            root,
+            &cache_root(home),
+            CacheKind::Lane,
+            &mut report,
+            &mut budget,
+        )
+    });
+    if let Some(root) = &shared_root {
+        candidates.extend(discover(
+            root,
+            &shared_cache_root(home),
+            CacheKind::Shared,
+            &mut report,
+            &mut budget,
+        ));
+    }
+    report.measurement_skipped = budget.limited;
     let total = candidates
         .iter()
         .fold(0_u64, |sum, item| sum.saturating_add(item.bytes));
@@ -194,13 +955,482 @@ fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>) -> Surve
     });
     // Least recently used first; the path breaks ties deterministically.
     candidates.sort_by(|a, b| (a.newest, &a.display).cmp(&(b.newest, &b.display)));
+    let complete = !budget.limited && report.errors.is_empty();
     Survey {
         report,
-        root: Some(root),
+        lane_root,
+        shared_root,
         candidates,
         total,
         free,
+        complete,
     }
+}
+
+/// Continue an epoch-fenced target census, checking the caller's deadline
+/// between every directory entry and preserving the native stream cookies.
+fn survey_with_progress(
+    home: &Path,
+    free_space: &mut dyn FnMut() -> io::Result<u64>,
+    preview: bool,
+    snapshot: &mut SurveySnapshot,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Survey {
+    let mut report = Report::default();
+    let lane_root = open_cache_root(&cache_root(home), &mut report);
+    let shared_root = open_cache_root(&shared_cache_root(home), &mut report);
+    let lane_identity = root_identity(lane_root.as_ref(), &mut report);
+    let shared_identity = root_identity(shared_root.as_ref(), &mut report);
+    if snapshot.version != SURVEY_SNAPSHOT_VERSION
+        || snapshot.lane_root != lane_identity
+        || snapshot.shared_root != shared_identity
+    {
+        if !snapshot.completed.is_empty() || snapshot.measuring.is_some() {
+            report.warnings.push("GC survey roots changed; restarting census".into());
+        }
+        snapshot.completed.clear();
+        snapshot.root_cursor = None;
+        snapshot.measuring = None;
+    }
+    snapshot.version = SURVEY_SNAPSHOT_VERSION;
+    snapshot.lane_root = lane_identity;
+    snapshot.shared_root = shared_identity;
+
+    let mut measurement_budget = MeasureBudget::new(preview);
+    let mut stop = || should_stop() || !measurement_budget.consume();
+    let mut candidates = snapshot.completed.clone();
+    let mut interrupted = None;
+    for (root, cache_path, kind) in [
+        (lane_root.as_ref(), cache_root(home), CacheKind::Lane),
+        (shared_root.as_ref(), shared_cache_root(home), CacheKind::Shared),
+    ] {
+        let Some(root) = root else { continue };
+        if !discover_with_progress(
+            root,
+            &cache_path,
+            kind,
+            &mut report,
+            &mut candidates,
+            snapshot,
+            &mut stop,
+            &mut interrupted,
+        ) {
+            break;
+        }
+    }
+    drop(stop);
+    let complete = interrupted.is_none()
+        && !measurement_budget.limited
+        && report.errors.is_empty();
+    report.measurement_skipped = !complete;
+    if let Some(path) = interrupted {
+        report.interrupted_at = Some(path);
+    } else if !complete && report.interrupted_at.is_none() {
+        report.interrupted_at = Some(cache_root(home));
+    }
+    let total = candidates
+        .iter()
+        .fold(0_u64, |sum, item| sum.saturating_add(item.bytes));
+    let free = free_space().unwrap_or_else(|error| {
+        report.errors.push(format!("free space: {error}"));
+        u64::MAX
+    });
+    candidates.sort_by(|a, b| (a.newest, &a.display).cmp(&(b.newest, &b.display)));
+    if complete {
+        snapshot.completed = candidates.clone();
+        snapshot.measuring = None;
+    }
+    Survey {
+        report,
+        lane_root,
+        shared_root,
+        candidates,
+        total,
+        free,
+        complete,
+    }
+}
+
+fn open_cache_root(path: &Path, report: &mut Report) -> Option<Directory> {
+    match Directory::open_anchor(path) {
+        Ok(root) => Some(root),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => {
+            report.errors.push(format!("{}: {error}", path.display()));
+            None
+        }
+    }
+}
+
+fn root_identity(root: Option<&Directory>, report: &mut Report) -> Option<RootIdentity> {
+    root.and_then(|root| match root.metadata() {
+        Ok(metadata) => Some(RootIdentity {
+            device: metadata.device,
+            inode: metadata.inode,
+            modified_ns: metadata.modified_ns,
+        }),
+        Err(error) => {
+            report.errors.push(format!("cache root identity: {error}"));
+            None
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discover_with_progress(
+    root: &Directory,
+    cache_root: &Path,
+    kind: CacheKind,
+    report: &mut Report,
+    candidates: &mut Vec<Candidate>,
+    snapshot: &mut SurveySnapshot,
+    should_stop: &mut dyn FnMut() -> bool,
+    interrupted: &mut Option<PathBuf>,
+) -> bool {
+    let saved_cursor = snapshot.root_cursor;
+    if saved_cursor.is_some_and(|cursor| cursor.kind == CacheKind::Shared && kind == CacheKind::Lane) {
+        return true;
+    }
+    let mut entries = match root.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.errors.push(format!("{}: {error}", cache_root.display()));
+            return true;
+        }
+    };
+    let (start_offset, mut seen) = match saved_cursor {
+        Some(cursor) if cursor.kind == kind => (cursor.offset, cursor.scanned),
+        _ => (0, 0),
+    };
+    if let Err(error) = entries.seek(start_offset) {
+        report.errors.push(format!("{}: {error}", cache_root.display()));
+        snapshot.completed.clear();
+        snapshot.root_cursor = Some(RootCursor {
+            kind,
+            offset: 0,
+            scanned: 0,
+        });
+        snapshot.measuring = None;
+        return false;
+    }
+    loop {
+        let entry_offset = match entries.position() {
+            Ok(offset) => offset,
+            Err(error) => {
+                report.errors.push(format!("{}: {error}", cache_root.display()));
+                return false;
+            }
+        };
+        let Some(entry) = entries.next() else {
+            snapshot.root_cursor = match kind {
+                CacheKind::Lane => Some(RootCursor {
+                    kind: CacheKind::Shared,
+                    offset: 0,
+                    scanned: 0,
+                }),
+                CacheKind::Shared => None,
+            };
+            snapshot.completed = candidates.clone();
+            snapshot.measuring = None;
+            return true;
+        };
+        seen = seen.saturating_add(1);
+        if seen > MAX_CACHE_ROOT_ENTRIES {
+            report.errors.push(format!(
+                "{}: cache root entry limit exceeded",
+                cache_root.display()
+            ));
+            return true;
+        }
+        let name = match entry {
+            Ok(name) => name,
+            Err(error) => {
+                report.errors.push(format!("{}: {error}", cache_root.display()));
+                continue;
+            }
+        };
+        if should_stop() {
+            snapshot.completed = candidates.clone();
+            snapshot.root_cursor = Some(RootCursor {
+                kind,
+                offset: entry_offset,
+                scanned: seen.saturating_sub(1),
+            });
+            *interrupted = Some(
+                name.to_str()
+                    .filter(|name| is_cache_digest(name))
+                    .map_or_else(|| cache_root.to_owned(), |digest| {
+                        cache_root.join(digest).join("target")
+                    }),
+            );
+            return false;
+        }
+        let Some(digest) = name.to_str().filter(|name| is_cache_digest(name)) else {
+            continue;
+        };
+        let metadata = match root.metadata_at(&name, false) {
+            Ok(metadata)
+                if metadata.kind == FileKind::Directory
+                    && metadata.uid == effective_uid()
+                    && (kind != CacheKind::Lane || metadata.mode & 0o7777 == 0o700)
+                    && (kind != CacheKind::Shared || metadata.mode & 0o022 == 0) =>
+            {
+                metadata
+            }
+            _ => continue,
+        };
+        let Ok(cache) = PayloadTree::claim(root, &name, &metadata) else {
+            continue;
+        };
+        for target_name in TARGETS {
+            if should_stop() {
+                snapshot.completed = candidates.clone();
+                snapshot.root_cursor = Some(RootCursor {
+                    kind,
+                    offset: entry_offset,
+                    scanned: seen.saturating_sub(1),
+                });
+                *interrupted = Some(cache_root.join(digest).join(target_name));
+                return false;
+            }
+            let target = OsStr::new(target_name);
+            let target_metadata = match cache.metadata_at(target) {
+                Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+                Ok(_) => continue,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => {
+                    report.errors.push(format!(
+                        "{}: {error}",
+                        cache_root.join(digest).join(target_name).display()
+                    ));
+                    continue;
+                }
+            };
+            let candidate = Candidate {
+                kind,
+                cache: digest.to_owned(),
+                target: target_name.to_owned(),
+                display: cache_root.join(digest).join(target_name),
+                bytes: 0,
+                newest: target_metadata.modified_ns,
+                target_modified_ns: target_metadata.modified_ns,
+                identity: (target_metadata.device, target_metadata.inode),
+            };
+            if let Some(completed) = snapshot.completed.iter().find(|saved| {
+                same_candidate(saved, &candidate)
+            }) {
+                if !candidates
+                    .iter()
+                    .any(|item| same_candidate(item, completed))
+                {
+                    candidates.push(completed.clone());
+                }
+                continue;
+            }
+            let resumed = snapshot
+                .measuring
+                .take()
+                .filter(|state| state_matches(state, &candidate));
+            match measure_resumable(&cache, &candidate, &target_metadata, resumed, should_stop) {
+                Ok(MeasureOutcome::Complete { bytes, newest }) => {
+                    candidates.push(Candidate {
+                        bytes,
+                        newest,
+                        ..candidate
+                    });
+                }
+                Ok(MeasureOutcome::Interrupted(state)) => {
+                    snapshot.measuring = Some(state);
+                    snapshot.completed = candidates.clone();
+                    snapshot.root_cursor = Some(RootCursor {
+                        kind,
+                        offset: entry_offset,
+                        scanned: seen.saturating_sub(1),
+                    });
+                    *interrupted = Some(candidate.display);
+                    return false;
+                }
+                Ok(MeasureOutcome::Changed) => {
+                    snapshot.measuring = None;
+                    // A concurrent mutation invalidates the traversal cookie.
+                    // Defer this target to the next sweep instead of restarting
+                    // the same large tree until the budget expires.
+                    snapshot.completed = candidates.clone();
+                    snapshot.root_cursor = Some(RootCursor {
+                        kind,
+                        offset: entry_offset,
+                        scanned: seen.saturating_sub(1),
+                    });
+                    *interrupted = Some(candidate.display);
+                    return false;
+                }
+                Err(error) => {
+                    report.errors.push(format!("{}: {error}", candidate.display.display()));
+                    snapshot.measuring = None;
+                    snapshot.completed = candidates.clone();
+                    snapshot.root_cursor = Some(RootCursor {
+                        kind,
+                        offset: entry_offset,
+                        scanned: seen.saturating_sub(1),
+                    });
+                    *interrupted = Some(candidate.display);
+                    return false;
+                }
+            }
+        }
+        let offset = match entries.position() {
+            Ok(offset) => offset,
+            Err(error) => {
+                report.errors.push(format!("{}: {error}", cache_root.display()));
+                return false;
+            }
+        };
+        snapshot.root_cursor = Some(RootCursor {
+            kind,
+            offset,
+            scanned: seen,
+        });
+    }
+}
+
+fn same_candidate(saved: &Candidate, current: &Candidate) -> bool {
+    saved.kind == current.kind
+        && saved.cache == current.cache
+        && saved.target == current.target
+        && saved.target_modified_ns == current.target_modified_ns
+        && saved.identity == current.identity
+}
+
+fn state_matches(state: &MeasureProgress, candidate: &Candidate) -> bool {
+    state.kind == candidate.kind
+        && state.cache == candidate.cache
+        && state.target == candidate.target
+        && state.identity == candidate.identity
+        && state
+            .stack
+            .first()
+            .is_some_and(|root| root.modified_ns == candidate.target_modified_ns)
+}
+
+enum MeasureOutcome {
+    Complete { bytes: u64, newest: i128 },
+    Interrupted(MeasureProgress),
+    Changed,
+}
+
+fn measure_resumable(
+    cache: &PayloadTree,
+    candidate: &Candidate,
+    target_metadata: &Metadata,
+    resumed: Option<MeasureProgress>,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> io::Result<MeasureOutcome> {
+    let mut progress = resumed.unwrap_or_else(|| MeasureProgress {
+        kind: candidate.kind,
+        cache: candidate.cache.clone(),
+        target: candidate.target.clone(),
+        identity: candidate.identity,
+        stack: vec![MeasureFrame {
+            path: Vec::new(),
+            device: target_metadata.device,
+            inode: target_metadata.inode,
+            modified_ns: target_metadata.modified_ns,
+            offset: 0,
+            bytes: target_metadata.allocated,
+            newest: target_metadata.modified_ns,
+        }],
+    });
+    while !progress.stack.is_empty() {
+        if should_stop() {
+            return Ok(MeasureOutcome::Interrupted(progress));
+        }
+        if progress.stack.len() > MAX_DEPTH {
+            return Err(io::Error::other("directory nesting too deep"));
+        }
+        let frame_index = progress.stack.len() - 1;
+        let (frame_path, frame_identity, frame_offset) = {
+            let frame = &progress.stack[frame_index];
+            (
+                frame.path.clone(),
+                (frame.device, frame.inode, frame.modified_ns),
+                frame.offset,
+            )
+        };
+        let mut directory = cache
+            .child(OsStr::new(&candidate.target))
+            .map_err(io::Error::other)?;
+        for part in &frame_path {
+            directory = directory.child(&decode_component(part)?).map_err(io::Error::other)?;
+        }
+        let metadata = directory.metadata().map_err(io::Error::other)?;
+        if (metadata.device, metadata.inode, metadata.modified_ns)
+            != frame_identity
+        {
+            return Ok(MeasureOutcome::Changed);
+        }
+        let mut entries = directory.directory().entries().map_err(io::Error::other)?;
+        entries.seek(frame_offset).map_err(io::Error::other)?;
+        let Some(name) = entries.next() else {
+            let completed = progress.stack.pop().expect("current frame");
+            if let Some(parent) = progress.stack.last_mut() {
+                parent.bytes = parent.bytes.saturating_add(completed.bytes);
+                parent.newest = parent.newest.max(completed.newest);
+            } else {
+                return Ok(MeasureOutcome::Complete {
+                    bytes: completed.bytes,
+                    newest: completed.newest,
+                });
+            }
+            continue;
+        };
+        let name = name.map_err(io::Error::other)?;
+        let next_offset = entries.position().map_err(io::Error::other)?;
+        let child_metadata = match directory.metadata_at(&name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => return Ok(MeasureOutcome::Changed),
+            Err(error) => return Err(io::Error::other(error)),
+        };
+        let current = &mut progress.stack[frame_index];
+        current.offset = next_offset;
+        current.bytes = current.bytes.saturating_add(child_metadata.allocated);
+        current.newest = current.newest.max(child_metadata.modified_ns);
+        if child_metadata.kind == FileKind::Directory {
+            let mut path = current.path.clone();
+            path.push(encode_component(&name));
+            progress.stack.push(MeasureFrame {
+                path,
+                device: child_metadata.device,
+                inode: child_metadata.inode,
+                modified_ns: child_metadata.modified_ns,
+                offset: 0,
+                bytes: 0,
+                newest: child_metadata.modified_ns,
+            });
+        }
+    }
+    Ok(MeasureOutcome::Changed)
+}
+
+fn encode_component(component: &OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    component
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn decode_component(encoded: &str) -> io::Result<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    if encoded.len() % 2 != 0 {
+        return Err(io::Error::other("invalid survey path component"));
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let text = std::str::from_utf8(pair).map_err(io::Error::other)?;
+        bytes.push(u8::from_str_radix(text, 16).map_err(io::Error::other)?);
+    }
+    Ok(OsString::from_vec(bytes))
 }
 
 /// Remove candidates until the cap and the floor hold. Each is probed, and its
@@ -211,27 +1441,58 @@ fn prune(
     dry_run: bool,
     now_ns: i128,
     free_space: &mut dyn FnMut() -> io::Result<u64>,
+    protection: &TargetProtection,
+) -> Report {
+    let mut should_stop = || false;
+    prune_with_progress(
+        survey,
+        limits,
+        dry_run,
+        now_ns,
+        free_space,
+        protection,
+        &mut should_stop,
+    )
+}
+
+fn prune_with_progress(
+    survey: Survey,
+    limits: Limits,
+    dry_run: bool,
+    now_ns: i128,
+    free_space: &mut dyn FnMut() -> io::Result<u64>,
+    protection: &TargetProtection,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Report {
     let Survey {
         mut report,
-        root,
+        lane_root,
+        shared_root,
         candidates,
         mut total,
         mut free,
+        complete: _,
     } = survey;
-    let Some(root) = root else {
-        return report;
-    };
     let grace = grace_ns(limits);
     for candidate in candidates {
         if total <= limits.max_bytes && free >= limits.free_floor {
+            break;
+        }
+        if should_stop() {
+            report.measurement_skipped = true;
+            report.interrupted_at = Some(candidate.display);
             break;
         }
         if within_grace(candidate.newest, now_ns, grace) {
             report.recent.push(candidate.display);
             continue;
         }
-        match remove(&root, &candidate, dry_run, now_ns, grace) {
+        let root = match candidate.kind {
+            CacheKind::Lane => lane_root.as_ref(),
+            CacheKind::Shared => shared_root.as_ref(),
+        };
+        let Some(root) = root else { continue };
+        match remove(root, &candidate, dry_run, now_ns, grace, protection) {
             Ok(Outcome::Removed) => {
                 total = total.saturating_sub(candidate.bytes);
                 report.bytes = report.bytes.saturating_add(candidate.bytes);
@@ -267,11 +1528,23 @@ fn within_grace(newest: i128, now_ns: i128, grace: i128) -> bool {
     age < grace && age > -FUTURE_SKEW_NS
 }
 
-/// Every profile directory in this user's lane caches, measured. Anything that
-/// cannot be opened without following a link is left alone.
-fn discover(root: &Directory, cache_root: &Path, report: &mut Report) -> Vec<Candidate> {
+/// Managed target directories in one of the host's private or shared caches.
+fn discover(
+    root: &Directory,
+    cache_root: &Path,
+    kind: CacheKind,
+    report: &mut Report,
+    budget: &mut MeasureBudget,
+) -> Vec<Candidate> {
     let mut candidates = Vec::new();
-    let names = match provenant_os::fs::entry_names(root, MAX_ENTRIES) {
+    let names = match provenant_os::fs::entry_names(
+        root,
+        if budget.preview {
+            PREVIEW_ENTRIES
+        } else {
+            MAX_CACHE_ROOT_ENTRIES
+        },
+    ) {
         Ok(names) => names,
         Err(error) => {
             report.errors.push(error.to_string());
@@ -279,15 +1552,22 @@ fn discover(root: &Directory, cache_root: &Path, report: &mut Report) -> Vec<Can
         }
     };
     for name in names {
+        if budget.preview_limited() {
+            break;
+        }
         let Some(digest) = name.to_str().filter(|name| is_cache_digest(name)) else {
             continue;
         };
+        if !budget.consume() {
+            break;
+        }
         let Ok(metadata) = root.metadata_at(&name, false) else {
             continue;
         };
         if metadata.kind != FileKind::Directory
             || metadata.uid != effective_uid()
-            || metadata.mode & 0o7777 != 0o700
+            || (kind == CacheKind::Lane && metadata.mode & 0o7777 != 0o700)
+            || (kind == CacheKind::Shared && metadata.mode & 0o022 != 0)
         {
             continue;
         }
@@ -296,106 +1576,82 @@ fn discover(root: &Directory, cache_root: &Path, report: &mut Report) -> Vec<Can
         };
         for target in TARGETS {
             let target = OsStr::new(target);
-            let Ok(found) = profiles(&cache, target) else {
+            let metadata = match cache.metadata_at(target) {
+                Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
+                Ok(_) => continue,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => {
+                    report.errors.push(error.to_string());
+                    continue;
+                }
+            };
+            let Ok(target_tree) = cache.child(target) else {
                 continue;
             };
-            for path in found {
-                let display = path
-                    .iter()
-                    .fold(cache_root.join(digest), |base, part| base.join(part));
-                let measured = open_path(&cache, &path).and_then(|tree| measure(&tree, 0));
-                match measured {
-                    Ok((bytes, newest)) => candidates.push(Candidate {
-                        cache: name.clone(),
-                        path,
-                        display,
-                        bytes,
-                        newest,
-                    }),
-                    Err(error) => report
-                        .errors
-                        .push(format!("{}: {error}", display.display())),
-                }
+            let display = cache_root.join(digest).join(target);
+            match measure(&target_tree, 0, budget) {
+                Ok((bytes, newest)) => candidates.push(Candidate {
+                    kind,
+                    cache: digest.to_owned(),
+                    target: target.to_string_lossy().into_owned(),
+                    display,
+                    bytes,
+                    newest,
+                    target_modified_ns: metadata.modified_ns,
+                    identity: (metadata.device, metadata.inode),
+                }),
+                Err(error) => report
+                    .errors
+                    .push(format!("{}: {error}", display.display())),
             }
         }
     }
     candidates
 }
 
-/// Component paths of profile directories under `cache/<target>`, at most one
-/// triple directory deep.
-fn profiles(cache: &PayloadTree, target: &OsStr) -> io::Result<Vec<Vec<OsString>>> {
-    let mut found = Vec::new();
-    if cache.metadata_at(target).map_err(io::Error::other)?.kind != FileKind::Directory {
-        return Ok(found);
-    }
-    let target_tree = cache.child(target).map_err(io::Error::other)?;
-    for name in directory_names(&target_tree)? {
-        if !is_directory(&target_tree, &name) {
-            continue;
+fn directory_names(
+    directory: &PayloadTree,
+    budget: &mut MeasureBudget,
+) -> io::Result<Vec<OsString>> {
+    let limit = if budget.preview {
+        budget.remaining.min(PREVIEW_ENTRIES)
+    } else {
+        MAX_ENTRIES
+    };
+    let mut names = Vec::new();
+    for entry in provenant_os::fs::entry_names(directory.directory(), limit)
+        .map_err(io::Error::other)?
+    {
+        if !budget.consume() {
+            break;
         }
-        let Ok(child) = target_tree.child(&name) else {
-            continue;
-        };
-        if is_profile(&child) {
-            found.push(vec![target.to_owned(), name]);
-            continue;
-        }
-        for inner in directory_names(&child)? {
-            if is_directory(&child, &inner)
-                && child
-                    .child(&inner)
-                    .is_ok_and(|candidate| is_profile(&candidate))
-            {
-                found.push(vec![target.to_owned(), name.clone(), inner]);
-            }
-        }
+        names.push(entry.map_err(io::Error::other)?);
     }
-    Ok(found)
-}
-
-fn is_profile(directory: &PayloadTree) -> bool {
-    directory
-        .metadata_at(OsStr::new(CARGO_LOCK))
-        .is_ok_and(|metadata| metadata.kind == FileKind::Regular)
-}
-
-fn is_directory(parent: &PayloadTree, name: &OsStr) -> bool {
-    parent
-        .metadata_at(name)
-        .is_ok_and(|metadata| metadata.kind == FileKind::Directory)
-}
-
-fn directory_names(directory: &PayloadTree) -> io::Result<Vec<OsString>> {
-    provenant_os::fs::entry_names(directory.directory(), MAX_ENTRIES).map_err(io::Error::other)
-}
-
-fn open_path(cache: &PayloadTree, path: &[OsString]) -> io::Result<PayloadTree> {
-    let (first, rest) = path
-        .split_first()
-        .ok_or_else(|| io::Error::other("empty path"))?;
-    let mut tree = cache.child(first).map_err(io::Error::other)?;
-    for part in rest {
-        tree = tree.child(part).map_err(io::Error::other)?;
-    }
-    Ok(tree)
+    Ok(names)
 }
 
 /// Allocated bytes and the newest modification time below `directory`.
-fn measure(directory: &PayloadTree, depth: usize) -> io::Result<(u64, i128)> {
+fn measure(
+    directory: &PayloadTree,
+    depth: usize,
+    budget: &mut MeasureBudget,
+) -> io::Result<(u64, i128)> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory nesting too deep"));
     }
     let metadata = directory.metadata().map_err(io::Error::other)?;
     let mut bytes = if depth == 0 { metadata.allocated } else { 0 };
     let mut newest = metadata.modified_ns;
-    for name in directory_names(directory)? {
+    for name in directory_names(directory, budget)? {
+        if budget.preview_limited() {
+            return Ok((bytes, i128::MAX));
+        }
         let metadata = directory.metadata_at(&name).map_err(io::Error::other)?;
         bytes = bytes.saturating_add(metadata.allocated);
         newest = newest.max(metadata.modified_ns);
         if metadata.kind == FileKind::Directory {
             let child = directory.child(&name).map_err(io::Error::other)?;
-            let (child_bytes, child_newest) = measure(&child, depth + 1)?;
+            let (child_bytes, child_newest) = measure(&child, depth + 1, budget)?;
             bytes = bytes.saturating_add(child_bytes);
             newest = newest.max(child_newest);
         }
@@ -403,79 +1659,66 @@ fn measure(directory: &PayloadTree, depth: usize) -> io::Result<(u64, i128)> {
     Ok((bytes, newest))
 }
 
-/// Probe every lock, re-check recency, and remove only if all locks are free
-/// and nothing was written lately. While the locks are held, Cargo waits on
-/// them and the lock files go last. That protects only against a Cargo that
-/// holds a lock at probe time. It does not cover a test or run binary that keeps
-/// executing after Cargo drops its locks, nor a Cargo between opening a lock
-/// file and locking it. Those leave recent writes, which the grace spares, and
-/// a directory written since the survey is spared too. A binary that runs longer
-/// than the grace without writing under the profile directory is unprotected
-/// unless a Cargo lock is still held.
+/// Re-check target identity and recency, then remove the whole target only if
+/// custody and every Cargo profile lock under the cache are free.
 fn remove(
     root: &Directory,
     candidate: &Candidate,
     dry_run: bool,
     now_ns: i128,
     grace: i128,
+    protection: &TargetProtection,
 ) -> io::Result<Outcome> {
     let metadata: Metadata = root
-        .metadata_at(&candidate.cache, false)
+        .metadata_at(OsStr::new(&candidate.cache), false)
         .map_err(io::Error::other)?;
-    let cache = PayloadTree::claim(root, &candidate.cache, &metadata).map_err(io::Error::other)?;
-    let (name, parents) = candidate
-        .path
-        .split_last()
-        .ok_or_else(|| io::Error::other("empty path"))?;
-    let parent = open_path(&cache, parents)?;
-    let profile = parent.child(name).map_err(io::Error::other)?;
-    let mut guards: Vec<LockGuard> = Vec::new();
-    for lock in LOCKS {
-        match profile
-            .directory()
-            .try_flock_foreign(OsStr::new(lock), LockMode::Exclusive)
+    let cache = PayloadTree::claim(root, OsStr::new(&candidate.cache), &metadata)
+        .map_err(io::Error::other)?;
+    let owner = if candidate.kind == CacheKind::Lane {
+        provenant_confinement::cache::lane_cargo_cache_owner_path(cache.directory())
             .map_err(io::Error::other)?
-        {
-            ForeignLock::Acquired(guard) => guards.push(guard),
-            ForeignLock::Held => return Ok(Outcome::Busy),
-            // A vanished `.cargo-lock` means another process is removing or
-            // replacing this directory.
-            ForeignLock::Absent if lock == CARGO_LOCK => return Ok(Outcome::Busy),
-            ForeignLock::Absent => {}
-        }
+    } else {
+        None
+    };
+    if (candidate.kind == CacheKind::Lane && owner.is_none())
+        || protection.protects(candidate.kind, OsStr::new(&candidate.cache), owner.as_deref())
+    {
+        return Ok(Outcome::Busy);
     }
+    let Some(_guards) = provenant_confinement::cache::lock_cargo_profiles(cache.directory()) else {
+        return Ok(Outcome::Busy);
+    };
+    let name = OsStr::new(&candidate.target);
+    let target_metadata = cache.metadata_at(name).map_err(io::Error::other)?;
+    if target_metadata.kind != FileKind::Directory
+        || (target_metadata.device, target_metadata.inode) != candidate.identity
+    {
+        return Ok(Outcome::Busy);
+    }
+    let target = cache.child(name).map_err(io::Error::other)?;
     if dry_run {
         return Ok(Outcome::Removed);
     }
-    let (_, newest) = measure(&profile, 0)?;
+    let (_, newest) = measure(&target, 0, &mut MeasureBudget::new(false))?;
     if newest != candidate.newest || within_grace(newest, now_ns, grace) {
         return Ok(Outcome::Recent);
     }
-    remove_contents(&profile, 0)?;
-    for lock in LOCKS {
-        match profile.unlink(OsStr::new(lock)) {
-            Ok(()) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(io::Error::other(error)),
-        }
-    }
-    drop(profile);
-    parent.rmdir(name).map_err(io::Error::other)?;
-    drop(guards);
+    remove_contents(&target, 0)?;
+    drop(target);
+    cache.rmdir(name).map_err(io::Error::other)?;
     Ok(Outcome::Removed)
 }
 
-/// Remove everything but the lock files, widening unreadable directories.
-/// Links are unlinked, never followed.
+/// Remove a target tree while its Cargo profile locks are held. Links are
+/// unlinked, never followed.
 fn remove_contents(directory: &PayloadTree, depth: usize) -> io::Result<()> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory nesting too deep"));
     }
     directory.make_writable().map_err(io::Error::other)?;
-    for name in directory_names(directory)? {
-        if depth == 0 && LOCKS.iter().any(|lock| OsStr::new(lock) == name) {
-            continue;
-        }
+    for name in provenant_os::fs::entry_names(directory.directory(), MAX_ENTRIES)
+        .map_err(io::Error::other)?
+    {
         let metadata = directory.metadata_at(&name).map_err(io::Error::other)?;
         if metadata.kind == FileKind::Directory {
             let child = directory.child(&name).map_err(io::Error::other)?;
@@ -492,7 +1735,10 @@ fn remove_contents(directory: &PayloadTree, depth: usize) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{
+        fs,
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    };
 
     const TEST_NOW_SECONDS: u64 = 100_000;
 
@@ -514,12 +1760,51 @@ mod tests {
             if !path.exists() {
                 fs::create_dir(&path).unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                let mut owner = b"provenant-lane-cargo-owner-v2\n".to_vec();
+                owner.extend_from_slice(&0_u64.to_le_bytes());
+                owner.extend_from_slice(&0_u64.to_le_bytes());
+                owner.extend_from_slice(
+                    Path::new(&format!("/fixture/worktree-{digit}"))
+                        .as_os_str()
+                        .as_bytes(),
+                );
+                fs::write(path.join(".provenant-worktree-owner"), owner).unwrap();
             }
             path
         }
-        /// A profile directory of `bytes` of payload, last written `age` seconds ago.
-        fn profile(&self, digit: char, name: &str, bytes: usize, age: u64) -> PathBuf {
-            let dir = self.cache(digit).join("target").join(name);
+        fn shared_cache(&self, digit: char) -> PathBuf {
+            let path = shared_cache_root(self.home.path()).join(digit.to_string().repeat(64));
+            if !path.exists() {
+                fs::create_dir_all(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            path
+        }
+        /// A managed target directory with `bytes` of payload and a last-use
+        /// time `age` seconds ago.
+        fn profile(&self, digit: char, _name: &str, bytes: usize, age: u64) -> PathBuf {
+            let dir = self.cache(digit).join("target");
+            fs::create_dir_all(dir.join("deps")).unwrap();
+            for lock in LOCKS {
+                fs::write(dir.join(lock), b"").unwrap();
+            }
+            let payload = dir.join("deps/payload");
+            fs::write(&payload, vec![1; bytes]).unwrap();
+            let when = fixed_time() - std::time::Duration::from_secs(age);
+            for path in [
+                &payload,
+                &dir.join("deps"),
+                &dir,
+                &dir.join(CARGO_LOCK),
+                &dir.join(LOCKS[1]),
+                &dir.join(LOCKS[2]),
+            ] {
+                fs::File::open(path).unwrap().set_modified(when).unwrap();
+            }
+            dir
+        }
+        fn shared_profile(&self, digit: char, _name: &str, bytes: usize, age: u64) -> PathBuf {
+            let dir = self.shared_cache(digit).join("target");
             fs::create_dir_all(dir.join("deps")).unwrap();
             for lock in LOCKS {
                 fs::write(dir.join(lock), b"").unwrap();
@@ -572,13 +1857,155 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_skips_profile_census_without_changes() {
+    fn dry_run_reports_profile_size_and_budget_without_changes() {
         let fixture = Fixture::new();
         let profile = fixture.profile('a', "debug", 4096, 100);
-        let report = collect(fixture.home.path(), fixture.home.path(), limits(0, 0), true).unwrap();
-        assert!(report.measurement_skipped);
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 1024,
+            setting: "1K".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let report = collect_with_protection(
+            fixture.home.path(),
+            fixture.home.path(),
+            limits(1024, 0),
+            true,
+            &budget,
+            &TargetProtection::default(),
+        )
+        .unwrap();
+        assert!(!report.measurement_skipped);
         assert!(report.removed.is_empty());
+        assert!(report.cache_bytes >= 4096);
+        assert_eq!(report.budget_bytes, 1024);
+        assert_eq!(report.budget_setting, "1K");
+        assert_eq!(report.budget_source, "default");
         assert!(profile.join("deps/payload").is_file());
+    }
+
+    #[test]
+    fn a_warm_launch_moves_a_target_to_the_mru_end_without_artifact_writes() {
+        let fixture = Fixture::new();
+        let older = fixture.profile('a', "debug", 4096, 3000);
+        let other = fixture.profile('b', "debug", 4096, 1000);
+        let payload = older.join("deps/payload");
+        let before = fs::metadata(&payload).unwrap().modified().unwrap();
+
+        assert!(mark_managed_target_use(fixture.home.path(), &older).unwrap());
+        let after = fs::metadata(&payload).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+
+        let mut free = plenty;
+        let survey = survey(fixture.home.path(), &mut free, false);
+        assert_eq!(survey.candidates.last().unwrap().display, older);
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn an_interrupted_large_target_census_resumes_from_its_epoch_sidecar() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = fixture.profile('a', "debug", 1, 100);
+        let large = target.join("many");
+        fs::create_dir(&large).unwrap();
+        for index in 0..128 {
+            fs::write(large.join(format!("file-{index:03}")), vec![index as u8; 1024]).unwrap();
+        }
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: u64::MAX,
+            setting: "100%".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut calls = 0;
+        let mut stop = || {
+            calls += 1;
+            calls > 24
+        };
+        let mut refresh = TargetProtection::default;
+        let partial = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000001",
+            &mut stop,
+            &mut refresh,
+        )
+        .unwrap();
+        assert!(partial.measurement_skipped);
+        assert_eq!(partial.interrupted_at.as_deref(), Some(target.as_path()));
+        let detail = partial.cursor_detail.clone().expect("published continuation");
+        assert!(target.exists());
+        assert!(state.path().join("tick").join(detail).is_file());
+
+        let mut continue_scan = || false;
+        let mut refresh = TargetProtection::default;
+        let resumed = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            partial.cursor_detail.as_deref(),
+            "0000000000000002",
+            &mut continue_scan,
+            &mut refresh,
+        )
+        .unwrap();
+        assert!(!resumed.measurement_skipped);
+        assert!(resumed.cache_bytes >= 128 * 1024);
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn an_interrupted_cache_root_walk_resumes_after_completed_keys() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        const CACHE_KEYS: usize = 16;
+        for index in 0..CACHE_KEYS {
+            let digit = char::from_digit(index as u32, 16).unwrap();
+            fixture.profile(digit, "debug", 1, 100);
+        }
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: u64::MAX,
+            setting: "100%".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut detail = None;
+        for epoch in 1..=16_u64 {
+            let mut calls = 0;
+            let mut stop = || {
+                calls += 1;
+                calls > 18
+            };
+            let mut refresh = TargetProtection::default;
+            let report = collect_with_progress(
+                state.path(),
+                fixture.home.path(),
+                limits(u64::MAX, 0),
+                false,
+                &budget,
+                &TargetProtection::default(),
+                detail.as_deref(),
+                &format!("{epoch:016x}"),
+                &mut stop,
+                &mut refresh,
+            )
+            .unwrap();
+            if !report.measurement_skipped {
+                assert!(report.cache_bytes >= (CACHE_KEYS as u64) * 4096);
+                return;
+            }
+            detail = report.cursor_detail;
+            assert!(detail.is_some(), "interrupted census must publish progress");
+        }
+        panic!("flat cache-root census failed to reach later cache keys");
     }
 
     #[test]
@@ -614,6 +2041,107 @@ mod tests {
     }
 
     #[test]
+    fn private_and_shared_profiles_share_one_lru_budget() {
+        let fixture = Fixture::new();
+        let oldest = fixture.profile('a', "debug", 8192, 3000);
+        let middle = fixture.shared_profile('b', "debug", 8192, 2000);
+        let newest = fixture.profile('c', "debug", 8192, 1000);
+        let before = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            true,
+            now(),
+            &mut plenty,
+        );
+        let mut free = plenty;
+        let survey = survey(fixture.home.path(), &mut free, false);
+        let oldest_bytes = survey.candidates[0].bytes;
+        let report = sweep(
+            fixture.home.path(),
+            limits(before.cache_bytes - oldest_bytes, 0),
+            false,
+            now(),
+            &mut plenty,
+        );
+        assert_eq!(report.removed, vec![oldest.clone()]);
+        assert!(!oldest.exists() && middle.exists() && newest.exists());
+    }
+
+    #[test]
+    fn shared_target_cargo_lock_and_live_project_protection_prevent_removal() {
+        let fixture = Fixture::new();
+        let debug = fixture.shared_profile('a', "debug", 4096, 100);
+        let guard = hold(&debug, CARGO_LOCK);
+        let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
+        assert!(report.removed.is_empty());
+        assert_eq!(report.busy, vec![debug.clone()]);
+        drop(guard);
+
+        let mut protection = TargetProtection::default();
+        protection.shared_projects.insert("a".repeat(64));
+        let report = {
+            let mut free = plenty;
+            prune(
+                survey(fixture.home.path(), &mut free, false),
+                limits(0, 0),
+                false,
+                now(),
+                &mut free,
+                &protection,
+            )
+        };
+        assert!(report.removed.is_empty());
+        assert_eq!(report.busy, vec![debug.clone()]);
+        assert!(debug.join("deps/payload").exists());
+    }
+
+    #[test]
+    fn live_private_target_owner_is_never_evicted_without_a_cargo_lock() {
+        let fixture = Fixture::new();
+        let target = fixture.profile('a', "debug", 4096, 100);
+        let mut protection = TargetProtection::default();
+        protection
+            .worktrees
+            .insert(PathBuf::from("/fixture/worktree-a"));
+        let report = {
+            let mut free = plenty;
+            prune(
+                survey(fixture.home.path(), &mut free, false),
+                limits(0, 0),
+                false,
+                now(),
+                &mut free,
+                &protection,
+            )
+        };
+        assert!(report.removed.is_empty());
+        assert_eq!(report.busy, vec![target.clone()]);
+        assert!(target.join("deps/payload").exists());
+    }
+
+    #[test]
+    fn incomplete_target_payload_counts_and_is_reclaimed_with_its_target() {
+        let fixture = Fixture::new();
+        let target = fixture.cache('a').join("target");
+        let payload = target.join("incomplete-seed/payload");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, vec![7; 8192]).unwrap();
+        let preview = sweep(
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            true,
+            now(),
+            &mut plenty,
+        );
+        assert!(preview.cache_bytes >= 8192);
+
+        let apply = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
+        assert_eq!(apply.removed, vec![target]);
+        assert!(apply.cache_bytes < preview.cache_bytes);
+        assert!(!payload.exists());
+    }
+
+    #[test]
     fn least_recently_used_goes_first_and_the_cap_stops_collection() {
         let fixture = Fixture::new();
         let oldest = fixture.profile('a', "debug", 8192, 3000);
@@ -626,23 +2154,26 @@ mod tests {
             now(),
             &mut plenty,
         );
-        let one = before.cache_bytes / 3;
+        let mut free = plenty;
+        let survey = survey(fixture.home.path(), &mut free, false);
+        let oldest_bytes = survey.candidates[0].bytes;
+        let middle_bytes = survey.candidates[1].bytes;
         // Room for two of the three: only the oldest goes.
         let report = sweep(
             fixture.home.path(),
-            limits(before.cache_bytes - one, 0),
+            limits(before.cache_bytes - oldest_bytes, 0),
             false,
             now(),
             &mut plenty,
         );
         assert_eq!(report.removed, vec![oldest.clone()]);
         assert!(!oldest.exists() && middle.exists() && newest.exists());
-        assert_eq!(report.bytes, one);
-        assert!(report.cache_bytes <= before.cache_bytes - one);
+        assert_eq!(report.bytes, oldest_bytes);
+        assert!(report.cache_bytes <= before.cache_bytes - oldest_bytes);
         // A tighter cap takes the next oldest, never the newest first.
         let report = sweep(
             fixture.home.path(),
-            limits(one, 0),
+            limits(before.cache_bytes - oldest_bytes - middle_bytes, 0),
             false,
             now(),
             &mut plenty,
@@ -768,14 +2299,13 @@ mod tests {
     }
 
     #[test]
-    fn only_profile_directories_are_collected() {
+    fn whole_managed_targets_are_collected_and_other_cache_entries_are_kept() {
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 100);
-        let triple = fixture.profile('a', "aarch64-apple-darwin/release", 4096, 100);
-        let doc = fixture.cache('a').join("target/doc");
+        let doc = debug.join("doc");
         fs::create_dir_all(&doc).unwrap();
         fs::write(doc.join("index.html"), b"x").unwrap();
-        let lint = fixture.cache('a').join("target-lint/debug");
+        let lint = fixture.cache('a').join("target-lint");
         fs::create_dir_all(&lint).unwrap();
         fs::write(lint.join(CARGO_LOCK), b"").unwrap();
         fs::write(lint.join("payload"), vec![1; 4096]).unwrap();
@@ -783,14 +2313,10 @@ mod tests {
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join(CARGO_LOCK), b"").unwrap();
         let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
-        assert!(
-            !debug.exists() && !triple.exists() && !lint.exists(),
-            "{report:?}"
-        );
-        assert_eq!(report.removed.len(), 3);
-        assert!(doc.join("index.html").exists());
+        assert!(!debug.exists() && !lint.exists(), "{report:?}");
+        assert_eq!(report.removed.len(), 2);
+        assert!(!doc.join("index.html").exists());
         assert!(stray.join(CARGO_LOCK).exists());
-        assert!(fixture.cache('a').join("target").is_dir());
     }
 
     #[test]
@@ -891,7 +2417,7 @@ mod tests {
             let fixture = Fixture::new();
             let debug = fixture.profile('a', "debug", 4096, 1000);
             let mut free = plenty;
-            let survey = survey(fixture.home.path(), &mut free);
+            let survey = survey(fixture.home.path(), &mut free, false);
             let when = fixed_time();
             match touch {
                 "lock" => fs::File::open(debug.join(CARGO_LOCK))
@@ -901,7 +2427,14 @@ mod tests {
                 "directory" => fs::create_dir_all(debug.join("deps/incremental")).unwrap(),
                 _ => fs::write(debug.join("deps/payload"), b"more").unwrap(),
             }
-            let report = prune(survey, graced(0, 900), false, now(), &mut free);
+            let report = prune(
+                survey,
+                graced(0, 900),
+                false,
+                now(),
+                &mut free,
+                &TargetProtection::default(),
+            );
             assert!(report.removed.is_empty(), "{touch}");
             assert_eq!(report.recent, vec![debug.clone()], "{touch}");
             assert!(debug.join("deps/payload").exists(), "{touch}");
@@ -913,14 +2446,21 @@ mod tests {
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 1000);
         let mut free = plenty;
-        let survey = survey(fixture.home.path(), &mut free);
+        let survey = survey(fixture.home.path(), &mut free, false);
         // Newer than the walk saw, yet far older than any grace.
         let later = fixed_time() - std::time::Duration::from_secs(500);
         fs::File::open(debug.join("deps/payload"))
             .unwrap()
             .set_modified(later)
             .unwrap();
-        let report = prune(survey, limits(0, 0), false, now(), &mut free);
+        let report = prune(
+            survey,
+            limits(0, 0),
+            false,
+            now(),
+            &mut free,
+            &TargetProtection::default(),
+        );
         assert!(report.removed.is_empty() && debug.exists());
         assert_eq!(report.recent, vec![debug.clone()]);
     }
@@ -934,19 +2474,18 @@ mod tests {
         let idle_b = fixture.profile('d', "debug", 8192, 900);
         let _a = hold(&busy_a, CARGO_LOCK);
         let _b = hold(&busy_b, LOCKS[1]);
-        let one = sweep(
-            fixture.home.path(),
-            limits(u64::MAX, 0),
-            true,
-            now(),
-            &mut plenty,
-        )
-        .cache_bytes
-            / 4;
+        let mut free = plenty;
+        let survey = survey(fixture.home.path(), &mut free, false);
+        let idle_bytes: u64 = survey
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.display == idle_a || candidate.display == idle_b)
+            .map(|candidate| candidate.bytes)
+            .sum();
         // The cap would fit the busy pair's neighbours but not the busy pair.
         let report = sweep(
             fixture.home.path(),
-            limits(one, 0),
+            limits(survey.total - idle_bytes, 0),
             false,
             now(),
             &mut plenty,

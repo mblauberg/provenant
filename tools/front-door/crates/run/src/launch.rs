@@ -2951,6 +2951,7 @@ mod policy_reporting_tests {
                 .unwrap(),
                 cargo_target_seed: false,
                 state_root: "/fixture/state".into(),
+                roots: None,
                 sandbox: provenant_confinement::run_config::SandboxMode {
                     requested: true,
                     effective: true,
@@ -2959,6 +2960,8 @@ mod policy_reporting_tests {
                 },
                 backend: None,
                 cargo_target: Default::default(),
+                cargo_cache_budget: None,
+                cargo_target_protection: Default::default(),
             }),
         };
         // Bind a real unavailable backend before the claim is persisted.

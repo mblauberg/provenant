@@ -256,6 +256,24 @@ fn entry_snapshot_refuses_over_budget_without_mutation() {
     assert_eq!(entry_names(&dir, 3).unwrap().len(), 3);
 }
 
+#[test]
+fn directory_stream_resumes_from_an_opaque_cookie() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    for name in ["a", "b", "c"] {
+        dir.create_new(OsStr::new(name)).unwrap();
+    }
+    let expected = names(&dir);
+    let mut stream = dir.entries().unwrap();
+    assert_eq!(stream.next().unwrap().unwrap(), expected[0]);
+    let cookie = stream.position().unwrap();
+    drop(stream);
+
+    let mut resumed = dir.entries().unwrap();
+    resumed.seek(cookie).unwrap();
+    assert_eq!(resumed.next().unwrap().unwrap(), expected[1]);
+}
+
 fn payload_root(temp: &Path, mode: u32) -> (Directory, Metadata) {
     let parent = Directory::open_anchor(temp).unwrap();
     parent.mkdir(OsStr::new("payload"), 0o700).unwrap();

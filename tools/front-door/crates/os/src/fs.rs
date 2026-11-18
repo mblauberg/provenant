@@ -1436,6 +1436,22 @@ impl Iterator for Entries {
             .map(|result| result.map_err(error("readdir", &self.path)))
     }
 }
+impl Entries {
+    /// Return an opaque offset for resumable traversal of an unchanged tree.
+    pub fn position(&mut self) -> Result<i64> {
+        self.stream
+            .position()
+            .map_err(error("telldir", &self.path))
+    }
+
+    /// Resume from a prior offset after checking that the directory is
+    /// unchanged. Offsets are filesystem cookies, not entry counts.
+    pub fn seek(&mut self, position: i64) -> Result<()> {
+        self.stream
+            .seek(position)
+            .map_err(error("seekdir", &self.path))
+    }
+}
 
 /// File capability; native handoff stays within the OS and custody boundaries.
 #[derive(Debug)]

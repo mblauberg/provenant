@@ -3889,6 +3889,19 @@ pub(super) fn prepare_candidates_inner(
         let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
         let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
         let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
+        let (cargo_cache_budget, cargo_cache_budget_warning) =
+            match provenant_config::cargo_cache_budget(
+                &task.profile,
+                &run::build_dir_gc::shared_cache_root(&home),
+            ) {
+                Ok(budget) => (Some(budget), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "Cargo cache budget could not be resolved ({error}); launch continues without eviction"
+                    )),
+                ),
+            };
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
@@ -3899,6 +3912,7 @@ pub(super) fn prepare_candidates_inner(
                 source: lanes.build_limit_source(),
             }),
             cargo_target: Some(cargo_target.clone()),
+            cargo_cache_budget: cargo_cache_budget.clone(),
         };
         let text = format!(
             "{}\n{text}",
@@ -4557,6 +4571,9 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = &cargo_target_warning {
             push_launch_warning(&mut route, warning.clone());
         }
+        if let Some(warning) = &cargo_cache_budget_warning {
+            push_launch_warning(&mut route, warning.clone());
+        }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);
         }
@@ -4797,6 +4814,11 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
+        let cargo_target_protection = run::build_dir_gc::target_protection_for_launch(
+            roots,
+            writer.as_ref().map(|writer| writer.worktree.path()),
+            common_git_dir,
+        );
         return Ok(run::PreparedLaunch {
             limits,
             continuation_expectation,
@@ -4817,9 +4839,12 @@ pub(super) fn prepare_candidates_inner(
                 cargo_home,
                 cargo_target_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
+                roots: Some(roots.clone()),
                 sandbox,
                 backend: None,
                 cargo_target: cargo_target.clone(),
+                cargo_cache_budget,
+                cargo_target_protection,
             }),
         });
     }

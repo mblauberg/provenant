@@ -549,6 +549,33 @@ pub struct Entries {
     stream: *mut libc::DIR,
     finished: bool,
 }
+impl Entries {
+    /// Return the opaque position of the next directory entry. The cookie can
+    /// be reused with `seek` while the directory identity and contents remain
+    /// unchanged.
+    pub fn position(&mut self) -> io::Result<i64> {
+        // SAFETY: the iterator uniquely owns this live DIR stream.
+        let position = unsafe { libc::telldir(self.stream) };
+        if position < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(position as i64)
+        }
+    }
+
+    /// Resume this directory stream from an opaque cookie returned by
+    /// `position`. The caller must validate directory identity and mtime.
+    pub fn seek(&mut self, position: i64) -> io::Result<()> {
+        let position = libc::c_long::try_from(position)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid directory cookie"))?;
+        // SAFETY: the iterator uniquely owns this live DIR stream. `seekdir`
+        // retains no pointers and the cookie came from this filesystem's
+        // `telldir` implementation.
+        unsafe { libc::seekdir(self.stream, position) };
+        self.finished = false;
+        Ok(())
+    }
+}
 impl Drop for Entries {
     fn drop(&mut self) {
         // SAFETY: fdopendir transferred unique ownership to this iterator.

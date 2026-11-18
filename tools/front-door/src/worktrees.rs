@@ -551,11 +551,11 @@ impl provenant_config::RetentionMeasurements for GcData {
     fn build_directories(&self) -> provenant_config::ByteObservation {
         if self.build_dirs.errors.is_empty() && !self.build_dirs.measurement_skipped {
             provenant_config::ByteObservation::Measured {
-                bytes: self.build_dirs.bytes,
+                bytes: self.build_dirs.cache_bytes,
             }
         } else {
             provenant_config::ByteObservation::Partial {
-                bytes: self.build_dirs.bytes,
+                bytes: self.build_dirs.cache_bytes,
             }
         }
     }
@@ -873,10 +873,21 @@ fn gc_data_summary(data: &GcData) -> String {
         }
     ));
     if data.build_dirs.measurement_skipped {
-        human.push_str("lane build directory census skipped in preview\n");
+        human.push_str(&format!(
+            "Cargo target census partial: {} known bytes / {} byte budget (setting {}; source: {}); resumes at {}\n",
+            data.build_dirs.cache_bytes,
+            data.build_dirs.budget_bytes,
+            data.build_dirs.budget_setting,
+            data.build_dirs.budget_source,
+            data.build_dirs
+                .interrupted_at
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("next sweep"))
+                .display(),
+        ));
     } else {
         human.push_str(&format!(
-        "{} lane build director(ies), {} bytes {}; {} bytes of lane build output remain, {} busy, {} recent\n",
+        "{} Cargo target(s), {} bytes {}; {} / {} bytes remain (budget setting {}; source: {}), {} busy, {} recent\n",
         data.build_dirs.removed.len(),
         data.build_dirs.bytes,
         if data.report.dry_run {
@@ -885,9 +896,15 @@ fn gc_data_summary(data: &GcData) -> String {
             "reclaimed"
         },
         data.build_dirs.cache_bytes,
+        data.build_dirs.budget_bytes,
+        data.build_dirs.budget_setting,
+        data.build_dirs.budget_source,
         data.build_dirs.busy.len(),
         data.build_dirs.recent.len(),
     ));
+    }
+    for warning in &data.build_dirs.warnings {
+        human.push_str(&format!("Cargo cache warning: {warning}\n"));
     }
     for error in &data.build_dirs.errors {
         human.push_str(&format!("lane build output: {error}\n"));
@@ -1129,7 +1146,11 @@ enum GcOutput<'a> {
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
         build_dir_bytes: u64,
+        build_dir_budget_bytes: u64,
+        build_dir_budget_setting: &'a str,
+        build_dir_budget_source: &'a str,
         build_dir_measurement_skipped: bool,
+        build_dir_interrupted_at: &'a Option<PathBuf>,
         graph_checkpoints_removed: usize,
         sweep_budget_seconds: u64,
         sweep_budget_source: &'a str,
@@ -1190,7 +1211,11 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
         build_dir_bytes: data.build_dirs.cache_bytes,
+        build_dir_budget_bytes: data.build_dirs.budget_bytes,
+        build_dir_budget_setting: &data.build_dirs.budget_setting,
+        build_dir_budget_source: &data.build_dirs.budget_source,
         build_dir_measurement_skipped: data.build_dirs.measurement_skipped,
+        build_dir_interrupted_at: &data.build_dirs.interrupted_at,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
         sweep_budget_seconds: data.sweep_budget_seconds,
         sweep_budget_source: &data.sweep_budget_source,
@@ -2044,12 +2069,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(idle_seconds) * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
-        max_total_bytes: Some(
-            config
-                .gc
-                .lane_cargo_cache_max_bytes()
-                .map_err(Error::DiskSpace)?,
-        ),
+        // The lane and shared Cargo targets have one profile-level budget in
+        // build_directories. This pass remains responsible for idle whole-cache
+        // reclamation and the free-space floor.
+        max_total_bytes: None,
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
@@ -2950,12 +2973,33 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let home = self.home;
         let config = self.config;
         let free_floor = self.free_floor;
+        let profile = config.dispatch_profile(&[])?;
+        let cache_root = provenant_run::build_dir_gc::shared_cache_root(home);
+        let budget = provenant_config::cargo_cache_budget(&profile, &cache_root)
+            .map_err(Error::DiskSpace)?;
+        let mut protection = provenant_run::build_dir_gc::TargetProtection::default();
+        for project in self.projects {
+            let live = project
+                .lanes
+                .iter()
+                .filter(|lane| !lane.occupancy.is_available())
+                .collect::<Vec<_>>();
+            for lane in &live {
+                protection.worktrees.insert(lane.path.clone());
+            }
+            if !live.is_empty() {
+                protection.shared_projects.insert(
+                    provenant_run::target_seed::project_key(project.binding.common_dir()),
+                );
+            }
+        }
+        protection.unobserved = !self.data.unobserved_projects.is_empty();
 
-        let result = provenant_run::build_dir_gc::collect(
+        let result = provenant_run::build_dir_gc::collect_with_protection(
             roots.state.as_path(),
             home,
             provenant_run::build_dir_gc::Limits {
-                max_bytes: config.domains.fabric.lanes.build_settings().build_dir_cap(),
+                max_bytes: budget.bytes,
                 free_floor,
                 grace_seconds: config
                     .domains
@@ -2965,6 +3009,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     .build_dir_grace_seconds(),
             },
             command.dry_run,
+            &budget,
+            &protection,
         );
 
         self.data.build_dirs =
@@ -3512,19 +3558,22 @@ mod gc_preview_tests {
     #[test]
     fn gc_summary_reports_build_output_reclaimed_and_remaining() {
         let mut data = GcData::default();
-        data.build_dirs.removed.push("/cache/a/target/debug".into());
+        data.build_dirs.removed.push("/cache/a/target".into());
         data.build_dirs.bytes = 4096;
         data.build_dirs.cache_bytes = 8192;
-        data.build_dirs.busy.push("/cache/b/target/debug".into());
-        data.build_dirs.recent.push("/cache/c/target/debug".into());
+        data.build_dirs.budget_bytes = 16384;
+        data.build_dirs.budget_setting = "16K".into();
+        data.build_dirs.budget_source = "host".into();
+        data.build_dirs.busy.push("/cache/b/target".into());
+        data.build_dirs.recent.push("/cache/c/target".into());
         for (dry_run, expected) in [
             (
                 true,
-                "1 lane build director(ies), 4096 bytes reclaimable; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
+                "1 Cargo target(s), 4096 bytes reclaimable; 8192 / 16384 bytes remain (budget setting 16K; source: host), 1 busy, 1 recent\n",
             ),
             (
                 false,
-                "1 lane build director(ies), 4096 bytes reclaimed; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
+                "1 Cargo target(s), 4096 bytes reclaimed; 8192 / 16384 bytes remain (budget setting 16K; source: host), 1 busy, 1 recent\n",
             ),
         ] {
             data.report.dry_run = dry_run;
@@ -3536,7 +3585,8 @@ mod gc_preview_tests {
         assert_eq!(json["build_dir_bytes"], 8192);
         let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
         assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
-        assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target/debug");
+        assert_eq!(json["build_dir_budget_source"], "host");
+        assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target");
     }
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {

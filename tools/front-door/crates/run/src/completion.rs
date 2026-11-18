@@ -308,6 +308,7 @@ pub struct PreambleExtras {
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
     pub cargo_target: Option<crate::ResolvedCargoTarget>,
+    pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
@@ -372,8 +373,20 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::ResolvedCargoTarget::preamble)
                 .unwrap_or_else(|| crate::ResolvedCargoTarget::default().preamble());
+            let cargo_cache_budget = extras
+                .cargo_cache_budget
+                .as_ref()
+                .map(|budget| {
+                    format!(
+                        "Cargo cache budget: {} bytes (setting {}; source: {}; lanes.cargo_cache_max).\n",
+                        budget.bytes,
+                        budget.setting,
+                        budget.source.as_str(),
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "{verification}{cargo_target}{}{}{budget}",
+                "{verification}{cargo_target}{cargo_cache_budget}{}{}{budget}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )

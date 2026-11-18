@@ -373,7 +373,7 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     let fresh = profile("fast", 1_000)?;
     fs::write(
         rig.state.join("config.toml"),
-        b"schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes=100000\n",
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.cargo_cache_max'='100000'\n",
     )?;
     // A running Cargo holds its profile's lock: the directory is never taken.
     let held = Directory::open_anchor(&building)?;
