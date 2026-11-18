@@ -77,8 +77,13 @@ pins the PR's base and head, independently of the launching checkout. Supplying
 both `subject` and `review_base` pins an explicit range instead. The host uses
 base...head (three-dot) for diff evidence and selection, including branches with
 merges from main. Without a subject, the host warns which checkout-derived range
-it chose and why. Nested review launches retain the same pins. Before
-expanding the full panel, it
+it chose and why. Nested review launches retain the same pins. A retry whose
+canonical raw-request identity matches a stored child receipt replays that
+receipt and its admitted pins before host preparation, whether the parent is
+active or inactive. The relay rechecks the stored identity under the journal
+lock so a concurrent admission also wins over newly prepared pins. An active
+launch without a matching receipt resolves current pins; an inactive parent
+cannot admit a new child. Before expanding the full panel, it
 derives changed paths and measured size from the merge-base-to-subject diff and
 passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
 the selected shape and add their lenses; explicit request fields and layered

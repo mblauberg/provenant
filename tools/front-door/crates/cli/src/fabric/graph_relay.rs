@@ -144,12 +144,11 @@ pub fn serve_with_read(
             .ok_or_else(not_a_node)?;
         let parent =
             relay::historical_parent_of_attempt(&checkpoint, &reference).ok_or_else(not_a_node)?;
-        let replay = replay_run_request(&checkpoint, parent, &request)?;
+        if let Some(receipt) = replay_run_request(&checkpoint, parent, &request)? {
+            return Ok(serde_json::to_value(receipt)?);
+        }
         if relay::parent_of_attempt(&checkpoint, &reference).is_none() {
-            return replay
-                .map(serde_json::to_value)
-                .transpose()?
-                .ok_or_else(not_a_node);
+            return Err(not_a_node());
         }
         // Host lookup runs only for an active parent, outside the journal lock.
         // Normal Add admission below checks the parent again after preparation.
@@ -209,10 +208,9 @@ pub fn serve_with_read(
     if let Some(request) = &run_request {
         let parent =
             relay::historical_parent_of_attempt(&checkpoint, &reference).ok_or_else(not_a_node)?;
-        let replay = replay_run_request(&checkpoint, parent, request)?;
-        if relay::parent_of_attempt(&checkpoint, &reference).is_none()
-            && let Some(receipt) = replay
-        {
+        // Preparation runs without the lock; another caller may have admitted
+        // this raw request in the meantime, with different resolved pins.
+        if let Some(receipt) = replay_run_request(&checkpoint, parent, request)? {
             return Ok(serde_json::to_value(receipt)?);
         }
     }
@@ -2590,27 +2588,35 @@ mod provisioning_tests {
     }
 
     // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    // Spec: docs/specs/routing.md#pinned-review-selection
     #[test]
-    fn lost_child_receipt_replays_after_graph_settlement() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn lost_child_receipt_replays_while_active_and_after_graph_settlement()
+    -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{
             AttemptState, GraphCheckpoint, GraphExecution, NodeState,
         };
-        for terminal in [NodeState::Succeeded, NodeState::Skipped] {
+        for (terminal, concurrent) in [(NodeState::Succeeded, false), (NodeState::Skipped, true)] {
             let root = tempfile::tempdir()?;
             let home = root.path().join("home");
             let project = home.join("project");
             std::fs::create_dir_all(&project)?;
-            for args in [
-                vec!["init", "-q"],
-                vec!["commit", "--allow-empty", "-qm", "base"],
-            ] {
+            let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
                 let output = provenant_os::fixture::git_command()
                     .current_dir(&project)
                     .args(args)
                     .output()?;
-                assert!(output.status.success());
-            }
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+            };
+            git(&["init", "-q"])?;
+            git(&["commit", "--allow-empty", "-qm", "base"])?;
+            let base = git(&["rev-parse", "HEAD"])?;
+            git(&["commit", "--allow-empty", "-qm", "review subject"])?;
+            let subject = git(&["rev-parse", "HEAD"])?;
             let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
             inputs.state_dir = Some(root.path().join("state"));
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -2655,18 +2661,47 @@ mod provisioning_tests {
                 journal.prepare_fixture_checkpoint(&mut checkpoint)?;
                 journal.save(&checkpoint)?;
             }
-            let request = json!({"op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply"});
-            let input = json!({"template":"review","pr":7});
+            let request = json!({
+                "op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply",
+                "launch":{"node":{"use":"task","prompt":format!("Review {base}...{subject}"),
+                    "source":{"type":"commit","commit":subject}}}
+            });
+            let input = if concurrent {
+                json!({"template":"review","subject":"HEAD","review_base":base})
+            } else {
+                json!({"template":"review","pr":7})
+            };
             let identity = relay::RunRequestIdentity::for_input(&input)?;
             let run = json!({"op":"run","request_id":identity.id,"input":input});
             let prepare = |input: Value| -> Result<Value, ServiceError> {
                 assert_eq!(input["op"], "prepare_child");
-                assert_eq!(input["input"]["pr"], 7);
+                if concurrent {
+                    assert_eq!(input["input"]["subject"], "HEAD");
+                    assert_eq!(input["input"]["review_base"], base);
+                } else {
+                    assert_eq!(input["input"]["pr"], 7);
+                }
                 // Host lookup/preparation must not hold the graph journal lock.
                 drop(open().map_err(journal_error)?);
                 let mut prepared = request.clone();
                 prepared.as_object_mut().unwrap().remove("op");
                 Ok(prepared)
+            };
+            let racing_prepare = |input| {
+                // Another caller admits the same raw request while this caller
+                // is preparing outside the journal lock. Its pins win.
+                serve_with_read(
+                    &context,
+                    "caller",
+                    run.clone(),
+                    budget,
+                    &cancel,
+                    &clock,
+                    &prepare,
+                )?;
+                let mut moved = prepare(input)?;
+                moved["launch"]["node"]["source"]["commit"] = json!(base);
+                Ok(moved)
             };
             let receipt = serve_with_read(
                 &context,
@@ -2675,9 +2710,34 @@ mod provisioning_tests {
                 budget,
                 &cancel,
                 &clock,
-                &prepare,
+                &|input| {
+                    if concurrent {
+                        racing_prepare(input)
+                    } else {
+                        prepare(input)
+                    }
+                },
             )?;
+            git(&["commit", "--allow-empty", "-qm", "moved review ref"])?;
+            let moved_subject = git(&["rev-parse", "HEAD"])?;
+            assert_ne!(moved_subject, subject);
             let before_live_replay = open()?.load("g-lost-receipt")?;
+            let admitted = before_live_replay
+                .as_ref()
+                .ok_or("checkpoint")?
+                .expansions
+                .iter()
+                .flat_map(|expansion| &expansion.nodes)
+                .find(|node| node.id == receipt["node"].as_str().unwrap())
+                .ok_or("child")?;
+            assert_eq!(
+                serde_json::to_value(&admitted.source)?,
+                request["launch"]["node"]["source"]
+            );
+            assert_eq!(
+                admitted.prompt,
+                request["launch"]["node"]["prompt"].as_str().unwrap()
+            );
             let mut changed_wait = run.clone();
             changed_wait["input"]["wait_seconds"] = json!(5);
             let live_replay = serve_with_read(
@@ -2687,10 +2747,67 @@ mod provisioning_tests {
                 budget,
                 &cancel,
                 &clock,
-                &prepare,
+                &|input| {
+                    let mut moved = prepare(input)?;
+                    moved["launch"]["node"]["source"]["commit"] = json!(moved_subject);
+                    panic!(
+                        "a matching receipt must bypass lookup even when the review ref moved: {moved}"
+                    );
+                },
             )?;
-            assert_eq!(live_replay["replayed"], true);
+            let mut expected_replay = receipt.clone();
+            expected_replay["replayed"] = json!(true);
+            assert_eq!(live_replay, expected_replay);
+            // Reopen the checkpoint and context, as after a host restart, with
+            // forge lookup unavailable. Both pins and the receipt must survive.
+            let reloaded_context = Context::open(context.roots.clone(), &home, &project)?;
+            let unavailable = |_| Err(refused("forge_unavailable", "fixture lookup unavailable"));
+            let reloaded_replay = serve_with_read(
+                &reloaded_context,
+                "caller",
+                run.clone(),
+                budget,
+                &cancel,
+                &clock,
+                &unavailable,
+            )?;
+            assert_eq!(reloaded_replay, expected_replay);
             assert_eq!(open()?.load("g-lost-receipt")?, before_live_replay);
+            let mut fresh_run = run.clone();
+            fresh_run["input"]["idempotency_key"] = json!("fresh-live-run");
+            fresh_run["request_id"] =
+                json!(relay::RunRequestIdentity::for_input(&fresh_run["input"])?.id);
+            assert!(matches!(
+                serve_with_read(&context, "caller", fresh_run.clone(), budget, &cancel, &clock, &unavailable),
+                Err(error) if error.code() == "forge_unavailable"
+            ));
+            let fresh_receipt = serve_with_read(
+                &context,
+                "caller",
+                fresh_run,
+                budget,
+                &cancel,
+                &clock,
+                &|input| {
+                    let mut prepared = prepare(input)?;
+                    prepared["id"] = json!("fresh-child");
+                    prepared["idempotency_key"] = json!("fresh-live-run");
+                    prepared["launch"]["node"]["source"]["commit"] = json!(moved_subject);
+                    Ok(prepared)
+                },
+            )?;
+            assert_eq!(fresh_receipt["replayed"], false);
+            let fresh_checkpoint = open()?.load("g-lost-receipt")?.ok_or("checkpoint")?;
+            let fresh_child = fresh_checkpoint
+                .expansions
+                .iter()
+                .flat_map(|expansion| &expansion.nodes)
+                .find(|node| node.id == fresh_receipt["node"].as_str().unwrap())
+                .ok_or("fresh child")?;
+            assert_eq!(
+                serde_json::to_value(&fresh_child.source)?,
+                json!({"type":"commit","commit":moved_subject})
+            );
             let settled = {
                 let mut journal = open()?;
                 let mut checkpoint = journal.load("g-lost-receipt")?.ok_or("checkpoint")?;
