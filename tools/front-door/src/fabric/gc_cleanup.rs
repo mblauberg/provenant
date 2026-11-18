@@ -365,6 +365,9 @@ fn release_settled_cache(
     // Private output belongs to a settled lane, not to the lifetime of its
     // worktree. A continuation can recreate it; shared download links are
     // unlinked without traversing their targets. Busy/unknown is retried by GC.
+    let cache_started = std::time::Instant::now();
+    let keep_cache_going =
+        || !cancel.is_cancelled() && cache_started.elapsed() < std::time::Duration::from_secs(5);
     if let Err(error) = crate::worktrees::with_context_mode_cancel(
         roots,
         &settled.roots.home,
@@ -396,6 +399,10 @@ fn release_settled_cache(
                         ));
                     }
                     Ok(Some(guard))
+                },
+                &provenant_confinement::cache::CacheGcScan {
+                    keep_going: Some(&keep_cache_going),
+                    ..Default::default()
                 },
             )
             .map_err(|error| crate::worktrees::Error::Permissions(*error.source))

@@ -2565,7 +2565,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             let projects = &self.projects;
             let deadline = self.deadline;
             let lease = self.lease.as_ref();
-            let mut keep_going = || sweep_should_continue(deadline, lease);
+            let keep_going = || sweep_should_continue(deadline, lease);
             let scan = provenant_confinement::cache::CacheGcScan {
                 start_at: start_at.as_deref(),
                 detail: detail.as_deref(),
@@ -3388,8 +3388,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             return Ok(());
         }
         let projects = self.project_ids.to_vec();
-        let resume_detail = self.resume_detail();
-        let resuming_collection = resume_detail.is_some_and(|detail| {
+        let resume_detail = self.resume_detail().map(str::to_owned);
+        let resuming_collection = resume_detail.as_deref().is_some_and(|detail| {
             detail.starts_with("graph-collect-v1|") || detail.starts_with("graph-collection-v1|")
         });
         if !resuming_collection {
@@ -3397,8 +3397,11 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 let deadline = self.deadline;
                 let lease = self.lease.as_ref();
                 let keep_going = || sweep_should_continue(deadline, lease);
-                let control =
-                    self.sweep_control(self.resume_candidate(), resume_detail, &keep_going);
+                let control = self.sweep_control(
+                    self.resume_candidate(),
+                    resume_detail.as_deref(),
+                    &keep_going,
+                );
                 crate::checkpoint_retention::measure(
                     &self.roots.state,
                     projects.iter().copied(),
@@ -3414,7 +3417,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         }
 
         let (start_at, detail) = if resuming_collection {
-            (self.resume_candidate(), resume_detail)
+            (self.resume_candidate(), resume_detail.as_deref())
         } else {
             (None, None)
         };
