@@ -750,6 +750,7 @@ pub(crate) fn templates(
 #[cfg(test)]
 #[allow(
     unused_imports,
+    dead_code,
     reason = "the custom worktree driver includes this module without libtest"
 )]
 mod tests {

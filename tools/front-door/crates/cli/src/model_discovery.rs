@@ -33,7 +33,10 @@ fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
     (snapshot.adapter == adapter).then_some(snapshot)
 }
 
-#[allow(clippy::print_stderr, reason = "warn that the discovery cache is unusable")]
+#[allow(
+    clippy::print_stderr,
+    reason = "warn that the discovery cache is unusable"
+)]
 pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
     let snapshots: Vec<_> = PROVIDERS
         .iter()
@@ -120,23 +123,54 @@ fn refresh_with(
             let state = crate::quota::private(roots.state.as_path()).map_err(|e| e.to_string())?;
             let dir = crate::quota::child(&state, std::ffi::OsStr::new("model-discovery"))
                 .map_err(|e| e.to_string())?;
-            let _lock = dir.try_lock(std::ffi::OsStr::new(&format!("{adapter}.lock")), provenant_os::fs::LockMode::Exclusive).map_err(|e| e.to_string())?;
+            let _lock = dir
+                .try_lock(
+                    std::ffi::OsStr::new(&format!("{adapter}.lock")),
+                    provenant_os::fs::LockMode::Exclusive,
+                )
+                .map_err(|e| e.to_string())?;
             let old = read(roots, adapter);
-            if old.as_ref().is_some_and(|old| old.observed_at > snapshot.observed_at) {
+            if old
+                .as_ref()
+                .is_some_and(|old| old.observed_at > snapshot.observed_at)
+            {
                 return Err("a newer snapshot is already recorded".into());
             }
             let bundled = Catalogue::bundled().map_err(|e| e.to_string())?;
             let old_ids: std::collections::BTreeSet<String> = match &old {
-                Some(old) => old.models.iter().map(|row| row.model.as_str().to_owned()).collect(),
-                None => bundled.models().iter().filter(|row| row.model.adapter() == *adapter).map(|row| row.model.as_str().to_owned()).collect(),
+                Some(old) => old
+                    .models
+                    .iter()
+                    .map(|row| row.model.as_str().to_owned())
+                    .collect(),
+                None => bundled
+                    .models()
+                    .iter()
+                    .filter(|row| row.model.adapter() == *adapter)
+                    .map(|row| row.model.as_str().to_owned())
+                    .collect(),
             };
-            let new_ids: std::collections::BTreeSet<String> = snapshot.models.iter().map(|row| row.model.as_str().to_owned()).collect();
+            let new_ids: std::collections::BTreeSet<String> = snapshot
+                .models
+                .iter()
+                .map(|row| row.model.as_str().to_owned())
+                .collect();
             let added: Vec<_> = new_ids.difference(&old_ids).map(String::as_str).collect();
             let retired: Vec<_> = old_ids.difference(&new_ids).map(String::as_str).collect();
             let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
-            dir.atomic_write(std::ffi::OsStr::new(&format!("{adapter}.json")), ".models-", &bytes, provenant_os::fs::PublishMode::Replace)
-                .and_then(|p| p.require_durable()).map_err(|e| e.to_string())?;
-            Ok(format!("model discovery: {adapter}: new [{}]; retired [{}]", added.join(", "), retired.join(", ")))
+            dir.atomic_write(
+                std::ffi::OsStr::new(&format!("{adapter}.json")),
+                ".models-",
+                &bytes,
+                provenant_os::fs::PublishMode::Replace,
+            )
+            .and_then(|p| p.require_durable())
+            .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "model discovery: {adapter}: new [{}]; retired [{}]",
+                added.join(", "),
+                retired.join(", ")
+            ))
         };
         match publish() {
             Ok(message) => messages.push(message),

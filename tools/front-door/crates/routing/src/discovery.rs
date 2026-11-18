@@ -201,7 +201,10 @@ mod tests {
             .find(|row| row.model.as_str() == "agy/gemini-9-flash")
             .unwrap();
         assert!(model.controls_known && !model.effort_suffix);
-        let catalogue = crate::Catalogue::bundled().unwrap().with_discovery(std::slice::from_ref(&agy)).unwrap();
+        let catalogue = crate::Catalogue::bundled()
+            .unwrap()
+            .with_discovery(std::slice::from_ref(&agy))
+            .unwrap();
         assert_eq!(catalogue.quota_pool(&model.model), Some("gemini"));
         assert!(model.efforts.contains(&"high".into()) && model.efforts.contains(&"low".into()));
         let cursor = parse_text_models(
