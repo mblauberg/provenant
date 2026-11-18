@@ -159,7 +159,7 @@ impl RunStore {
 /// Redact decoded handoff values before a graph consumes local or peer output.
 pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
-        let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
+        let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
@@ -277,7 +277,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
         Err(error) => {
             let mut value = serde_json::json!(error);
             let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
+                let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
                     .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
                 String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
             });
@@ -732,7 +732,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn final_handoff_preserves_examples_and_typed_masking_revalidates_bounds() -> TestResult {
+    fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {
             for field in ["note", "remaining", "decisions", "verify", "future"] {
                 let temp = tempfile::tempdir()?;
@@ -761,21 +761,12 @@ mod tests {
                     .capture_handoff(&attempt, &record, &result)?
                     .handoff?
                     .ok_or("final snapshot")?;
-                assert!(safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
-                let masked = transform_handoff(&safe, |text| {
-                    let safe = provenant_confinement::redact::publication_text(
-                        text.as_bytes(),
-                        [b"sk-abcdefghijklmnopqrstuvwx".to_vec()],
-                    )
-                    .map_err(|_| RunError::Validation("typed mask"))?;
-                    String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
-                })?;
-                assert!(!masked.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
-                assert!(masked.fenced().contains("[REDACTED]"));
+                assert!(!safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
+                assert!(safe.fenced().contains("[REDACTED]"));
                 assert_eq!(store.handoff(&record)??, Some(safe));
             }
         }
-        // Masking a registered short credential expands the note past its byte cap.
+        // Redacting short URL credentials expands the note past its byte cap.
         let url = "\nhttps://a:b@h";
         let note = format!(
             "{}{url}",
@@ -784,9 +775,8 @@ mod tests {
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
         handoff.note = note;
         let redact = |text: &str| {
-            let safe =
-                provenant_confinement::redact::publication_text(text.as_bytes(), [b"a:b".to_vec()])
-                    .map_err(|_| RunError::Validation("redaction"))?;
+            let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+                .map_err(|_| RunError::Validation("redaction"))?;
             String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
         };
         let invalid = transform_handoff(&handoff, redact);

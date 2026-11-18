@@ -246,6 +246,9 @@ pub(super) fn make_outputs_with_upstream(
         .filter(|capture| !capture.source_truncated)
         .and_then(|capture| findings_block(capture).ok())
         .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .filter(|block| {
+            prompt_text::validate_identities(block, prompt_text::Context::Outputs).is_ok()
+        })
         .and_then(|block| block.get("repair_items").cloned())
         .map(serde_json::from_value::<Vec<RepairItem>>);
     let repair_items = match parsed_repair_items {
@@ -391,6 +394,10 @@ fn parse_findings_mode(
             error.column()
         )
     })?;
+    if ingress {
+        prompt_text::validate_identities(&block, prompt_text::Context::Outputs)
+            .map_err(str::to_owned)?;
+    }
     if block
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
@@ -441,7 +448,8 @@ fn parse_findings_mode(
         if ingress {
             let wrapper = serde_json::json!({"findings": [entry]});
             let mut wrapper =
-                prompt_text::normalise(&wrapper["findings"]).map_err(str::to_owned)?;
+                prompt_text::normalise_capture(&wrapper["findings"], prompt_text::Context::Finding)
+                    .map_err(str::to_owned)?;
             entry = wrapper[0]
                 .take()
                 .as_object()

@@ -468,26 +468,34 @@ from the provider environment. A thread-bound, memory-only publication scope
 also supplies descriptor credentials through capture and settlement, then clears
 on every exit. Literal and JSON-escaped
 spellings are masked in stored prompts, checkpoints, events, captured outputs
-and diagnostics. Stored content preserves unregistered secret-shaped examples.
+and diagnostics. Stored authored content preserves unregistered secret-shaped examples.
 Warning projections retain schema paths and policy facts only.
 
 Admission bounds the worst-case checkpoint before saving the plan.
-Graph text is normalised at ingress before planning or hashing. All decoded
-strings and object keys use the same literal mask, including identity positions,
-so references receive the same replacement. A masked object-key collision
-refuses publication rather than silently overwriting data. Live patches,
-retry briefs and CI observations use this representation. A steer normalises
-only its new brief and replacement routes, preserving stored nodes.
-Captured findings are normalised before merging stored upstream evidence;
-the remaining fresh capture projection, including handoff fields and repair
-item extensions, is normalised before becoming graph outputs. Stored fragments
-are replayed without rewriting their digested bytes. Template-bound and child
-launch inputs receive the same policy warning check before publication.
-Shape detection is advisory input policy, separate from literal publication
-masking; it does not decide whether a value is a real credential.
-Typed handoffs are normalised at capture before any
-consumer retains them. Checkpoints persist
-the normalised form. Compaction retains parsed, normalised findings as typed
+Authored launch inputs (briefs, prompt text, live patches) warn on credential-shaped
+input (`policy.SECRET_SHAPED_INPUT`) and mask registered credential values,
+preserving unregistered examples. All decoded strings and object keys in authored
+inputs use literal masking; a masked object-key collision refuses publication rather
+than silently overwriting data. Live patches, retry briefs and steers use this
+representation before planning or hashing. A steer normalises only its new brief and
+replacement routes, preserving stored nodes.
+
+Captured output is normalised before storage or consumption. `prompt_text::Context`
+enumerates identity positions (review_base, worktree, branch, route fields, finding
+IDs, files and propagation markers, repair item IDs, node references, template names
+and sources). Identity fields and all object keys are scanned across each new
+structured capture, including fields omitted by typed projections. A credential-shaped
+identity or key refuses that capture as invalid output; it is never rewritten. Only
+declared scalar identity fields retain their bytes: a route or source object does not
+exempt its extension values. Content fields in captured output, including handoff fields,
+repair item extensions and findings summaries, filter known credential shapes and
+quoted assignments in addition to exact registered values. Captured findings are parsed
+and normalised before merging stored upstream evidence; the remaining fresh capture
+projection is normalised once before becoming graph outputs. Stored fragments are
+replayed without rewriting their digested bytes. Typed handoffs are normalised at capture
+before any consumer retains them. Checkpoints persist the normalised form. Compaction
+retains parsed, normalised findings as typed values in content-addressed storage. Resume
+never fills templates or rewrites a digest.
 values in content-addressed storage. Resume never fills templates or rewrites a
 sealed submission. A resume path or document hash selects the retained graph
 identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
