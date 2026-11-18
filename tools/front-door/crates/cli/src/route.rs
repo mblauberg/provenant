@@ -29,6 +29,11 @@ pub use resolution::{depletion_facts, resolve_review_family};
 use serde::Serialize;
 use std::{collections::BTreeSet, io, str::FromStr};
 
+/// Read the same effective model catalogue used by dispatch, without probing.
+pub fn effective_catalogue(roots: &Roots) -> Result<Catalogue, RoutingError> {
+    crate::model_discovery::effective(roots)
+}
+
 /// The same effective catalogue and derived account set used by routing.
 /// This read never probes a provider or filters on quota/readiness.
 pub fn provider_check_routes(
@@ -340,7 +345,7 @@ pub(crate) fn exclusion_rules(
     let settings = crate::config_reads::read_for(roots, "route")?
         .domains
         .accounts;
-    let models: Vec<ModelId> = Catalogue::bundled()?
+    let models: Vec<ModelId> = crate::model_discovery::effective(roots)?
         .models()
         .iter()
         .map(|entry| entry.model.clone())

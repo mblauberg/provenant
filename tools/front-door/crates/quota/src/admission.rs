@@ -1064,7 +1064,7 @@ mod admission_tests {
         };
         let mut route = route();
         route.adapter = account.adapter.clone();
-        route.model = "gpt-6.1-sol".into();
+        route.model = "fixture-model".into();
         route.readiness = RouteReadiness::Ready {
             availability_warning: None,
             extra: Default::default(),
@@ -1632,10 +1632,7 @@ mod refusal_scope_tests {
             details: None,
             windows: vec![window("quota", 10000)],
         });
-        for (model, pool) in [
-            ("gemini-3.8-flash", "gemini"),
-            ("claude-sonnet-4-6", "claude"),
-        ] {
+        for (model, pool) in [("gemini-fixture", "gemini"), ("claude-fixture", "claude")] {
             assert!(
                 Admission {
                     policy: crate::source::test_policy(),
@@ -1666,10 +1663,7 @@ mod refusal_scope_tests {
                     window("claude.weekly", claude),
                 ],
             });
-            for (model, pool) in [
-                ("gemini-3.8-flash", "gemini"),
-                ("claude-sonnet-4-6", "claude"),
-            ] {
+            for (model, pool) in [("gemini-fixture", "gemini"), ("claude-fixture", "claude")] {
                 let admitted = Admission {
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,

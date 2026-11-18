@@ -1,6 +1,7 @@
 //! Pure explicit routing over immutable snapshots. No process or state effects.
 #![forbid(unsafe_code)]
 mod catalog;
+mod discovery;
 mod exclusion;
 mod facts;
 mod fallback;
@@ -12,6 +13,7 @@ mod resolve;
 mod retry;
 mod review;
 pub use catalog::*;
+pub use discovery::*;
 pub use exclusion::*;
 pub use facts::*;
 pub use fallback::*;

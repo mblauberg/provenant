@@ -2491,11 +2491,23 @@ pub fn run(
             *limit,
         ),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
-            let human = quota_human(&report);
+            let mut human = quota_human(&report);
+            let mut data = serde_json::to_value(&report)?;
+            if let Quota::Tick { adapter, .. } = &command {
+                let changes = crate::model_discovery::refresh(
+                    roots,
+                    adapter.adapter.as_deref(),
+                    report.generated_unix_seconds,
+                );
+                for change in &changes {
+                    human.push_str(&format!("{change}\n"));
+                }
+                data["model_discovery"] = serde_json::to_value(changes)?;
+            }
             if matches!(command, Quota::Show(_)) {
                 summary = Some(quota_summary(&report));
             }
-            Ok((serde_json::to_value(report)?, human))
+            Ok((data, human))
         }),
     };
     let (envelope, human) = match result {

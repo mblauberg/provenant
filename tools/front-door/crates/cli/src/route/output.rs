@@ -275,7 +275,7 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         Some(efforts) if efforts.is_empty() => text.push_str("supported efforts: none\n"),
         Some(efforts) => text.push_str(&format!("supported efforts: {}\n", efforts.join(", "))),
         None => {
-            text.push_str("model is not in the catalogue; effort support is unrecorded\n");
+            text.push_str("warning: model source=user; absent from the bundled and discovered catalogue, effort support is unrecorded\n");
             if !preview.nearest_models.is_empty() {
                 text.push_str(&format!(
                     "nearest catalogued IDs: {}\n",
@@ -386,8 +386,9 @@ pub fn run(
                 }));
                 lines.extend(list.models.iter().map(|m| {
                     format!(
-                        "{} efforts=[{}]{}",
+                        "{} source={} efforts=[{}]{}",
                         m.model.as_str(),
+                        m.source,
                         m.efforts.join(","),
                         unobserved_model(&m.model, list)
                     )
@@ -455,8 +456,9 @@ pub fn run(
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} weight={} pacing={:?}{}{}",
+                                "{} source={} weight={} pacing={:?}{}{}",
                                 member.model.as_str(),
+                                member.source,
                                 member.weight,
                                 member.pacing,
                                 member

@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn the_repository_template_is_filled_from_the_receipts() {
-        let author = facts(1, "codex/gpt-6@high", HEAD);
+        let author = facts(1, "codex/fixture-author@high", HEAD);
         let reviews = [facts(2, "claude/opus@high", HEAD)];
         let text = fill(TEMPLATE, &body(&author, &reviews)).unwrap();
         assert!(!text.contains("<!--"), "{text}");
@@ -447,7 +447,7 @@ mod tests {
             &format!("Approve merge of `{HEAD}` to `main`."),
             "Risk tier: substantial (delivery receipt). Rollback: revert the merge commit on `main`.",
             &format!("Base: `main` at `abcdef0`. Head under review: `feat/thing` at `{HEAD}`."),
-            "- Author route: `codex/gpt-6@high` (receipt `attempts/1`)",
+            "- Author route: `codex/fixture-author@high` (receipt `attempts/1`)",
             "- Reviewer route: `claude/opus@high` (receipt `attempts/2`)",
             &format!("- Exact head reviewed: `{HEAD}`\n"),
             "<summary>Implementation detail</summary>\n\nAttempt 01010101010101010101010101010101",
@@ -472,11 +472,17 @@ mod tests {
 
     #[test]
     fn graph_reviews_use_the_same_receipt_rows_as_pr_open() {
+        let _catalogue = provenant_routing::fixture_models(&[
+            ("codex/fixture-terra", "openai"),
+            ("claude/fixture-opus", "anthropic"),
+            ("codex/fixture-sol", "openai"),
+        ])
+        .unwrap();
         let author = facts(1, "writer/model@high", HEAD);
         let mut reviews = [
-            facts(2, "codex/gpt-6.1-terra@high", HEAD),
-            facts(3, "claude/claude-opus-5-5@high", REVIEWED),
-            facts(4, "codex/gpt-6.1-sol@high", HEAD),
+            facts(2, "codex/fixture-terra@high", HEAD),
+            facts(3, "claude/fixture-opus@high", REVIEWED),
+            facts(4, "codex/fixture-sol@high", HEAD),
         ];
         for (facts, (role, verdict)) in reviews.iter_mut().zip([
             ("lens.correctness-spec", "FAIL"),
@@ -506,10 +512,10 @@ mod tests {
 
     #[test]
     fn a_review_of_another_head_or_no_review_is_stated_not_hidden() {
-        let author = facts(1, "codex/gpt-6@high", HEAD);
+        let author = facts(1, "codex/fixture-author@high", HEAD);
         let none = fill(TEMPLATE, &body(&author, &[])).unwrap();
         assert!(none.contains("- Reviewer route: none recorded"), "{none}");
-        let reviews = [facts(2, "codex/gpt-6@high", REVIEWED)];
+        let reviews = [facts(2, "codex/fixture-author@high", REVIEWED)];
         let stale = fill(TEMPLATE, &body(&author, &reviews)).unwrap();
         assert!(
             stale.contains("(differs from the head under review)"),

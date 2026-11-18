@@ -12,8 +12,9 @@ gate it. Policy and defaults are overridable data
 
 ## Exact selection, no inference
 
-A request names one exact model or route. No adapter, upgrade, effort or
-downgrade is inferred. An adapter may declare that a valid but unsupported
+A request names one exact model or route. A shipped pool resolves its model-family
+selectors against the effective catalogue; a user model pin stays exact. The
+selected provider, model and effort are recorded before launch. An adapter may declare that a valid but unsupported
 catalogued model effort is dropped before admission; the applied route and
 launch record retain its warning and source. Invalid controls remain errors.
 A family comes only from provider protocol evidence at
@@ -51,11 +52,24 @@ preference always expires.
 - Why: changing operating policy should not need a Rust change, and a typo must
   not widen access.
 
+## Provider model discovery
+
+Provider CLI listings supply model availability and supported controls. A successful
+refresh records a timestamped snapshot; a failed probe keeps the preceding
+snapshot. The effective catalogue overlays those listings on bundled metadata.
+A listing is not evidence of a model's confidentiality, capability, or answering
+family. Shipped pools and writer advice select the latest numeric version matching
+a family selector; an explicit user pool or model choice stays pinned. Model-specific
+policy values stay with the exact catalogue entry rather than being inferred for a
+new version. Explicit uncatalogued choices may proceed with a source warning.
+`quota tick` refreshes listings and reports changes. Route listings name the source
+of model and pool entries.
+
 ## Provider model scope
 
 Compiled provider model patterns constrain automatic choices from shipped
 pools. Owner-configured pools, routes and model preferences may select other
-catalogued models. When the owner explicitly sets
+models; an uncatalogued selection carries a source warning. When the owner explicitly sets
 `providers.<adapter>.models`, that restriction applies to automatic choices
 from both shipped and owner-configured pools, routes, preferences, fallbacks and
 depletion hand-offs. A fallback model is an automatic alternative, even when

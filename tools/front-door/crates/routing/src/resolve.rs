@@ -156,6 +156,7 @@ pub struct AccountPacingView {
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
     pub model: ModelId,
+    pub source: String,
     pub weight: u8,
     pub effort: Option<String>,
     pub efforts: Vec<String>,
@@ -199,12 +200,18 @@ pub fn list(
             .iter()
             .filter(|member| matches(member.model.adapter()))
         {
-            if context.catalogue.model(&member.model).is_none() {
-                return Err(RoutingError::Catalogue);
-            }
             admissible(&member.model, member.effort.as_deref(), context)?;
             views.push(RoutePoolMemberView {
                 model: member.model.clone(),
+                source: if context.config.pools.contains_key(&name) {
+                    "user".into()
+                } else {
+                    context
+                        .catalogue
+                        .model(&member.model)
+                        .map_or("bundled", |entry| entry.source.as_str())
+                        .into()
+                },
                 weight: member.weight,
                 effort: member.effort.clone(),
                 efforts: member.efforts.clone(),
@@ -1185,8 +1192,8 @@ fn account_reason<'q>(
     {
         reason = Some(RouteExclusionReason::AuthRequired);
     }
-    // Explicit exact IDs use the executable/account preflight too. The provider
-    // owns model availability; named routes and pools require catalogue entries.
+    // Exact IDs, including configured routes, use the executable/account
+    // preflight. The provider owns model availability.
     let quota = latest_reading(model, availability, context, true);
     if reason.is_none()
         && let Some(q) = quota
@@ -1836,6 +1843,7 @@ fn candidate(
                 .config
                 .model_policy
                 .effective(
+                    context.catalogue,
                     model,
                     a.account_key.as_deref().or(context.policy_account_hint),
                     context.now,
@@ -1921,6 +1929,9 @@ fn candidate(
         },
     };
     let mut diagnostics = RouteDiagnostics::default();
+    if context.catalogue.model(model).is_none() {
+        diagnostics.launch_warnings.push(format!("model {} is absent from the bundled and discovered catalogue; source=user, provider availability is unverified", model.as_str()));
+    }
     if let Some(a) = availability
         && matches!(readiness, RouteReadiness::Ready { .. })
         && let Some(reason_text) = account_probe_failure_reason(model, a, context)
@@ -2348,7 +2359,7 @@ fn resolve_inner(
                             context.config.permits_automatic_model(
                                 &route.model,
                                 AutomaticModelSource::OwnerConfiguration,
-                            ) && context.catalogue.model(&route.model).is_some()
+                            )
                         })
                         .map(|route| {
                             vec![RoutePoolMember {
@@ -2403,9 +2414,6 @@ fn resolve_inner(
                         )],
                     });
                 }
-                if context.catalogue.model(&named.model).is_none() {
-                    return Err(RoutingError::Catalogue);
-                }
                 if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
                     return Err(RoutingError::ConfidentialModel);
                 }
@@ -2454,6 +2462,7 @@ fn resolve_inner(
             .config
             .model_policy
             .effective(
+                context.catalogue,
                 &primary_model,
                 primary
                     .account_key
@@ -2818,6 +2827,7 @@ fn classify_pool(
                         .config
                         .model_policy
                         .effective(
+                            context.catalogue,
                             &member.model,
                             resolved
                                 .account_key

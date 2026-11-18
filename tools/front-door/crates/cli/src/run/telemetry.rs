@@ -9,6 +9,7 @@ pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
 pub(super) fn cache_kpi_rows(
     facts: &[&provenant_records::AttemptFact],
     domains: &crate::domains::Domains,
+    catalogue: &provenant_routing::Catalogue,
     now: provenant_core::WallTime,
 ) -> Value {
     let mut grouped: BTreeMap<(Option<String>, Option<String>), Vec<&provenant_records::Usage>> =
@@ -31,7 +32,7 @@ pub(super) fn cache_kpi_rows(
         let sum = |select: fn(&provenant_records::Usage) -> Option<u64>| usages.iter().try_fold(0u64, |sum, usage| sum.checked_add(select(usage)?));
         let target = model.as_deref().and_then(|model| ModelId::parse(model).ok()).and_then(|model| {
             let key = account.as_deref().and_then(|label| domains.accounts.entries.values().find(|entry| entry.adapter == model.adapter() && (entry.label == label || entry.key == label))).map(|entry| entry.key.as_str()).or(account.as_deref());
-            domains.routing.model_policy.effective(&model, key, now).policy.cache.read_share_target
+            domains.routing.model_policy.effective(catalogue, &model, key, now).policy.cache.read_share_target
         });
         json!({"model": model, "account": account, "share": provenant_routing::cache_read_share(sum(|u| u.uncached_input), sum(|u| u.cache_read), sum(|u| u.cache_write)), "target": target})
     }).collect();
@@ -226,9 +227,12 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
     let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings, &prices)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let task_context = super::telemetry_context::report(&selected, &graph_quality, edge)?;
+    let catalogue = crate::model_discovery::effective(edge.roots)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
+        &catalogue,
         call.clock.wall_now().map_err(|_| {
             provenant_run::RunError::Admission(provenant_run::AdmissionError::Clock)
         })?,
