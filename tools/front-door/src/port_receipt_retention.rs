@@ -4,7 +4,7 @@ use provenant_config::{
     PortReceiptLifetime,
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots, SweepControl};
-use provenant_records::{CanonicalV1, FileDigest, PortSource};
+use provenant_records::{FileDigest, PortSource};
 use provenant_run::{ExecutionContext, Request, RunStore};
 use serde::Serialize;
 use std::{
