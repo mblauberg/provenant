@@ -1,7 +1,11 @@
 //! Supervisor handoff for accepted attempts. The provider seam is minimal and
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
-use crate::{artifacts::read_sealed, db::decode, *};
+use crate::{
+    artifacts::{read_sealed, read_sealed_observed},
+    db::decode,
+    *,
+};
 use provenant_core::{ActorId, AttemptId, OperationId};
 use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
@@ -1081,6 +1085,14 @@ impl RunStore {
     pub fn request(&self, attempt: AttemptId, call: &Request<'_>) -> Result<CanonicalRequest> {
         Ok(self.request_with_digest(attempt, call)?.0)
     }
+    /// An observed request read that does not invoke `F_FULLFSYNC` disk flushes.
+    pub fn request_observed(
+        &self,
+        attempt: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<CanonicalRequest> {
+        Ok(self.request_observed_with_digest(attempt, call)?.0)
+    }
     /// The request and the digest of its stored bytes. Callers compare this
     /// digest, never a reserialised request, because its schema may have
     /// evolved since the run was written.
@@ -1090,6 +1102,29 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
         let raw = read_sealed(
+            &self.attempt_dir(attempt, false)?,
+            "request.json",
+            RECORD_LIMIT,
+        )?
+        .ok_or(RunError::NotFound)?;
+        let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
+        let stored = self.attempt_operation(attempt, call)?.request_digest;
+        if digest != stored {
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::RequestDigest,
+                "request.json",
+                Some(ArtifactValue::digest(stored)),
+                Some(ArtifactValue::digest(digest)),
+            ));
+        }
+        Ok((decode(&raw)?, digest))
+    }
+    pub(crate) fn request_observed_with_digest(
+        &self,
+        attempt: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
+        let raw = read_sealed_observed(
             &self.attempt_dir(attempt, false)?,
             "request.json",
             RECORD_LIMIT,
