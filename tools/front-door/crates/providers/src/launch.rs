@@ -607,10 +607,8 @@ pub(crate) fn admit(
     }
     for path in [input.executable, input.cwd] {
         if !path.is_absolute() {
-            return Err(input.policy.boundary_error(
-                "LAUNCH_ADMIT_AUTHORITY_2",
-                Facts::violation("the selected executable and working directory must be absolute"),
-                ProviderError::InvalidPath,
+            return Err(ProviderError::InvalidInvocation(
+                "the selected executable and working directory must be absolute",
             ));
         }
     }

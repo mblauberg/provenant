@@ -145,7 +145,7 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     assert_eq!(defaults.providers["codex"], ProviderSettings::default());
     assert_eq!(defaults.providers["claude"], ProviderSettings::default());
     test_support::assert_leaf_origins(&defaults);
-    let text = "schema_version=1\n[providers.codex]\nupdate=false\n[providers.claude]\nupdate={command=['claude','update']}\nupdate_interval_seconds=3600\nupdate_timeout_seconds=600";
+    let text = "schema_version=1\n[providers.codex]\nupdate=false\nclean_config=true\n[providers.claude]\nupdate={command=['claude','update']}\nupdate_interval_seconds=3600\nupdate_timeout_seconds=600";
     let config = load(&roots(), Some(text.as_bytes())).unwrap();
     assert_eq!(
         config.providers["codex"].update,
@@ -159,6 +159,15 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     );
     assert_eq!(config.providers["claude"].update_interval_seconds, 3600);
     assert_eq!(config.providers["claude"].update_timeout_seconds, 600);
+    assert!(config.providers["codex"].clean_config);
+    assert!(crate::knobs::documented_field(
+        "providers.codex.clean_config"
+    ));
+    assert!(!config.providers["claude"].clean_config);
+    assert!(matches!(
+        config.origins["providers.codex.clean_config"],
+        Origin::User { .. }
+    ));
     let capped = "schema_version=1\n[providers.codex]\nruntime_deadline_seconds=7200";
     let capped = load(&roots(), Some(capped.as_bytes())).unwrap();
     assert_eq!(
@@ -178,6 +187,7 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     test_support::assert_leaf_origins(&config);
     for (section, setting, rule) in [
         ("codex", "update=42", "type"),
+        ("codex", "clean_config=42", "type"),
         ("codex", "update='shell string'", "type"),
         ("codex", "update={command=[],typo=1}", "type"),
         ("codex", "update={command=[]}", "provider_update_command"),

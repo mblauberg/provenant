@@ -46,21 +46,20 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     if access != Access::ReadOnly {
-        return Err(input.boundary_error(
-            "COMMAND_PREPARE_AUTHORITY_3",
+        return Err(ProviderError::CapabilityUnavailable(
             "command adapter cannot enforce writer access",
+        ));
+    }
+    if session != Session::Fresh || input.route.account_key.is_some() {
+        return Err(input.boundary_error(
+            "COMMAND_PREPARE_AUTHORITY",
+            "command adapter cannot ignore the selected session or account identity",
             ProviderError::UnsupportedPolicy,
         ));
     }
-    if session != Session::Fresh
-        || !input.route.model.is_empty()
-        || input.route.effort.is_some()
-        || input.route.account_key.is_some()
-    {
-        return Err(input.boundary_error(
-            "COMMAND_PREPARE_AUTHORITY",
-            "command adapter cannot ignore the selected invocation identity",
-            ProviderError::UnsupportedPolicy,
+    if !input.route.model.is_empty() || input.route.effort.is_some() {
+        return Err(ProviderError::CapabilityUnavailable(
+            "command adapter does not support model or effort selection",
         ));
     }
     if input
@@ -80,13 +79,9 @@ fn prepare(
         .filter(|command| {
             !command.argv.is_empty() && !command.argv[0].is_empty() && command.program.is_absolute()
         })
-        .ok_or_else(|| {
-            input.boundary_error(
-                "COMMAND_PREPARE_AUTHORITY_2",
-                "configured command needs non-empty argv and an absolute executable",
-                ProviderError::UnsupportedPolicy,
-            )
-        })?;
+        .ok_or(ProviderError::InvalidInvocation(
+            "configured command needs non-empty argv and an absolute executable",
+        ))?;
     // The fixed script merges stderr into the captured output. Positional
     // arguments stay literal; no configured argument is interpreted as shell text.
     let mut argv = vec![

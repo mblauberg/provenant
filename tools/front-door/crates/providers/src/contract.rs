@@ -44,6 +44,10 @@ pub enum ProviderError {
     LoginRequired,
     #[error("launch path is not absolute or lies outside the plan's roots")]
     InvalidPath,
+    #[error("provider capability unavailable: {0}")]
+    CapabilityUnavailable(&'static str),
+    #[error("invalid provider invocation: {0}")]
+    InvalidInvocation(&'static str),
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
     #[error("provider cannot honour configured policy action for {code}")]
@@ -98,7 +102,9 @@ impl ProviderError {
             | Self::InvalidPath
             | Self::UnsupportedPolicy => B::Authority,
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
-            Self::PromptTooLarge { .. }
+            Self::CapabilityUnavailable(_)
+            | Self::InvalidInvocation(_)
+            | Self::PromptTooLarge { .. }
             | Self::Malformed
             | Self::MalformedFrame { .. }
             | Self::IncompleteFrame
@@ -122,6 +128,14 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     assert_eq!(
         ProviderError::IdentityMismatch.boundary_class(),
         B::Authority
+    );
+    assert_eq!(
+        ProviderError::CapabilityUnavailable("model").boundary_class(),
+        B::None
+    );
+    assert_eq!(
+        ProviderError::InvalidInvocation("argv").boundary_class(),
+        B::None
     );
     assert_eq!(
         ProviderError::UnsupportedPolicy.boundary_class(),

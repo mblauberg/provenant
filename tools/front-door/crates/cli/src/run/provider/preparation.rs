@@ -261,8 +261,8 @@ pub(super) fn violates_account_pin(
     })
 }
 
-/// A provider's typed login refusal can be retried before handoff. Policy,
-/// identity and path errors remain unclassified and stop route switching.
+/// Login and capability failures can try another eligible route before handoff.
+/// Identity, authority and malformed invocation failures do not change routes.
 pub(super) fn provider_preparation_fallback(
     error: &provenant_providers::ProviderError,
 ) -> provenant_routing::FallbackOutcome {
@@ -271,6 +271,9 @@ pub(super) fn provider_preparation_fallback(
         ProviderError::LoginRequired
         | ProviderError::CredentialNotFound
         | ProviderError::CredentialExpired => provenant_routing::FallbackOutcome::AuthRequired,
+        ProviderError::CapabilityUnavailable(_) => {
+            provenant_routing::FallbackOutcome::AdapterUnavailable
+        }
         _ => provenant_routing::FallbackOutcome::Other,
     }
 }
@@ -425,7 +428,7 @@ pub(super) fn dependency_preparation_event(
     match result {
         Ok(event) => Some(event),
         Err(error) => {
-            let warning = provenant_confinement::redact::bounded_line(
+            let warning = provenant_core::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
@@ -449,7 +452,7 @@ pub(super) fn dependency_preparation_event(
 }
 
 #[test]
-fn dependency_setup_failure_warns_and_retains_redacted_reason() {
+fn dependency_setup_failure_warns_and_retains_reason() {
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let policy = provenant_records::policy::Policy::default();
     let event = dependency_preparation_event(
@@ -461,7 +464,7 @@ fn dependency_setup_failure_warns_and_retains_redacted_reason() {
     .expect("warning policy retains the event");
     assert_eq!(event["outcome"], "warning");
     let reason = event["reason"].as_str().unwrap();
-    assert!(!reason.contains(secret));
+    assert!(reason.contains(secret));
     let success = serde_json::json!({"outcome": "installed"});
     assert_eq!(
         dependency_preparation_event(
@@ -586,7 +589,7 @@ fn prepare_writer_dependencies_with_policy(
 ) -> Result<serde_json::Value, String> {
     let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
     if let Err(error) = &result {
-        let detail = provenant_confinement::redact::bounded_line(
+        let detail = provenant_core::bounded_line(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
@@ -948,15 +951,10 @@ impl PrepareError {
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
-            Self::Unsupported(error) => {
-                let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
-                    error.to_string(),
-                );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
-                refusal.policy_code = Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY".into());
-                refusal
-            }
+            Self::Unsupported(error) => run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                error.to_string(),
+            ),
             Self::ContinuationRequest(error) => {
                 let guard = error.guard();
                 let mut refusal = run::PrepareRefusal::boxed(
@@ -1178,7 +1176,21 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         field: provenant_records::LaunchField::Write,
     })
     .into_refusal();
-    assert_eq!(unsupported.boundary_class, BoundaryClass::Authority);
+    assert_eq!(unsupported.boundary_class, BoundaryClass::None);
+    let home = PlanCheckError::Plan(provenant_confinement::PlanError::Home(
+        provenant_os::home::HomeError::UnsupportedState,
+    ))
+    .into_refusal();
+    assert_eq!(home.boundary_class, BoundaryClass::None);
+    assert!(home.policy_code.is_none());
+    assert_eq!(
+        home.terminal_cause,
+        provenant_records::run::TerminalCause::HandoffRefused
+    );
+    let extensions =
+        PlanCheckError::Plan(provenant_confinement::PlanError::UnconfinedExtensions).into_refusal();
+    assert_eq!(extensions.boundary_class, BoundaryClass::Authority);
+    assert!(extensions.policy_code.is_some());
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
@@ -1367,6 +1379,11 @@ impl PlanCheckError {
 
     fn policy_code(&self) -> Option<&'static str> {
         use provenant_confinement::{PlanError, permissions::PermissionError};
+        // A policy code must describe an established boundary, not manufacture
+        // one for an ordinary capability, resource or private-home error.
+        if self.boundary_class() == provenant_records::diagnostic::BoundaryClass::None {
+            return None;
+        }
         let permission = match self {
             Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => Some(error),
             _ => None,
@@ -1465,11 +1482,14 @@ impl PlanCheckError {
 
     fn into_refusal(self) -> Box<run::PrepareRefusal> {
         let skipped = self.skipped("preparation");
-        let mut refusal = run::PrepareRefusal::boxed(
-            provenant_records::run::TerminalCause::AccessPolicyRefused,
-            skipped.detail.clone(),
-        );
-        refusal.boundary_class = self.boundary_class();
+        let boundary = self.boundary_class();
+        let cause = if boundary == provenant_records::diagnostic::BoundaryClass::None {
+            provenant_records::run::TerminalCause::HandoffRefused
+        } else {
+            provenant_records::run::TerminalCause::AccessPolicyRefused
+        };
+        let mut refusal = run::PrepareRefusal::boxed(cause, skipped.detail.clone());
+        refusal.boundary_class = boundary;
         refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped.guard_resource;
@@ -3779,6 +3799,18 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
+        if adapter.id() == "codex" {
+            request.codex = if writer.is_none()
+                || config
+                    .providers
+                    .get("codex")
+                    .is_some_and(|settings| settings.clean_config)
+            {
+                provenant_confinement::CodexPolicy::Clean
+            } else {
+                provenant_confinement::CodexPolicy::Inherited
+            };
+        }
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
         let limits = run::lane_limits(
@@ -4048,6 +4080,9 @@ pub(super) fn prepare_candidates(
                 }
                 let kind = if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
                     SkipKind::AuthRequired
+                } else if previous_outcome == provenant_routing::FallbackOutcome::AdapterUnavailable
+                {
+                    SkipKind::Unavailable
                 } else {
                     SkipKind::Refused
                 };
@@ -4081,6 +4116,10 @@ pub(super) fn prepare_candidates(
                     let kind =
                         if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
                             SkipKind::AuthRequired
+                        } else if previous_outcome
+                            == provenant_routing::FallbackOutcome::AdapterUnavailable
+                        {
+                            SkipKind::Unavailable
                         } else {
                             SkipKind::Refused
                         };
@@ -4548,6 +4587,20 @@ pub(super) fn prepare_candidates(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
+        if adapter.id() == "codex" {
+            let source = if writer.is_none() {
+                "read-only extension authority"
+            } else {
+                match config.origins.get("providers.codex.clean_config") {
+                    Some(provenant_config::Origin::User { .. }) => "host configuration",
+                    _ => "compiled default",
+                }
+            };
+            provider.launch_warnings.push(format!(
+                "Codex clean_config={} (providers.codex.clean_config; source: {source})",
+                plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,
+            ));
+        }
         provider.applied_access = Some(serde_json::from_value(
             spec.applied_access()
                 .receipt(&home, spec.credential_roots()),

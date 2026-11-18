@@ -1,4 +1,5 @@
 //! Focused Seatbelt policy properties plus provider grant invariants.
+
 use super::tests::{fixture_access_plan, fixture_input, fixture_token, route};
 use super::*;
 use provenant_confinement::cargo::CargoHome;
@@ -22,7 +23,7 @@ fn grant(path: &str, scope: PathScope) -> PathGrant {
 
 /// Grants `prepare` adds only when the host has the path (the macOS-only SSL
 /// and Command Line Tools roots, a Homebrew or `/usr/local` prefix). They would
-/// make the snapshots differ by machine, so the tests drop them.
+/// make fixtures differ by machine, so the tests drop them.
 fn host_probed(path: &Path) -> bool {
     if path.starts_with("/opt/homebrew/Cellar/provider/1.0") {
         return false;
@@ -111,6 +112,7 @@ fn prepared(
     }
     if let Some(socket) = &mut profile.spec.fabric_socket {
         // Rendered fixtures are shared by macOS and Linux.
+
         socket.path = "/fixture/host/fabric-relay.sock".into();
     }
     Ok((confined.permissions().clone(), profile))
@@ -490,6 +492,7 @@ fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
     Ok(())
 }
 
+// Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
 #[test]
 fn open_profile_keeps_ambient_network_and_link_defaults() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -578,5 +581,49 @@ fn open_defaults_keep_credential_and_keychain_boundaries_mandatory()
         }
     }
     assert!(rendered.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
+#[test]
+fn provider_profiles_keep_open_defaults_explicit_network_and_mandatory_boundaries()
+-> Result<(), Box<dyn std::error::Error>> {
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        for network in [
+            NetworkAccess::Open,
+            NetworkAccess::Provider,
+            NetworkAccess::Local,
+        ] {
+            let (plan, profile) = prepared(id, Access::ReadOnly, login(id), false, Some(network))?;
+            let rendered = render(&plan, &profile, Path::new(HOME))?;
+            assert!(rendered.contains("(allow default)"), "{id}");
+            assert_eq!(
+                rendered.contains("(deny network*)"),
+                network != NetworkAccess::Open,
+                "{id}"
+            );
+            let credential = Path::new(HOME).join(".ssh");
+            for operation in ["file-read*", "file-write*"] {
+                assert!(
+                    rendered.contains(&format!(
+                        "(deny {operation} (subpath \"{}\"))",
+                        credential.display()
+                    )),
+                    "{id}: {operation} credential boundary"
+                );
+            }
+            for root in &plan.read_roots {
+                assert!(
+                    rendered.contains(&format!(
+                        "(deny file-write* (subpath \"{}\"))",
+                        root.path.display()
+                    )),
+                    "{id}: read-only root"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
