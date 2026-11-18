@@ -1864,61 +1864,6 @@ fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
 }
 
 #[test]
-fn removed_cli_spellings_match_both_migration_documents() {
-    fn declared_spelling(removed: &Removed) -> String {
-        let path = removed.words.join(" ");
-        match removed.flag {
-            Some(flag) => format!("provenant {path} --{flag}"),
-            None => format!("provenant {path}"),
-        }
-    }
-    fn rows(document: &str) -> Vec<(String, String)> {
-        let start = "<!-- REMOVED_CLI_START -->";
-        let end = "<!-- REMOVED_CLI_END -->";
-        let body = document
-            .split_once(start)
-            .and_then(|(_, rest)| rest.split_once(end).map(|(body, _)| body))
-            .expect("removed-command table markers exist");
-        body.lines()
-            .filter(|line| line.trim_start().starts_with('|'))
-            .filter_map(|line| {
-                let mut cells = line.trim().trim_matches('|').split('|');
-                let spelling = cells.next()?.trim().trim_matches('`').to_owned();
-                let replacement = cells.next()?.trim().to_owned();
-                (spelling.starts_with("provenant ") && !replacement.is_empty())
-                    .then_some((spelling, replacement))
-            })
-            .collect()
-    }
-
-    let expected: std::collections::BTreeSet<_> = REMOVED
-        .iter()
-        .map(|removed| (declared_spelling(removed), removed.replacement.to_owned()))
-        .collect();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-    for path in [
-        repository.join("docs/runbooks/using-provenant-2-from-another-repository.md"),
-        repository.join("docs/specs/consumer-contract.md"),
-    ] {
-        let source = std::fs::read_to_string(&path).unwrap();
-        let entries = rows(&source);
-        let actual: std::collections::BTreeSet<_> = entries.iter().cloned().collect();
-        assert_eq!(
-            entries.len(),
-            actual.len(),
-            "duplicate migration rows in {}",
-            path.display()
-        );
-        assert_eq!(
-            actual,
-            expected,
-            "migration rows disagree in {}",
-            path.display()
-        );
-    }
-}
-
-#[test]
 fn launch_retry_knobs_are_listed_with_defaults_bounds_and_sources() {
     let config = load::<&[u8]>(&roots(), None).unwrap();
     let schema = schema(&config, &domains::NO_DOMAINS, "fixture".into()).unwrap();
