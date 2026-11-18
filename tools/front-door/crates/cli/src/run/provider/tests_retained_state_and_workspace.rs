@@ -720,12 +720,11 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
             assert!(policy.mandatory().github().contains(&subtree(&gh)));
             let plan = ConfinedPlan::new(request)?;
             let mut profile = provenant_confinement::permissions::ProviderProfileSpec {
-                deny_credential_access: true,
+                confinement: provenant_confinement::permissions::ResolvedConfinementPolicy::default().without_credentials(),
                 ..Default::default()
             };
             assert!(!github_auth_permitted(&plan, &profile));
-            profile.deny_credential_access = false;
-            profile.deny_network = true;
+            profile.confinement = provenant_confinement::permissions::ResolvedConfinementPolicy::default().offline();
             assert!(!github_auth_permitted(&plan, &profile));
         }
     }

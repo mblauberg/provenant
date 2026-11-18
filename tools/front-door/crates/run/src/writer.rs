@@ -1177,8 +1177,9 @@ fn launch_resource_limits(
 }
 
 impl LaunchConfinement {
-    /// Backend absence is advisory. Plan validation and profile compilation
-    /// still fail at their typed credential, Git and integrity boundaries.
+    /// Resolve backend availability once. The caller must reject an unavailable
+    /// backend whenever this launch selected an effective confinement profile;
+    /// only an already-selected trusted route bypasses backend binding.
     pub(crate) fn bind_backend(
         &mut self,
         cancel: &CancelToken,

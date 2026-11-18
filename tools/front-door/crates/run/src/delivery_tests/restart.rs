@@ -849,12 +849,12 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     .unwrap(),
                 cargo_target_seed: false,
                 state_root: self.state.clone(),
-                sandbox: provenant_confinement::run_config::SandboxMode {
-                    requested: true,
-                    effective: true,
-                    source: provenant_confinement::run_config::SandboxSource::Knob,
-                    warning: None,
-                },
+                sandbox: provenant_confinement::run_config::SandboxMode::required(
+                    true,
+                    true,
+                    provenant_confinement::run_config::SandboxSource::Knob,
+                    None,
+                ),
                 backend: None,
             });
             Ok(prepared)

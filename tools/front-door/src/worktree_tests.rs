@@ -1022,12 +1022,12 @@ impl provenant_run::Providers for WriterProvider {
                     .unwrap(),
                     cargo_target_seed: false,
                     state_root: self.state.clone(),
-                    sandbox: provenant_confinement::run_config::SandboxMode {
-                        requested: true,
-                        effective: true,
-                        source: provenant_confinement::run_config::SandboxSource::Knob,
-                        warning: None,
-                    },
+                    sandbox: provenant_confinement::run_config::SandboxMode::required(
+                        true,
+                        true,
+                        provenant_confinement::run_config::SandboxSource::Knob,
+                        None,
+                    ),
                     backend: None,
                 }),
                 observed_head: None,

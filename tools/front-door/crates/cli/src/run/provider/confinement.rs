@@ -849,21 +849,17 @@ pub(super) fn github_auth_permitted(
     plan: &ConfinedPlan,
     profile: &provenant_confinement::permissions::ProviderProfileSpec,
 ) -> bool {
-    if plan.permissions().network != NetworkAccess::Open
-        || profile.deny_credential_access
-        || profile.deny_network
-    {
-        return false;
-    }
-    plan.permissions().policy.as_ref().is_none_or(|policy| {
-        !policy.optional().deny_read.iter().any(|denied| {
-            policy
-                .mandatory()
-                .github()
-                .iter()
-                .any(|root| denied.overlaps(root))
+    let resolved = profile.confinement.resolve_for(plan.permissions());
+    resolved.github_permitted()
+        && plan.permissions().policy.as_ref().is_none_or(|policy| {
+            !resolved.deny_read().iter().any(|denied| {
+                policy
+                    .mandatory()
+                    .github()
+                    .iter()
+                    .any(|root| denied.overlaps(root))
+            })
         })
-    })
 }
 
 /// Home and TMPDIR for the host's Git utility: a fresh private directory under

@@ -458,6 +458,9 @@ fn prepare(
         session_state: crate::SessionStateLocation::AttemptPrivate,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
+                confinement:
+                    provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                        .resolve_for(input.confined.permissions()),
                 process_executables,
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,

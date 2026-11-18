@@ -291,7 +291,7 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
         (O::UndeclaredProcessExec, Allowed),
         (O::ProcessFork, Allowed),
     ]);
-    if spec.deny_keychain_access {
+    if !spec.confinement.keychain_permitted() {
         map.extend([
             (O::ShellExec, Allowed),
             (O::KeychainTool, Denied),
@@ -620,7 +620,7 @@ fn probes(
         let file = first_file(grant).ok_or("runtime read file")?;
         list.push(read(O::RuntimeRead, &file));
     }
-    if spec.deny_keychain_access {
+    if !spec.confinement.keychain_permitted() {
         list.extend([
             probe(
                 O::ShellExec,

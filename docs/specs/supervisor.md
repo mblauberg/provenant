@@ -189,6 +189,18 @@ fabricated terminal event.
 
 Lane profiles start open and deny the boundaries
 ([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)).
+`ResolvedConfinementPolicy` composes the host's optional restrictions, the lane's
+network selection and the provider's authentication and offline preferences.
+Admission and rendering consume this same resolution and retain restriction
+sources. An absent optional setting leaves ordinary files, tools, local
+services and network access open. Capacity settings warn by default; a sourced
+configured stop remains distinct from a mandatory boundary refusal.
+
+Every credential declaration is enforced independently. An exception for an
+enclosing runtime, package or selected authentication root cannot open a nested
+declared store. Selected authentication and its exact aliases retain only their
+declared access. Link operations remain subject to credential, state, source
+and Git boundaries without a blanket denial of ordinary hard links.
 
 ### Plans refuse unsafe roots
 
@@ -202,6 +214,9 @@ lane grant validation consume it. File declarations retain exact scope.
 Credential directories are denied after every grant. The standalone Codex
 release package read exception is relative to its declared Codex home; it
 confers no writes and never exempts another overlapping credential declaration.
+The whole runtime grant must pass the complete mandatory credential inventory
+before receiving a carve-out. An undeclared file inside a declared shared store
+stays private even when runtime discovery requests its enclosing subtree.
 Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
@@ -225,9 +240,15 @@ directories and private worktree Git directories keep their hard hold.
 `run --explain` and launch preparation use one source admission decision and
 report its refusal code and reason or sourced warnings.
 
-Unsupported confinement fails `ConfinementUnavailable` and never widens
-access. An optional root that resolves into a declared credential root is
-omitted with a warning.
+Unsupported confinement fails honestly and never widens a selected profile's
+access. The mere presence of an inherited OS sandbox does not prove equivalent
+credential, Git or read-only protection. A trusted route selected by the host's
+default or an explicit off setting can retain an existing OS sandbox without a
+new profile when neither explicit restrictions nor an active parent floor
+require one; its receipt reports inherited enforcement.
+Failure to enforce a selected profile cannot choose that route implicitly.
+An optional root that resolves into a declared
+credential root is omitted with a warning.
 
 Registered Git projects' declared worktree allocation roots remain protected
 from extra host write grants, including before those roots exist. Resolve the
@@ -285,9 +306,11 @@ build output and tool configuration use private lane caches.
 
 ### Network, IPC and process information
 
-No lane reaches the peer agent's socket. Lanes may read process information
-but never another process's arguments, and signals stay inside the lane's own
-sandbox. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
+No lane reaches the peer agent's socket. Ordinary system and process metadata
+queries remain open. Arguments, task information and memory from outside the
+lane's sandbox stay private; the cross-process pidinfo guard is required to
+enforce the argument boundary. Same-sandbox process queries and signals remain
+available. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
 separate OS user or VM.
 - Why: the peer agent relays to unconfined children, and Seatbelt can enforce
   no more.

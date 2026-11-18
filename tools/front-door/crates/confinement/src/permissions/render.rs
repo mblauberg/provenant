@@ -14,7 +14,6 @@ use std::path::PathBuf;
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) const DYLD_BOOTSTRAP_RULES: &str = r#"
-(deny file-link)
 (allow file-read* (subpath "/System/Library"))
 (allow file-read* (subpath "/usr/bin"))
 (allow file-read* (subpath "/usr/lib"))
@@ -75,6 +74,8 @@ pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (deny signal)
 (allow signal (target same-sandbox))
 (allow process-info*)
+(deny process-info-pidinfo)
+(allow process-info-pidinfo (target same-sandbox))
 (deny mach-priv-task-port mach-task-read)
 (allow mach-priv-task-port mach-task-read (target same-sandbox))
 (deny process-info-setcontrol process-info-dirtycontrol)
@@ -239,6 +240,8 @@ fn compile_sbpl_inner(
     .into_iter()
     .max()
     .unwrap_or(0);
+    let mandatory = mandatory_for_plan(plan, anchors.home, None)?;
+    let credentials = mandatory.credential_roots();
     if let Some(warning) = check_capacity_policy(
         policy,
         "GRANT_COUNT",
@@ -267,29 +270,22 @@ fn compile_sbpl_inner(
     )? {
         report_policy_message(warning);
     }
-    validate_profile_spec_with_home(
-        &profile.spec,
-        anchors.home,
-        &plan.credential_roots,
-        usize::MAX,
-    )?;
+    validate_profile_spec_with_home(&profile.spec, anchors.home, credentials, usize::MAX)?;
     for grant in &plan.read_roots {
-        validate_read_exec_grant(grant, &plan.credential_roots)
+        validate_read_exec_grant(grant, credentials)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     // Every lexical credential check runs before any filesystem anchor check,
     // so a refused root names the declared store rather than a missing anchor.
     for grant in plan.protected_roots.iter().chain(&plan.write_roots) {
-        validate_noncredential_grant(grant, &plan.credential_roots)
+        validate_noncredential_grant(grant, credentials)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     let worktree_grants = match &plan.mode {
         AccessMode::ReadOnly => None,
-        AccessMode::WorktreeWrite(authority) => Some(verify_worktree_authority(
-            authority,
-            anchors,
-            &plan.credential_roots,
-        )?),
+        AccessMode::WorktreeWrite(authority) => {
+            Some(verify_worktree_authority(authority, anchors, credentials)?)
+        }
     };
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
@@ -297,7 +293,7 @@ fn compile_sbpl_inner(
         }
         read_only.revalidate().map_err(compile_authority_error)?;
         for grant in &read_only.writes {
-            validate_noncredential_grant(grant, &plan.credential_roots)
+            validate_noncredential_grant(grant, credentials)
                 .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
             if plan
                 .protected_roots
@@ -313,15 +309,13 @@ fn compile_sbpl_inner(
                 .map_err(compile_authority_error)?;
         }
     }
-    if let Some(policy) = &plan.policy {
-        for grant in &plan.write_roots {
-            policy.mandatory().validate_extra_write(grant)?;
-            let canonical = resolve_boundary_path(&grant.path)?;
-            policy.mandatory().validate_extra_write(&PathGrant {
-                path: canonical,
-                scope: grant.scope,
-            })?;
-        }
+    for grant in &plan.write_roots {
+        mandatory.validate_extra_write(grant)?;
+        let canonical = resolve_boundary_path(&grant.path)?;
+        mandatory.validate_extra_write(&PathGrant {
+            path: canonical,
+            scope: grant.scope,
+        })?;
     }
     let grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
     let read_grants = &grants.reads;
@@ -377,7 +371,7 @@ fn compile_sbpl_inner(
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath(plan.scratch.path.clone()));
     }
-    validate_noncredential_grant(&plan.scratch, &plan.credential_roots)
+    validate_noncredential_grant(&plan.scratch, credentials)
         .map_err(|error| error.with_credential_path(&plan.scratch.path, Some(anchors.home)))?;
     anchors
         .verify_grant_held(&plan.scratch)
@@ -422,7 +416,7 @@ fn compile_sbpl_inner(
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
-        validate_noncredential_grant(state, &plan.credential_roots)
+        validate_noncredential_grant(state, credentials)
             .map_err(|error| error.with_credential_path(&state.path, Some(anchors.home)))?;
         if state.overlaps(&plan.scratch) {
             return Err(PermissionError::ProtectedOverlap);
@@ -482,7 +476,7 @@ fn compile_sbpl_inner(
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors, &plan.credential_roots)?;
+        verify_worktree_authority(authority, anchors, credentials)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
@@ -566,6 +560,8 @@ impl<'a> GrantSet<'a> {
         reads.extend(profile.spec.runtime_reads.iter().cloned());
         reads.extend(profile.spec.process_executables.iter().cloned());
         let mut credential_writes = Vec::new();
+        let confinement = profile.spec.confinement.resolve_for(plan);
+        let keychain_root = home.join("Library/Keychains");
         if let Some(mechanism) = &plan.selected_authentication {
             let selected = profile
                 .spec
@@ -573,8 +569,30 @@ impl<'a> GrantSet<'a> {
                 .iter()
                 .find(|item| &item.mechanism == mechanism)
                 .ok_or(PermissionError::PermissionNotRecorded)?;
-            reads.extend(selected.roots.iter().cloned());
-            credential_writes.extend(selected.in_place_writes.iter().cloned());
+            if confinement.credentials_permitted()
+                && (confinement.keychain_permitted() || selected.keychain.is_none())
+            {
+                reads.extend(
+                    selected
+                        .roots
+                        .iter()
+                        .filter(|root| {
+                            confinement.keychain_permitted()
+                                || !root.path.starts_with(&keychain_root)
+                        })
+                        .cloned(),
+                );
+                credential_writes.extend(
+                    selected
+                        .in_place_writes
+                        .iter()
+                        .filter(|root| {
+                            confinement.keychain_permitted()
+                                || !root.path.starts_with(&keychain_root)
+                        })
+                        .cloned(),
+                );
+            }
         }
         if plan.include_continuation {
             reads.extend(profile.spec.continuation_reads.iter().cloned());
@@ -774,11 +792,10 @@ fn render_profile_with_policy(
     policy: &Policy,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(allow default)\n");
-    let network = plan.policy.as_ref().map_or(plan.network, |policy| {
-        policy.optional().network_for(plan.network)
-    });
+    let confinement = profile.spec.confinement.resolve_for(plan);
+    let network = confinement.network();
     // Restrict the default before adding typed online endpoint/relay grants.
-    if network != NetworkAccess::Open {
+    if network != NetworkPolicy::Open {
         source.push_str("(deny network*)\n");
     }
     // Apple dyld bootstrap rules are shared with the backend probe to keep
@@ -845,7 +862,7 @@ fn render_profile_with_policy(
     }
     // TLS root lookup on macOS needs this one service: denying it stops every
     // provider reaching its API. Keychain files keep their own denials.
-    if profile.spec.deny_keychain_access || profile.spec.deny_credential_access {
+    if !confinement.keychain_permitted() {
         source.push_str("(deny mach-lookup (global-name-prefix \"com.apple.SecurityServer\"))\n");
         source.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
     } else {
@@ -980,13 +997,13 @@ fn render_profile_with_policy(
             "(allow network-outbound (remote ip \"localhost:*\"))\n",
         ));
     }
-    if matches!(network, NetworkAccess::Local | NetworkAccess::Open) {
+    if matches!(network, NetworkPolicy::Local | NetworkPolicy::Open) {
         source.push_str(LOCAL_SERVICE_RULES);
     }
-    if network == NetworkAccess::Open {
+    if network == NetworkPolicy::Open {
         source.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
     }
-    if profile.spec.deny_network {
+    if network == NetworkPolicy::Offline {
         source.push_str("(deny network*)\n");
     }
 
@@ -1035,17 +1052,32 @@ fn mandatory_for_plan(
     home: &Path,
     worktree: Option<&WorktreeWriteGrants>,
 ) -> Result<MandatoryRoots, PermissionError> {
-    if let Some(policy) = &plan.policy {
-        return Ok(policy.mandatory().clone());
+    let mut mandatory = if let Some(policy) = &plan.policy {
+        policy.mandatory().clone()
+    } else {
+        let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
+        let missing_source = home.join(".provenant-unbound-source");
+        let source = worktree
+            .map(|grants| grants.worktree.path.as_path())
+            .or_else(|| plan.read_only.as_ref().map(|grants| grants.root.as_path()))
+            .or_else(|| plan.read_roots.first().map(|root| root.path.as_path()))
+            .unwrap_or(&missing_source);
+        MandatoryRoots::new(home, &state, source)?
+    };
+    for root in plan.credential_roots.entries() {
+        mandatory.add_declared_credential(
+            PathGrant {
+                path: root.path.clone(),
+                scope: match root.scope {
+                    provenant_core::CredentialScope::Exact => PathScope::Exact,
+                    provenant_core::CredentialScope::Subtree => PathScope::Subtree,
+                },
+            },
+            root.source.clone(),
+            root.kind.clone(),
+        )?;
     }
-    let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
-    let missing_source = home.join(".provenant-unbound-source");
-    let source = worktree
-        .map(|grants| grants.worktree.path.as_path())
-        .or_else(|| plan.read_only.as_ref().map(|grants| grants.root.as_path()))
-        .or_else(|| plan.read_roots.first().map(|root| root.path.as_path()))
-        .unwrap_or(&missing_source);
-    MandatoryRoots::new(home, &state, source)
+    Ok(mandatory)
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1055,7 +1087,12 @@ fn selected_keychain<'a>(
     home: &Path,
     mandatory: &MandatoryRoots,
 ) -> Option<&'a PathGrant> {
-    if profile.spec.deny_keychain_access || profile.spec.deny_credential_access {
+    if !profile
+        .spec
+        .confinement
+        .resolve_for(plan)
+        .keychain_permitted()
+    {
         return None;
     }
     let auth = selected_authentication(plan, profile)?;
@@ -1197,25 +1234,11 @@ fn push_boundaries(
     credential_writes: &[PathGrant],
     worktree: Option<&WorktreeWriteGrants>,
     home: &Path,
-    network: NetworkAccess,
+    network: NetworkPolicy,
 ) -> Result<(), PermissionError> {
     let mut ancestors = std::collections::BTreeSet::new();
     let mut mandatory = mandatory_for_plan(plan, home, worktree)?;
-    // Every credential root the plan declares (a relocated Cargo home, for
-    // example) is denied explicitly, as the home-derived stores are.
-    for root in plan.credential_roots.entries() {
-        mandatory.add_declared_credential(
-            PathGrant {
-                path: root.path.clone(),
-                scope: match root.scope {
-                    provenant_core::CredentialScope::Exact => PathScope::Exact,
-                    provenant_core::CredentialScope::Subtree => PathScope::Subtree,
-                },
-            },
-            root.source.clone(),
-            root.kind.clone(),
-        )?;
-    }
+    let confinement = profile.spec.confinement.resolve_for(plan);
     // Every declared authentication family is private, selected or otherwise.
     for root in profile
         .spec
@@ -1227,12 +1250,12 @@ fn push_boundaries(
     }
     let keychain = selected_keychain(plan, profile, home, &mandatory).cloned();
     let selected = selected_authentication(plan, profile);
-    let gh = network == NetworkAccess::Open
-        && !profile.spec.deny_network
-        && !profile.spec.deny_credential_access;
+    let gh = network == NetworkPolicy::Open && confinement.github_permitted();
     let mut credential_reads = Vec::new();
-    if !profile.spec.deny_credential_access {
-        if let Some(selected) = selected {
+    if confinement.credentials_permitted() {
+        if let Some(selected) =
+            selected.filter(|auth| confinement.keychain_permitted() || auth.keychain.is_none())
+        {
             credential_reads.extend(
                 selected
                     .roots
@@ -1254,10 +1277,9 @@ fn push_boundaries(
     let packages: Vec<_> = reads
         .iter()
         .chain(&profile.spec.tool_exec_roots)
-        .filter(|_| !profile.spec.deny_credential_access)
         .filter(|grant| {
-            is_codex_standalone_package(&grant.path, &plan.credential_roots)
-                && validate_read_exec_grant(grant, &plan.credential_roots).is_ok()
+            is_codex_standalone_package(&grant.path, mandatory.credential_roots())
+                && validate_read_exec_grant(grant, mandatory.credential_roots()).is_ok()
         })
         .cloned()
         .collect();
@@ -1277,9 +1299,10 @@ fn push_boundaries(
         };
         push_denial(source, "file-read*", root, exceptions)?;
         push_denial(source, "file-clone", root, exceptions)?;
+        push_rule(source, "deny", "file-link", &root.path, root.scope)?;
         push_denial(source, "process-exec", root, &packages)?;
         push_denial(source, "file-map-executable", root, &packages)?;
-        if profile.spec.deny_credential_access
+        if !confinement.credentials_permitted()
             || credential_writes.is_empty()
             || root.path == home.join(".claude.json")
         {
@@ -1305,6 +1328,7 @@ fn push_boundaries(
         for operation in [
             "file-read*",
             "file-clone",
+            "file-link",
             "file-write*",
             "process-exec",
             "file-map-executable",
@@ -1341,7 +1365,7 @@ fn push_boundaries(
     }
     let refresh: Vec<_> = credential_writes
         .iter()
-        .filter(|_| !profile.spec.deny_credential_access)
+        .filter(|_| confinement.credentials_permitted())
         .filter(|grant| {
             !mandatory
                 .non_exempt()
@@ -1362,6 +1386,7 @@ fn push_boundaries(
     for root in std::iter::once(mandatory.state()).chain(mandatory.state_aliases()) {
         push_denial(source, "file-read*", root, &state_reads)?;
         push_denial(source, "file-clone", root, &state_reads)?;
+        push_denial(source, "file-link", root, &private)?;
         let mut state_exec = private.clone();
         state_exec.extend(mandatory.state_exec().iter().cloned());
         state_exec.extend(packages.iter().cloned());
@@ -1398,6 +1423,7 @@ fn push_boundaries(
             .chain(source_root.as_ref())
         {
             push_denial(source, "file-write*", root, exceptions)?;
+            push_rule(source, "deny", "file-link", &root.path, root.scope)?;
             push_ancestor_guards(source, root, &mut ancestors)?;
         }
     }
@@ -1428,6 +1454,7 @@ fn push_boundaries(
             &[]
         };
         push_denial(source, "file-write*", root, exceptions)?;
+        push_rule(source, "deny", "file-link", &root.path, root.scope)?;
         push_ancestor_guards(source, root, &mut ancestors)?;
     }
     let marker = PathGrant {
@@ -1451,12 +1478,14 @@ fn push_boundaries(
         .chain(writer_marker.as_ref())
     {
         push_rule(source, "deny", "file-write*", &root.path, root.scope)?;
+        push_rule(source, "deny", "file-link", &root.path, root.scope)?;
         push_ancestor_guards(source, root, &mut ancestors)?;
     }
     for root in &plan.secret_roots {
         for operation in [
             "file-read*",
             "file-clone",
+            "file-link",
             "file-write*",
             "process-exec",
             "file-map-executable",
@@ -1470,26 +1499,27 @@ fn push_boundaries(
     // of where the host placed their credential/config parents.
     for root in mandatory.state_reads() {
         push_rule(source, "deny", "file-write*", &root.path, root.scope)?;
+        push_rule(source, "deny", "file-link", &root.path, root.scope)?;
         push_ancestor_guards(source, root, &mut ancestors)?;
     }
     // Host restrictions are final and admit no exceptions, including refresh,
     // prompt, package and GitHub CLI grants.
-    if let Some(policy) = &plan.policy {
-        for root in &policy.optional().deny_read {
-            for operation in [
-                "file-read*",
-                "file-clone",
-                "process-exec",
-                "file-map-executable",
-            ] {
-                push_rule(source, "deny", operation, &root.path, root.scope)?;
-            }
-            push_ancestor_guards(source, root, &mut ancestors)?;
+    for root in confinement.deny_read() {
+        for operation in [
+            "file-read*",
+            "file-clone",
+            "file-link",
+            "process-exec",
+            "file-map-executable",
+        ] {
+            push_rule(source, "deny", operation, &root.path, root.scope)?;
         }
-        for root in &policy.optional().deny_write {
-            push_rule(source, "deny", "file-write*", &root.path, root.scope)?;
-            push_ancestor_guards(source, root, &mut ancestors)?;
-        }
+        push_ancestor_guards(source, root, &mut ancestors)?;
+    }
+    for root in confinement.deny_write() {
+        push_rule(source, "deny", "file-write*", &root.path, root.scope)?;
+        push_rule(source, "deny", "file-link", &root.path, root.scope)?;
+        push_ancestor_guards(source, root, &mut ancestors)?;
     }
     // Ordinary read grants cannot expose another terminal's input stream.
     source.push_str(

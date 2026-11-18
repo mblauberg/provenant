@@ -154,26 +154,20 @@ impl PreparedLaunch {
         cancel: &provenant_core::CancelToken,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        use provenant_confinement::run_config::SandboxRestriction;
         use provenant_core::consumer_env::SANDBOX;
         use std::io::Write as _;
-        let Some(confinement) = self.confinement.as_mut().filter(|c| c.sandbox.effective) else {
+        let Some(confinement) = self.confinement.as_mut() else {
             return Ok(());
         };
-        let permissions = confinement.plan.permissions();
-        let optional = permissions
-            .policy
-            .as_ref()
-            .map(|p| p.optional())
-            .cloned()
-            .unwrap_or_default();
-        let restrictions = SandboxRestriction::for_policy(permissions.network, &optional);
-        let availability = confinement.bind_backend(cancel, policy)?;
-        confinement.sandbox.resolve_backend(
-            availability,
-            &restrictions,
-            provenant_confinement::run_config::current_process_is_sandboxed(),
-        );
+        if confinement.sandbox.requires_backend() {
+            let availability = confinement.bind_backend(cancel, policy)?;
+            // An inherited OS sandbox is not proof that the selected mandatory
+            // credential, Git and authority boundaries are already present.
+            confinement.sandbox.resolve_backend(availability)?;
+        }
+        if !confinement.sandbox.effective {
+            return Ok(());
+        }
         let mode = &confinement.sandbox;
         if let Some(warning) = &mode.warning {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
@@ -2835,6 +2829,7 @@ mod policy_reporting_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-launch.md#policy-and-confinement
     #[test]
     fn claimed_launch_reports_once_when_a_prepared_attempt_is_replayed()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -2879,7 +2874,16 @@ mod policy_reporting_tests {
                 nested_confinement: false,
             },
         })?;
-        #[allow(unused_mut)]
+        let inherited_sandbox = provenant_confinement::run_config::RunConfig::default()
+            .sandbox_for(provenant_confinement::run_config::SandboxInputs {
+                route: "command/test",
+                knob: None,
+                parent_sandboxed: false,
+                restrictions: &[],
+                os_sandboxed: true,
+                platform_supported: cfg!(target_os = "macos"),
+            });
+        assert!(!inherited_sandbox.requires_backend());
         let mut prepared = PreparedLaunch {
             limits: Default::default(),
             continuation_expectation: None,
@@ -2907,38 +2911,30 @@ mod policy_reporting_tests {
                 .unwrap(),
                 cargo_target_seed: false,
                 state_root: "/fixture/state".into(),
-                sandbox: provenant_confinement::run_config::SandboxMode {
-                    requested: true,
-                    effective: true,
-                    source: provenant_confinement::run_config::SandboxSource::Knob,
-                    warning: None,
-                },
+                sandbox: inherited_sandbox,
                 backend: None,
             }),
         };
-        // Bind a real unavailable backend before the claim is persisted.
-        #[cfg(not(target_os = "macos"))]
-        {
-            prepared.bind_sandbox_backend(&cancel, &Default::default())?;
-            let mode = prepared
-                .route
-                .sandbox
+        prepared.bind_sandbox_backend(&cancel, &Default::default())?;
+        let mode = prepared
+            .route
+            .sandbox
+            .as_ref()
+            .ok_or("missing inherited sandbox receipt")?;
+        assert!(mode.effective);
+        assert!(mode.warning.is_none());
+        assert!(
+            prepared
+                .confinement
                 .as_ref()
-                .ok_or("missing sandbox receipt")?;
-            assert!(mode.warning.is_some());
-            assert_eq!(
-                mode.effective,
-                provenant_confinement::run_config::current_process_is_sandboxed()
-            );
-            assert!(
-                prepared
-                    .confinement
-                    .as_ref()
-                    .ok_or("missing confinement")?
-                    .backend
-                    .is_none()
-            );
-        }
+                .ok_or("missing confinement")?
+                .backend
+                .is_none(),
+            "trusted inherited route must not probe a nested backend"
+        );
+        assert!(prepared.environment.iter().any(|(name, value)| {
+            name == provenant_core::consumer_env::SANDBOX && value == "on"
+        }));
         let grants =
             applied_write_grants(&prepared, WriteGrantLimit::default(), &Default::default())?;
         let mut output = Vec::new();
@@ -2952,14 +2948,13 @@ mod policy_reporting_tests {
             &mut output,
         )?;
         assert!(matches!(claimed.state, AttemptState::Starting { .. }));
-        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             claimed
                 .applied_route
                 .as_ref()
                 .and_then(|route| route.sandbox.as_ref()),
             prepared.route.sandbox.as_ref(),
-            "the claim must persist the actual backend warning and effective mode",
+            "the claim must persist the inherited effective mode",
         );
         // Another launcher can have prepared from the same queued record.
         // The compare-and-swap must refuse its stale claim before reporting.

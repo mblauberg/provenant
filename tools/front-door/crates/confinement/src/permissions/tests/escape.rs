@@ -12,6 +12,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 #[test]
 fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::Error>> {
+    use super::super::render::render as render_profile;
     use super::render::{RuleAction, rule_facts, rule_index, rule_index_without_strings};
     use crate::repo::{GitRefName, verify_worktree};
     use crate::utility::{GitMutation, execute_git_mutation};
@@ -72,8 +73,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     std::fs::write(&inside, b"")?;
     let symlink_path = linked.path().join("symlink");
     symlink(&protected_file, &symlink_path)?;
-    // Shared tool stores and dispatch write roots are writable; Cargo
-    // credentials stay hidden inside an otherwise readable Cargo home.
+    // Runtime grants stay on the noncredential Cargo subtrees; credential
+    // files are not carved out of the enclosing Cargo home.
     let cargo = provenant_os::fs::canonicalize(&fixture.home)?.join(".cargo");
     std::fs::create_dir_all(cargo.join("registry"))?;
     std::fs::create_dir_all(cargo.join("bin"))?;
@@ -117,15 +118,20 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
 
     let profile = ProviderProfile {
         spec: ProviderProfileSpec {
-            deny_keychain_access: true,
+            confinement: ResolvedConfinementPolicy::default().without_keychain(),
             allow_process_fork: true,
             allow_database_ipc: true,
-            runtime_reads: [cargo.clone(), configured_tools.clone(), private.clone()]
-                .map(|path| PathGrant {
-                    path,
-                    scope: PathScope::Subtree,
-                })
-                .to_vec(),
+            runtime_reads: [
+                cargo.join("registry"),
+                cargo.join("bin"),
+                configured_tools.clone(),
+                private.clone(),
+            ]
+            .map(|path| PathGrant {
+                path,
+                scope: PathScope::Subtree,
+            })
+            .to_vec(),
             tool_writes: [cargo.join("registry"), shared_locks.clone()]
                 .map(|path| PathGrant {
                     path,
@@ -281,7 +287,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
 
     let mut anchor_paths = vec![
         root.clone(),
-        cargo.clone(),
+        cargo.join("registry"),
+        cargo.join("bin"),
         shared_locks.clone(),
         configured_tools.clone(),
         scratch.clone(),
@@ -348,9 +355,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         limits: ProfileLimits::default(),
         policy: provenant_records::policy::Policy::default(),
     };
-    // Existing hard links in the scratch, the worktree and its ignored
-    // build and dependency trees do not refuse the launch: the sandbox
-    // denies new links, and the few Git control files are checked directly.
+    // Existing hard links in scratch, the worktree and ignored build or
+    // dependency trees do not refuse launch. New links are denied only when
+    // they touch a protected credential, state, source or Git path.
     let alias = scratch.join("hardlink-probe");
     std::fs::hard_link(&protected_file, &alias)?;
     let hardlink_path = linked.path().join("hardlink");
@@ -376,12 +383,11 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
                     .all(|alias| value != alias.to_string_lossy().as_ref())
         })
     }));
-    assert!(rule_index(&sbpl, RuleAction::Deny, "file-link", None).is_some());
     assert!(rule_index(&sbpl, RuleAction::Allow, "sysctl-read", None).is_some());
     assert!(rule_index_without_strings(&sbpl, RuleAction::Allow, "process-exec").is_some());
     std::fs::remove_file(alias)?;
-    // A second name for a Git control file is the one link that refuses.
-    // (Repository revalidation already refuses a second name for `config`.)
+    // A second name for a protected Git control file refuses compilation.
+    // (Repository revalidation also refuses a second name for `config`.)
     std::fs::create_dir_all(common.join("hooks"))?;
     let hook = common.join("hooks/pre-commit");
     std::fs::write(&hook, b"#!/bin/sh\n")?;
@@ -448,6 +454,88 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     assert_eq!(std::fs::read(&handoff)?, b"progress");
     assert!(!temporary_handoff.exists());
     let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
+    let ordinary_link_source = scratch.join("ordinary-link-source");
+    let ordinary_link_destination = scratch.join("ordinary-link-destination");
+    std::fs::write(&ordinary_link_source, "ordinary scratch data")?;
+    let ordinary_link = run(
+        &executables[2],
+        &[&ordinary_link_source, &ordinary_link_destination],
+    );
+    assert!(
+        successful_probe(&ordinary_link),
+        "ordinary scratch link: {ordinary_link:?}"
+    );
+    assert_eq!(
+        std::fs::read(&ordinary_link_destination)?,
+        b"ordinary scratch data"
+    );
+    let readonly_source_alias = scratch.join("read-only-source-alias");
+    let readonly_link = run_in(
+        &read_only_sbpl,
+        &executables[2],
+        &[&inside, &readonly_source_alias],
+    );
+    assert!(
+        denied_probe(&readonly_link),
+        "read-only source link: {readonly_link:?}"
+    );
+    assert!(!readonly_source_alias.exists());
+    // A Codex runtime subtree normally receives a package carve-out from the
+    // enclosing Codex home. A second host declaration can make that same
+    // subtree a shared credential store; undeclared files under it must stay
+    // hidden from the runtime grant.
+    let shared_runtime_store = home.join(".codex");
+    let pnpm_runtime = shared_runtime_store.join("packages/standalone/releases/fixture/pnpm");
+    let undeclared_runtime_file = pnpm_runtime.join("bin/pnpm");
+    std::fs::create_dir_all(undeclared_runtime_file.parent().ok_or("pnpm parent")?)?;
+    std::fs::write(&undeclared_runtime_file, "runtime payload")?;
+    let mut carveout_mandatory = mandatory.clone();
+    carveout_mandatory.add_credentials(PathGrant {
+        path: shared_runtime_store,
+        scope: PathScope::Subtree,
+    })?;
+    let carveout_profile = ProviderProfile {
+        spec: ProviderProfileSpec {
+            runtime_reads: vec![PathGrant {
+                path: pnpm_runtime.clone(),
+                scope: PathScope::Subtree,
+            }],
+            ..profile.spec.clone()
+        },
+        observations: profile.observations.clone(),
+    };
+    let carveout_plan = PlanPermissions {
+        policy: Some(
+            crate::run_config::RunConfig::default().policy_for_launch(&state, carveout_mandatory),
+        ),
+        mode: AccessMode::ReadOnly,
+        ..plan.clone()
+    };
+    let mut carveout_anchor_paths = anchor_paths.clone();
+    carveout_anchor_paths.push(pnpm_runtime);
+    let carveout_directories = carveout_anchor_paths
+        .iter()
+        .map(AnchoredDirectory::open_canonical)
+        .collect::<Result<Vec<_>, _>>()?;
+    let carveout_anchors = Anchors {
+        directories: &carveout_directories,
+        worktree: None,
+        ..anchors
+    };
+    let carveout_grants = GrantSet::build(&carveout_plan, &carveout_profile, &home, None)?;
+    let carveout_sbpl = render_profile(&carveout_grants)?;
+    let undeclared_runtime = run_in(&carveout_sbpl, &executables[4], &[&undeclared_runtime_file]);
+    assert!(
+        denied_probe(&undeclared_runtime),
+        "undeclared file in shared runtime carve-out: {undeclared_runtime:?}"
+    );
+    let refused_runtime = backend.compile(&carveout_plan, &carveout_profile, &carveout_anchors);
+    assert!(matches!(
+        refused_runtime,
+        Err(error)
+            if error.boundary_class()
+                == provenant_records::diagnostic::BoundaryClass::Credentials
+    ));
     let connect = |sbpl: &str, socket: &Path| {
         run_in(
             sbpl,
@@ -811,7 +899,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             worktree: writer.then_some((&linked, &selected_ref)),
             ..anchors
         };
-        for (network, deny_credentials, readable) in [
+        for (network, without_credentials, readable) in [
             (NetworkAccess::Open, false, true),
             (NetworkAccess::Local, false, false),
             (NetworkAccess::Open, true, false),
@@ -827,7 +915,11 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
                 spec: profile.spec.clone(),
                 observations: profile.observations.clone(),
             };
-            gh_profile.spec.deny_credential_access = deny_credentials;
+            gh_profile.spec.confinement = if without_credentials {
+                ResolvedConfinementPolicy::default().without_credentials()
+            } else {
+                ResolvedConfinementPolicy::default()
+            };
             let gh_sbpl =
                 String::from_utf8(backend.compile(&gh_plan, &gh_profile, &gh_anchors)?.profile)?;
             for github in mandatory.github() {
@@ -836,7 +928,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
                 assert_eq!(
                     successful_probe(&outcome),
                     readable,
-                    "gh store writer={writer} network={network:?} explicit_deny={deny_credentials}: {outcome:?}"
+                    "gh store writer={writer} network={network:?} without_credentials={without_credentials}: {outcome:?}"
                 );
                 if !readable {
                     assert!(denied_probe(&outcome));

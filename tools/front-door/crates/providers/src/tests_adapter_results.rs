@@ -136,7 +136,7 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
             .any(|grant| grant.path == Path::new("/fixture/home/.rustup"))
     );
     assert_eq!(spec.stdin, Stdin::Null);
-    assert!(spec.profile.spec.deny_keychain_access);
+    assert!(!spec.profile.spec.confinement.keychain_permitted());
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     assert!(matches!(
         adapter.prepare(input),
@@ -187,8 +187,8 @@ fn command_credentials_stay_denied_in_every_network_mode() {
             runtimes: &[],
         });
         let mut spec = command::Command.prepare(input).unwrap();
-        assert!(spec.profile.spec.deny_credential_access);
-        assert!(spec.profile.spec.deny_keychain_access);
+        assert!(!spec.profile.spec.confinement.credentials_permitted());
+        assert!(!spec.profile.spec.confinement.keychain_permitted());
         // An overlapping allow must never override the final credential denials.
         for relative in [
             ".config/gh",

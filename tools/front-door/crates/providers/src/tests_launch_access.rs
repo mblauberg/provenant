@@ -181,7 +181,7 @@ fn claude_writer_uses_confinement_instead_of_native_tool_permissions() -> Result
             .windows(2)
             .any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")
     );
-    assert!(spec.profile.spec.deny_keychain_access);
+    assert!(!spec.profile.spec.confinement.keychain_permitted());
     assert!(spec.profile.spec.authentication.is_empty());
     Ok(())
 }

@@ -112,10 +112,16 @@ fn prepare(
     let mut profile = ProviderProfileSpec {
         process_executables: vec![exact("/bin/sh"), exact(input.executable)],
         allow_process_fork: true,
-        deny_keychain_access: true,
-        deny_credential_access: true,
-        deny_network: input.confined.permissions().network
-            == provenant_records::run::NetworkAccess::Provider,
+        confinement: {
+            let policy = provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                .without_credentials()
+                .resolve_for(input.confined.permissions());
+            if policy.network() == provenant_confinement::permissions::NetworkPolicy::Provider {
+                policy.offline()
+            } else {
+                policy
+            }
+        },
         runtime_reads: Vec::new(),
         tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin")],
         ..Default::default()
