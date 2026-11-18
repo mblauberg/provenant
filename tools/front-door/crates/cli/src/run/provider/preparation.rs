@@ -4099,6 +4099,17 @@ pub(super) fn prepare_candidates_inner(
         };
         let (cargo_target_dir, cargo_target_lint) =
             cargo_target.target_paths(&home, common_git_dir, private_cache);
+        // A shared or configured target lies outside the lane cache. Create it
+        // here so a sandboxed lane's grants can anchor to it; Cargo would
+        // create it itself only after the profile is fixed.
+        let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
+            .into_iter()
+            .filter(|path| !path.starts_with(private_cache))
+            .find_map(|path| {
+                std::fs::create_dir_all(path)
+                    .err()
+                    .map(|error| format!("cannot create Cargo target {}: {error}", path.display()))
+            });
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -4542,6 +4553,9 @@ pub(super) fn prepare_candidates_inner(
         }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
+        }
+        if let Some(warning) = &cargo_target_warning {
+            push_launch_warning(&mut route, warning.clone());
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);

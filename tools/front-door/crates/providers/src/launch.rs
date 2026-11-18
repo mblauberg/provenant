@@ -1182,12 +1182,7 @@ pub(crate) fn finalise_provider_env(
             binding
         }
     };
-    let target = (input.host_var)("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cache.join("target"));
-    let lint_target = (input.host_var)(provenant_core::consumer_env::LANE_CARGO_LINT_TARGET)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cache.join("target-lint"));
+    let (target, lint_target) = lane_targets(input);
     cargo_environment(
         &binding,
         input.home,
@@ -1802,6 +1797,7 @@ pub(crate) fn rust_tools(
             &mut requirements.exec,
             setup,
         );
+        external_target_grants(input, access, requirements);
     }
     system_tools(access, &mut requirements.reads, &mut requirements.exec, env);
     crate::swift::swift_tools(input, access, requirements, env, setup);
@@ -1840,18 +1836,13 @@ fn rust_toolchain(
     let cargo = input.home.join(".cargo");
     let rustup = input.home.join(".rustup");
     let cache = lane_cache(input);
-    let target = (input.host_var)("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cache.join("target"));
+    let (target, _) = lane_targets(input);
     // The host prepares the writer cache itself under custody. Cargo
     // creates target/ after launch, so anchor the cache.
     // A read-only lane's cache is its scratch, which rustdoc also uses (via
     // TMPDIR) for the doc-test binaries it compiles and runs. The lane can
     // already execute everything it builds and its read-only worktree.
     tool_exec_roots.push(subtree(cache));
-    if target != cache.join("target") {
-        tool_exec_roots.push(subtree(&target));
-    }
     runtime_reads.extend([subtree(cargo.join("bin")), subtree(&rustup)]);
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
@@ -1860,8 +1851,42 @@ fn rust_toolchain(
     for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
         add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
     }
-    if access == Access::ReadOnly || target != cache.join("target") {
+    if access == Access::ReadOnly {
         setup.push(SetupStep::CreateDir(target));
+    }
+}
+
+/// The lane's Cargo build and lint targets: the host-resolved
+/// `lanes.cargo_target` paths, or the lane cache when none was passed.
+fn lane_targets(input: &PrepareInput<'_>) -> (PathBuf, PathBuf) {
+    let cache = lane_cache(input);
+    let target = (input.host_var)("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target"));
+    let lint = (input.host_var)(provenant_core::consumer_env::LANE_CARGO_LINT_TARGET)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target-lint"));
+    (target, lint)
+}
+
+/// A shared or configured target lies outside the lane cache, so its grants
+/// are not covered by the cache's. The host creates it before launch; the lane
+/// reads, writes and runs what it builds there.
+fn external_target_grants(
+    input: &PrepareInput<'_>,
+    access: Access,
+    requirements: &mut ToolRequirements,
+) {
+    let cache = lane_cache(input);
+    let (target, lint) = lane_targets(input);
+    let lint = (access == Access::WorktreeWrite).then_some(lint);
+    for path in std::iter::once(target).chain(lint) {
+        if path.starts_with(cache) {
+            continue;
+        }
+        requirements.reads.push(subtree(&path));
+        requirements.writes.push(subtree(&path));
+        requirements.exec.push(subtree(path));
     }
 }
 
