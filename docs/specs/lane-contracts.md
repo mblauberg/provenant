@@ -105,6 +105,11 @@ subtree read sees project and graph broadcasts and its ancestors/descendants,
 excluding sibling subtrees and other graphs. Descendants follow the graph's
 `--` node separator, not arbitrary string prefixes. Projects have separate files.
 
+Console tree peer reads carry the requested attempt subtree to each peer, which
+applies the same bounded selector as a local read. An older peer may ignore the
+optional field and return its whole tree; the caller preserves that result but
+marks peer coverage partial and warns that subtree selection was unsupported.
+
 `notes::Note` retains a stable identity and a source-local sequence. Its
 `observation` conversion takes a delivery-allocated `ObservationCursor`, preserving
 the shared contract's project-stream ordering and `ObservationKind::Note`.

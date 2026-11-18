@@ -385,6 +385,7 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                 Err(error) => return Err(error.into()),
             };
             index_graphs(&resolved.roots, project)?;
+            index_notes(&resolved.roots, project)?;
             let mut inputs = provenant_core::RootInputs::new(
                 resolved.home.clone(),
                 context.project_root.clone(),
@@ -1076,6 +1077,63 @@ fn index_graphs(roots: &Roots, project: ProjectId) -> Result<()> {
     Ok(())
 }
 
+/// Reconcile immutable note files into the shared stream. The source-local
+/// sequence is only a progress marker: each note is reread from Board and the
+/// store's stable observation identity makes a retry after a crash idempotent.
+fn index_notes(roots: &Roots, project: ProjectId) -> Result<()> {
+    use provenant_fabric_runtime::notes::{Board, Host, Input, Scope};
+
+    let dir = directory(roots, project)?;
+    let _guard = match dir.try_lock("notes-index.lock".as_ref(), LockMode::Exclusive) {
+        Ok(guard) => guard,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = Store::open(&roots.state, &request)?;
+    let board = Board::open(
+        roots.state.as_path(),
+        project,
+        provenant_fabric_runtime::notes::default_read_cap(),
+        provenant_fabric_runtime::notes::default_byte_cap(),
+    )?;
+    let host = Host::chair(project, None);
+    let mut cursor: i64 = read(&dir, "notes-cursor.json")?;
+    for _ in 0..16 {
+        let page: Value = serde_json::from_value(board.execute(
+            &host,
+            Input::Read {
+                reader: "observation-stream".into(),
+                scope: Scope::Project,
+                after: Some(cursor),
+                limit: Some(64),
+            },
+            &clock,
+            &cancel,
+        )?)?;
+        let notes = page["events"].as_array().ok_or("invalid notes page")?;
+        for value in notes {
+            let note: provenant_fabric_runtime::notes::Note =
+                serde_json::from_value(value.clone())?;
+            let observation = note.observation(ObservationCursor { project, seq: 0 })?;
+            // Match the source identity and envelope on replay. The note's own
+            // provenance time remains in detail and its lineage is preserved.
+            store.append_observation(&observation, WallTime::from_micros(0)?, &request)?;
+        }
+        cursor = page["next"].as_i64().ok_or("invalid notes cursor")?;
+        save(&dir, "notes-cursor.json", &cursor)?;
+        if page["truncated"] != true || notes.is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,6 +1148,96 @@ mod tests {
             .unwrap();
         provenant_os::fixture::private_state_dir(roots.state.as_path()).unwrap();
         (temp, roots, ProjectId::from_bytes([34; 16]))
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn note_and_correction_reconcile_once_across_consumer_reconnects() -> Result<()> {
+        use provenant_fabric_runtime::notes::{Board, Host, Input, Scope};
+        use provenant_records::lane_contract::ObservationKind;
+
+        let (_temp, roots, project) = fixture();
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let board = Board::open(
+            roots.state.as_path(),
+            project,
+            provenant_fabric_runtime::notes::default_read_cap(),
+            provenant_fabric_runtime::notes::default_byte_cap(),
+        )?;
+        let host = Host::chair(project, None);
+        let add = |text: &str, resolves| Input::Add {
+            text: text.into(),
+            tags: vec![],
+            scope: Scope::Project,
+            resolves,
+        };
+        let first: provenant_fabric_runtime::notes::Note = serde_json::from_value(board.execute(
+            &host,
+            add("first note", None),
+            &clock,
+            &cancel,
+        )?)?;
+        index_notes(&roots, project)?;
+
+        let request = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = Store::open(&roots.state, &request)?;
+        let consumer = provenant_core::ActorId::from_bytes([35; 16]);
+        let first_page = store.observations(project, 0, 10, &request)?;
+        assert_eq!(first_page.items.len(), 1);
+        assert_eq!(first_page.items[0].id, first.id);
+        assert_eq!(first_page.items[0].lineage, first.lineage);
+        assert_eq!(first_page.items[0].kind, ObservationKind::Note);
+        store.mark_events_read(project, consumer, first_page.items[0].cursor.seq, &request)?;
+        let resumed = store.event_cursor(project, consumer, &request)?;
+        assert_eq!(resumed, first_page.items[0].cursor.seq);
+
+        let correction: provenant_fabric_runtime::notes::Note = serde_json::from_value(
+            board.execute(&host, add("corrected note", Some(1)), &clock, &cancel)?,
+        )?;
+        index_notes(&roots, project)?;
+        // Simulate retry after the source was indexed but before its cursor was
+        // trusted by a restarted indexer.
+        let dir = directory(&roots, project)?;
+        save(&dir, "notes-cursor.json", &0_i64)?;
+        index_notes(&roots, project)?;
+
+        let after_reconnect = store.observations(project, resumed, 10, &request)?;
+        assert_eq!(after_reconnect.items.len(), 1);
+        assert_eq!(after_reconnect.items[0].id, correction.id);
+        assert_eq!(after_reconnect.items[0].kind, ObservationKind::Note);
+        assert_eq!(after_reconnect.items[0].detail["resolves"], 1);
+        store.mark_events_read(
+            project,
+            consumer,
+            after_reconnect.items[0].cursor.seq,
+            &request,
+        )?;
+        assert_eq!(
+            store
+                .observations(
+                    project,
+                    store.event_cursor(project, consumer, &request)?,
+                    10,
+                    &request,
+                )?
+                .items
+                .len(),
+            0
+        );
+        let replay = store.observations(project, 0, 10, &request)?;
+        assert_eq!(
+            replay
+                .items
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.id.as_str(), correction.id.as_str()]
+        );
+        Ok(())
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events
