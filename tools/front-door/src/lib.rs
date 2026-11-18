@@ -135,7 +135,7 @@ fn emit<T: Serialize>(
     emit_summarised(result, globals, human, read_only, None)
 }
 /// `emit` for an owner that supplies its own compact view.
-fn emit_summarised<T: Serialize>(
+pub(crate) fn emit_summarised<T: Serialize>(
     result: &CommandResult<T>,
     globals: &provenant_cli::Globals,
     human: &str,

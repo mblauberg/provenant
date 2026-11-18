@@ -388,7 +388,18 @@ fn invoke(
                     repair: None,
                 });
             }
-            crate::emit(&result, globals, &human, command == "templates")
+            let summary = if command == "templates" {
+                templates_summary(&result.data, input.get("name").and_then(Value::as_str))
+            } else {
+                None
+            };
+            crate::emit_summarised(
+                &result,
+                globals,
+                &human,
+                command == "templates",
+                summary.as_ref(),
+            )
         }
         Err(error) => {
             let config = config_cause(error.as_ref());
@@ -729,6 +740,100 @@ pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn Worke
         workers,
     )
 }
+pub(crate) fn templates_summary(
+    data: &Value,
+    show_target: Option<&str>,
+) -> Option<provenant_cli::Summary> {
+    let entries = data.get("templates")?.as_array()?;
+    if let Some(target) = show_target {
+        let entry = entries
+            .iter()
+            .find(|e| e["name"] == target)
+            .or_else(|| entries.first())?;
+        let name = entry["name"].as_str().unwrap_or(target);
+        let layer = entry["layer"].as_str().unwrap_or("unknown");
+        let template = &entry["template"];
+
+        let nodes_str = if let Some(nodes) = template
+            .get("nodes")
+            .and_then(Value::as_array)
+            .filter(|n| !n.is_empty())
+        {
+            let mut parts = Vec::new();
+            for node in nodes {
+                let id = node["id"].as_str().unwrap_or("unknown");
+                let role = node["role"]
+                    .as_str()
+                    .or_else(|| node["use"].as_str())
+                    .or_else(|| node["kind"].as_str())
+                    .or_else(|| node["tier"].as_str())
+                    .unwrap_or("-");
+                parts.push(format!("{id} ({role})"));
+            }
+            parts.join(", ")
+        } else {
+            let role = template["role"]
+                .as_str()
+                .or_else(|| template["kind"].as_str())
+                .or_else(|| template["tier"].as_str())
+                .unwrap_or("leaf");
+            format!("{name} ({role})")
+        };
+
+        let mut param_parts = Vec::new();
+        if let Some(params) = template.get("parameters").and_then(Value::as_object) {
+            for (pname, pval) in params {
+                if let Some(def) = pval.get("default").filter(|v| !v.is_null()) {
+                    let def_str = serde_json::to_string(def).unwrap_or_else(|_| def.to_string());
+                    param_parts.push(format!("{pname}={def_str}"));
+                } else {
+                    param_parts.push(format!("{pname} (no default)"));
+                }
+            }
+        }
+        let params_str = if param_parts.is_empty() {
+            "none".to_string()
+        } else {
+            param_parts.join(", ")
+        };
+
+        Some(provenant_cli::Summary {
+            lines: vec![
+                format!("{name} ({layer})"),
+                format!("nodes: {nodes_str}"),
+                format!("parameters: {params_str}"),
+            ],
+            next: None,
+            omitted: 0,
+        })
+    } else {
+        let mut lines = Vec::new();
+        for entry in entries {
+            let name = entry["name"].as_str().unwrap_or("unknown");
+            let layer = entry["layer"].as_str().unwrap_or("unknown");
+            let template = &entry["template"];
+            let purpose = template
+                .get("doc")
+                .and_then(Value::as_str)
+                .or_else(|| template.get("brief").and_then(Value::as_str))
+                .or_else(|| template.get("prompt").and_then(Value::as_str))
+                .and_then(|text| text.lines().next())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("-");
+            lines.push(format!("{layer} {name}: {purpose}"));
+        }
+        if lines.is_empty() {
+            lines.push("no templates".to_string());
+        }
+        Some(provenant_cli::Summary {
+            lines,
+            next: None,
+            omitted: 0,
+        })
+    }
+}
+
 pub(crate) fn templates(
     request: Templates,
     globals: &Globals,
