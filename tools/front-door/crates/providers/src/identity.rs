@@ -153,7 +153,41 @@ impl RegisteredAccount {
     }
 }
 
-/// Whether two account configuration trees overlap, including equality.
+/// Resolve the state and credential stores an account actually owns. HOME-rooted
+/// adapters keep client state below their declared harness directory, not across
+/// their entire HOME. Resolve every store separately to catch symlink aliases.
+pub fn account_state_paths(adapter: &str, directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let spec = provenant_records::AdapterSpec::get(adapter);
+    let home_rooted = spec
+        .and_then(|spec| spec.install)
+        .filter(|install| install.lane_home.0 == "HOME");
+    let paths = match home_rooted {
+        Some(install) => {
+            let mut paths = vec![directory.join(install.home)];
+            if let Some(spec) = spec {
+                paths.extend(
+                    spec.credential_files
+                        .iter()
+                        .map(|file| directory.join(file)),
+                );
+            }
+            paths
+        }
+        None => vec![directory.to_owned()],
+    };
+    paths
+        .into_iter()
+        .map(|path| {
+            provenant_core::PathResolver::resolve_existing_ancestor(
+                &provenant_os::fs::SystemPathResolver,
+                &path,
+            )
+            .unwrap_or(path)
+        })
+        .collect()
+}
+
+/// Whether resolved state or credential stores overlap, including equality.
 pub fn account_directories_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
@@ -166,23 +200,32 @@ impl Accounts {
         if accounts.len() > 128 {
             return Err(crate::ProviderError::Overflow);
         }
+        let stores: Vec<_> = accounts
+            .iter()
+            .map(|account| account_state_paths(&account.adapter, &account.directory))
+            .collect();
         for (index, account) in accounts.iter().enumerate() {
-            if accounts.iter().skip(index + 1).any(|other| {
-                let same_identity = account.adapter == other.adapter && account.key == other.key;
-                let local_login = |account: &RegisteredAccount| {
-                    provenant_records::AdapterSpec::get(&account.adapter)
-                        .is_some_and(|spec| spec.is_unregistered_local(&account.key))
-                };
-                // Entries for an adapter with only a local login are metadata
-                // associations, not distinct trees that require isolation.
-                let shared_local_login = account.adapter == other.adapter
-                    && provenant_records::AdapterSpec::get(&account.adapter)
-                        .is_some_and(provenant_records::AdapterSpec::uses_shared_local_login);
-                same_identity
-                    || (account_directories_overlap(&account.directory, &other.directory)
-                        && !(account.adapter == other.adapter
-                            && (local_login(account) || local_login(other) || shared_local_login)))
-            }) {
+            if accounts
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .any(|(other_index, other)| {
+                    let same_identity =
+                        account.adapter == other.adapter && account.key == other.key;
+                    // Entries for an adapter with only a local login are metadata
+                    // associations, not distinct trees that require isolation.
+                    let shared_local_login = account.adapter == other.adapter
+                        && provenant_records::AdapterSpec::get(&account.adapter)
+                            .is_some_and(provenant_records::AdapterSpec::uses_shared_local_login);
+                    same_identity
+                        || (!shared_local_login
+                            && stores[index].iter().any(|path| {
+                                stores[other_index]
+                                    .iter()
+                                    .any(|other| account_directories_overlap(path, other))
+                            }))
+                })
+            {
                 return Err(crate::ProviderError::IdentityMismatch);
             }
         }
@@ -224,15 +267,19 @@ mod account_registry_tests {
         let local = RegisteredAccount::new("agy", "local", home.clone()).unwrap();
         let isolated =
             RegisteredAccount::new("agy", "agy-registered", home.join(".agy-work")).unwrap();
-        assert!(Accounts::new(vec![local, isolated]).is_ok());
+        let nested =
+            RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/nested")).unwrap();
+        assert!(Accounts::new(vec![local, isolated, nested]).is_ok());
     }
 
+    // Spec: docs/specs/routing.md#accounts-and-credentials
     #[test]
-    fn registered_account_roots_must_still_not_overlap_each_other() {
+    fn registered_accounts_must_not_share_resolved_stores() {
         let home = std::path::PathBuf::from("/fixture/home");
         let first = RegisteredAccount::new("agy", "agy-first", home.join(".agy-work")).unwrap();
         let nested =
-            RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/nested")).unwrap();
+            RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/.gemini/nested"))
+                .unwrap();
         assert!(matches!(
             Accounts::new(vec![first, nested]),
             Err(crate::ProviderError::IdentityMismatch)
@@ -265,7 +312,7 @@ mod account_registry_tests {
         let home = std::path::PathBuf::from("/fixture/home");
         let local = RegisteredAccount::new("agy", "local", home.clone()).unwrap();
         let other_provider =
-            RegisteredAccount::new("codex", "work", home.join(".codex/work")).unwrap();
+            RegisteredAccount::new("codex", "work", home.join(".gemini/work")).unwrap();
         assert!(matches!(
             Accounts::new(vec![local, other_provider]),
             Err(crate::ProviderError::IdentityMismatch)

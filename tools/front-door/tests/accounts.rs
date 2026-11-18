@@ -135,7 +135,7 @@ fn check_config_shares_local_login_metadata_and_keeps_other_overlaps() -> Result
         report["data"]["findings"][0]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("registered directories overlap")
+            .contains("stores overlap")
     );
 
     let rig = TestRig::new()?;
@@ -151,6 +151,98 @@ fn check_config_shares_local_login_metadata_and_keeps_other_overlaps() -> Result
             .as_str()
             .unwrap_or_default()
             .contains("accounts codex-one and codex-two")
+    );
+    Ok(())
+}
+
+#[test]
+fn home_rooted_accounts_register_nested_homes_but_refuse_shared_stores() -> Result {
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("bin");
+    fs::create_dir(&bin)?;
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    case "$1" in --log-file) log="$2"; shift;; esac
+    shift
+done
+case "$HOME" in */.agy-second) email=second@example.test;; *) email=first@example.test;; esac
+printf 'OAuth: authenticated successfully as %s (test)\n' "$email" > "$log"
+printf '%s\n' '{"status":"SUCCESS"}'
+"#,
+    )?;
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let second = rig.home.join(".agy-second");
+    fs::create_dir_all(second.join("Library/Keychains"))?;
+    fs::write(second.join("Library/Keychains/login.keychain-db"), "")?;
+    for (label, directory) in [("first", &rig.home), ("second", &second)] {
+        let output = rig.command(&[
+            "accounts",
+            "register",
+            "--adapter",
+            "agy",
+            "--directory",
+            directory.to_str().ok_or("directory")?,
+            label,
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+    }
+    assert_eq!(code(&rig.command(&["check", "config", "--json"])?), 0);
+    let duplicate = rig.command(&[
+        "accounts",
+        "register",
+        "--adapter",
+        "agy",
+        "--directory",
+        second.to_str().ok_or("directory")?,
+        "duplicate",
+        "--json",
+    ])?;
+    assert_ne!(code(&duplicate), 0);
+    let refusal: serde_json::Value = serde_json::from_slice(&duplicate.stdout.bytes)?;
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("overlap")
+    );
+    // A different HOME spelling whose client state aliases the first store is
+    // still a credential overlap, including through symlinks.
+    let alias = rig.home.join(".agy-alias");
+    fs::create_dir_all(second.join(".gemini"))?;
+    fs::create_dir_all(&alias)?;
+    std::os::unix::fs::symlink(second.join(".gemini"), alias.join(".gemini"))?;
+    let duplicate = rig.command(&[
+        "accounts",
+        "register",
+        "--adapter",
+        "agy",
+        "--directory",
+        alias.to_str().ok_or("directory")?,
+        "alias",
+        "--json",
+    ])?;
+    assert_ne!(code(&duplicate), 0);
+    let refusal: serde_json::Value = serde_json::from_slice(&duplicate.stdout.bytes)?;
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("overlap")
     );
     Ok(())
 }
