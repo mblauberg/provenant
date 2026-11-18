@@ -129,6 +129,7 @@ pub fn record_capacity_cooldown(
         account: record.account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     }))
@@ -489,6 +490,7 @@ pub fn record_refusal(
         account: record.account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     })

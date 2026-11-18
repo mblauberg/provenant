@@ -163,7 +163,8 @@ spend the single lineage allowance in [retry owner](retry-owner.md).
 
 ## Unknown never means ready
 
-Unknown or stale quota never causes a refusal, and missing, expired or
+Unknown or stale quota does not establish exhaustion. Monthly allowance pacing
+constrains unobserved cycles as described below. Missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
 limit holds the whole account until its reset. Agy's recorded refusals expire
@@ -187,6 +188,31 @@ providers at the same tier before stopping at the chair.
   no stale evidence may admit a launch.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
   `crates/routing/src/resolve.rs`
+
+## Monthly allowance ledger
+
+`monthly_allowance_assessment` caps next-launch spend at elapsed cycle fraction
+plus burst, respecting model-pool scope. Missing registered cycles constrain
+eligibility; local logins roll remembered cycles forward or estimate UTC months,
+exposing the source without granting readiness.
+
+`AllowanceLedger` retains costs across policy and cycle-estimate changes.
+When discovery removes accounts, only canonical local-login keys retain debt;
+registered records drop. Ticks clear provider, probe-failure, login
+and readiness observations, retrying cleanup later. Debt cannot supply
+review-family candidates; local preview requires provider or readiness evidence.
+First samples baseline debt; deltas confirm only covered, pre-observation
+reservations. Flat/decreasing reports and incomplete journal coverage retain
+debt. Rollover preserves learned cost.
+
+`reserve_allowance_launch` bypasses inapplicable policies. Contention admits with
+warnings and durable receipts after bounded retries. Receipt acknowledgements
+precede retirement, surviving crashes beyond journal retention.
+
+Canonical local logins accept account overrides. `route list` exposes sourced
+settings, knobs, estimates and budgets; `pacing_preview` shares its assessment.
+[Operating details](../runbooks/routing-and-templates.md#pacing) cover overrides
+and retention.
 
 ## Revisioned, bounded refresh
 

@@ -4738,6 +4738,26 @@ pub(super) fn prepare_candidates_inner(
             (false, _) => None,
         };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
+        let allowance_policies =
+            provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
+        match crate::quota::reserve_allowance_launch(
+            roots,
+            &route,
+            &paths.attempt_id.to_string(),
+            &config.domains.routing,
+            &catalogue,
+            &allowance_policies,
+            provenant_os::clock::SystemClock::new()
+                .wall_now()
+                .map_err(|e| e.to_string())?,
+        ) {
+            Ok(Some(warning)) => provider.launch_warnings.push(format!("warning: {warning}")),
+            Ok(None) => (),
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
+                continue;
+            }
+        }
         // Publish the route/root binding only when this candidate is ready to
         // return as the applied launch. A refused fallback candidate must not
         // leave terminal settlement observing a different native account.
