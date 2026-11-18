@@ -439,8 +439,12 @@ Git's own inventory is the worktree registry. A worktree's owning lane decides
 who else writes in it. Worktree occupancy is a shared lease: any number of lanes
 may hold one worktree simultaneously. By maintainer decision (#3451), path claims
 are advisory and overlapping claims refuse nothing; a live conflicting writer is
-not excluded by Provenant. Data is protected by Git's index.lock, pathspec commits
-and exclusive removal custody. Custody outlives the requesting call. Each attempt
+not excluded by Provenant. Enforced protections are Git's `index.lock` with retry
+and exclusive removal custody requiring zero live holders. Pathspec commits are lane
+guidance (used by Provenant's own budget commits) to avoid staging sibling paths, rather
+than an enforced guarantee over the shared index. Sibling registration in the narrow residual
+window between an `other_holders_live` observation and budget commit or convergence
+restore is allowed by the design. Custody outlives the requesting call. Each attempt
 also holds its own holder lease; proof that a sibling has settled cannot release
 another attempt's custody. Removal requires exclusive occupancy with zero live holders.
 `worktree remove` refuses the primary, a live writer or observed process, and has

@@ -32,12 +32,14 @@ pub fn fast_forward(
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let entry_head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
-    // Observing an already satisfied pin has no checkout effect. Shared
-    // holders may keep editing or committing; only an actual advance needs
-    // exclusive occupancy and a clean tree.
+    let canonical = canonicalize(&entry.path)?;
+    // Observing an already satisfied pin has no checkout effect when another
+    // occupancy holder is live. Shared holders may keep editing or committing;
+    // without a live holder, ordinary reuse must verify cleanliness under exclusive custody.
     if !entry.locked
         && !entry.prunable
         && (entry_head == head || is_ancestor(context, head, entry_head, cancel)?)
+        && disk_writer_state(context.project_state, &canonical) == Occupancy::Held
     {
         let tree = verify_worktree(context.repo, &path)?;
         tree.repo().revalidate_identity()?;

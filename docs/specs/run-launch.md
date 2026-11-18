@@ -28,9 +28,11 @@ Optional `write_scope` paths are advisory claims: overlaps in one worktree warn
 the owning lane in its admission receipt and checkpoint and refuse nothing.
 By maintainer decision (#3451), path overlap is advisory rather than exclusive;
 a live conflicting writer is not refused. Provenant holds no lock around Git.
-Data is protected by Git's index.lock with brief jittered retry, pathspec commits
-(`git commit -- <owned paths>`) avoiding committing a sibling's staged paths,
-and exclusive removal custody requiring zero live holders. Shared budget commits
+Enforced protections are Git's `index.lock` with brief jittered retry and
+exclusive removal custody requiring zero live holders. Pathspec commits
+(`git commit -m <msg> -- <owned paths>`) are lane guidance (and what Provenant's
+own budget commit does) so lanes avoid committing a sibling's staged paths, rather
+than an enforced guarantee over the shared index. Shared budget commits
 use the immutable minimal shared Git context, letting Git retain its index lock
 through the branch CAS.
 - Why: sharing follows the owner's decision while unrelated lanes stay isolated.
@@ -54,9 +56,11 @@ before reseeding and warning. Only divergent histories with live siblings
 refuse, with a next step to wait or use an independent worktree. Git failures
 remain failures rather than ancestry answers.
 Liveness comes from each other attempt's retained occupancy holder proof,
-excluding the current attempt. Unscoped budget stops preserve files while
-siblings live; a lone holder can commit all its work and restore files on failed
-publication.
+excluding the current attempt. `other_holders_live` is observed before performing
+unscoped budget commits or convergence restore; concurrent sibling registration
+in the narrow residual window between observation and mutation is allowed by
+design. Unscoped budget stops preserve files while siblings live; a lone holder
+can commit all its work and restore files on failed publication.
 Settlement copies object files through held, no-follow descriptors into a byte- and entry-bounded
 host-owned sender before sanitising sidecars. It preserves the live shared
 store and its validated host alternate; inconsistent input fails integrity checks
@@ -66,8 +70,9 @@ holds no repository-wide lock around Git commands. Explicit `*.lock` collisions
 receive brief bounded retries with jitter; semantic conflicts and permission
 failures are returned immediately. Prepared ref deletion retries only before
 Git has acknowledged preparation. A satisfied source pin has no checkout effect
-and does not exclude shared holders or their edits; an actual checkout advance
-still requires exclusive occupancy.
+and does not exclude shared holders or their edits while another holder is live;
+with no live holder, ordinary reuse falls through to exclusive occupancy and verifies
+cleanliness, so an actual checkout advance or unshared reuse still requires a clean tree.
 - Why: independent worktrees and coherent config reads must not queue behind sibling launches.
 
 Before entering handoff or spawning a guardian, the launcher durably prepares

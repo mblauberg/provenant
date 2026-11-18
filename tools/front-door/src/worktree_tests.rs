@@ -278,7 +278,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_graph_output_preserves_lens_diff_base",
             "writer_dispatch_edits_a_linked_worktree",
-            "second_writer_is_refused_while_first_holds_the_worktree",
+            "shared_holders_both_launch_and_removal_refused_while_holder_is_live",
             "writer_settlement_merges_upstream_advance",
             "writer_terminal_refuses_sequencer_state",
             "writer_production_plan_denies_outside_writes",
@@ -379,8 +379,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
                 }
-                "second_writer_is_refused_while_first_holds_the_worktree" => {
-                    second_writer_is_refused_while_first_holds_the_worktree()
+                "shared_holders_both_launch_and_removal_refused_while_holder_is_live" => {
+                    shared_holders_both_launch_and_removal_refused_while_holder_is_live()
                 }
                 "writer_settlement_merges_upstream_advance" => {
                     writer_settlement_merges_upstream_advance()

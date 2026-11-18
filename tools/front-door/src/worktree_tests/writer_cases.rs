@@ -83,7 +83,7 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
     Ok(())
 }
 
-pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
+pub(super) fn shared_holders_both_launch_and_removal_refused_while_holder_is_live() -> Result {
     if !writer_backend_available()? {
         return Ok(());
     }

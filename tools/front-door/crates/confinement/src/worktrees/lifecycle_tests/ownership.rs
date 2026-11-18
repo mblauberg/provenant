@@ -37,6 +37,46 @@ fn satisfied_source_pin_does_not_exclude_shared_holders_or_their_edits()
 }
 
 #[test]
+fn dirty_checkout_at_requested_commit_is_refused_without_live_holder_and_admitted_with_live_holder()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "holder-check".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    fs::write(info.path.join("uncommitted"), "dirty checkout content")?;
+
+    // No live holder: ordinary reuse must check cleanliness and refuse the dirty tree.
+    let refused = fast_forward(&context, &info.path, info.head, &cancel());
+    assert!(
+        matches!(refused, Err(WorktreeError::Dirty(_))),
+        "expected Dirty error without live holder, got: {refused:?}"
+    );
+
+    // Live holder: shared occupancy allows concurrent admission even with dirty checkout.
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let held = provenant_supervisor::custody::lock_writer_occupancy(
+        &slot,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    fast_forward(&context, &info.path, info.head, &cancel())?;
+    assert_eq!(
+        fs::read_to_string(info.path.join("uncommitted"))?,
+        "dirty checkout content"
+    );
+    drop(held);
+    Ok(())
+}
+
+#[test]
 fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box<dyn Error>> {
     for scenario in ["dirty", "diverged", "leased"] {
         let fixture = Fixture::new()?;
@@ -902,8 +942,13 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             |_| Ok(()),
             &cancel(),
         );
-        assert!(
-            calls.get() >= if keep { 2 } else { 3 },
+        // Terminality is checked during output collection and removal eligibility;
+        // when keep is false, removal proceeds past output preparation through
+        // the final pre-deletion check (4 calls); when keep is true, ignored output
+        // is preserved and refuses removal earlier (2 calls).
+        assert_eq!(
+            calls.get(),
+            if keep { 2 } else { 4 },
             "terminality is rechecked after output preparation"
         );
         if keep {

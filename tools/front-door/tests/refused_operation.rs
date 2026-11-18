@@ -108,19 +108,12 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         assert_eq!(code(&made), 0, "{made:?}");
         let writer = rig.project.join(".worktrees/refusal-writer");
         fs::write(writer.join("tracked"), "uncommitted work")?;
-        // Advance the base commit: advancing a dirty worktree to a new commit
-        // refuses with WRITER_SCOPE under the shared occupancy lease model.
-        let advance = rig.execute(&git, &["commit", "--allow-empty", "-qm", "advance"], None)?;
-        assert_eq!(code(&advance), 0, "{advance:?}");
-        let rev = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
-        let advance_commit = String::from_utf8(rev.stdout.bytes)?.trim().to_string();
         let graph = rig.root.join("graph.json");
         fs::write(
             &graph,
             serde_json::to_vec(&json!({
                 "graph_id":"dirty-writer", "nodes":[{
                     "id":"writer", "use":"write", "worktree":writer,
-                    "source":{"type":"commit", "commit":advance_commit},
                     "write_scope":["."], "route":{"adapter":"codex", "model":"gpt-6-luna"}
                 }], "templates":{"write":{
                     "prompt":"PROMPT_SENTINEL",
