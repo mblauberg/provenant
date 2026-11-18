@@ -23,6 +23,7 @@ mod tracker;
 
 mod chair_log_retention;
 mod checkpoint_retention;
+mod events;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -46,7 +47,6 @@ mod settlement;
 mod staging_gc;
 mod state_handoff;
 mod status_wait;
-mod events;
 mod target_seed_build;
 mod usage;
 mod verify;
@@ -1381,7 +1381,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             process.workers(),
         ),
         Command::Wait(cmd) => status_wait::run(cmd, globals),
-        Command::Events { from, follow } => events::run(from, follow, globals),
+        Command::Events {
+            from,
+            follow,
+            consumer,
+        } => events::run(from.unwrap_or(0), follow, consumer.as_deref(), globals),
         Command::Land {
             numbers,
             strategy,

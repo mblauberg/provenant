@@ -109,11 +109,14 @@ pub enum Command {
     /// Replay project observations as JSON lines
     Events {
         /// Resume after this project sequence cursor
-        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..))]
-        from: i64,
+        #[arg(long, value_parser = clap::value_parser!(i64).range(0..))]
+        from: Option<i64>,
         /// Continue delivering observations as they arrive
         #[arg(long)]
         follow: bool,
+        /// Persist delivery progress under this consumer name
+        #[arg(long, conflicts_with = "from")]
+        consumer: Option<String>,
     },
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]

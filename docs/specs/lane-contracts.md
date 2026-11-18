@@ -36,8 +36,10 @@ at the host listener. Those source stores remain authoritative; the shared
 stream indexes observations for replay and does not replace them. The store's
 `append_observation` deduplicates stable source identities and `observations`
 assigns the project cursor on replay. `provenant events --from SEQ [--follow]`
-emits those observations as JSON lines; readers persist a cursor only after
-processing. Source ingestion, listener and chair adapter remain separate work.
+emits those observations as JSON lines. `--consumer NAME` resumes the stored
+cursor and advances it after each line is flushed; a crash before the cursor
+write can redeliver that line. The cursor records delivery to stdout, not the
+consumer’s processing. Source ingestion and the listener remain separate work.
 
 ## Result projection
 

@@ -54,6 +54,9 @@ pub struct Reaction {
     /// The attempt's usage row is in the usage ledger.
     #[serde(default)]
     pub ledger_done: bool,
+    /// The settled attempt was indexed in the shared observation stream.
+    #[serde(default)]
+    pub observation_done: bool,
 }
 
 impl Reaction {
@@ -62,6 +65,7 @@ impl Reaction {
             || !self.notice_done
             || !self.log_done
             || !self.ledger_done
+            || !self.observation_done
     }
 }
 
@@ -177,6 +181,7 @@ impl RunStore {
             notice_done: false,
             log_done: false,
             ledger_done: false,
+            observation_done: false,
         })
     }
 

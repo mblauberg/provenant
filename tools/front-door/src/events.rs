@@ -1,16 +1,14 @@
 //! Read-only JSON-lines edge for project observations.
 use provenant_cli::Globals;
-use provenant_core::CancelToken;
+use provenant_core::{ActorId, CancelToken};
 use provenant_fabric_store::{Request, Store};
 use provenant_os::{changes::watch::Watcher, clock::SystemClock};
 use provenant_records::Outcome;
-use std::{
-    io::Write,
-    time::{Duration, Instant},
-};
+use sha2::{Digest, Sha256};
+use std::{io::Write, time::Duration};
 
-pub(crate) fn run(from: i64, follow: bool, globals: &Globals) -> u8 {
-    match stream(from, follow, globals) {
+pub(crate) fn run(from: i64, follow: bool, consumer: Option<&str>, globals: &Globals) -> u8 {
+    match stream(from, follow, consumer, globals) {
         Ok(()) => 0,
         Err(error) => crate::fail(
             "events",
@@ -25,6 +23,7 @@ pub(crate) fn run(from: i64, follow: bool, globals: &Globals) -> u8 {
 fn stream(
     mut cursor: i64,
     follow: bool,
+    consumer: Option<&str>,
     globals: &Globals,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = crate::roots::resolve(
@@ -54,12 +53,11 @@ fn stream(
     } else {
         None
     };
-    let store = Store::open_read_only(
-        &resolved.roots.state,
-        Instant::now() + Duration::from_secs(5),
-    )?
-    .ok_or("project event store does not exist")?
-    .live_read_only()?;
+    let store = Store::open(&resolved.roots.state, &request)?;
+    let consumer = consumer.map(consumer_id).transpose()?;
+    if let Some(consumer) = consumer {
+        cursor = store.event_cursor(context.identity.project, consumer, &request)?;
+    }
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     loop {
@@ -70,6 +68,9 @@ fn stream(
             writeln!(output)?;
             output.flush()?;
             cursor = event.cursor.seq;
+            if let Some(consumer) = consumer {
+                store.mark_events_read(context.identity.project, consumer, cursor, &request)?;
+            }
         }
         if page.truncated || count == 100 {
             continue;
@@ -80,5 +81,39 @@ fn stream(
                 watcher.wait(Duration::from_secs(60))?;
             }
         }
+    }
+}
+
+// Namespace the stable consumer identity separately from ordinary actors.
+fn consumer_id(name: &str) -> Result<ActorId, &'static str> {
+    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+        return Err("consumer name must be 1-128 bytes without control characters");
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"provenant observation consumer\0");
+    hash.update(name.as_bytes());
+    let digest = hash.finalize();
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest[..16]);
+    Ok(ActorId::from_bytes(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn named_consumers_have_stable_separate_cursors() {
+        assert_eq!(
+            consumer_id("chair-session").unwrap(),
+            consumer_id("chair-session").unwrap()
+        );
+        assert_ne!(
+            consumer_id("chair-session").unwrap(),
+            consumer_id("other-session").unwrap()
+        );
+        assert!(consumer_id("").is_err());
+        assert!(consumer_id("bad\nname").is_err());
     }
 }
