@@ -150,11 +150,14 @@ impl ResolvedCargoTarget {
     }
 }
 
-/// A line `Cargo target: shared|private|<path>` in the chair brief.
+/// A line `Cargo target: shared|private` in the chair brief. A brief is requester text
+/// (possibly pasted from an issue, possibly from a sandboxed parent lane), so it can
+/// pick a mode but never name a path: a custom path grants the lane read, write and exec
+/// there, and comes only from host or project configuration or the launch knob.
 fn brief_target(brief: &str) -> Option<CargoTargetSetting> {
     brief.lines().find_map(|line| {
         let rest = line.trim().strip_prefix("Cargo target:")?;
-        CargoTargetSetting::parse(rest.trim())
+        CargoTargetSetting::parse(rest.trim()).filter(|setting| !setting.is_custom())
     })
 }
 
@@ -177,6 +180,22 @@ mod tests {
         assert_eq!(resolved.source, "default");
         assert!(resolved.value.is_shared());
         assert!(!resolved.value.is_private());
+    }
+
+    #[test]
+    fn brief_can_pick_a_mode_but_never_a_path() {
+        assert_eq!(
+            brief_target("Cargo target: private"),
+            Some(CargoTargetSetting::Private)
+        );
+        assert_eq!(
+            brief_target("intro\nCargo target: shared\n"),
+            Some(CargoTargetSetting::Shared)
+        );
+        assert_eq!(
+            brief_target("Cargo target: /Users/someone/Library/LaunchAgents"),
+            None
+        );
     }
 
     #[test]
@@ -227,11 +246,11 @@ mod tests {
 
         let brief_override = ResolvedCargoTarget::resolve_with_brief(
             &profile,
-            "Implement feature.\nCargo target: /brief/target\n",
+            "Implement feature.\nCargo target: private\n",
         );
         assert_eq!(
             brief_override.preamble(),
-            "Cargo target: /brief/target (source: brief; lanes.cargo_target).\n"
+            "Cargo target: private (source: brief; lanes.cargo_target).\n"
         );
     }
 

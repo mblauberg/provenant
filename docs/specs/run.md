@@ -47,7 +47,7 @@ The host's own build output supplies target seed generations.
 The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
 - `shared` (default): one target directory per project under the host cache (`~/Library/Caches/provenant-shared-cargo/<project_key>/target`), avoiding cold builds and skipping seed cloning. Lanes for the same repository share the warm target and Cargo serialises concurrent access with its build lock.
 - `private`: preserves the per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
-- Absolute path: uses the path directly.
+- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `shared` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
 
 The preamble and `provenant config show` report the resolved target directory and its source, e.g. `(source: default; lanes.cargo_target)` or `(source: host; lanes.cargo_target)`.
 Target seeding and clone machinery are skipped when `shared` or an absolute target is selected; seeding is used only for `private`.
