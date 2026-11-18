@@ -8,6 +8,7 @@ use std::os::fd::AsRawFd;
 /// validate the relationship they need before granting authority.
 #[cfg(target_os = "linux")]
 pub(crate) fn unix_peer_pid(stream: &std::os::unix::net::UnixStream) -> io::Result<i64> {
+    // SAFETY: `ucred` is a plain C struct of integers; the all-zero pattern is valid.
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
     // SAFETY: `credentials` and `length` are writable for the syscall, and the
@@ -30,7 +31,9 @@ pub(crate) fn unix_peer_pid(stream: &std::os::unix::net::UnixStream) -> io::Resu
             "Unix peer credentials are invalid",
         ));
     }
-    if credentials.uid != unsafe { libc::geteuid() } {
+    // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
+    let effective_uid = unsafe { libc::geteuid() };
+    if credentials.uid != effective_uid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Unix peer belongs to another user",
