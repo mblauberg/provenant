@@ -930,6 +930,7 @@ impl GitContext {
         let base = resolve(executor, git, cwd, base, &env, Some(host_state))?;
         let head = resolve(executor, git, cwd, head, &env, Some(host_state))?;
         let range = format!("{base}..{head}");
+        let diff_range = format!("{base}...{head}");
         let (log, log_timed_out) = read_git_with_env(
             executor,
             git,
@@ -962,7 +963,7 @@ impl GitContext {
                 "--ignore-submodules=none",
                 "--no-color",
                 "--no-relative",
-                &range,
+                &diff_range,
                 "--",
             ]
         };
@@ -1041,7 +1042,7 @@ impl GitContext {
             String::new()
         };
         Ok(format!(
-            "Host-written Git context for {}..{}: log at {}; per-file diff stat at {}; \
+            "Host-written Git context for {}...{}: log at {}; per-file diff stat at {}; \
              one patch slice per changed file in {} (index at {}); whole diff at {}; \
              bounds, truncation and timeouts at {}. The stat and slices are navigation aids, \
              not the scope of the review. Start from the stat and read the slice for each file \
@@ -1392,6 +1393,46 @@ mod tests {
             std::fs::read_to_string(scratch.path().join("git-diff-slices/index.txt"))?
                 .contains("changed.txt")
         );
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    fn capture_review_diff_uses_merge_base_after_main_merges() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let git = |args: &[&str]| -> TestResult {
+            assert!(
+                provenant_os::fixture::git_command()
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()?
+                    .success()
+            );
+            Ok(())
+        };
+        git(&["init", "-q"])?;
+        git(&["checkout", "-qB", "main"])?;
+        git(&["commit", "--allow-empty", "-qm", "root"])?;
+        git(&["checkout", "-qb", "feature"])?;
+        std::fs::write(temp.path().join("feature.txt"), "feature\n")?;
+        git(&["add", "feature.txt"])?;
+        git(&["commit", "-qm", "feature"])?;
+        git(&["checkout", "-q", "main"])?;
+        std::fs::write(temp.path().join("merged.txt"), "main\n")?;
+        git(&["add", "merged.txt"])?;
+        git(&["commit", "-qm", "main change"])?;
+        git(&["checkout", "-q", "feature"])?;
+        git(&["merge", "-q", "--no-ff", "main", "-m", "merge main"])?;
+        git(&["checkout", "-q", "main"])?;
+        std::fs::write(temp.path().join("later.txt"), "later\n")?;
+        git(&["add", "later.txt"])?;
+        git(&["commit", "-qm", "later main change"])?;
+        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let context = GitContext::capture_at(&binary, temp.path(), temp.path(), "main", "feature")?;
+        let diff = String::from_utf8_lossy(&context.diff.bytes);
+        assert!(diff.contains("feature.txt"));
+        assert!(!diff.contains("merged.txt"));
+        assert!(!diff.contains("later.txt"));
         Ok(())
     }
 
