@@ -1070,7 +1070,7 @@ mod tests {
     // Spec: docs/specs/disk.md#bounded-sweeps
     #[test]
     fn sweep_budget_uses_duration_units_and_allows_immediate_checkpoint() {
-        let mut settings = GcSettings::default();
+        let mut settings = super::GcSettings::default();
         assert_eq!(settings.sweep_budget_seconds(), Ok(300));
         settings.sweep_budget = "2m".into();
         assert_eq!(settings.sweep_budget_seconds(), Ok(120));

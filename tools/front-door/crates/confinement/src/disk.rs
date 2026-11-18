@@ -317,6 +317,7 @@ pub enum WriterRegistration<'a> {
 /// Observe writer-slot and process occupancy without collecting worktree disk
 /// metrics or running merge checks. Callers may stop between projects and the
 /// native process census polls the same callback while reading process data.
+#[allow(clippy::too_many_arguments)]
 pub fn writer_occupancy(
     repo: &VerifiedRepo,
     utility: &UtilityRuntime,
