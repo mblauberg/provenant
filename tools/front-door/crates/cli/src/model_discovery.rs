@@ -55,34 +55,90 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
 
 /// A probe failure leaves its previous snapshot untouched. Return bounded,
 /// human-readable changes and warnings to the quota command.
-pub(crate) fn refresh(roots: &Roots, filter: Option<&str>, now: i64) -> Vec<String> {
-    let Ok(executor) = SystemExecutor::new(1) else {
-        return vec!["model discovery: executor unavailable".into()];
-    };
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the discovery executor is a real-time boundary"
+)]
+pub(crate) fn refresh(
+    roots: &Roots,
+    enabled: &[String],
+    now: i64,
+    budget: Duration,
+) -> Vec<String> {
     let Ok(cwd) = std::env::current_dir() else {
         return vec!["model discovery: working directory unavailable".into()];
     };
-    refresh_with(roots, filter, now, |binary, args| {
-        let argv: Vec<OsString> = std::iter::once(binary)
-            .chain(args.iter().copied())
-            .map(OsString::from)
-            .collect();
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(20));
-        options.stdout = StreamPolicy::Capture {
-            limit: LIMIT as usize,
+    let deadline = std::time::Instant::now() + budget;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut pending = std::collections::BTreeSet::new();
+    for (harness, args) in PROVIDERS {
+        let adapter = harness.spec().name;
+        if !enabled.iter().any(|id| id == adapter) {
+            continue;
+        }
+        let Ok(binary) = crate::run::provider_executable(harness.spec().binary) else {
+            continue;
         };
-        options.stderr = StreamPolicy::Discard;
-        options.process_group = true;
-        options.cleanup_process_group = true;
-        options.stop_on_output_limit = true;
-        executor
-            .execute(options)
-            .ok()
-            .filter(|out| {
-                out.termination == Termination::Exit(0) && !out.timed_out && !out.stdout.truncated
-            })
-            .map(|out| out.stdout.bytes)
-    })
+        pending.insert(adapter);
+        let args = *args;
+        let cwd = cwd.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let executor = SystemExecutor::new(1).ok()?;
+                let argv: Vec<OsString> = std::iter::once(binary.into_os_string())
+                    .chain(args.iter().map(OsString::from))
+                    .collect();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                let mut options = ExecOptions::new(&argv, &cwd, remaining);
+                options.stdout = StreamPolicy::Capture {
+                    limit: LIMIT as usize,
+                };
+                options.stderr = StreamPolicy::Discard;
+                options.process_group = true;
+                options.cleanup_process_group = true;
+                options.stop_on_output_limit = true;
+                executor
+                    .execute(options)
+                    .ok()
+                    .filter(|out| {
+                        out.termination == Termination::Exit(0)
+                            && !out.timed_out
+                            && !out.stdout.truncated
+                    })
+                    .map(|out| out.stdout.bytes)
+            })();
+            let _ = tx.send((adapter, result));
+        });
+    }
+    drop(tx);
+    let mut completed = std::collections::BTreeMap::new();
+    while !pending.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok((adapter, result)) => {
+                pending.remove(adapter);
+                completed.insert(adapter, result);
+            }
+            Err(_) => break,
+        }
+    }
+    let mut messages = Vec::new();
+    for (adapter, result) in completed {
+        messages.extend(refresh_with(roots, Some(adapter), now, |_, _| {
+            result.clone()
+        }));
+    }
+    messages.extend(pending.into_iter().map(|adapter| {
+        format!("model discovery: {adapter} deadline reached; retaining previous snapshot")
+    }));
+    messages
 }
 
 fn refresh_with(

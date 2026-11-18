@@ -10,7 +10,7 @@ overridable in the selected state's `<state>/config.toml`.
 
 ## Inspect and choose
 
-Run `provenant route list` to inspect pools, then `provenant route resolve NAME`
+Run `provenant route list` to inspect model sources and pools, then `provenant route resolve NAME`
 to preview a choice and its sources. Use `provenant route --help` to change
 pools or exclude a route. Dispatch readiness can change after the preview, so
 check the attempt record for the resolved route.

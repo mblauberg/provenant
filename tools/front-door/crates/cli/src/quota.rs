@@ -2458,6 +2458,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         next,
     )
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "quota command is a real-time boundary"
+)]
 pub fn run(
     command: Quota,
     globals: &crate::Globals,
@@ -2474,6 +2478,7 @@ pub fn run(
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
+    let started = std::time::Instant::now();
     let mut summary = None;
     let result = match &command {
         Quota::History {
@@ -2496,10 +2501,36 @@ pub fn run(
             if let Quota::Tick { adapter, power, .. } = &command
                 && !matches!(power, Power::Low)
             {
+                let config = crate::config_reads::read_for(roots, "quota")?;
+                let enabled = config
+                    .knobs
+                    .get("quota.model_discovery")
+                    .and_then(|value| value.value.as_bool())
+                    .unwrap_or(true);
+                let accounts = effects.accounts()?;
+                let eligible: Vec<String> = registry
+                    .iter()
+                    .filter(|entry| {
+                        let id = entry.adapter.id();
+                        enabled
+                            && entry.quota_source.is_some()
+                            && provenant_records::AdapterSpec::get(id).is_some_and(|spec| {
+                                spec.quota_probe != provenant_records::QuotaProbeKind::None
+                            })
+                            && adapter.adapter.as_deref().is_none_or(|filter| filter == id)
+                            && accounts.iter().any(|account| account.adapter == id)
+                    })
+                    .map(|entry| entry.adapter.id().to_owned())
+                    .collect();
+                let budget =
+                    std::time::Duration::from_secs(config.domains.quota.wall_budget_seconds)
+                        .saturating_sub(started.elapsed())
+                        .saturating_sub(std::time::Duration::from_secs(1));
                 let changes = crate::model_discovery::refresh(
                     roots,
-                    adapter.adapter.as_deref(),
+                    &eligible,
                     report.generated_unix_seconds,
+                    budget,
                 );
                 for change in &changes {
                     human.push_str(&format!("{change}\n"));

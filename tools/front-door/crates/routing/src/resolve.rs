@@ -128,7 +128,7 @@ pub struct RouteList {
     pub valid_pairs: Vec<ValidRoutePair>,
     pub catalogue_revision: String,
     pub models: Vec<ModelEntry>,
-    pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
+    pub named_routes: std::collections::BTreeMap<String, NamedRouteView>,
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
     pub account_pacing: Vec<AccountPacingView>,
@@ -141,8 +141,15 @@ pub struct RouteList {
 }
 #[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
+    pub source: String,
     pub model: ModelId,
     pub effort: Option<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct NamedRouteView {
+    pub model: ModelId,
+    pub effort: Option<String>,
+    pub source: String,
 }
 #[derive(Debug, Serialize)]
 pub struct AccountPacingView {
@@ -238,6 +245,7 @@ pub fn list(
             for effort in efforts {
                 if admissible(&entry.model, effort.as_deref(), context).is_ok() {
                     valid_pairs.push(ValidRoutePair {
+                        source: entry.source.clone(),
                         model: entry.model.clone(),
                         effort,
                     });
@@ -261,7 +269,16 @@ pub fn list(
             .routes
             .iter()
             .filter(|(_, r)| !query.valid && matches(r.model.adapter()))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    NamedRouteView {
+                        model: v.model.clone(),
+                        effort: v.effort.clone(),
+                        source: "user".into(),
+                    },
+                )
+            })
             .collect(),
         pools,
         pacing,

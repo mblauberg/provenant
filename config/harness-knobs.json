@@ -490,6 +490,11 @@
     }
   },
   "knobs": {
+    "quota.model_discovery": {
+      "type": "bool", "default": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/quota.rs",
+      "effect": "Refresh eligible provider model listings during normal-power quota ticks."
+    },
     "confinement.census_exclude_ancestors": {
         "type": "bool",
         "default": true,

@@ -62,10 +62,15 @@ family. Shipped pools and writer advice select the latest numeric version matchi
 a family selector; an explicit user pool or model choice stays pinned. Model-specific
 policy values stay with the exact catalogue entry rather than being inferred for a
 new version. Explicit uncatalogued choices may proceed with a source warning.
-`quota tick` refreshes listings and reports changes, except in low-power mode, which
-invokes no discovery tools. Discovery messages are transient command output, not
-part of the persisted quota report. Route listings name the source of model and pool
-entries.
+`quota tick` refreshes listings and reports changes for installed adapters with a
+registered account and an enabled quota probe. Low-power ticks invoke no discovery
+tools; `knobs.quota.model_discovery` disables discovery globally (default true).
+Probes run concurrently within the quota tick's remaining wall budget, with one
+second reserved for reporting. Failed or overdue probes retain their previous
+snapshots. Advisory family selectors resolve independently, retaining bundled advice
+for a family absent from a partial listing. Discovery messages are transient command
+output, not part of the persisted quota report. Route listings name the source of
+model, valid pair, named route and pool entries in human and JSON output.
 
 ## Provider model scope
 

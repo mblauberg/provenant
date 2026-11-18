@@ -179,6 +179,10 @@ mod tests {
         assert_eq!(model.source, "discovered");
         assert_eq!(model.trains_on_prompts, None);
         assert!(
+            catalogue.writer_advisory.cheaper_models.contains(&id),
+            "partial listing must update the sol advisory independently"
+        );
+        assert!(
             catalogue.pools["senior"]
                 .iter()
                 .any(|member| member.model == id)

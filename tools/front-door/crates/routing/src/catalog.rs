@@ -1720,10 +1720,20 @@ impl Catalogue {
             })
             .cloned()
             .collect();
-        // Missing families retain bundled advice instead of failing the whole catalogue.
-        if let Ok(advice) = self.writer_selectors.resolve(&active_models) {
-            self.writer_advisory = advice;
-        }
+        // Resolve each family independently: a partial listing must not freeze
+        // unrelated selectors. Missing families retain their bundled model.
+        let select = |selectors: &[String]| {
+            selectors
+                .iter()
+                .filter_map(|selector| {
+                    latest_in_family(selector, &active_models)
+                        .or_else(|| latest_in_family(selector, models))
+                        .map(|entry| entry.model.clone())
+                })
+                .collect()
+        };
+        self.writer_advisory.warn_models = select(&self.writer_selectors.warn_selectors);
+        self.writer_advisory.cheaper_models = select(&self.writer_selectors.cheaper_selectors);
         for (name, members) in &mut self.pools {
             let selectors = self
                 .pool_selectors
@@ -2188,6 +2198,55 @@ mod tests {
         }
         let route = resolve(&request_for("codex/not-in-catalogue-at-all")?, &context)?;
         assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn partial_discovery_keeps_writer_advice_for_each_family()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = crate::parse_codex_models(br#"{"models":[{"slug":"gpt-6.2-sol","supported_reasoning_levels":[{"effort":"high"}]}]}"#, 1)?;
+        let catalogue = Catalogue::bundled()?.with_discovery(&[snapshot])?;
+        assert!(
+            catalogue
+                .writer_advisory
+                .cheaper_models
+                .iter()
+                .any(|id| id.as_str() == "codex/gpt-6.2-sol")
+        );
+        let config = RoutingConfig::default();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            choice_context: None,
+            selection_evidence: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
+            launch_specs: None,
+            readiness: None,
+            access: &[],
+            now: provenant_core::WallTime::from_micros(0)?,
+            host: "test-host",
+        };
+        let opus = catalogue.pools["principal"]
+            .iter()
+            .find(|member| {
+                catalogue
+                    .writer_advisory
+                    .warn_models
+                    .contains(&member.model)
+            })
+            .ok_or("missing principal Opus")?;
+        let route = resolve(&request_for(opus.model.as_str())?, &context)?;
+        let advice = config
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("missing advice")?;
+        assert!(advice.contains("codex/gpt-6.2-sol"), "{advice}");
         Ok(())
     }
 

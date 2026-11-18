@@ -1280,3 +1280,85 @@ fn configured_polling_intervals_reach_show_and_tick() -> Result {
     );
     rig.assert_v1_root_untouched()
 }
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test the command's real-time deadline"
+)]
+fn discovery_tick_respects_eligibility_knob_and_deadline() -> Result {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        time::{Duration, Instant},
+    };
+    let mut rig = quota_rig()?;
+    let bin = rig.root.join("discovery-bin");
+    fs::create_dir(&bin)?;
+    let marker = rig.root.join("discovery-marker");
+    let codex = bin.join("codex");
+    fs::write(
+        &codex,
+        "#!/bin/sh\nif [ \"$1\" = debug ]; then printf invoked >> \"$DISCOVERY_MARKER\"; printf '%s' '{\"models\":[{\"slug\":\"gpt-6.2-sol\"}]}'; fi\n",
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        "#!/bin/sh\nprintf forbidden >> \"$DISCOVERY_MARKER\"\n",
+    )?;
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push(("PATH".into(), bin.into_os_string()));
+    rig.env
+        .push(("DISCOVERY_MARKER".into(), marker.as_os_str().to_owned()));
+    let config = rig.state.join("config.toml");
+    let original = fs::read_to_string(&config)?;
+    fs::write(
+        &config,
+        format!("{original}\n[knobs]\n\"quota.model_discovery\" = false\n"),
+    )?;
+    let shown = rig.command(&["config", "show", "--json"])?;
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    assert_eq!(
+        shown["data"]["knobs"]["quota.model_discovery"]["value"],
+        false
+    );
+    assert_eq!(
+        shown["data"]["knobs"]["quota.model_discovery"]["source"],
+        "override"
+    );
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),
+        0
+    );
+    assert!(!marker.exists());
+    fs::write(&config, &original)?;
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),
+        0
+    );
+    assert_eq!(fs::read_to_string(&marker)?, "invoked");
+    fs::remove_file(&codex)?;
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),
+        0
+    );
+    assert_eq!(fs::read_to_string(&marker)?, "invoked");
+    fs::write(
+        &codex,
+        "#!/bin/sh\nif [ \"$1\" = debug ]; then /bin/sleep 5; fi\n",
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        &config,
+        format!("{original}\n[domains.quota]\nwall_budget_seconds = 2\n"),
+    )?;
+    let start = Instant::now();
+    let out = rig.command(&["quota", "tick", "--power", "ac", "--json"])?;
+    assert_eq!(code(&out), 0);
+    assert!(start.elapsed() < Duration::from_secs(4));
+    assert!(String::from_utf8_lossy(&out.stdout.bytes).contains("retaining previous snapshot"));
+    Ok(())
+}

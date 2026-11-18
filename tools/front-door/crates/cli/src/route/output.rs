@@ -379,8 +379,9 @@ pub fn run(
                 let mut lines = vec![format!("catalogue {}", list.catalogue_revision)];
                 lines.extend(list.valid_pairs.iter().map(|pair| {
                     format!(
-                        "{} effort={}",
+                        "{} source={} effort={}",
                         pair.model.as_str(),
+                        pair.source,
                         pair.effort.as_deref().unwrap_or("unspecified")
                     )
                 }));
@@ -395,8 +396,9 @@ pub fn run(
                 }));
                 lines.extend(list.named_routes.iter().map(|(name, r)| {
                     format!(
-                        "route {name} = {}{}",
+                        "route {name} = {} source={}{}",
                         r.model.as_str(),
+                        r.source,
                         unobserved_model(&r.model, list)
                     )
                 }));
@@ -498,6 +500,7 @@ pub fn run(
     let summary = match &result.data {
         Some(Data::List(list)) => {
             let counts = [
+                ("valid pairs", list.valid_pairs.len()),
                 ("models", list.models.len()),
                 ("routes", list.named_routes.len()),
                 ("pools", list.pools.len()),
@@ -506,7 +509,18 @@ pub fn run(
                 ("model exclusions", list.model_exclusions.len()),
                 ("exclusion notes", list.exclusion_notes.len()),
             ];
-            let mut rows = Vec::new();
+            let mut rows: Vec<_> = list
+                .valid_pairs
+                .iter()
+                .map(|pair| {
+                    format!(
+                        "{} source={} effort={}",
+                        pair.model.as_str(),
+                        pair.source,
+                        pair.effort.as_deref().unwrap_or("unspecified")
+                    )
+                })
+                .collect();
             if list.readiness_truncated {
                 rows.push("warning: readiness display limited to 256 account/model rows".into());
             }
@@ -527,8 +541,9 @@ pub fn run(
             }));
             rows.extend(list.named_routes.iter().map(|(name, r)| {
                 format!(
-                    "route {name} = {}{}",
+                    "route {name} = {} source={}{}",
                     r.model.as_str(),
+                    r.source,
                     unobserved_model(&r.model, list)
                 )
             }));
