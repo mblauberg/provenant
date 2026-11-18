@@ -810,6 +810,11 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
 
 fn policy_codex_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    rig.env.push((
+        "FIXTURE_API_KEY".into(),
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+    ));
+
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(rig.home.join(path))?;
     }
@@ -1595,6 +1600,11 @@ fn write_opencode_session(args: &[String]) -> Result {
 
 fn claude_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    rig.env.push((
+        "FIXTURE_API_KEY".into(),
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+    ));
+
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     rig.copy_executable(&std::env::current_exe()?, &bin.join("claude"))?;
@@ -4254,30 +4264,12 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     };
     let before = snapshot()?;
     let brief = rig.root.join("retry-brief.md");
-    let secret = "password=\"fixture-secret-3391\"";
-    fs::write(&brief, secret)?;
     let saved_env = rig.env.clone();
     for (k, v) in &mut rig.env {
         if k == "PATH" {
             *v = std::ffi::OsString::from("/fixture/changed/path");
         }
     }
-    let out = rig.command(&[
-        "retry",
-        "retry-stop/writer",
-        "--brief-file",
-        brief.to_str().ok_or("brief")?,
-        "--json",
-    ])?;
-    let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_ne!(code(&out), 0, "{reply}");
-    let output = String::from_utf8_lossy(&out.stdout.bytes);
-    assert!(output.contains("credential-shaped value"), "{output}");
-    assert!(output.contains("prompt"), "{output}");
-    assert!(output.contains("secret"), "{output}");
-    assert!(!output.contains("fixture-secret-3391"), "{output}");
-    assert_eq!(snapshot()?, before);
-
     // Also assert that a refused retry with invalid extension from a changed PATH leaves checkpoint unchanged
     let out = rig.command(&[
         "retry",

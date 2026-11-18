@@ -147,6 +147,16 @@ impl std::fmt::Debug for SecretInput {
     }
 }
 
+/// Memory-only values retained by the guardian's publication filter, never
+/// passed to the provider or included in a launch summary.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SecretValues(pub Vec<Vec<u8>>);
+impl std::fmt::Debug for SecretValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretValues(redacted)")
+    }
+}
+
 pub struct ExecOptions<'a> {
     pub argv: &'a [OsString],
     pub env: Option<&'a [(OsString, OsString)]>,

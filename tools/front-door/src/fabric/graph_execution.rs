@@ -606,7 +606,7 @@ impl Factory {
                                 .map(|id| id.as_str().to_owned())
                         })
                         .unwrap_or_else(|| format!("submit:{}", document.graph_id));
-                    super::interface::scan_graph_input(
+                    self.graph_input_warnings(
                         &serde_json::to_value(&document)
                             .map_err(|_| FacadeError::InvalidInput { detail: None })?,
                     )?;

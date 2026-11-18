@@ -405,12 +405,6 @@ pub fn admit_child_bound(
     writer_base: Option<(&str, &str)>,
 ) -> Result<ChildReceipt, PatchError> {
     let invalid = |message: String| PatchError::invalid(message);
-    // A child may arrive already compiled. Inspect it before live patch
-    // normalisation can redact a credential and hide it from admission.
-    let value =
-        serde_json::to_value(request).map_err(|_| invalid("invalid child request".into()))?;
-    super::refusal::scan_value(&value, context.scan)
-        .map_err(|cause| PatchError::secret(cause.field, cause.rule))?;
     if request.id.is_empty()
         || request.id.len() > ID_BYTES
         || request.id.contains(SEPARATOR)

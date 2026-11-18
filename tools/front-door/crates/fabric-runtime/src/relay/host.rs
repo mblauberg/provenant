@@ -198,8 +198,10 @@ impl HostRelay {
         std::fs::set_permissions(&relay.path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let cancel = relay.cancel.clone();
+        let publication = provenant_confinement::redact::capture_publication_scope();
         relay.thread = Some(thread::Builder::new().name("fabric-relay".into()).spawn(
             move || {
+                let _publication = publication.enter();
                 serve_connections(limits, &handler, &graph, &cancel, |send| {
                     while !cancel.is_cancelled() {
                         match listener.accept() {
@@ -241,10 +243,13 @@ fn serve_connections(
 ) {
     let (send, receive) = mpsc::sync_channel::<UnixStream>(32);
     let receive = Mutex::new(receive);
+    let publication = provenant_confinement::redact::capture_publication_scope();
     thread::scope(|scope| {
         for _ in 0..WORKERS {
             let receive = &receive;
+            let publication = publication.clone();
             scope.spawn(move || {
+                let _publication = publication.enter();
                 while !cancel.is_cancelled() {
                     let received = match receive.lock() {
                         Ok(receive) => receive.recv_timeout(Duration::from_millis(20)),
@@ -635,6 +640,37 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn relay_workers_mask_parent_descriptor_values_and_keep_examples()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("relay/socket");
+        let secret = b"parent-descriptor-3391";
+        let _scope = provenant_confinement::redact::publication_scope([secret.to_vec()])?;
+        let relay = HostRelay::start(
+            path.clone(),
+            provenant_records::Limits::CONFIG,
+            |_, _, _| {
+                let safe = provenant_confinement::redact::publication_text(
+                    b"parent-descriptor-3391 sk-unregistered-example-3391",
+                    [],
+                )
+                .map_err(|_| FacadeError::StateCorrupt)?;
+                Ok(serde_json::json!({"text":String::from_utf8_lossy(&safe)}))
+            },
+        )?;
+        let result = mutate(
+            &path,
+            &request(),
+            &CancelToken::new(),
+            Duration::from_secs(5),
+        )?;
+        assert_eq!(result["text"], "[REDACTED] sk-unregistered-example-3391");
+        drop(relay);
+        Ok(())
+    }
+
     #[test]
     fn relay_drop_cancels_handler_and_next_call_is_unavailable()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -807,7 +843,7 @@ mod tests {
                 library: &library,
                 resolvers: &resolvers,
                 limits: &limits,
-                scan: &|_| Ok(()),
+
                 journal: None,
 
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

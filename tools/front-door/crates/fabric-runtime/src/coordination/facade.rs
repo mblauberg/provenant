@@ -234,10 +234,6 @@ pub enum GraphRelayCause {
     InvalidTemplate,
     InvalidConfig,
     InvalidReview,
-    Secret {
-        field: crate::graph::refusal::SchemaPath,
-        rule: crate::graph::refusal::SecretRule,
-    },
     Cycle,
     Conflict,
 }
@@ -300,9 +296,6 @@ impl GraphRelayCause {
             }
             Self::InvalidReview => {
                 "the review panel could not be resolved; check the review routing configuration".into()
-            }
-            Self::Secret { field, rule } => {
-                format!("the {field} contains a credential-shaped value (rule {rule}); remove credential material before retrying")
             }
             Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency".into(),
             Self::Conflict => {
@@ -914,12 +907,6 @@ impl FacadeError {
                     reason: String::new(),
                 })
             }
-            CandidateError::Secret(cause) => Self::invalid(InvalidInputDetail::GraphRelayCause(
-                GraphRelayCause::Secret {
-                    field: cause.field,
-                    rule: cause.rule,
-                },
-            )),
             CandidateError::Extension(cause) => Self::DispatchRefused {
                 reason: cause.to_string(),
                 fact: Some(DispatchRefusalFact::GraphExtension(cause)),
@@ -1662,12 +1649,6 @@ mod diagnostic_tests {
             super::GraphRelayCause::WriterWorktree,
             super::GraphRelayCause::ChildDepth,
             super::GraphRelayCause::TargetOutsideGraph,
-            super::GraphRelayCause::Secret {
-                field: crate::graph::refusal::SchemaPath::root(
-                    crate::graph::refusal::SchemaField::Brief,
-                ),
-                rule: crate::graph::refusal::SecretRule::Secret,
-            },
         ] {
             let error = FacadeError::GraphRelayRefused {
                 refusal_code: "refused_child".into(),

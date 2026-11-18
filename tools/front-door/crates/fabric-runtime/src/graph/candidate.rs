@@ -1,5 +1,5 @@
 //! Pure graph admission shared by every publisher. No journal writes here.
-use super::refusal::{ExtensionCause, ExtensionRule, SecretCause};
+use super::refusal::{ExtensionCause, ExtensionRule};
 use super::*;
 use crate::coordination::{facade::GraphInput, input::ValidateInput};
 
@@ -28,8 +28,6 @@ pub enum CandidateError {
         node: refusal::GraphIdentifier,
         invariant: &'static str,
     },
-    #[error("{0}")]
-    Secret(SecretCause),
     #[error("{0}")]
     Extension(ExtensionCause),
     #[error("{0}")]
@@ -135,18 +133,6 @@ fn admit(
     }
     .validate_input(provenant_core::WaitTransport::Cli)
     .map_err(|_| CandidateError::Input)?;
-    if let Some(path) = requester_path {
-        patch::scan_for_secrets(&String::from_utf8_lossy(path)).map_err(|_| {
-            CandidateError::Secret(SecretCause {
-                field: refusal::SchemaPath::root(refusal::SchemaField::RequesterPath),
-                rule: refusal::SecretRule::Secret,
-            })
-        })?;
-    }
-    let scan = |value: &serde_json::Value| {
-        refusal::scan_value(value, &patch::scan_for_secrets).map_err(CandidateError::Secret)
-    };
-    scan(&serde_json::to_value(document).map_err(|_| CandidateError::Plan)?)?;
     let generous = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -159,7 +145,6 @@ fn admit(
     };
     let saved = checkpoint.map_or(&[][..], |c| c.extensions.as_slice());
     let expansions = checkpoint.map_or(&[][..], |c| c.expansions.as_slice());
-    scan(&serde_json::to_value(expansions).map_err(|_| CandidateError::Plan)?)?;
     // Persisted data must be diagnosed before prospective plan validation can
     // collapse its invariant into a generic invalid candidate.
     if checkpoint.is_some() {
@@ -229,11 +214,6 @@ fn admit(
     let (plan, _) =
         validate_flat_plan(&expanded, &generous).map_err(CandidateError::from_admission)?;
     validate_output_kinds(&expanded).map_err(CandidateError::from_admission)?;
-    // Expansion with no substitutions commonly retains the exact source.
-    // It has already passed both decoded-field and encoded-record scans.
-    if expanded != *document {
-        scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
-    }
     let topology_changes = if running_unchanged {
         let previous = plans::expand(document, saved, expansions, &generous)
             .map_err(|_| CandidateError::Plan)?;

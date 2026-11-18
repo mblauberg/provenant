@@ -49,7 +49,6 @@ fn add(
         journal: None,
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -383,7 +382,6 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         journal: None,
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -392,13 +390,6 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         ("missing", child("child", "unknown-parent"), "invalid"),
         ("b", child("child", "settled-parent"), "parent_settled"),
         ("a", child("child", "depth-limit"), "child_depth"),
-        (
-            "a",
-            {
-                child("AKIAIOSFODNN7EXAMPLE", "secret-child")
-            },
-            "secret",
-        ),
     ] {
         let (document, mut checkpoint) =
             live((expected == "child_depth").then(|| json!({"child_depth":0})));
@@ -417,49 +408,6 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         assert_eq!(error.code, expected, "{}", request.idempotency_key);
         assert_eq!(checkpoint, before, "{}", request.idempotency_key);
         assert_eq!(patch::revision(&checkpoint), 0);
-    }
-}
-
-// Spec: docs/specs/fabric.md#checkpoint-envelope
-#[test]
-fn child_launch_credentials_are_refused_before_normalisation() {
-    let library = template::TemplateLibrary::bundled();
-    let resolvers = Default::default();
-    let limits = plans::generous();
-    let context = patch::PatchContext {
-        journal: None,
-        library: &library,
-        resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
-        limits: &limits,
-        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
-    };
-    for compiled in [false, true] {
-        let (document, mut checkpoint) = live(None);
-        let before = checkpoint.clone();
-        let mut request = child("safe-child", "safe-key");
-        let secret = "password=fixture-secret-3391";
-        if compiled {
-            request.launch = Some(relay::ChildLaunch {
-                node: json!({"id":"safe-child", "prompt":secret, "access":"read_only"}),
-                templates: Default::default(),
-            });
-        } else {
-            request.prompt = secret.into();
-        }
-        let error = relay::admit_child(
-            &mut patch::LiveGraph {
-                document: &document,
-                checkpoint: &mut checkpoint,
-            },
-            "a",
-            &request,
-            &context,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "secret");
-        assert!(!error.to_string().contains(secret));
-        assert_eq!(checkpoint, before);
     }
 }
 
@@ -624,7 +572,6 @@ fn detached_children_do_not_gate_their_parents_dependants() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
@@ -841,7 +788,6 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -933,7 +879,6 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1013,7 +958,6 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
         journal: Some(&journal),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1047,7 +991,6 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1328,7 +1271,6 @@ fn successful_final_patch_producer_leaves_its_planned_work_pending() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
@@ -1504,7 +1446,6 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
         journal: None,
         limits: &limits,
         worktree_layout: ports.worktree_layout.clone(),
@@ -1550,7 +1491,6 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     let changed_context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
         journal: None,
         limits: &limits,
         worktree_layout: ports.worktree_layout,
@@ -1728,7 +1668,6 @@ fn bound_direct_and_planned_child_preserves_explicit_worktree_and_upstream_sourc
             journal: None,
             library: &library,
             resolvers: &resolvers,
-            scan: &|_| Ok(()),
             limits: &limits,
             worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         };
@@ -1953,7 +1892,6 @@ nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]
         journal: None,
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

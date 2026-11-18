@@ -3,7 +3,7 @@
 //! Storage only moves these bytes; it must never rewrite digested content.
 use super::*;
 
-/// Redact known credential shapes before graph text is planned or persisted.
+/// Mask typed and ambient credential values before graph text is persisted.
 pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
     #[cfg(test)]
     NORMALISATION_TRACE.with_borrow_mut(|trace| {
@@ -11,7 +11,7 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
             trace.push(text.to_owned());
         }
     });
-    let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+    let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
         .map_err(|_| "graph text redaction failed")?;
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
 }
@@ -44,171 +44,28 @@ pub(super) fn trace<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
 #[cfg(test)]
 pub(super) fn assert_once(trace: &[String], original: &str) {
     assert_eq!(trace.iter().filter(|text| *text == original).count(), 1);
-    let normal = normalise_prompt_text(original).unwrap();
-    assert_ne!(normal, original, "fixture must exercise normalisation");
-    assert!(
-        !trace.contains(&normal),
-        "already normalised text re-entered ingress"
-    );
-}
-
-/// A schema position, never inferred from user-defined keys or object shape.
-#[derive(Clone, Copy)]
-pub(super) enum Context {
-    Content,
-    Identity,
-    Document,
-    Patch,
-    Node,
-    Route,
-    RequestedRoute,
-    Source,
-    TemplateMap,
-    Template,
-    Plan,
-    Composite,
-    Loop,
-    Input,
-    Land,
-    Condition,
-    CiTarget,
-    Outputs,
-    Result,
-    Findings,
-    Finding,
-    RepairItem,
-    CiObservation,
-}
-
-impl Context {
-    fn child(self, key: &str) -> Self {
-        use Context::*;
-        match (self, key) {
-            (
-                Document,
-                "graph_id" | "review_base" | "integration_branch" | "replay_digest"
-                | "decision_session",
-            ) => Identity,
-            (Document, "nodes")
-            | (Patch, "nodes" | "replace")
-            | (Template, "node" | "nodes")
-            | (Composite, "nodes")
-            | (Loop, "body") => Node,
-            (Document, "submission_patch") => Patch,
-            (Document, "template_library") | (Patch, "templates") => TemplateMap,
-            (TemplateMap, _) => Template,
-            (Template, "name" | "tier") => Identity,
-            (Template, "exports")
-            | (Node, "inputs")
-            | (Composite, "exports")
-            | (Plan, "fallback_inputs") => Input,
-            (Patch, "idempotency_key" | "skip") => Identity,
-            (
-                Node,
-                "id" | "template" | "use" | "depends_on" | "after" | "after_settled"
-                | "after_expansion" | "continues" | "dispositions" | "parent_node" | "worktree"
-                | "review_base" | "review_lens" | "repair_lens",
-            ) => Identity,
-            (Node, "route" | "routes") => Route,
-            (Node, "source") => Source,
-            (Node, "composite") | (Plan, "fallback") => Composite,
-            (Node, "loop" | "repeat") => Loop,
-            (Node, "plan") => Plan,
-            (Node, "land") => Land,
-            (Node, "condition") => Condition,
-            (Plan, "patterns") => Template,
-            (Plan, "fallback_depends_on") | (Loop, "until" | "decision_session") => Identity,
-            (
-                Route,
-                "adapter" | "name" | "model" | "alias" | "effort" | "account" | "tier"
-                | "required_family" | "peer_source_head",
-            ) => Identity,
-            (Route, "peer_requested_route") => RequestedRoute,
-            (
-                RequestedRoute,
-                "kind" | "required_family" | "provider" | "name" | "model" | "effort"
-                | "excluded_families" | "preferred_families",
-            ) => Identity,
-            (Source, "type" | "commit" | "node") => Identity,
-            (Input, "node") | (Land, "node" | "session") | (CiTarget, "node") => Identity,
-            (Condition, "target") => CiTarget,
-            (Outputs, "findings") => Findings,
-            (Findings, _) => Finding,
-            (Outputs, "repair_items") => RepairItem,
-            (Outputs, "result") => Result,
-            (Outputs, "branch" | "commit") | (Result, "path" | "digest") => Identity,
-            (Finding, "id" | "file" | "path" | "lens" | "propagates")
-            | (RepairItem, "id")
-            | (CiObservation, "head_sha") => Identity,
-            // Everything else, including flattened extension values, is content.
-            // A content subtree can never re-enter a schema context.
-            _ => Content,
-        }
-    }
-}
-
-/// Identity bytes and object keys are immutable, so refuse credentials rather
-/// than silently changing references. Check the entire fresh structured block,
-/// including fields that a later typed projection may discard.
-pub(super) fn validate_identities(
-    value: &serde_json::Value,
-    context: Context,
-) -> Result<(), &'static str> {
-    let scan = |text: &str| {
-        provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
-            .map_err(|_| "credential in structured output identity or object key")
-    };
-    match value {
-        serde_json::Value::String(text)
-            if matches!(context, Context::Identity | Context::CiTarget) =>
-        {
-            scan(text)?
-        }
-        serde_json::Value::Array(values) => {
-            let child = if matches!(context, Context::Findings) {
-                Context::Finding
-            } else {
-                context
-            };
-            for value in values {
-                validate_identities(value, child)?;
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for (key, value) in values {
-                scan(key)?;
-                validate_identities(value, context.child(key))?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    assert_eq!(normalise_prompt_text(original).unwrap(), original);
 }
 
 pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
     input: &T,
-    context: Context,
 ) -> Result<T, &'static str> {
-    fn visit(value: &mut serde_json::Value, context: Context) -> Result<(), &'static str> {
+    fn visit(value: &mut serde_json::Value) -> Result<(), &'static str> {
         match value {
-            serde_json::Value::String(value)
-                if !matches!(context, Context::Identity | Context::CiTarget) =>
-            {
-                *value = normalise_prompt_text(value)?;
-            }
+            serde_json::Value::String(value) => *value = normalise_prompt_text(value)?,
             serde_json::Value::Array(values) => {
-                let child = if matches!(context, Context::Findings) {
-                    Context::Finding
-                } else {
-                    context
-                };
                 for value in values {
-                    visit(value, child)?;
+                    visit(value)?;
                 }
             }
             serde_json::Value::Object(values) => {
-                for (key, value) in values {
-                    visit(value, context.child(key))?;
+                let entries = std::mem::take(values);
+                for (key, mut value) in entries {
+                    visit(&mut value)?;
+                    let key = normalise_prompt_text(&key)?;
+                    if values.insert(key, value).is_some() {
+                        return Err("credential masking collapsed object keys");
+                    }
                 }
             }
             _ => {}
@@ -216,10 +73,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
         Ok(())
     }
     let mut value = serde_json::to_value(input).map_err(|_| "cannot encode graph text")?;
-    validate_identities(&value, context)?;
-    visit(&mut value, context)?;
-    let text = serde_json::to_string(&value).map_err(|_| "cannot encode graph text")?;
-    super::patch::scan_for_secrets(&text).map_err(|_| "graph text matches a secret pattern")?;
+    visit(&mut value)?;
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 
@@ -229,8 +83,8 @@ pub(super) fn captured_handoff(
     capture: &mut crate::result_capture::CapturedResult,
 ) -> Result<(), &'static str> {
     match &mut capture.handoff {
-        Ok(handoff) => *handoff = normalise(handoff, Context::Content)?,
-        Err(error) => error.retained = normalise(&error.retained, Context::Content)?,
+        Ok(handoff) => *handoff = normalise(handoff)?,
+        Err(error) => error.retained = normalise(&error.retained)?,
     }
     Ok(())
 }
@@ -239,7 +93,7 @@ pub(super) fn captured_handoff(
 /// upstream evidence. Only the fresh output projection enters the walker here.
 pub(super) fn captured_outputs(mut outputs: NodeOutputs) -> Result<NodeOutputs, &'static str> {
     let findings = std::mem::take(&mut outputs.findings);
-    let mut outputs = normalise(&outputs, Context::Outputs)?;
+    let mut outputs = normalise(&outputs)?;
     outputs.findings = findings;
     Ok(outputs)
 }
@@ -250,7 +104,7 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn prompt_normalisation_preserves_control_identities() {
+    fn prompt_normalisation_preserves_secret_shaped_examples_and_references() {
         let identity = "control-id";
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let value = serde_json::json!({
@@ -264,7 +118,7 @@ mod tests {
             "with": {"source": secret, "path": [secret], "template": secret},
             "template_library": {"test": {"doc": secret, "parameters": {"value": {"type": "string", "doc": secret}}}}
         });
-        let safe: serde_json::Value = normalise(&value, Context::Document).unwrap();
+        let safe: serde_json::Value = normalise(&value).unwrap();
         for pointer in [
             "/graph_id",
             "/nodes/0/id",
@@ -274,13 +128,19 @@ mod tests {
         ] {
             assert_eq!(safe.pointer(pointer).unwrap(), identity);
         }
-        assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
-        assert_eq!(safe, normalise(&safe, Context::Document).unwrap());
+        assert_eq!(safe.pointer("/nodes/0/prompt").unwrap(), secret);
+        assert_eq!(safe.pointer("/nodes/0/comment/nodes/0/id").unwrap(), secret);
+        assert_eq!(
+            safe.pointer("/provenance/parameters/source").unwrap(),
+            secret
+        );
+        assert!(serde_json::to_string(&safe).unwrap().contains(secret));
+        assert_eq!(safe, normalise(&safe).unwrap());
     }
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn captured_findings_and_handoff_use_the_same_normal_form() {
+    fn captured_secret_shaped_examples_are_kept_in_findings_and_handoff() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let summary = format!("finding summary {secret}");
         let comment = format!("repair extension {secret}");
@@ -308,7 +168,7 @@ mod tests {
         });
         assert_once(&calls, &note);
         assert!(
-            !input
+            input
                 .handoff
                 .as_ref()
                 .unwrap()
@@ -321,69 +181,38 @@ mod tests {
         assert_once(&calls, &comment);
         assert_eq!(safe.repair_items.as_ref().unwrap()[0].id, "F1");
         assert!(
-            !safe.repair_items.as_ref().unwrap()[0].extra["comment"]
+            safe.repair_items.as_ref().unwrap()[0].extra["comment"]
                 .as_str()
                 .unwrap()
                 .contains(secret)
         );
         assert_eq!(safe.result.as_ref().unwrap().digest, input.digest);
-        assert!(!safe.verdict.as_deref().unwrap().contains(secret));
-        assert!(!safe.result.as_ref().unwrap().excerpt.contains(secret));
+        assert!(safe.verdict.as_deref().unwrap().contains(secret));
+        assert!(safe.result.as_ref().unwrap().excerpt.contains(secret));
         assert_eq!(safe.findings[0].id, "F1");
         assert_eq!(safe.findings[0].file, "src/lib.rs");
         assert_eq!(safe.findings[0].propagates.as_deref(), Some("upstream:F1"));
-        assert!(!safe.findings[0].summary.contains(secret));
+        assert!(safe.findings[0].summary.contains(secret));
     }
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn captured_credentials_in_identities_or_keys_refuse_the_whole_block() {
+    fn secret_shaped_identity_and_object_keys_are_preserved_consistently() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
-        let base = serde_json::json!({
-            "schema_version": 1,
-            "findings": [{"id":"F1", "file":"src/lib.rs", "severity":"high",
-                "summary":"valid finding", "status":"open", "propagates":"upstream:F1"}],
-            "repair_items": [{"id":"F1", "status":"fixed", "reason":"fixed it"}]
+        let input = serde_json::json!({
+            "graph_id": secret,
+            "nodes": [{"id":secret, "depends_on":[secret], "prompt":"example " .to_owned() + secret}],
+            "metadata": {secret: "secret shaped example"}
         });
-        let mut cases = Vec::new();
-        for pointer in [
-            "/findings/0/id",
-            "/findings/0/file",
-            "/findings/0/propagates",
-            "/repair_items/0/id",
-        ] {
-            let mut value = base.clone();
-            *value.pointer_mut(pointer).unwrap() = secret.into();
-            cases.push(value);
-        }
-        let mut keyed = base.clone();
-        keyed["findings"] = serde_json::json!({secret: base["findings"][0].clone()});
-        cases.push(keyed);
-        let mut extension = base.clone();
-        extension["unknown"] = serde_json::json!({"nested": {secret: "extension key"}});
-        cases.push(extension);
-        let mut keyed_identity = base.clone();
-        keyed_identity["findings"] = serde_json::json!({"F1": base["findings"][0].clone()});
-        keyed_identity["findings"]["F1"]["file"] = secret.into();
-        cases.push(keyed_identity);
-        for value in cases {
-            let original = value.clone();
-            let mut input = crate::result_capture::ResultCapture::new(None);
-            input.push(format!("VERDICT: PASS\n```findings\n{value}\n```\n").as_bytes());
-            let input = input.finish();
-            let outputs =
-                captured_outputs(outputs::make_outputs(Some(&input), None, None, None, None))
-                    .unwrap();
-            assert_eq!(outputs.findings_available, Some(false));
-            assert!(outputs.findings.is_empty());
-            assert!(outputs.repair_items.is_none());
-            assert!(
-                outputs
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.starts_with(outputs::FINDINGS_INVALID))
-            );
-            assert!(!serde_json::to_string(&outputs).unwrap().contains(secret));
-            assert_eq!(value, original, "refusal must not rewrite identities");
-        }
+        let safe: serde_json::Value = normalise(&input).unwrap();
+        assert_eq!(safe["graph_id"], secret);
+        assert_eq!(safe["nodes"][0]["id"], secret);
+        assert_eq!(safe["nodes"][0]["depends_on"][0], secret);
+        assert!(
+            safe["nodes"][0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains(secret)
+        );
+        assert_eq!(safe["metadata"][secret], "secret shaped example");
     }
 }

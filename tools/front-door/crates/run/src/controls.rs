@@ -162,6 +162,7 @@ fn extensions(
 }
 
 /// A continuation of one terminal attempt with new input, as a new run.
+#[derive(Clone)]
 pub struct Resume {
     pub prior: AttemptId,
     pub expected_generation: u64,

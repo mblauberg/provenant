@@ -3097,7 +3097,6 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
             &patch::PatchContext {
                 library: &library,
                 resolvers: &resolvers,
-                scan: &patch::scan_for_secrets,
                 journal: None,
                 limits: &Default::default(),
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

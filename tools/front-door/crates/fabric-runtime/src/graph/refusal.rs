@@ -1,30 +1,42 @@
 //! Closed disclosure facts: caller text cannot be stored in a refusal cause.
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 /// A caller identifier may be disclosed only after its grammar has been checked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct GraphIdentifier(String);
+#[serde(try_from = "Option<String>", into = "Option<String>")]
+pub struct GraphIdentifier(Option<String>);
 
 impl TryFrom<String> for GraphIdentifier {
     type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if super::valid_node_identifier(&value) && super::patch::scan_for_secrets(&value).is_ok() {
-            Ok(Self(value))
+        if super::valid_node_identifier(&value) {
+            // This is a disclosure fact, never the graph's control identity.
+            // Keep the typed cause even when its identifier needs masking.
+            let safe = match provenant_confinement::redact::publication_text(value.as_bytes(), []) {
+                Ok(bytes) if bytes == value.as_bytes() => Some(value),
+                _ => None,
+            };
+            Ok(Self(safe))
         } else {
             Err("invalid graph identifier")
         }
     }
 }
-impl From<GraphIdentifier> for String {
+impl TryFrom<Option<String>> for GraphIdentifier {
+    type Error = &'static str;
+    fn try_from(value: Option<String>) -> Result<Self, Self::Error> {
+        value.map_or(Ok(Self(None)), Self::try_from)
+    }
+}
+impl From<GraphIdentifier> for Option<String> {
     fn from(value: GraphIdentifier) -> Self {
         value.0
     }
 }
 impl fmt::Display for GraphIdentifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.0.as_deref().unwrap_or_default())
     }
 }
 
@@ -140,76 +152,89 @@ impl fmt::Display for SchemaPath {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SecretRule {
-    #[default]
-    Secret,
-}
-impl fmt::Display for SecretRule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("secret")
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[error("the {field} contains a credential-shaped value (rule {rule})")]
-pub struct SecretCause {
-    pub field: SchemaPath,
-    pub rule: SecretRule,
-}
-
-/// Walk strings and keys, retaining schema positions only. Scanner prose is discarded.
-pub fn scan_value(
+/// Find secret-shaped text for a configurable, non-boundary policy rule.
+/// Warnings disclose only a schema path and the reason, never the value.
+pub fn input_warnings(
     value: &serde_json::Value,
-    scan: &dyn Fn(&str) -> Result<(), String>,
-) -> Result<(), SecretCause> {
-    fn walk<'a>(
-        value: &'a serde_json::Value,
+    policy: &provenant_records::policy::Policy,
+) -> Result<Vec<String>, Box<provenant_records::diagnostic::Diagnostic>> {
+    use provenant_records::policy::{Effect, Facts};
+
+    fn check(
         path: &SchemaPath,
-        scan: &dyn Fn(&str) -> Result<(), String>,
-        scanned: &mut std::collections::HashSet<&'a str>,
-    ) -> Result<(), SecretCause> {
-        let refuse = |field| SecretCause {
-            field,
-            rule: SecretRule::Secret,
-        };
+        text: &str,
+        policy: &provenant_records::policy::Policy,
+        warnings: &mut Vec<String>,
+    ) -> Result<(), Box<provenant_records::diagnostic::Diagnostic>> {
+        if super::patch::scan_for_secrets(text).is_ok() {
+            return Ok(());
+        }
+        let fact = Facts::violation(format!("{path} looks like a credential"));
+        match policy.check("SECRET_SHAPED_INPUT", fact) {
+            Effect::Proceed => Ok(()),
+            Effect::Warn(message) => {
+                warnings.push(message);
+                Ok(())
+            }
+            Effect::Refuse(diagnostic) => Err(diagnostic),
+        }
+    }
+
+    fn walk(
+        value: &serde_json::Value,
+        path: &SchemaPath,
+        policy: &provenant_records::policy::Policy,
+        seen: &mut HashSet<String>,
+        warnings: &mut Vec<String>,
+        matched: &mut bool,
+    ) -> Result<(), Box<provenant_records::diagnostic::Diagnostic>> {
         match value {
-            serde_json::Value::String(text) if scanned.insert(text) && scan(text).is_err() => {
-                Err(refuse(path.clone()))
+            serde_json::Value::String(text) => {
+                if seen.insert(text.clone()) && super::patch::scan_for_secrets(text).is_err() {
+                    *matched = true;
+                    check(path, text, policy, warnings)?;
+                }
             }
             serde_json::Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    walk(item, &path.index(index), scan, scanned)?;
+                    walk(item, &path.index(index), policy, seen, warnings, matched)?;
                 }
-                Ok(())
             }
             serde_json::Value::Object(fields) => {
                 for (key, value) in fields {
                     let child = path.key(key);
-                    if scanned.insert(key) && scan(key).is_err() {
-                        return Err(refuse(child));
+                    if seen.insert(key.clone()) && super::patch::scan_for_secrets(key).is_err() {
+                        *matched = true;
+                        check(&child, key, policy, warnings)?;
                     }
-                    walk(value, &child, scan, scanned)?;
+                    walk(value, &child, policy, seen, warnings, matched)?;
                 }
-                Ok(())
             }
-            _ => Ok(()),
+            _ => {}
         }
+        Ok(())
     }
-    // Snapshots can retain the same prompt in nodes, template bindings and
-    // submission patches. Its first occurrence supplies the schema position;
-    // rescanning identical text cannot discover another secret.
-    walk(value, &SchemaPath::default(), scan, &mut Default::default())?;
-    // Keep the whole-record scan too: a scanner may recognise encoded or
-    // cross-field forms that are absent from individual decoded strings.
-    if let Ok(encoded) = serde_json::to_string(value) {
-        scan(&encoded).map_err(|_| SecretCause {
-            field: SchemaPath::default(),
-            rule: SecretRule::Secret,
-        })?;
+
+    let mut warnings = Vec::new();
+    let mut matched = false;
+    walk(
+        value,
+        &SchemaPath::default(),
+        policy,
+        &mut HashSet::new(),
+        &mut warnings,
+        &mut matched,
+    )?;
+    // Preserve coverage for credentials assembled across adjacent fragments.
+    // Leaf matches already have better paths, so this is only reported when
+    // none of the decoded fields matched individually.
+    if !matched
+        && let Ok(encoded) = serde_json::to_string(value)
+        && super::patch::scan_for_secrets(&encoded).is_err()
+    {
+        check(&SchemaPath::default(), &encoded, policy, &mut warnings)?;
     }
-    Ok(())
+    Ok(warnings)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,7 +371,7 @@ impl ExtensionCause {
                 .and_then(|key| key.rsplit_once('.'))
                 .map(|(name, _)| name)
                 .filter(|name| super::valid_node_identifier(name))
-                .map(str::to_owned),
+                .and_then(|name| super::normalise_prompt_text(name).ok()),
         }
     }
 
@@ -391,7 +416,6 @@ mod tests {
             assert_eq!(
                 constructed.is_ok(),
                 super::super::valid_node_identifier(value)
-                    && super::super::patch::scan_for_secrets(value).is_ok()
             );
             assert_eq!(decoded.is_ok(), constructed.is_ok());
             if let Ok(identifier) = constructed {
@@ -402,24 +426,91 @@ mod tests {
     }
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn secret_shaped_identifiers_keep_cycle_causes_and_registered_values_are_masked() {
+        let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let graph: super::super::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2,"graph_id":"shape-cycle","nodes":[
+                {"id":example,"prompt":"work","access":"read_only","route":{"alias":"senior"},"depends_on":["other"]},
+                {"id":"other","prompt":"work","access":"read_only","route":{"alias":"senior"},"depends_on":[example]}
+            ]
+        })).unwrap();
+        let error = super::super::admit_candidate(
+            &graph,
+            None,
+            &[],
+            &Default::default(),
+            &Default::default(),
+            None,
+        )
+        .err()
+        .expect("cycle must still refuse");
+        assert!(
+            matches!(error, super::super::CandidateError::Cycle { ref node } if node.to_string() == example)
+        );
+        for value in [example, "redacted"] {
+            let _scope =
+                provenant_confinement::redact::publication_scope([value.as_bytes().to_vec()])
+                    .unwrap();
+            let masked = GraphIdentifier::try_from(value.to_owned()).unwrap();
+            assert!(masked.to_string().is_empty());
+            assert!(serde_json::to_value(&masked).unwrap().is_null());
+            let restored: GraphIdentifier =
+                serde_json::from_value(serde_json::to_value(masked).unwrap()).unwrap();
+            assert!(restored.to_string().is_empty());
+        }
+    }
+
     #[test]
     fn schema_paths_never_resume_schema_names_inside_caller_maps() {
         for value in [
-            serde_json::json!({"nodes":[{"CALLER_MARKER":{"brief":"credential"}}]}),
-            serde_json::json!({"context":{"brief":{"prompt":"credential"}}}),
+            serde_json::json!({"nodes":[{"CALLER_MARKER":{"brief":"password=fixture-secret-3391"}}]}),
+            serde_json::json!({"context":{"brief":{"prompt":"password=fixture-secret-3391"}}}),
         ] {
-            let cause = scan_value(&value, &|text| {
-                if text.contains("credential") {
-                    Err("SCANNER_MARKER".into())
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap_err();
-            let text = cause.to_string();
+            let policy = provenant_records::policy::Policy::default();
+            let warnings = input_warnings(&value, &policy).unwrap();
+            assert_eq!(warnings.len(), 1);
+            let text = &warnings[0];
             assert!(text.contains("[<key>][<key>]"), "{text}");
             assert!(!text.contains("CALLER_MARKER"));
-            assert!(!text.contains("SCANNER_MARKER"));
+            assert!(text.contains("looks like a credential"));
         }
+    }
+
+    #[test]
+    fn secret_shaped_inputs_warn_without_disclosing_values_and_policy_can_refuse() {
+        use provenant_records::policy::{Policy, Source, Strength};
+        use std::collections::BTreeMap;
+
+        let marker = "fixture-secret-3391";
+        let input = serde_json::json!({"nodes":[{"prompt":format!("password={marker}")}]});
+        let warnings = input_warnings(&input, &Policy::default()).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("nodes[0].prompt"));
+        assert!(warnings[0].contains("looks like a credential"));
+        assert!(!warnings[0].contains(marker));
+
+        let mut strict = Policy::default();
+        strict.overlay(
+            &BTreeMap::from([("SECRET_SHAPED_INPUT".into(), Strength::Refuse)]),
+            Source::Project,
+        );
+        let refusal = input_warnings(&input, &strict).unwrap_err();
+        assert_eq!(refusal.code, "SECRET_SHAPED_INPUT");
+        assert!(
+            refusal
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("nodes[0].prompt")
+        );
+        assert!(
+            !refusal
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains(marker)
+        );
     }
 }

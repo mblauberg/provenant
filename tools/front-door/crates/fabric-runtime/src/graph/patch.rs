@@ -2,7 +2,7 @@
 //!
 //! `admit_patch` compiles a patch's nodes and inline templates, checks it
 //! against an expected revision and an idempotency key, refuses cycles,
-//! conflicting edits and secrets, and journals it as one checkpoint
+//! conflicting edits, and journals it as one checkpoint
 //! expansion. A planner's fragment, a host submission and a live call from a
 //! lane all use it. Started attempts are immutable: `skip` and `replace` act
 //! only on nodes that have not started.
@@ -195,7 +195,7 @@ pub struct LadderChoice {
 #[error("{message}")]
 pub struct PatchError {
     /// Stable cause: `stale_revision`, `idempotency_conflict`, `cycle`,
-    /// `conflict`, `started`, `edit_scope`, `secret`, `journal` or `invalid`.
+    /// `conflict`, `started`, `edit_scope`, `journal` or `invalid`.
     pub code: &'static str,
     pub message: String,
     /// Closed diagnostic fact retained when a planner uses this admission path.
@@ -208,8 +208,6 @@ pub struct PatchError {
     pub candidate: Option<Box<CandidateError>>,
     /// The supplied parameter a template refused, when compilation failed on one.
     pub parameter: Option<Box<ParameterRefusal>>,
-    pub field: Option<refusal::SchemaPath>,
-    pub rule: Option<refusal::SecretRule>,
 }
 
 impl PatchError {
@@ -221,20 +219,6 @@ impl PatchError {
             admission: None,
             candidate: None,
             parameter: None,
-            field: None,
-            rule: None,
-        }
-    }
-    pub fn secret(field: refusal::SchemaPath, rule: refusal::SecretRule) -> Self {
-        Self {
-            code: "secret",
-            message: format!("the {field} contains a credential-shaped value (rule {rule})"),
-            cause: None,
-            admission: None,
-            candidate: None,
-            parameter: None,
-            field: Some(field),
-            rule: Some(rule),
         }
     }
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
@@ -267,8 +251,6 @@ pub type PatchJournal<'a> = dyn Fn(&PatchRecord) -> Result<(), String> + 'a;
 pub struct PatchContext<'a> {
     pub library: &'a TemplateLibrary,
     pub resolvers: &'a BTreeMap<String, Vec<String>>,
-    /// Refuses text that matches a secret pattern.
-    pub scan: &'a dyn Fn(&str) -> Result<(), String>,
     /// Writes an admitted patch to the graph's journal. `admit_patch` calls it
     /// before the admission is committed, so a failed write admits nothing.
     pub journal: Option<&'a PatchJournal<'a>>,
@@ -277,16 +259,10 @@ pub struct PatchContext<'a> {
     pub worktree_layout: provenant_config::WorktreeLayoutPort,
 }
 
-/// The confinement secret scan, as submission applies it.
+/// Detect credential-shaped text for advisory input policy and safe diagnostics.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
-    // Scan the original bytes so redaction markers retain their token boundaries.
-    let filtered = provenant_confinement::redact::known_shapes(text.as_bytes())
-        .map_err(|_| "patch secret scan failed".to_owned())?;
-    if filtered == text.as_bytes() {
-        Ok(())
-    } else {
-        Err("patch matches a secret pattern; remove the secret and retry".to_owned())
-    }
+    provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
+        .map_err(|_| "input looks like a credential".to_owned())
 }
 
 /// A running graph: its submitted document and its checkpoint.
@@ -549,22 +525,11 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
-    if let Some(brief) = brief {
-        (context.scan)(brief).map_err(|_| {
-            PatchError::secret(
-                refusal::SchemaPath::root(refusal::SchemaField::Prompt),
-                refusal::SecretRule::Secret,
-            )
-        })?;
-    }
     let normalised_brief = brief
         .map(prompt_text::normalise_prompt_text)
         .transpose()
         .map_err(PatchError::invalid)?;
     let brief = normalised_brief.as_deref();
-    if let Some(brief) = brief {
-        (context.scan)(brief).map_err(|reason| PatchError::new("secret", reason))?;
-    }
     let expanded = plans::expand(
         graph.document,
         &graph.checkpoint.extensions,
@@ -780,11 +745,7 @@ fn retry_node_scope(
     if let Some(routes) = replacement_routes {
         node.route = None;
         let routes: Vec<GraphRoute> =
-            prompt_text::normalise(&routes.to_vec(), prompt_text::Context::Route)
-                .map_err(PatchError::invalid)?;
-        let text =
-            serde_json::to_string(&routes).map_err(|e| PatchError::invalid(e.to_string()))?;
-        (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+            prompt_text::normalise(&routes.to_vec()).map_err(PatchError::invalid)?;
         node.routes = Some(routes);
     }
     // A reset removes its expansion-pause marker. Move the graph pause to
@@ -962,8 +923,7 @@ pub fn submission(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
-    *document = prompt_text::normalise(document, prompt_text::Context::Document)
-        .map_err(PatchError::invalid)?;
+    *document = prompt_text::normalise(document).map_err(PatchError::invalid)?;
     for node in &mut document.nodes {
         node.template.get_or_insert_with(|| "raw".into());
     }
@@ -1031,12 +991,10 @@ pub fn submission(
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &scan_for_secrets,
         journal: None,
         limits,
         worktree_layout,
     };
-    scan(&patch, &context)?;
     let compiled = compile_submission(
         &document.graph_id,
         &patch,
@@ -1060,10 +1018,7 @@ pub fn submit(
     integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
     let document = compile_submission(graph_id, patch, context, integration_branch)?;
-    let document: GraphDocument = prompt_text::normalise(&document, prompt_text::Context::Document)
-        .map_err(PatchError::invalid)?;
-    let text = serde_json::to_string(&document).map_err(|e| PatchError::invalid(e.to_string()))?;
-    (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+    let document: GraphDocument = prompt_text::normalise(&document).map_err(PatchError::invalid)?;
     admit_submission(&document, context)?;
     Ok(document)
 }
@@ -1206,12 +1161,6 @@ pub(super) struct Admission {
     pub warnings: Vec<String>,
 }
 
-fn scan(patch: &Patch, context: &PatchContext<'_>) -> Result<(), PatchError> {
-    let value = serde_json::to_value(patch).map_err(|_| PatchError::invalid("invalid patch"))?;
-    refusal::scan_value(&value, context.scan)
-        .map_err(|cause| PatchError::secret(cause.field, cause.rule))
-}
-
 /// Compile and check a patch against the current expansion without changing
 /// the checkpoint.
 pub(super) enum Preparation<'a> {
@@ -1236,10 +1185,7 @@ pub(super) fn prepare(
     // the steer boundary. Captured fragments were normalised before storage.
     // Only a live patch still carries unprocessed ingress text.
     let normalised = if matches!(mode, Preparation::Live { retry: None }) {
-        Some(
-            prompt_text::normalise(patch, prompt_text::Context::Patch)
-                .map_err(PatchError::invalid)?,
-        )
+        Some(prompt_text::normalise(patch).map_err(PatchError::invalid)?)
     } else {
         None
     };
@@ -1294,9 +1240,6 @@ pub(super) fn prepare(
         return Err(PatchError::invalid(
             "patch adds, skips and replaces nothing",
         ));
-    }
-    if matches!(mode, Preparation::Live { retry: None }) {
-        scan(patch, context)?;
     }
 
     // A planner's catalogue is host-authored and trusted; inline templates
@@ -1551,14 +1494,6 @@ pub(super) fn prepare(
     if matches!(mode, Preparation::FinalFragment) {
         expansion.final_fragment = true;
     }
-    // Compilation, item expansion and namespacing can join separately safe
-    // fragments. Scan only this admission's final product, never the stored
-    // document or prior expansions, and never rewrite their digested bytes.
-    if retry.is_none() {
-        let text = serde_json::to_string(&expansion)
-            .map_err(|error| PatchError::invalid(error.to_string()))?;
-        (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
-    }
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);
     let mut loop_writers = BTreeMap::new();
@@ -1590,10 +1525,7 @@ pub(super) fn prepare(
         None,
     )
     .map_err(|error| {
-        let mut refusal = match &error {
-            CandidateError::Secret(cause) => PatchError::secret(cause.field.clone(), cause.rule),
-            _ => PatchError::invalid(error.to_string()),
-        };
+        let mut refusal = PatchError::invalid(error.to_string());
         refusal.cause = match &error {
             CandidateError::Structural(limit) | CandidateError::NodeStructural { limit, .. } => {
                 Some(PlanFailureFact::Structural(*limit))

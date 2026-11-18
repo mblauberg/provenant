@@ -281,7 +281,6 @@ pub(super) fn correct_verdict(
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
             limits,
-            scan: &patch::scan_for_secrets,
             journal: None,
             worktree_layout: worktree_layout.clone(),
         },

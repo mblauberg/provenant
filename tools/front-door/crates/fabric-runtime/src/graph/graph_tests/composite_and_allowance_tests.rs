@@ -185,7 +185,6 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -327,7 +326,6 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

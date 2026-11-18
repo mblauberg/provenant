@@ -179,6 +179,7 @@ struct LaunchMessage {
     cwd: Vec<u8>,
     stdin: Vec<u8>,
     secret_input: Option<provenant_os::exec::SecretInput>,
+    publication_values: provenant_os::exec::SecretValues,
     holder_context: Vec<u8>,
     capture: CapturePlan,
 }
@@ -246,6 +247,7 @@ pub(crate) fn handoff(
         cwd: owned.command.cwd.as_os_str().as_bytes().to_vec(),
         stdin: owned.command.stdin,
         secret_input: owned.command.secret_input,
+        publication_values: owned.command.publication_values,
         holder_context: owned.command.holder_context,
         capture,
     };
@@ -283,9 +285,19 @@ pub(crate) fn handoff(
     Ok(())
 }
 
+/// Bind a transient publication scope without retaining credentials.
+pub type PublicationScopeBinder =
+    dyn Fn(
+        &[(Vec<u8>, Vec<u8>)],
+        Option<&provenant_os::exec::SecretInput>,
+        &provenant_os::exec::SecretValues,
+    ) -> std::result::Result<Box<dyn std::any::Any>, provenant_os::exec::FilterError>;
+
 /// Composition seam for Run's bounded provider decoder and confinement filter.
 #[derive(Default)]
 pub struct GuardianHooks<'a> {
+    /// Memory-only scope retained through capture and holder settlement.
+    pub publication_scope: Option<&'a PublicationScopeBinder>,
     /// Host disk policy, sampled only while this attempt has a live provider.
     pub disk: Option<&'a dyn DiskPressure>,
     /// Resource sampling cadence selected from `[domains.run]`; `None` uses the compiled default.
@@ -483,6 +495,17 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         crate::process_os::handoff::receive(&mut inherited.channel, Duration::from_secs(10))?;
     let mut message: LaunchMessage =
         decode_v1(payload.as_slice(), LAUNCH_LIMITS).map_err(|_| CustodyError::InvalidRecord)?;
+    let _publication_scope = hooks
+        .publication_scope
+        .map(|bind| {
+            bind(
+                &message.environment,
+                message.secret_input.as_ref(),
+                &message.publication_values,
+            )
+        })
+        .transpose()
+        .map_err(|_| CustodyError::InvalidRecord)?;
     let argv_check: Vec<_> = message
         .argv
         .iter()

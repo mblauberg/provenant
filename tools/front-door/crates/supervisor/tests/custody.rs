@@ -507,6 +507,7 @@ fn start_with_profile(
     )?;
     let identity = publication.custody_metadata()?;
     let mut command = ProviderCommand {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
         priority: 0,
@@ -1359,6 +1360,7 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
         priority: 0,
@@ -1418,6 +1420,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
         priority: 0,

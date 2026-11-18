@@ -181,7 +181,7 @@ input, write scope or explicit plan parameter emits the advisory
 Launch, retry, edit and relay add/edit build the complete candidate in memory.
 Requester binding and PATH, extension syntax (`GraphInput::validate_input`),
 prospective loop expansion, structural host limits, the checkpoint
-envelope and the secret scan must all pass before publishing anything. The
+envelope and effective input policy must all pass before publishing anything. The
 journal lock covers reading the original state through publication. A refused
 candidate leaves the checkpoint and execution binding unchanged. The pure
 `admit_candidate` gate owns admission; entry points do not maintain separate
@@ -201,9 +201,15 @@ the complete retained extension list contributes to the checkpoint envelope.
 
 Admission refusals may name node IDs, loop keys and field paths that passed the
 identifier grammar, and host-owned rule identifiers and schema positions. They
-never echo free-form caller text such as prompt or brief bodies. `SchemaPath` and `SecretRule` are closed types. Arbitrary
-map keys become `[<key>]`; array positions may use indices. Both original
-strings and object keys are scanned. Extension causes carry a closed extension
+never echo free-form caller text such as prompt or brief bodies. A disclosure
+identifier containing a registered credential is omitted (`null`) while the
+refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbitrary
+map keys become `[<key>]`; array positions may use indices. Secret-shaped input
+produces a `SECRET_SHAPED_INPUT` warning naming the field and saying it looks
+like a credential, without echoing the value. The compiled default is Warn;
+`policy.SECRET_SHAPED_INPUT` can select Off or Refuse, with source and knob
+named in each warning. Policy refusal occurs before any mutation or reservation.
+Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
 kind and rule; limit causes name the host limit, never the supplied value.
 CLI stderr, diagnostic JSON and relay wire details project the same cause.
 
@@ -442,36 +448,32 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 `redact::known_values` masks explicitly supplied credential values while
-preserving other text. Callers must supply the values before publication.
+preserving other text. Publication helpers combine typed values with non-empty
+ambient credential variables, using the existing credential-key vocabulary;
+they do not open credential stores or broaden access. The launch carries ambient
+values across the private guardian handoff in a redacted-debug wrapper, separate
+from the provider environment. A thread-bound, memory-only publication scope
+also supplies descriptor credentials through capture and settlement, then clears
+on every exit. Literal and JSON-escaped
+spellings are masked in stored prompts, checkpoints, events, captured outputs
+and diagnostics. Stored content preserves unregistered secret-shaped examples.
+Warning projections retain schema paths and policy facts only.
 
 Admission bounds the worst-case checkpoint before saving the plan.
-Graph text is normalised exactly once, at ingress, by schema path.
-`prompt_text::Context` enumerates identity positions (finding IDs, files and
-propagation markers, repair item IDs, node references, routes, template names
-and sources). Identity fields and all object keys are scanned across the whole
-new structured capture, including fields omitted by typed projections. A
-credential-shaped identity or key refuses that capture as invalid output; it is
-never rewritten. Only declared scalar identity fields retain their bytes: a route
-or source object does not exempt its extension values. Every other string is
-content, including flattened extension maps and template or parameter
-documentation. Content descendants cannot re-enter a schema context through
-identity-like keys. Live patches, retry briefs and CI observations use this
-representation before planning or hashing. A steer normalises only its new
-brief and replacement routes, preserving the rest of its stored node.
-Captured findings are parsed and normalised before merging stored upstream
-evidence; the remaining fresh capture projection (including handoff fields and
-repair item extensions) is normalised once before becoming graph outputs.
-Raw transient captures remain available to parse new patches at their own
-ingress, and never become persisted graph text. Captured fragments are parsed,
-normalised and scanned before storage; retries parse stored fragments without
-normalising them again. Template substitutions are scanned after interpolation,
-and each new admission's compiled expansion is scanned before commit, since
-separately safe fragments can assemble a credential. A bound launch is scanned
-before its text is normalised and published, including after template binding.
-Scanning preserves original bytes and token boundaries, including beside redaction markers. Only an assignment
-value that is exactly a redaction marker is already redacted; a marker prefix
-never exempts further value bytes. This never rewrites stored
-nodes or prior expansions. Typed handoffs are normalised at capture before any
+Graph text is normalised at ingress before planning or hashing. All decoded
+strings and object keys use the same literal mask, including identity positions,
+so references receive the same replacement. A masked object-key collision
+refuses publication rather than silently overwriting data. Live patches,
+retry briefs and CI observations use this representation. A steer normalises
+only its new brief and replacement routes, preserving stored nodes.
+Captured findings are normalised before merging stored upstream evidence;
+the remaining fresh capture projection, including handoff fields and repair
+item extensions, is normalised before becoming graph outputs. Stored fragments
+are replayed without rewriting their digested bytes. Template-bound and child
+launch inputs receive the same policy warning check before publication.
+Shape detection is advisory input policy, separate from literal publication
+masking; it does not decide whether a value is a real credential.
+Typed handoffs are normalised at capture before any
 consumer retains them. Checkpoints persist
 the normalised form. Compaction retains parsed, normalised findings as typed
 values in content-addressed storage. Resume never fills templates or rewrites a

@@ -14,7 +14,6 @@ mod relay_provisioning {
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,
-                scan: &|_| Ok(()),
                 limits: &limits,
 
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

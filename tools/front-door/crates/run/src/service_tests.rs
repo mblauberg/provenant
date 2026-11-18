@@ -429,66 +429,40 @@ fn dispatch_replay_output_and_cancel_share_the_service() -> TestResult {
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn secret_input_is_refused_before_publication() -> TestResult {
+fn secret_shaped_dispatch_warns_and_strict_policy_leaves_no_operation() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
-    for nested in [false, true] {
-        let mut input = submission(secret);
-        rename(&mut input, if nested { "nested-secret" } else { "secret" });
-        if nested {
-            input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
-            input.lane_depth = 2;
-        }
-        let operation = input.operation_id.clone();
-        let error = Service::new(&store)
-            .dispatch(input, temp.path(), &call)
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            RunError::RecordedRefusal(ref diagnostic)
-                if diagnostic.code == ErrorKind::SecretInput.code()
-        ));
-        let saved = store
-            .operation(&operation, &call)?
-            .ok_or("missing refusal")?;
-        assert!(!saved.extra.contains_key("prompt"));
-        assert!(saved.refusal.as_ref().is_some_and(|diagnostic| {
-            !diagnostic
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains(secret))
-        }));
-        assert!(matches!(
-            Service::new(&store).dispatch(
-                {
-                    let mut replay = submission(secret);
-                    rename(&mut replay, if nested { "nested-secret" } else { "secret" });
-                    if nested {
-                        replay.parent_attempt =
-                            Some(provenant_core::AttemptId::from_bytes([9; 16]));
-                        replay.lane_depth = 2;
-                    }
-                    replay
-                },
-                temp.path(),
-                &call
-            ),
-            Err(RunError::RecordedRefusal(_))
-        ));
-        let mut changed = submission("changed");
-        rename(
-            &mut changed,
-            if nested { "nested-secret" } else { "secret" },
-        );
-        assert!(matches!(
-            Service::new(&store).dispatch(changed, temp.path(), &call),
-            Err(RunError::OperationConflict)
-        ));
-    }
+    let example = "password=fixture-example-service-3391";
+    let record = Service::new(&store).dispatch(submission(example), temp.path(), &call)?;
+    let warnings = record.extra["warnings"]
+        .as_array()
+        .ok_or("visible warnings")?;
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.to_string().contains("prompt looks like a credential"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|w| !w.to_string().contains("fixture-example-service-3391"))
+    );
+    let mut strict = submission(example);
+    rename(&mut strict, "strict-example");
+    strict.task.profile.policy_overrides.insert(
+        "SECRET_SHAPED_INPUT".into(),
+        provenant_records::policy::Strength::Refuse,
+    );
+    let operation = strict.operation_id.clone();
+    assert!(
+        matches!(Service::new(&store).dispatch(strict, temp.path(), &call),
+        Err(RunError::RecordedRefusal(diagnostic)) if diagnostic.code == "SECRET_SHAPED_INPUT")
+    );
+    assert!(store.operation(&operation, &call)?.is_none());
     Ok(())
 }
 

@@ -273,7 +273,6 @@ fn retry_of_a_declared_stop_preserves_a_valid_checkpoint() {
             &patch::PatchContext {
                 library: &template::TemplateLibrary::bundled(),
                 resolvers: &Default::default(),
-                scan: &|_| Ok(()),
                 journal: None,
                 limits: &plans::generous(),
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

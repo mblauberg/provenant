@@ -10,7 +10,7 @@ use super::Context;
 use provenant_core::{CancelToken, Clock, Pause, WaitBudget};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
-    patch::{LiveGraph, PatchContext, scan_for_secrets},
+    patch::{LiveGraph, PatchContext},
     relay::{self, RelayOp},
     template::{Layer, TemplateLibrary},
 };
@@ -39,12 +39,6 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         "invalid_template" => Some(Cause::InvalidTemplate),
         "invalid_config" => Some(Cause::InvalidConfig),
         "invalid_review" => Some(Cause::InvalidReview),
-        "secret" => Some(Cause::Secret {
-            field: provenant_fabric_runtime::graph::refusal::SchemaPath::root(
-                provenant_fabric_runtime::graph::refusal::SchemaField::Patch,
-            ),
-            rule: provenant_fabric_runtime::graph::refusal::SecretRule::Secret,
-        }),
         "cycle" => Some(Cause::Cycle),
         "conflict" | "stale_revision" | "idempotency_conflict" => {
             return ServiceError::Cli {
@@ -82,33 +76,8 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
 }
 
 fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> ServiceError {
-    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-    if let Some(candidate) = error.candidate.clone() {
-        return ServiceError::Facade(match *candidate {
-            provenant_fabric_runtime::graph::CandidateError::Secret(cause) => {
-                FacadeError::GraphRelayRefused {
-                    refusal_code: "secret".into(),
-                    detail: Some(InvalidInputDetail::GraphRelayCause(
-                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                            field: cause.field,
-                            rule: cause.rule,
-                        },
-                    )),
-                }
-            }
-            other => FacadeError::graph_candidate(other),
-        });
-    }
-    if let (Some(field), Some(rule)) = (error.field.clone(), error.rule) {
-        return ServiceError::Facade(FacadeError::GraphRelayRefused {
-            refusal_code: error.code.into(),
-            detail: Some(InvalidInputDetail::GraphRelayCause(
-                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                    field,
-                    rule,
-                },
-            )),
-        });
+    if let Some(candidate) = error.candidate {
+        return ServiceError::Facade(FacadeError::graph_candidate(*candidate));
     }
     match error.admission {
         Some(admission) => ServiceError::Facade(FacadeError::graph_admission(*admission)),
@@ -147,6 +116,30 @@ pub fn serve_with_read(
     clock: &dyn Clock,
     read: &impl Fn(Value) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
+    let mutating_input = matches!(arguments["op"].as_str(), Some("add" | "edit"));
+    let policy = if mutating_input {
+        let config = crate::config_reads::read_for(&context.roots, "run admission")
+            .map_err(|_| journal_error(()))?;
+        config.domains.policy.resolve_with_knobs(
+            &context.identity.project.to_string(),
+            &config.knobs,
+            &Default::default(),
+        )
+    } else {
+        Default::default()
+    };
+    let policy_error = |diagnostic: Box<provenant_records::diagnostic::Diagnostic>| {
+        ServiceError::Facade(FacadeError::RecordedRefusal {
+            refusal_code: diagnostic.code.clone(),
+            diagnostic,
+        })
+    };
+    let mut warnings = if mutating_input {
+        provenant_fabric_runtime::graph::refusal::input_warnings(&arguments, &policy)
+            .map_err(policy_error)?
+    } else {
+        Vec::new()
+    };
     let op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
     // The lane has already started the launch allowance. This confirmed
@@ -238,19 +231,29 @@ pub fn serve_with_read(
             return match relay::replay_child(&document, &checkpoint, historical, request)
                 .map_err(patch_refused)?
             {
-                Some(receipt) => Ok(serde_json::to_value(receipt)?),
+                Some(receipt) => {
+                    let mut value = serde_json::to_value(receipt)?;
+                    if !warnings.is_empty() {
+                        value["warnings"] = json!(warnings);
+                    }
+                    Ok(value)
+                }
                 None => Err(not_a_node()),
             };
         }
         (None, _) => return Err(not_a_node()),
     };
-    let value = match op {
+    let mut value = match op {
         RelayOp::Read { .. } => unreachable!("reads return before journal locking"),
         RelayOp::Add(request) => {
             if let Some(receipt) = relay::replay_child(&document, &checkpoint, &parent, &request)
                 .map_err(patch_refused)?
             {
-                return Ok(serde_json::to_value(receipt)?);
+                let mut value = serde_json::to_value(receipt)?;
+                if !warnings.is_empty() {
+                    value["warnings"] = json!(warnings);
+                }
+                return Ok(value);
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
@@ -271,7 +274,7 @@ pub fn serve_with_read(
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,
-                scan: &scan_for_secrets,
+
                 limits: &context.config.graph.limits,
                 worktree_layout: context.port_table.worktree_layout.clone(),
             };
@@ -367,9 +370,22 @@ pub fn serve_with_read(
                     .map(|(branch, commit)| (branch.as_str(), commit.as_str())),
             )
             .map_err(patch_refused)?;
+            if let Some(expansion) = checkpoint.expansions.last() {
+                warnings.extend(
+                    provenant_fabric_runtime::graph::refusal::input_warnings(
+                        &serde_json::to_value(expansion)?,
+                        &policy,
+                    )
+                    .map_err(policy_error)?,
+                );
+            }
             if receipt.replayed {
                 // Nothing changed; the earlier admission is already journalled.
-                return Ok(serde_json::to_value(receipt)?);
+                let mut value = serde_json::to_value(receipt)?;
+                if !warnings.is_empty() {
+                    value["warnings"] = json!(warnings);
+                }
+                return Ok(value);
             }
             if request.needs_worktree_provisioning()
                 && let Some(path) = receipt.worktree.as_deref()
@@ -455,12 +471,21 @@ pub fn serve_with_read(
                     journal: None,
                     library: &library,
                     resolvers: &resolvers,
-                    scan: &scan_for_secrets,
+
                     limits: &context.config.graph.limits,
                     worktree_layout: context.port_table.worktree_layout.clone(),
                 },
             )
             .map_err(patch_refused)?;
+            if let Some(expansion) = checkpoint.expansions.last() {
+                warnings.extend(
+                    provenant_fabric_runtime::graph::refusal::input_warnings(
+                        &serde_json::to_value(expansion)?,
+                        &policy,
+                    )
+                    .map_err(policy_error)?,
+                );
+            }
             // Leave time to persist a refusal and deliver it to the caller.
             // The relay's transport reserve alone does not cover journal I/O.
             let now = clock.mono_now();
@@ -525,6 +550,11 @@ pub fn serve_with_read(
         }
     };
     journal.save(&checkpoint).map_err(journal_error)?;
+    if !warnings.is_empty() {
+        warnings.sort();
+        warnings.dedup();
+        value["warnings"] = json!(warnings);
+    }
     Ok(value)
 }
 
@@ -2591,7 +2621,7 @@ mod provisioning_tests {
                 journal.prepare_fixture_checkpoint(&mut checkpoint)?;
                 journal.save(&checkpoint)?;
             }
-            let request = json!({"op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply"});
+            let request = json!({"op":"add","id":"child","use":"task","prompt":"password=example-lost-reply-3391", "idempotency_key":"lost-reply"});
             let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             let settled = {
                 let mut journal = open()?;
@@ -2613,6 +2643,21 @@ mod provisioning_tests {
             let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             assert_eq!(replay["node"], receipt["node"]);
             assert_eq!(replay["revision"], receipt["revision"]);
+            for reply in [&receipt, &replay] {
+                let warnings = reply["warnings"]
+                    .as_array()
+                    .ok_or("visible replay warnings")?;
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|w| w.to_string().contains("prompt looks like a credential"))
+                );
+                assert!(
+                    warnings
+                        .iter()
+                        .all(|w| !w.to_string().contains("example-lost-reply-3391"))
+                );
+            }
             assert_eq!(replay["replayed"], true);
             assert_eq!(open()?.load("g-lost-receipt")?, Some(settled));
             let mut changed = request.clone();
@@ -2721,118 +2766,6 @@ mod provisioning_tests {
     }
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    #[test]
-    fn relay_secret_refusals_preserve_schema_cause_and_checkpoint()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        let project = home.join("project");
-        std::fs::create_dir_all(&project)?;
-        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
-        let context = Context::open(
-            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
-            &home,
-            &project,
-        )?;
-        let cancel = CancelToken::new();
-        let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"edit-scope",
-            "nodes":[
-                {"id":"writer","access":"read_only","prompt":"Write","route":{"alias":"senior"}},
-                {"id":"review","access":"read_only","prompt":"Review","route":{"alias":"senior"}}
-            ]
-        }))?;
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":2,"graph_id":"edit-scope","plan_digest":"fixture",
-            "nodes":[
-                {"id":"writer","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0, "attempt": 1},
-                    "route":{"alias":"senior"},"state":"running",
-                    "attempt_ref":format!("{}/caller",context.identity.host),"outcome":null,"launch_actor":"fixture"
-                }]},
-                {"id":"review","state":"pending","worktree":null,"attempts":[]}
-            ]
-        }))?;
-        {
-            let mut journal = FileJournal::open(
-                &context.roots.state,
-                context.identity.project,
-                "edit-scope",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                peer_origin_context: None,
-                peer_submission_digest: None,
-                requester_path: None,
-                extra: Default::default(),
-                bases: None,
-                directory: project.clone(),
-                document,
-            })?;
-            journal.save(&checkpoint)?;
-        }
-        let before = FileJournal::read_checkpoint(
-            &context.roots.state,
-            context.identity.project,
-            "edit-scope",
-        )?;
-        let marker = "RELAY_MARKER_3391";
-        let secret = format!("sk-abcdefghijklmnopqrstuvwx {marker}");
-        let mut keyed = json!({"id":"writer--child", "prompt":"safe", "route":{"alias":"senior"}});
-        keyed[marker] = json!(secret);
-        for (request, field) in [
-            (
-                json!({"op":"add", "id":"child", "use":"task", "prompt":secret, "idempotency_key":"secret-add"}),
-                "nodes[0].prompt",
-            ),
-            (
-                json!({"op":"edit", "id":"edit-scope", "patch":{"schema_version":1, "nodes":[keyed.clone()]}}),
-                "nodes[0][<key>]",
-            ),
-            (
-                json!({"op":"edit", "id":"edit-scope", "patch":{"schema_version":1, "replace":[keyed]}}),
-                "replace[0][<key>]",
-            ),
-        ] {
-            let error = serve(&context, "caller", request, budget, &cancel, &clock)
-                .expect_err("secret must be refused");
-            assert_eq!(
-                error.code(),
-                "secret",
-                "{field}: {}",
-                error.structured_error()
-            );
-            assert!(
-                error.structured_error().to_string().contains(field),
-                "{}",
-                error.structured_error()
-            );
-            for projection in [error.to_string(), error.structured_error().to_string()] {
-                assert!(!projection.contains(marker), "{projection}");
-                assert!(
-                    !projection.contains("sk-abcdefghijklmnopqrstuvwx"),
-                    "{projection}"
-                );
-            }
-            assert_eq!(
-                FileJournal::read_checkpoint(
-                    &context.roots.state,
-                    context.identity.project,
-                    "edit-scope"
-                )?,
-                before
-            );
-        }
-        Ok(())
-    }
-
-    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn crash_after_the_fence_is_recovered_by_the_next_serve()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3258,7 +3191,7 @@ mod panel_tests {
                     library: &library,
                     resolvers: &resolvers,
                     limits: &limits,
-                    scan: &scan_for_secrets,
+
                     journal: None,
                     worktree_layout: worktree_layout.clone(),
                 },
@@ -3465,7 +3398,7 @@ mod panel_tests {
                 library: &library,
                 resolvers: &crucial,
                 limits: &limits,
-                scan: &|_| Ok(()),
+
                 journal: None,
 
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

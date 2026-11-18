@@ -78,13 +78,12 @@ fn event(
 
 fn effect_identifier(kind: &str, value: Option<&str>) -> Option<Value> {
     let value = value?;
-    if value.len() > 512
-        || !value.bytes().all(|byte| byte.is_ascii_graphic())
-        || super::patch::scan_for_secrets(value).is_err()
-    {
+    if value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
         return None;
     }
-    Some(serde_json::json!({"effect":kind,"identifier":value}))
+    let safe = provenant_confinement::redact::publication_text(value.as_bytes(), []).ok()?;
+    let safe = String::from_utf8(safe).ok()?;
+    Some(serde_json::json!({"effect":kind,"identifier":safe}))
 }
 
 pub(in crate::graph) fn name(id: &str) -> OsString {

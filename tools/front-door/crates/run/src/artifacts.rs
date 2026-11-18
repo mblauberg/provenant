@@ -144,7 +144,7 @@ impl RunStore {
             ));
         }
         let mut hash = Sha256::new();
-        let mut redactor = provenant_confinement::redact::Redactor::new([])
+        let mut redactor = provenant_confinement::redact::Redactor::for_publication([])
             .map_err(|_| RunError::Validation("output redaction failed"))?;
         let mut capture = provenant_records::result_capture::ResultCapture::new(required_verdict);
         let mut buffer = [0u8; 8192];

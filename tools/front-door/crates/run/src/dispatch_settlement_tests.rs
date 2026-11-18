@@ -2,6 +2,9 @@ use super::*;
 
 #[test]
 fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
+    let _scope = provenant_confinement::redact::publication_scope([
+        b"ghp_abcdefghijklmnopqrstuvwxyz0123456789".to_vec(),
+    ])?;
     for (answer, expected) in [
         ("plain answer", "plain answer"),
         (
@@ -77,6 +80,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let _scope = provenant_confinement::redact::publication_scope([token.as_bytes().to_vec()])?;
     let attempt = store
         .context
         .state_root

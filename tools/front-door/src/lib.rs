@@ -879,8 +879,8 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             });
         let disk = disk_guard::LaneDisk::default();
         let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
-            provenant_confinement::redact::Redactor::new([]),
-            provenant_confinement::redact::Redactor::new([]),
+            provenant_confinement::redact::Redactor::for_publication([]),
+            provenant_confinement::redact::Redactor::for_publication([]),
         ) else {
             return fail(
                 "internal supervise",
@@ -925,7 +925,18 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         let _ = writeln!(io::stderr().lock(),
             "resource sampling interval: {}ms (source: {})",
             effective_interval.as_millis(), resource_sample_interval_source);
+        let bind_publication = |environment: &[(Vec<u8>, Vec<u8>)],
+                                secret: Option<&provenant_os::exec::SecretInput>,
+                                inherited: &provenant_os::exec::SecretValues| {
+            let mut values = provenant_confinement::redact::launch_values(environment, secret.map(|value| value.bytes.as_slice()))
+                .map_err(|_| provenant_os::exec::FilterError)?;
+            values.extend(inherited.0.iter().cloned());
+            let scope = provenant_confinement::redact::publication_scope(values)
+                .map_err(|_| provenant_os::exec::FilterError)?;
+            Ok(Box::new(scope) as Box<dyn std::any::Any>)
+        };
         let hooks = provenant_supervisor::GuardianHooks {
+            publication_scope: Some(&bind_publication),
             disk: Some(&disk),
             resource_sample_interval,
             holder: Some(&holder),

@@ -1459,7 +1459,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         .map_err(|error| match error {
             CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
-                node: node.into(),
+                node: node.to_string(),
                 invariant,
             },
             other => GraphError::Candidate(other),
@@ -1537,7 +1537,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &patch::PatchContext {
                         library: &library,
                         resolvers: &resolvers,
-                        scan: &patch::scan_for_secrets,
+
                         journal: None,
                         limits,
                         worktree_layout: worktree_layout.clone(),
@@ -1807,6 +1807,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     None,
                     limits,
                     &worktree_layout,
+                    &admission_policy,
                 );
                 if let Some((next_expanded, next_plan, next_positions)) = settled {
                     validate_expanded_rows(&checkpoint, &next_plan)?;
@@ -2125,7 +2126,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let context = patch::PatchContext {
                                         library: &library,
                                         resolvers: &resolvers,
-                                        scan: &patch::scan_for_secrets,
+
                                         journal: None,
                                         limits,
                                         worktree_layout: worktree_layout.clone(),
@@ -3353,6 +3354,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         settled_result.as_deref(),
                         limits,
                         &worktree_layout,
+                        &admission_policy,
                     )
                 } else {
                     None
@@ -3422,6 +3424,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     None,
                     limits,
                     &worktree_layout,
+                    &admission_policy,
                 )
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;

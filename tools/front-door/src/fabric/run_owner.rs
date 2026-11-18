@@ -688,8 +688,7 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
 pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput
-        | E::Refused
+        E::Refused
         | E::Unsupported
         | E::WriterScope
         | E::Confinement

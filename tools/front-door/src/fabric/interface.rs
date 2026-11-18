@@ -1,7 +1,6 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::*;
 use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
-use provenant_fabric_runtime::graph::refusal::{SchemaField, SchemaPath, SecretRule};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
@@ -134,17 +133,13 @@ fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause))
 }
 
-pub(super) fn scan_graph_input(value: &Value) -> Result<(), FacadeError> {
-    provenant_fabric_runtime::graph::refusal::scan_value(value, &patch::scan_for_secrets).map_err(
-        |cause| {
-            FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                    field: cause.field,
-                    rule: cause.rule,
-                },
-            ))
-        },
-    )
+pub(super) fn policy_refusal(
+    diagnostic: Box<provenant_records::diagnostic::Diagnostic>,
+) -> FacadeError {
+    FacadeError::RecordedRefusal {
+        refusal_code: diagnostic.code.clone(),
+        diagnostic,
+    }
 }
 
 /// A refused template parameter keeps its typed refusal; any other compile
@@ -174,14 +169,6 @@ pub(super) fn graph_patch_error(error: patch::PatchError) -> FacadeError {
         return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));
     }
     let cause = match error.code {
-        "secret" => {
-            let field = error
-                .field
-                .clone()
-                .unwrap_or_else(|| SchemaPath::root(SchemaField::Patch));
-            let rule = error.rule.unwrap_or_default();
-            Some(GraphRelayCause::Secret { field, rule })
-        }
         "cycle" => Some(GraphRelayCause::Cycle),
         "conflict" | "stale_revision" | "idempotency_conflict" => Some(GraphRelayCause::Conflict),
         "started" => Some(GraphRelayCause::StartedNode),
@@ -877,6 +864,18 @@ fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
 }
 
 impl Factory {
+    pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
+        let config = provenant_cli::config_reads::read_for(&self.context.roots, "run admission")
+            .map_err(|_| FacadeError::io("read graph admission policy"))?;
+        let policy = config.domains.policy.resolve_with_knobs(
+            &self.context.identity.project.to_string(),
+            &config.knobs,
+            &Default::default(),
+        );
+        provenant_fabric_runtime::graph::refusal::input_warnings(value, &policy)
+            .map_err(policy_refusal)
+    }
+
     fn validate_host_placement(
         &self,
         node: &provenant_fabric_runtime::graph::GraphNode,
@@ -1441,11 +1440,11 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
-        if operation == "edit"
-            && let Some(patch) = input.get("patch")
-        {
-            scan_graph_input(patch)?;
-        }
+        let warnings = if matches!(operation, "edit" | "retry") {
+            self.graph_input_warnings(&input)?
+        } else {
+            Vec::new()
+        };
         // This shared path must not silently drop the retired field.
         if input.get("operation_id").is_some() {
             return Err(FacadeError::invalid(InvalidInputDetail::OperationIdRetired));
@@ -1507,7 +1506,7 @@ impl Factory {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
         }
-        match operation {
+        let mut receipt = match operation {
             "templates" => {
                 let library = self.template_library(input.get("templates"))?;
                 let names: Vec<_> = match input.get("name").and_then(Value::as_str) {
@@ -1571,7 +1570,11 @@ impl Factory {
             _ => Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "operation".into(),
             ))),
+        }?;
+        if !warnings.is_empty() {
+            receipt["warnings"] = json!(warnings);
         }
+        Ok(receipt)
     }
 
     fn submit_document(
@@ -1585,9 +1588,7 @@ impl Factory {
         let mut input = launch_input(input)?;
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
-        if let Some(document) = raw {
-            scan_graph_input(document)?;
-        }
+        let mut input_warnings = self.graph_input_warnings(&input)?;
         if let Some(document) = raw {
             provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
                 .map_err(|_| {
@@ -1649,24 +1650,6 @@ impl Factory {
             })
             .to_owned();
         let template_name = template_name.as_str();
-        if let Some(brief) = input.get("brief").and_then(Value::as_str)
-            && patch::scan_for_secrets(brief).is_err()
-        {
-            return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                    field: SchemaPath::root(SchemaField::Brief),
-                    rule: SecretRule::Secret,
-                },
-            )));
-        }
-        if patch::scan_for_secrets(template_name).is_err() {
-            return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                    field: SchemaPath::root(SchemaField::Template),
-                    rule: SecretRule::Secret,
-                },
-            )));
-        }
         // Type each `--set` value once, by the template's declaration, before
         // the launch is hashed or compiled.
         let declared = library.resolve(template_name).map_err(graph_input_reason)?;
@@ -1732,7 +1715,7 @@ impl Factory {
         let context = PatchContext {
             library: &library,
             resolvers: &resolver,
-            scan: &patch::scan_for_secrets,
+
             journal: None,
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
@@ -2025,7 +2008,7 @@ impl Factory {
         self.confine_nodes(&mut bound)?;
         // Template binding can assemble a credential from individually safe
         // inputs. Check the bound launch before submission normalises its text.
-        scan_graph_input(&bound)?;
+        input_warnings.extend(self.graph_input_warnings(&bound)?);
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         document.set_replay_digest(&digest);
@@ -2053,11 +2036,14 @@ impl Factory {
                 disk: None,
                 reason: error.to_string(),
             })?;
-        let warnings = implementation_warnings(
+        input_warnings.extend(implementation_warnings(
             &expanded_for_warnings.nodes,
             input,
             self.context.config.implement.warn_unbounded_junior,
-        );
+        ));
+        input_warnings.sort();
+        input_warnings.dedup();
+        let warnings = input_warnings;
         if input["explain"] == true {
             let skipped = provenant_fabric_runtime::graph::when::skipped_rows(
                 &document,
@@ -2148,9 +2134,6 @@ impl Factory {
                     }
                 },
             }));
-        }
-        for warning in &warnings {
-            warn_operator(warning);
         }
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
             // A concurrent launch bound this name to other input between the
@@ -2410,7 +2393,7 @@ impl Factory {
             &PatchContext {
                 library: &library,
                 resolvers: &resolver,
-                scan: &patch::scan_for_secrets,
+
                 journal: None,
                 limits: &self.context.config.graph.limits,
                 worktree_layout: self.context.port_table.worktree_layout.clone(),
@@ -2560,7 +2543,7 @@ impl Factory {
                     &PatchContext {
                         library: &library,
                         resolvers: &resolver,
-                        scan: &patch::scan_for_secrets,
+
                         journal: None,
                         limits: &self.context.config.graph.limits,
                         worktree_layout: self.context.port_table.worktree_layout.clone(),
@@ -5891,62 +5874,6 @@ mod tests {
                 .graph_document(json!({"op":"run","document":"graph.json"}), budget, &cancel)
                 .is_err()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn graph_context_secret_is_rejected_before_preview_publication_or_journal() -> Result {
-        let rig = TestRig::new()?;
-        let factory = factory(&rig)?;
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let secret = "sk-abcdefghijklmnopqrstuvwx";
-        // Spec: docs/specs/fabric.md#checkpoint-envelope
-        // Context values are free-form and normalised. Object keys retain
-        // identity, so credentials there must be refused before publication.
-        let document = json!({
-            "schema_version":2, "graph_id":"metadata-secret",
-            "context":{(secret):"retained note"},
-            "nodes":[{"id":"inspect", "prompt":"Inspect code", "access":"read_only", "route":{"alias":"junior"}}]
-        });
-        for explain in [true, false] {
-            let error = factory
-                .graph_document(
-                    json!({
-                        "op":"run", "document":document, "explain":explain
-                    }),
-                    budget,
-                    &cancel,
-                )
-                .err()
-                .ok_or("credential-shaped context key was accepted")?;
-            assert_eq!(
-                error,
-                FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                    provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
-                        field: serde_json::from_value(json!([{"field":"context"}, "key"]))?,
-                        rule: SecretRule::Secret,
-                    },
-                ))
-            );
-            assert!(!serde_json::to_string(&error)?.contains(secret));
-            assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
-            assert!(!rig.project.join(".provenant/scratch/graphs").exists());
-            assert!(
-                FileJournal::graph_ids(
-                    &factory.context.roots.state,
-                    factory.context.identity.project
-                )?
-                .is_empty()
-            );
-            assert!(
-                FileJournal::event_graph_ids(
-                    &factory.context.roots.state,
-                    factory.context.identity.project
-                )?
-                .is_empty()
-            );
-        }
         Ok(())
     }
 

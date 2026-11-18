@@ -257,6 +257,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     )
     .unwrap();
     let message = LaunchMessage {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile: None,
         schema_version: 1,
@@ -712,6 +713,7 @@ fn spawn_missing_attempt_guardian(
     )
     .unwrap();
     let message = LaunchMessage {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile: None,
         schema_version: 1,
@@ -1239,6 +1241,9 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
 #[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        publication_values: provenant_os::exec::SecretValues(vec![
+            b"ambient-test-credential-3391".to_vec(),
+        ]),
         policy: Default::default(),
         profile: None,
         priority: 0,
@@ -1321,6 +1326,8 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     assert_eq!(decoded.stdin, message.stdin);
     assert_eq!(decoded.argv, message.argv);
     assert_eq!(decoded.environment, message.environment);
+    assert_eq!(decoded.publication_values.0, message.publication_values.0);
+    assert!(!format!("{:?}", message.publication_values).contains("ambient-test-credential-3391"));
 }
 
 fn identity(pid: i64, start: u64, group: i64, session: i64) -> ProcessIdentity {

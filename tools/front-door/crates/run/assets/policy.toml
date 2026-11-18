@@ -1293,6 +1293,15 @@ knob = "policy.LANE_TIP_UNROOTED"
 justification = "A lane tip with no known ancestor publishes the lane's own branch with a warning, so no work is lost."
 
 [[rule]]
+code = "SECRET_SHAPED_INPUT"
+site = "fabric-runtime/src/graph/refusal.rs#input_warnings"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.SECRET_SHAPED_INPUT"
+justification = "Secret-shaped input warns with its schema path and proceeds; real known credential values are masked at publication boundaries."
+
+[[rule]]
 code = "DIRTY_WRITER"
 site = "run/src/graph_relay.rs#dirty_writer"
 boundary = "none"

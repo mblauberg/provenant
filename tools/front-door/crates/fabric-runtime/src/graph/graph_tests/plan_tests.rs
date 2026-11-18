@@ -2909,7 +2909,7 @@ fn admit(
     checkpoint: &mut GraphCheckpoint,
     patch: Value,
 ) -> Result<Admitted, PatchError> {
-    admit_with(document, checkpoint, None, patch, &|_| Ok(()))
+    admit_with(document, checkpoint, None, patch)
 }
 
 fn admit_with(
@@ -2917,7 +2917,6 @@ fn admit_with(
     checkpoint: &mut GraphCheckpoint,
     parent: Option<&str>,
     patch: Value,
-    scan: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<Admitted, PatchError> {
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([(
@@ -2928,7 +2927,6 @@ fn admit_with(
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan,
         journal: None,
         limits: &limits,
 
@@ -3010,7 +3008,7 @@ fn admit_patch_adds_a_swarm_and_replays_by_idempotency_key() {
 }
 
 #[test]
-fn admit_patch_refuses_cycles_conflicts_and_secrets() {
+fn admit_patch_refuses_cycles_and_conflicts() {
     let (document, mut checkpoint) = running_graph();
     let cycle = json!({"schema_version":1, "nodes":[
         {"id":"x", "use":"task", "after":["y"]}, {"id":"y", "use":"task", "after":["x"]}]});
@@ -3031,16 +3029,6 @@ fn admit_patch_refuses_cycles_conflicts_and_secrets() {
         admit(&document, &mut checkpoint, both).unwrap_err().code,
         "conflict"
     );
-    let secret = json!({"schema_version":1, "nodes":[{"id":"leak", "use":"task", "prompt":"use sk-fixture-secret"}]});
-    let error = admit_with(&document, &mut checkpoint, None, secret, &|text| {
-        if text.contains("sk-fixture-secret") {
-            Err("credential-shaped text".into())
-        } else {
-            Ok(())
-        }
-    })
-    .unwrap_err();
-    assert_eq!(error.code, "secret");
     assert!(
         checkpoint.expansions.is_empty(),
         "refused patches leave no journal entry"
@@ -3107,7 +3095,6 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
             &mut refused,
             Some("a"),
             edit.clone(),
-            &|_| Ok(()),
         )
         .unwrap_err();
         assert_eq!(error.code, "edit_scope");
@@ -3127,7 +3114,7 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
         .compile(&json!({"id":"a", "use":"plan"}))
         .unwrap();
         let mut planner = checkpoint.clone();
-        admit_with(&planned, &mut planner, Some("a"), edit, &|_| Ok(())).unwrap();
+        admit_with(&planned, &mut planner, Some("a"), edit).unwrap();
     }
 }
 
@@ -3153,8 +3140,7 @@ fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
     let mut planner = checkpoint.clone();
     admit_with(&planned, &mut planner, Some("a"), json!({"schema_version":1,
         "nodes":[{"id":"child", "use":"task", "prompt":"Child"}],
-        "replace":[{"id":"b", "use":"task", "prompt":"Replacement", "attempt":{"admitted_by":"elsewhere"}}]}),
-        &|_| Ok(())).unwrap();
+        "replace":[{"id":"b", "use":"task", "prompt":"Replacement", "attempt":{"admitted_by":"elsewhere"}}]})).unwrap();
     let expansion = planner.expansions.last().unwrap();
     assert_eq!(admitted_by(&expansion.nodes[0]).as_deref(), Some("a"));
     assert_eq!(
@@ -3208,7 +3194,6 @@ fn admit_patch_allows_lane_edits_in_its_subtree() {
         &mut checkpoint,
         Some("a"),
         json!({"schema_version":1,"nodes":[{"id":"child", "use":"task", "prompt":"Child"}]}),
-        &|_| Ok(()),
     )
     .unwrap();
     for edit in [
@@ -3216,7 +3201,7 @@ fn admit_patch_allows_lane_edits_in_its_subtree() {
         json!({"schema_version":1, "replace":[{"id":"a--child", "use":"task", "prompt":"Replacement"}]}),
     ] {
         let mut edited = checkpoint.clone();
-        admit_with(&document, &mut edited, Some("a"), edit, &|_| Ok(())).unwrap();
+        admit_with(&document, &mut edited, Some("a"), edit).unwrap();
     }
 }
 
@@ -3236,7 +3221,6 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         journal: Some(&sink),
         limits: &limits,
 
@@ -3267,7 +3251,6 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         journal: Some(&failing),
         limits: &limits,
 
@@ -3325,20 +3308,20 @@ fn submission_normalises_free_form_fields_once() {
         prompt_text::assert_once(&calls, field);
     }
     assert!(
-        !document.template_library["unused"]
+        document.template_library["unused"]
             .doc
             .as_ref()
             .unwrap()
             .contains(secret)
     );
     assert!(
-        !document.template_library["unused"].parameters["value"]
+        document.template_library["unused"].parameters["value"]
             .doc
             .as_ref()
             .unwrap()
             .contains(secret)
     );
-    assert!(!document.nodes[0].prompt.contains(secret));
+    assert!(document.nodes[0].prompt.contains(secret));
     let mut journal = MemoryJournal::default();
     let (_, calls) = prompt_text::trace(|| {
         let mut owner = FakeOwner {
@@ -3393,41 +3376,7 @@ fn live_patch_normalises_docs_and_extensions_once() {
         .iter()
         .find(|node| node.id == "probe")
         .unwrap();
-    assert!(!added.extra["comment"].as_str().unwrap().contains(secret));
-}
-
-// Spec: docs/specs/fabric.md#checkpoint-envelope
-#[test]
-fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
-    for text in [
-        "token=[REDACTED]",
-        "token=[REDACTED] next",
-        r#"{"prompt":"token=[REDACTED] next"}"#,
-        r#"{"token":"[REDACTED]"}"#,
-    ] {
-        assert!(patch::scan_for_secrets(text).is_ok());
-    }
-    let (document, mut checkpoint) = running_graph();
-    let admitted = admit_with(
-        &document,
-        &mut checkpoint,
-        None,
-        json!({"schema_version":1, "nodes":[{
-            "id":"masked", "use":"task", "prompt":"token=[REDACTED] next"
-        }]}),
-        &patch::scan_for_secrets,
-    )
-    .unwrap();
-    assert_eq!(admitted.revision, 1);
-    for text in [
-        "token=[REDACTED]secret",
-        "token=[REDACTED",
-        "token=PROVENANTMASK",
-        "token=secret",
-        "AKIAIOSFODNN7EXAMPLE",
-    ] {
-        assert!(patch::scan_for_secrets(text).is_err());
-    }
+    assert!(added.extra["comment"].as_str().unwrap().contains(secret));
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
@@ -3440,76 +3389,6 @@ fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
     for size in [32 * 1024, 128 * 1024, 256 * 1024] {
         let text = format!("PROVENANTMASK{} [REDACTED]", "X".repeat(size));
         assert!(patch::scan_for_secrets(&text).is_ok());
-    }
-}
-
-// Spec: docs/specs/fabric.md#checkpoint-envelope
-#[test]
-fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
-    // Build synthetic token shapes from parts; no usable credentials in fixtures.
-    let suffix = "Z".repeat(16);
-    let github_suffix = "q".repeat(36);
-    let bearer_suffix = "x".repeat(24);
-    let cases = [
-        ("AKIA", suffix.as_str()),
-        ("ghp_", github_suffix.as_str()),
-        ("Bearer ", bearer_suffix.as_str()),
-    ];
-    for (prefix, suffix) in cases {
-        let secret = format!("{prefix}{suffix}");
-        for marker in ["", "[REDACTED]"] {
-            let prefix = format!("{marker}{prefix}");
-            for nodes in [
-                json!([{"id":"child", "use":"joined", "with":{"prefix":prefix, "suffix":suffix}}]),
-                json!([{"id":"child", "use":"task", "prompt":format!("{prefix}${{item}}"), "over":[suffix]}]),
-            ] {
-                let patch = json!({"schema_version":1,
-            "templates":{"joined":{"brief":"${prefix}${suffix}", "parameters":{
-                "prefix":{"type":"string"}, "suffix":{"type":"string"}
-            }}},
-            "nodes": nodes});
-                assert!(!patch.to_string().contains(&secret));
-                let (document, mut checkpoint) = running_graph();
-                let before = checkpoint.clone();
-                let error = admit_with(
-                    &document,
-                    &mut checkpoint,
-                    None,
-                    patch.clone(),
-                    &patch::scan_for_secrets,
-                )
-                .unwrap_err();
-                assert!(error.to_string().contains("secret pattern"), "{error}");
-                assert!(!error.to_string().contains(&secret));
-                assert_eq!(checkpoint, before, "live refusal is atomic");
-
-                let document = planner(8);
-                let output = format!("```fragment\n{patch}\n```");
-                let mut journal = MemoryJournal::default();
-                let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
-                assert_eq!(run.status, GraphStatus::Paused);
-                assert!(run.checkpoint.expansions.is_empty());
-                assert!(
-                    run.checkpoint.nodes[0]
-                        .outputs
-                        .as_ref()
-                        .unwrap()
-                        .warnings
-                        .iter()
-                        .any(|warning| warning.contains("secret pattern"))
-                );
-                assert!(
-                    !serde_json::to_string(&run.checkpoint)
-                        .unwrap()
-                        .contains(&secret)
-                );
-                let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
-                assert_eq!(
-                    replay.checkpoint, run.checkpoint,
-                    "stored refusal replays unchanged"
-                );
-            }
-        }
     }
 }
 
@@ -3539,7 +3418,7 @@ fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
     prompt_text::assert_once(&calls, prompt);
     prompt_text::assert_once(&calls, doc);
     let stored = run.checkpoint.nodes[0].fragment.as_ref().unwrap().clone();
-    assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(stored.contains("AKIAIOSFODNN7EXAMPLE"));
     let (replayed, calls) = prompt_text::trace(|| {
         resume_with_budget(
             &document,
@@ -3566,7 +3445,6 @@ fn submit_compiles_a_patch_into_a_new_graph() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
         journal: None,
         limits: &limits,
 
@@ -4069,7 +3947,6 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
         Some("a"),
         json!({"schema_version":1,
         "nodes":[{"id":"live-child", "use":"task"}]}),
-        &|_| Ok(()),
     )
     .unwrap();
     let expanded = plans::expand(
@@ -4100,6 +3977,7 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
         Some(&capture(&output)),
         &plans::generous(),
         &provenant_config::PortTable::builtin().worktree_layout,
+        &Default::default(),
     )
     .expect("final patch must follow the live patch");
     assert_eq!(checkpoint.expansions.len(), 2);
@@ -4115,6 +3993,7 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
             Some(&capture(&output)),
             &plans::generous(),
             &provenant_config::PortTable::builtin().worktree_layout,
+        &Default::default(),
         )
         .is_none()
     );
@@ -4163,7 +4042,6 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
         journal: None,
         limits: &limits,
 

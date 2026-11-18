@@ -225,10 +225,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let secret = "AKIAIOSFODNN7EXAMPLE";
+        let _scope =
+            provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
         let mut value = json!({"execution": {"document": {"nodes": [
             {"id": "a", "prompt": format!("deploy with {secret} now")}
         ]}}});
-        value = prompt_text::normalise(&value, prompt_text::Context::Content).unwrap();
+        value = prompt_text::normalise(&value).unwrap();
         externalise(&directory, "g", &mut value).unwrap();
         let digest = value[STORED_TEXT]["/execution/document/nodes/0/prompt"]
             .as_str()

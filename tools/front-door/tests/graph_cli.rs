@@ -11,93 +11,104 @@ use std::{
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
 // Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn run_refuses_secret_brief_with_safe_cause() -> Result {
+fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
     let rig = GraphProject::new()?;
-    let brief = rig.project.join("secret-brief.md");
-    std::fs::write(&brief, "password=\"fixture-secret-3391\"")?;
-    let output = rig
-        .command()
-        .args(["run", "task", "--brief-file"])
-        .arg(&brief)
-        .output()?;
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(!output.status.success(), "{value}");
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("credential-shaped value"), "{text}");
-    assert!(text.contains("brief"), "{text}");
-    assert!(text.contains("secret"), "{text}");
-    assert!(!text.contains("fixture-secret-3391"), "{text}");
-    assert!(graph_records(&rig.state())?.is_empty());
-    Ok(())
-}
-
-#[test]
-fn run_refuses_secret_non_brief_field_with_safe_cause() -> Result {
-    let rig = GraphProject::new()?;
-    let path = rig.project.join("graph.json");
+    let example = "password=\"fixture-example-3391\"";
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
     std::fs::write(
-        &path,
-        serde_json::to_string(&json!({
-            "graph_id": "test-prompt-secret",
-            "nodes": [{
-                "id": "task",
-                "use": "task",
-                "prompt": "password=\"fixture-secret-3391\""
-            }]
-        }))?,
+        templates.join("example.toml"),
+        format!("brief='{example}'\ntier='junior'\n"),
     )?;
-    let output = rig.command().args(["run", "--file"]).arg(&path).output()?;
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(!output.status.success(), "{value}");
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("credential-shaped value"), "{text}");
-    assert!(text.contains("prompt"), "{text}");
-    assert!(text.contains("secret"), "{text}");
-    assert!(!text.contains("fixture-secret-3391"), "{text}");
-    assert!(graph_records(&rig.state())?.is_empty());
+    let document = rig.document(&json!({"schema_version":2,"graph_id":"example-input",
+        "nodes":[{"id":"task","use":"task","prompt":example}]}))?;
+    let cases = [
+        (
+            vec!["run", "task", "--brief", example, "--explain"],
+            "brief",
+        ),
+        (vec!["run", "example", "--explain"], "nodes[0]"),
+        (
+            vec![
+                "run",
+                "--file",
+                document.to_str().ok_or("document path")?,
+                "--explain",
+            ],
+            "document.nodes[0].prompt",
+        ),
+    ];
+    for (args, position) in cases {
+        let (output, reply) = rig.run(&args)?;
+        assert!(output.status.success(), "{reply}; {output:?}");
+        let warnings = reply["data"]["warnings"]
+            .as_array()
+            .ok_or("visible warnings")?;
+        assert!(warnings.iter().any(|w| w.as_str().is_some_and(
+            |w| w.contains("SECRET_SHAPED_INPUT")
+                && w.contains("looks like a credential")
+                && w.contains(position)
+        )));
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.to_string().contains("fixture-example-3391"))
+        );
+        assert!(
+            reply["data"].to_string().contains("fixture-example-3391"),
+            "example is retained: {reply}"
+        );
+    }
     Ok(())
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn compiled_launch_refuses_credentials_from_template_files() -> Result {
+fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
     let rig = GraphProject::new()?;
-    let templates = rig.project.join(".provenant/templates");
-    std::fs::create_dir_all(&templates)?;
-    for (name, secret) in [
-        ("github-secret", format!("ghp_{}", "q".repeat(36))),
-        ("aws-secret", format!("AKIA{}", "Z".repeat(16))),
-    ] {
-        std::fs::write(
-            templates.join(format!("{name}.toml")),
-            format!("brief='{secret}'\ntier='junior'\n"),
-        )?;
-        let output = rig.command().args(["run", name, "--explain"]).output()?;
-        let reply: Value = serde_json::from_slice(&output.stdout)?;
-        assert!(!output.status.success(), "{reply}");
-        let text = String::from_utf8_lossy(&output.stdout);
-        assert!(text.contains("credential-shaped value"), "{text}");
-        assert!(!text.contains(&secret), "{text}");
-        assert!(graph_records(&rig.state())?.is_empty());
+    let credential = "plain-registered-credential-3391";
+    let prompt = format!("Use {credential} for the fixture.");
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args([
+            "run",
+            "task",
+            "--brief",
+            &prompt,
+            "--model",
+            "fixture/model",
+        ])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    // The fixture adapter cannot execute. Successful admission still publishes
+    // a checkpoint and events before that unrelated provider refusal.
+    assert!(reply["error"].is_null(), "{reply}");
+    assert!(
+        reply["data"]["checkpoint"]["graph_id"].is_string(),
+        "{reply}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(credential));
+    let records = graph_records(&rig.state())?;
+    assert!(
+        records
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with(".events.jsonl"))
+    );
+    let mut masked = false;
+    for path in records {
+        let bytes = std::fs::read(&path)?;
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(credential),
+            "credential in {}",
+            path.display()
+        );
+        masked |= text.contains("[REDACTED]");
     }
-    Ok(())
-}
-
-#[test]
-fn run_refuses_credential_shaped_template_name() -> Result {
-    let rig = GraphProject::new()?;
-    let secret = "ghp_fixturesecret3391launch123456789";
-    let output = rig.command().args(["run", secret]).output()?;
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let all = format!("{stdout}\n{stderr}");
-    assert!(!all.contains(secret), "secret echoed in response: {all}");
-    assert!(all.contains("credential-shaped value"), "{all}");
-    assert!(all.contains("template"), "{all}");
-    assert!(all.contains("secret"), "{all}");
-    assert!(graph_records(&rig.state())?.is_empty());
+    assert!(masked, "checkpoint/prompt store retains the masked brief");
     Ok(())
 }
 
@@ -576,53 +587,6 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         .ok_or("graphs after stop")?;
     assert!(!rows.iter().any(|row| row["name"] == "broken"), "{after}");
     assert!(rows.iter().any(|row| row["name"] == "healthy"), "{after}");
-    Ok(())
-}
-
-#[test]
-fn graph_secrets_are_refused_before_publication() -> Result {
-    // Spec: docs/specs/fabric.md#checkpoint-envelope
-    // Free-form briefs are normalised at ingress. Schema identities and object
-    // keys must instead be rejected, without publishing graph or scratch state.
-    let secret = format!("ghp_{}", "a1".repeat(18));
-    for explain in [false, true] {
-        for source in ["graph_id", "node_id", "route", "context_key", "template"] {
-            let rig = GraphProject::new()?;
-            let mut document = json!({
-                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
-                "graph_id":"safe-graph", "nodes":[{
-                    "id":"safe-node", "prompt":"Inspect", "access":"read_only",
-                    "route":{"alias":"junior"}
-                }]
-            });
-            match source {
-                "graph_id" => document["graph_id"] = secret.clone().into(),
-                "node_id" => document["nodes"][0]["id"] = secret.clone().into(),
-                "route" => document["nodes"][0]["route"]["alias"] = secret.clone().into(),
-                "context_key" => document["context"] = json!({(secret.clone()):"note"}),
-                "template" => {
-                    document = json!({"nodes":[{"id":"x","use":secret}],
-                        "templates":{(secret.clone()):{"brief":"Inspect","tier":"senior"}}});
-                }
-                _ => unreachable!(),
-            }
-            let path = rig.document(&document)?;
-            let mut command = rig.command();
-            command.args(["run", "--file"]).arg(path);
-            if explain {
-                command.arg("--explain");
-            }
-            let output = command.output()?;
-            assert!(!output.status.success(), "{source}: {output:?}");
-            assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
-            assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
-            assert!(graph_records(&rig.state())?.is_empty(), "{source}");
-            assert!(
-                graph_records(&rig.project.join(".provenant/scratch"))?.is_empty(),
-                "{source}"
-            );
-        }
-    }
     Ok(())
 }
 
@@ -1790,7 +1754,7 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
 }
 
 #[test]
-fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
+fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
     for qualified in [true, false] {
         let rig = GraphProject::new()?;
         let id = settled_task_graph(&rig)?;
@@ -1799,9 +1763,21 @@ fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() 
         } else {
             id.clone()
         };
-        let brief = "line one\nline two: corrected scope\n";
+        let brief = "line one\npassword=fixture-example-retry-3391\n";
         let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
         assert!(output.status.success(), "{target}: {retried}");
+        let warnings = retried["data"]["warnings"]
+            .as_array()
+            .ok_or("retry warnings")?;
+        assert!(warnings.iter().any(|w| {
+            w.as_str()
+                .is_some_and(|w| w.contains("brief") && w.contains("looks like a credential"))
+        }));
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.to_string().contains("fixture-example-retry-3391"))
+        );
         let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
         assert_eq!(prompt, brief, "{target}");
         assert!(previous > 0, "started attempts are kept: {target}");
@@ -1825,5 +1801,50 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
     assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
     let (_, after) = rig.run(&["status", "two-nodes"])?;
     assert_eq!(after["data"]["rows"], before["data"]["rows"], "{after}");
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn strict_input_policy_and_invalid_extension_refuse_retry_atomically() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    fn snapshot_tree(
+        root: &Path,
+        output: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                snapshot_tree(&entry.path(), output)?;
+            } else {
+                output.insert(entry.path(), std::fs::read(entry.path())?);
+            }
+        }
+        Ok(())
+    }
+    let snapshot = || -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+        let mut output = std::collections::BTreeMap::new();
+        snapshot_tree(&rig.state().join("fabric/graphs"), &mut output)?;
+        Ok(output)
+    };
+    let before = snapshot()?;
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version=1\n[knobs]\n'policy.SECRET_SHAPED_INPUT'='refuse'\n",
+    )?;
+    let (output, reply) = rig.run(&["retry", &id, "--brief", "password=fixture-strict-3391"])?;
+    assert!(!output.status.success(), "{reply}");
+    assert!(reply.to_string().contains("SECRET_SHAPED_INPUT"), "{reply}");
+    assert!(!reply.to_string().contains("fixture-strict-3391"));
+    assert_eq!(snapshot()?, before);
+    let (output, reply) = rig.run(&["retry", &id, "--extend", "limits.unconfigured=1"])?;
+    assert!(!output.status.success(), "{reply}");
+    assert!(
+        !reply
+            .to_string()
+            .contains("graph input could not be processed")
+    );
+    assert_eq!(snapshot()?, before);
     Ok(())
 }

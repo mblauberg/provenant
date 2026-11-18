@@ -421,8 +421,7 @@ fn block<'a>(
 /// saved fragment is already admitted text and bypasses this function on replay.
 fn normalise_fragment(json: &str) -> Result<String, String> {
     let value = super::patch::Patch::from_fragment(json)?;
-    let value =
-        prompt_text::normalise(&value, prompt_text::Context::Patch).map_err(str::to_owned)?;
+    let value = prompt_text::normalise(&value).map_err(str::to_owned)?;
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
@@ -1207,7 +1206,6 @@ fn fragment(
     let context = super::patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &super::patch::scan_for_secrets,
         journal: None,
         limits,
         worktree_layout: worktree_layout.clone(),
@@ -1761,6 +1759,7 @@ pub(super) fn remaining(
 }
 
 /// Validate the entire prospective graph before publishing any added node.
+#[allow(clippy::too_many_arguments)] // Fresh captured patches use the effective admission policy.
 pub(super) fn settle(
     node: &PlannedNode,
     source: &GraphDocument,
@@ -1769,6 +1768,7 @@ pub(super) fn settle(
     capture: Option<&crate::result_capture::CapturedResult>,
     limits: &crate::config::GraphLimits,
     worktree_layout: &provenant_config::WorktreeLayoutPort,
+    policy: &provenant_records::policy::Policy,
 ) -> Option<(
     GraphDocument,
     PlannedGraph,
@@ -1894,11 +1894,16 @@ pub(super) fn settle(
             match final_patch.unwrap_or(Ok(None)) {
                 Ok(Some(json)) => {
                     safe_reason = PlanFailureFact::InvalidFragment;
-                    normalise_fragment(&json).and_then(|json| {
-                        super::patch::scan_for_secrets(&json)?;
-                        checkpoint.nodes[index].fragment = Some(json.clone());
-                        Ok(json)
-                    })
+                    serde_json::from_str::<serde_json::Value>(&json)
+                        .map_err(|_| "patch JSON is invalid".to_owned())
+                        .and_then(|value| {
+                            let warnings = super::refusal::input_warnings(&value, policy)
+                                .map_err(|error| error.detail.unwrap_or(error.code))?;
+                            checkpoint.nodes[index].warnings.extend(warnings);
+                            normalise_fragment(&json).inspect(|json| {
+                                checkpoint.nodes[index].fragment = Some(json.clone());
+                            })
+                        })
                 }
                 Ok(None) => {
                     safe_reason = PlanFailureFact::MissingBlock;
@@ -2000,21 +2005,8 @@ pub(super) fn settle(
             Some((preview, plan, positions))
         }
         Err(reason) => {
-            let reason = if super::patch::scan_for_secrets(&reason).is_err() {
-                "patch diagnostic contains a secret; inspect the captured result".to_owned()
-            } else {
-                reason
-                    .chars()
-                    .flat_map(|character| {
-                        if character.is_control() {
-                            character.escape_default().collect::<Vec<_>>()
-                        } else {
-                            vec![character]
-                        }
-                    })
-                    .take(MAX_ADVANCE_ERROR_BYTES)
-                    .collect()
-            };
+            let reason =
+                provenant_confinement::redact::bounded_line(&reason, MAX_ADVANCE_ERROR_BYTES);
             if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                 let warning = bounded(&format!("patch refused: {reason}"), WARNING_BYTES);
                 if !outputs.warnings.contains(&warning) {

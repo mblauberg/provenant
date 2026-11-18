@@ -28,6 +28,8 @@ pub enum RedactorError {
     SecretSetTooLarge,
     #[error("a secret value exceeds its byte bound")]
     SecretTooLong,
+    #[error("publication text filter failed")]
+    PublicationFilterFailed,
 }
 
 #[derive(Default)]
@@ -557,11 +559,15 @@ const ASSIGNMENT_KEYS: &[(&[u8], bool)] = &[
     (b"api-key", false),
     (b"apikey", false),
     (b"access_key", false),
+    (b"access_key_id", false),
+    (b"private_key", false),
+    (b"database_url", false),
+    (b"connection_string", false),
     (b"access-key", false),
     (b"auth", false),
     (b"authorization", true),
 ];
-/// The longest key is 13 bytes; the run keeps enough bytes before it to judge
+/// The run keeps enough bytes before the longest key to judge
 /// the separator that precedes it.
 const ASSIGNMENT_RUN: usize = 32;
 /// Scheme words longer than this are not `Basic` or `Bearer`.
@@ -1068,12 +1074,278 @@ impl<'a> FrameEmitter<'a> {
     }
 }
 
+struct EncodedUnit {
+    source_length: usize,
+    decoded_remaining: usize,
+    masked: bool,
+}
+
+enum JsonUnit {
+    NeedMore,
+    Complete(usize, [u8; 4], usize),
+}
+
+/// Literal matcher for text streams that may contain JSON string escapes.
+/// It compares decoded UTF-8 bytes while retaining the original source bytes
+/// until every possible secret match affecting them is decided.
+struct DecodedLiteralMatcher {
+    matcher: LiteralAutomaton,
+    pending_escape: Vec<u8>,
+    source: VecDeque<u8>,
+    units: VecDeque<EncodedUnit>,
+    decisions: Vec<(u8, bool)>,
+}
+
+impl DecodedLiteralMatcher {
+    fn new(secrets: &[Vec<u8>]) -> Self {
+        Self {
+            matcher: LiteralAutomaton::new(secrets),
+            pending_escape: Vec::with_capacity(12),
+            source: VecDeque::new(),
+            units: VecDeque::new(),
+            decisions: Vec::with_capacity(4),
+        }
+    }
+
+    fn matched(&self) -> bool {
+        self.matcher.matched
+    }
+
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        for byte in bytes {
+            self.pending_escape.push(*byte);
+            self.process_pending(false, output)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        self.process_pending(true, output)?;
+        if !self.pending_escape.is_empty() {
+            return Err(FilterError);
+        }
+        self.decisions.clear();
+        self.matcher.finish(&mut self.decisions);
+        self.consume_decisions(output)?;
+        if !self.units.is_empty() || !self.source.is_empty() {
+            return Err(FilterError);
+        }
+        Ok(())
+    }
+
+    fn process_pending(
+        &mut self,
+        eof: bool,
+        output: &mut Vec<(u8, bool)>,
+    ) -> Result<(), FilterError> {
+        while !self.pending_escape.is_empty() {
+            let JsonUnit::Complete(source_length, decoded, decoded_length) =
+                parse_json_unit(&self.pending_escape, eof)
+            else {
+                break;
+            };
+            self.source
+                .extend(self.pending_escape.drain(..source_length));
+            self.units.push_back(EncodedUnit {
+                source_length,
+                decoded_remaining: decoded_length,
+                masked: false,
+            });
+            for byte in &decoded[..decoded_length] {
+                self.decisions.clear();
+                self.matcher
+                    .filter(std::slice::from_ref(byte), &mut self.decisions);
+                self.consume_decisions(output)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_decisions(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        for (_, masked) in self.decisions.drain(..) {
+            let Some(unit) = self.units.front_mut() else {
+                return Err(FilterError);
+            };
+            if unit.decoded_remaining == 0 {
+                return Err(FilterError);
+            }
+            unit.masked |= masked;
+            unit.decoded_remaining -= 1;
+            if unit.decoded_remaining == 0 {
+                let unit = self.units.pop_front().ok_or(FilterError)?;
+                for _ in 0..unit.source_length {
+                    let byte = self.source.pop_front().ok_or(FilterError)?;
+                    output.push((byte, unit.masked));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Match both source bytes and their JSON-decoded text. Keeping both scanners
+/// preserves exact literal secrets that happen to spell an escape sequence.
+struct EncodedLiteralMatcher {
+    raw: LiteralAutomaton,
+    decoded: DecodedLiteralMatcher,
+    raw_pending: VecDeque<(u8, bool)>,
+    decoded_pending: VecDeque<(u8, bool)>,
+    raw_decisions: Vec<(u8, bool)>,
+    decoded_decisions: Vec<(u8, bool)>,
+}
+
+impl EncodedLiteralMatcher {
+    fn new(secrets: &[Vec<u8>]) -> Self {
+        Self {
+            raw: LiteralAutomaton::new(secrets),
+            decoded: DecodedLiteralMatcher::new(secrets),
+            raw_pending: VecDeque::new(),
+            decoded_pending: VecDeque::new(),
+            raw_decisions: Vec::new(),
+            decoded_decisions: Vec::new(),
+        }
+    }
+
+    fn matched(&self) -> bool {
+        self.raw.matched || self.decoded.matched()
+    }
+
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        self.raw_decisions.clear();
+        self.raw.filter(bytes, &mut self.raw_decisions);
+        self.decoded_decisions.clear();
+        self.decoded.filter(bytes, &mut self.decoded_decisions)?;
+        self.raw_pending.extend(self.raw_decisions.drain(..));
+        self.decoded_pending
+            .extend(self.decoded_decisions.drain(..));
+        self.merge(output)
+    }
+
+    fn finish(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        self.raw_decisions.clear();
+        self.raw.finish(&mut self.raw_decisions);
+        self.decoded_decisions.clear();
+        self.decoded.finish(&mut self.decoded_decisions)?;
+        self.raw_pending.extend(self.raw_decisions.drain(..));
+        self.decoded_pending
+            .extend(self.decoded_decisions.drain(..));
+        self.merge(output)?;
+        if !self.raw_pending.is_empty() || !self.decoded_pending.is_empty() {
+            return Err(FilterError);
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        while let (Some((raw_byte, raw_masked)), Some((decoded_byte, decoded_masked))) =
+            (self.raw_pending.front(), self.decoded_pending.front())
+        {
+            if raw_byte != decoded_byte {
+                return Err(FilterError);
+            }
+            output.push((*raw_byte, *raw_masked || *decoded_masked));
+            self.raw_pending.pop_front();
+            self.decoded_pending.pop_front();
+        }
+        Ok(())
+    }
+}
+
+fn parse_json_unit(source: &[u8], eof: bool) -> JsonUnit {
+    let complete = |length: usize, byte: u8| {
+        let mut decoded = [0; 4];
+        decoded[0] = byte;
+        JsonUnit::Complete(length, decoded, 1)
+    };
+    let Some(first) = source.first().copied() else {
+        return JsonUnit::NeedMore;
+    };
+    if first != b'\\' {
+        return complete(1, first);
+    }
+    let invalid = || complete(1, b'\\');
+    let Some(escape) = source.get(1).copied() else {
+        return if eof { invalid() } else { JsonUnit::NeedMore };
+    };
+    let escaped = match escape {
+        b'"' => Some(b'"'),
+        b'\\' => Some(b'\\'),
+        b'/' => Some(b'/'),
+        b'b' => Some(b'\x08'),
+        b'f' => Some(b'\x0c'),
+        b'n' => Some(b'\n'),
+        b'r' => Some(b'\r'),
+        b't' => Some(b'\t'),
+        _ => None,
+    };
+    if let Some(byte) = escaped {
+        return complete(2, byte);
+    }
+    if escape != b'u' {
+        return invalid();
+    }
+    if source.len() < 6 {
+        return if eof { invalid() } else { JsonUnit::NeedMore };
+    }
+    let Some(first_unit) = parse_hex4(&source[2..6]) else {
+        return invalid();
+    };
+    let codepoint = if (0xd800..=0xdbff).contains(&first_unit) {
+        if source.len() < 12 {
+            return if eof { invalid() } else { JsonUnit::NeedMore };
+        }
+        if source.get(6..8) != Some(&b"\\u"[..]) {
+            return invalid();
+        }
+        let Some(second_unit) = parse_hex4(&source[8..12]) else {
+            return invalid();
+        };
+        if !(0xdc00..=0xdfff).contains(&second_unit) {
+            return invalid();
+        }
+        0x10000 + ((u32::from(first_unit) - 0xd800) << 10) + (u32::from(second_unit) - 0xdc00)
+    } else if (0xdc00..=0xdfff).contains(&first_unit) {
+        return invalid();
+    } else {
+        u32::from(first_unit)
+    };
+    let Some(character) = char::from_u32(codepoint) else {
+        return invalid();
+    };
+    let mut decoded = [0; 4];
+    let decoded_length = character.encode_utf8(&mut decoded).len();
+    JsonUnit::Complete(
+        if codepoint > 0xffff { 12 } else { 6 },
+        decoded,
+        decoded_length,
+    )
+}
+
+fn parse_hex4(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    bytes.iter().try_fold(0u16, |value, byte| {
+        let digit = match byte {
+            b'0'..=b'9' => u16::from(*byte - b'0'),
+            b'a'..=b'f' => u16::from(*byte - b'a' + 10),
+            b'A'..=b'F' => u16::from(*byte - b'A' + 10),
+            _ => return None,
+        };
+        Some((value << 4) | digit)
+    })
+}
+
 /// Stateful filter used directly by supervisor capture. Values are never
 /// serialized or printed; malformed bounds make construction fail closed.
 pub struct Redactor {
+    literal_values: Vec<Vec<u8>>,
+    context_bound: bool,
     literals: LiteralAutomaton,
+    encoded_literals: Option<EncodedLiteralMatcher>,
     tokens: TokenScanner,
     assignments: AssignmentScanner,
+    literal_only: bool,
     failed: bool,
     decisions: [DecisionQueue; 3],
     redaction_run: bool,
@@ -1087,10 +1359,30 @@ impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
         let secrets = validate_secrets(secrets)?;
 
-        Ok(Self {
+        Ok(Self::with_secrets(secrets, false))
+    }
+
+    /// Capture filter for published text. Masks registered typed and ambient
+    /// literal values, including JSON-escaped spellings, without rewriting
+    /// merely secret-shaped examples.
+    pub fn for_publication(
+        typed_values: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Result<Self, RedactorError> {
+        let mut secrets = ambient_values()?;
+        secrets.extend(scoped_values());
+        secrets.extend(typed_values);
+        Ok(Self::with_secrets(publication_secrets(secrets)?, true))
+    }
+
+    fn with_secrets(secrets: Vec<Vec<u8>>, literal_only: bool) -> Self {
+        Self {
             literals: LiteralAutomaton::new(&secrets),
+            encoded_literals: (!secrets.is_empty()).then(|| EncodedLiteralMatcher::new(&secrets)),
+            literal_values: secrets,
+            context_bound: false,
             tokens: TokenScanner::default(),
             assignments: AssignmentScanner::default(),
+            literal_only,
             failed: false,
             decisions: std::array::from_fn(|_| DecisionQueue::default()),
             redaction_run: false,
@@ -1098,11 +1390,25 @@ impl Redactor {
             token_source: 0,
             replacements: VecDeque::new(),
             insertions: VecDeque::new(),
-        })
+        }
     }
 
     pub fn has_redaction(&self) -> bool {
-        self.literals.matched || self.tokens.matched || self.assignments.matched
+        self.encoded_literals
+            .as_ref()
+            .is_some_and(EncodedLiteralMatcher::matched)
+            || self.literals.matched
+            || (!self.literal_only && (self.tokens.matched || self.assignments.matched))
+    }
+
+    fn bind_publication_context(&mut self) -> Result<(), FilterError> {
+        if self.literal_only && !self.context_bound {
+            let mut values = self.literal_values.clone();
+            values.extend(scoped_values());
+            *self = Self::with_secrets(publication_secrets(values).map_err(|_| FilterError)?, true);
+            self.context_bound = true;
+        }
+        Ok(())
     }
 
     fn filter_frames(
@@ -1110,6 +1416,7 @@ impl Redactor {
         bytes: &[u8],
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<(), FilterError> {
+        self.bind_publication_context()?;
         if self.failed {
             return Err(FilterError);
         }
@@ -1119,17 +1426,27 @@ impl Redactor {
         let mut emitter = FrameEmitter::new(sink);
         for chunk in bytes.chunks(FRAME_LIMIT) {
             let mut literals = Vec::new();
-            let mut tokens = Vec::new();
-            self.literals.filter(chunk, &mut literals);
-            self.tokens.filter(chunk, &mut tokens).map_err(|_| {
-                self.failed = true;
-                FilterError
-            })?;
-            self.assignments.filter(chunk, &mut self.decisions[2]);
-            self.insertions
-                .extend(self.assignments.insertions.drain(..));
+            if let Some(encoded) = self.encoded_literals.as_mut() {
+                encoded.filter(chunk, &mut literals)?;
+            } else {
+                self.literals.filter(chunk, &mut literals);
+            }
             self.decisions[0].extend(literals);
-            self.queue_tokens(tokens);
+            if self.literal_only {
+                let unchanged: Vec<_> = chunk.iter().copied().map(|byte| (byte, false)).collect();
+                self.decisions[1].extend(unchanged.clone());
+                self.decisions[2].extend(unchanged);
+            } else {
+                let mut tokens = Vec::new();
+                self.tokens.filter(chunk, &mut tokens).map_err(|_| {
+                    self.failed = true;
+                    FilterError
+                })?;
+                self.assignments.filter(chunk, &mut self.decisions[2]);
+                self.insertions
+                    .extend(self.assignments.insertions.drain(..));
+                self.queue_tokens(tokens);
+            }
             self.emit_decided(&mut emitter)?;
         }
         emitter.flush();
@@ -1141,17 +1458,23 @@ impl Redactor {
             return Err(FilterError);
         }
         let mut literals = Vec::new();
-        let mut tokens = Vec::new();
-        self.literals.finish(&mut literals);
-        self.tokens.finish(&mut tokens).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
-        self.assignments.finish(&mut self.decisions[2]);
-        self.insertions
-            .extend(self.assignments.insertions.drain(..));
+        if let Some(encoded) = self.encoded_literals.as_mut() {
+            encoded.finish(&mut literals)?;
+        } else {
+            self.literals.finish(&mut literals);
+        }
         self.decisions[0].extend(literals);
-        self.queue_tokens(tokens);
+        if !self.literal_only {
+            let mut tokens = Vec::new();
+            self.tokens.finish(&mut tokens).map_err(|_| {
+                self.failed = true;
+                FilterError
+            })?;
+            self.assignments.finish(&mut self.decisions[2]);
+            self.insertions
+                .extend(self.assignments.insertions.drain(..));
+            self.queue_tokens(tokens);
+        }
         let mut emitter = FrameEmitter::new(sink);
         self.emit_decided(&mut emitter)?;
         emitter.flush();
@@ -1301,10 +1624,14 @@ pub fn known_values(
     secrets: impl IntoIterator<Item = Vec<u8>>,
 ) -> Result<Vec<u8>, RedactorError> {
     let secrets = validate_secrets(secrets)?;
-    let mut matcher = LiteralAutomaton::new(&secrets);
+    let mut matcher = EncodedLiteralMatcher::new(&secrets);
     let mut decisions = Vec::with_capacity(bytes.len());
-    matcher.filter(bytes, &mut decisions);
-    matcher.finish(&mut decisions);
+    matcher
+        .filter(bytes, &mut decisions)
+        .map_err(|_| RedactorError::PublicationFilterFailed)?;
+    matcher
+        .finish(&mut decisions)
+        .map_err(|_| RedactorError::PublicationFilterFailed)?;
     let mut safe = Vec::with_capacity(bytes.len());
     let mut masked = false;
     for (byte, secret) in decisions {
@@ -1318,10 +1645,169 @@ pub fn known_values(
     Ok(safe)
 }
 
-/// Filter one bounded in-memory message or artifact using the same known
-/// credential shapes as capture. Filter before paging to preserve token context.
+thread_local! {
+    static PUBLICATION_VALUES: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Memory-only publication authority for one guardian invocation. The guard is
+/// thread-bound and restores its caller's values on every exit, including panic.
+pub struct PublicationScope {
+    previous: Vec<Vec<u8>>,
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for PublicationScope {
+    fn drop(&mut self) {
+        PUBLICATION_VALUES.with_borrow_mut(|values| *values = std::mem::take(&mut self.previous));
+    }
+}
+
+/// Validated memory-only publication context for a host worker thread.
+/// It cannot be serialized or printed and grants no provider access.
+#[derive(Clone)]
+pub struct PublicationSnapshot(Vec<Vec<u8>>);
+
+impl PublicationSnapshot {
+    pub fn enter(self) -> PublicationScope {
+        let previous =
+            PUBLICATION_VALUES.with_borrow_mut(|values| std::mem::replace(values, self.0));
+        PublicationScope {
+            previous,
+            thread: std::marker::PhantomData,
+        }
+    }
+}
+
+pub fn capture_publication_scope() -> PublicationSnapshot {
+    PublicationSnapshot(scoped_values())
+}
+
+fn scoped_values() -> Vec<Vec<u8>> {
+    PUBLICATION_VALUES.with_borrow(Clone::clone)
+}
+
+pub fn publication_scope(
+    values: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<PublicationScope, RedactorError> {
+    let mut all = scoped_values();
+    all.extend(values);
+    let all = publication_secrets(all)?;
+    let previous = PUBLICATION_VALUES.with_borrow_mut(|values| std::mem::replace(values, all));
+    Ok(PublicationScope {
+        previous,
+        thread: std::marker::PhantomData,
+    })
+}
+
+/// Values already available to the launch: classified environment and the
+/// explicit secret descriptor, including decoded strings in a JSON payload.
+pub fn launch_values(
+    environment: &[(Vec<u8>, Vec<u8>)],
+    secret: Option<&[u8]>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    fn strings(value: &serde_json::Value, output: &mut Vec<Vec<u8>>) {
+        match value {
+            serde_json::Value::String(value) if !value.is_empty() => {
+                output.push(value.as_bytes().to_vec())
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    strings(value, output);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    strings(value, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut values = environment
+        .iter()
+        .filter(|(name, value)| credential_variable_name(name) && !value.is_empty())
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    if let Some(secret) = secret.filter(|value| !value.is_empty()) {
+        values.push(secret.to_vec());
+        if let Ok(value) = serde_json::from_slice(secret) {
+            strings(&value, &mut values);
+        }
+    }
+    publication_secrets(values)
+}
+
+/// Return non-empty values from ambient variables whose names end in one of
+/// the credential assignment keys understood by the streaming redactor.
+/// This deliberately reads process environment only; it never opens stores.
+pub fn ambient_values() -> Result<Vec<Vec<u8>>, RedactorError> {
+    let values = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            (credential_variable_name(name.as_encoded_bytes())
+                && !value.as_encoded_bytes().is_empty())
+            .then(|| value.into_encoded_bytes())
+        })
+        .collect::<Vec<_>>();
+    validate_secrets(values)
+}
+
+/// Mask typed and ambient credential values in text that is about to be
+/// persisted or published. Shape-like examples are unchanged unless their
+/// exact value is registered as a credential.
+pub fn publication_text(
+    bytes: &[u8],
+    typed_values: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<u8>, RedactorError> {
+    let mut secrets = ambient_values()?;
+    secrets.extend(scoped_values());
+    secrets.extend(typed_values);
+    known_values(bytes, publication_secrets(secrets)?)
+}
+
+fn publication_secrets(
+    secrets: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
+    secrets.sort();
+    secrets.dedup();
+    let mut secrets = validate_secrets(secrets)?;
+    let escaped = secrets
+        .iter()
+        .filter_map(|secret| {
+            let text = std::str::from_utf8(secret).ok()?;
+            let encoded = serde_json::to_string(text).ok()?;
+            let end = encoded.len().checked_sub(1)?;
+            let interior = encoded.as_bytes().get(1..end)?;
+            (interior != secret).then(|| interior.to_vec())
+        })
+        .collect::<Vec<_>>();
+    secrets.extend(escaped);
+    secrets.sort();
+    secrets.dedup();
+    validate_secrets(secrets)
+}
+
+fn credential_variable_name(name: &[u8]) -> bool {
+    ASSIGNMENT_KEYS.iter().any(|(key, _)| {
+        let Some(start) = name.len().checked_sub(key.len()) else {
+            return false;
+        };
+        let bounded = start == 0 || !name[start - 1].is_ascii_alphanumeric();
+        bounded && name[start..].eq_ignore_ascii_case(key)
+    })
+}
+
+/// Filter a diagnostic using known literals and credential shapes. Input
+/// policy uses the shape-only disclosure scanner; content uses publication_text.
 pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
-    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let secrets = publication_secrets(
+        ambient_values()
+            .map_err(|_| FilterError)?
+            .into_iter()
+            .chain(scoped_values()),
+    )
+    .map_err(|_| FilterError)?;
+    let mut redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
     let mut safe = Vec::new();
     let mut sink = |frame: &[u8]| {
         safe.extend_from_slice(frame);
@@ -1548,7 +2034,7 @@ fn is_store_candidate(name: &OsStr) -> bool {
 }
 
 /// Rewrite one transcript through the streaming filter, replacing the entry
-/// only when a shape matched. A clean file is read once and never staged,
+/// only when a registered credential matched. A clean file is read once and never staged,
 /// copied or synced. A file that changes while it is read fails closed; a link
 /// or hard link is refused rather than followed.
 fn scrub_file(dir: &Directory, name: &OsStr, text_only: bool) -> Result<bool, FilterError> {
@@ -1580,7 +2066,7 @@ fn scrub_file(dir: &Directory, name: &OsStr, text_only: bool) -> Result<bool, Fi
 }
 
 /// Stream one transcript through a fresh redactor, writing the filtered bytes
-/// to `staged` when one is given. Returns whether any shape matched. The file
+/// to `staged` when one is given. Returns whether a credential value matched. The file
 /// must match `before` when it is opened and must not change while it is read.
 fn filter_pass(
     dir: &Directory,
@@ -1594,7 +2080,7 @@ fn filter_pass(
     if !before.unchanged(&opened) {
         return Err(FilterError);
     }
-    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut redactor = Redactor::for_publication([]).map_err(|_| FilterError)?;
     let mut utf8_tail = Vec::new();
     let mut buffer = [0_u8; SESSION_CHUNK];
     loop {
@@ -1758,6 +2244,138 @@ mod tests {
             known_values(b"abcde", [b"abc".to_vec(), b"cde".to_vec()]).unwrap(),
             REDACTED
         );
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn launch_descriptor_values_mask_capture_and_settlement_without_persistence() {
+        let secret = b"descriptor-credential-3391";
+        let mut filter = Redactor::for_publication([]).unwrap();
+        {
+            let values = launch_values(
+                &[(b"GH_TOKEN".to_vec(), b"ambient-launch-3391".to_vec())],
+                Some(secret),
+            )
+            .unwrap();
+            let _scope = publication_scope(values).unwrap();
+            let input = b"descriptor-credential-3391 ambient-launch-3391 sk-example-value";
+            assert_eq!(
+                checked_frames(&mut filter, &[input]),
+                b"[REDACTED] [REDACTED] sk-example-value"
+            );
+            assert_eq!(publication_text(secret, []).unwrap(), REDACTED);
+        }
+        assert_eq!(publication_text(secret, []).unwrap(), secret);
+    }
+
+    #[test]
+    fn publication_text_masks_registered_values_and_keeps_examples() {
+        let encoded = serde_json::to_string("typed\"credential-3391").unwrap();
+        let input = format!("example=sk-example-value actual={encoded}");
+        assert_eq!(
+            publication_text(input.as_bytes(), [b"typed\"credential-3391".to_vec()]).unwrap(),
+            b"example=sk-example-value actual=\"[REDACTED]\""
+        );
+    }
+
+    #[test]
+    fn publication_stream_masks_typed_json_values_but_preserves_shapes() {
+        let secret = b"typed\"credential-3391";
+        let encoded = serde_json::to_string(std::str::from_utf8(secret).unwrap()).unwrap();
+        let input = format!("example=sk-example-value actual={encoded}");
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::for_publication([secret.to_vec()]).unwrap();
+            assert_eq!(
+                checked_frames(
+                    &mut redactor,
+                    &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                ),
+                b"example=sk-example-value actual=\"[REDACTED]\""
+            );
+        }
+    }
+
+    #[test]
+    fn publication_preserves_raw_escape_literal_matching() {
+        let secret = br"\u0042";
+        let source = br"literal=\u0042";
+        let expected = b"literal=[REDACTED]";
+        assert_eq!(
+            publication_text(source, [secret.to_vec()]).unwrap(),
+            expected
+        );
+        for split in 0..=source.len() {
+            let mut redactor = Redactor::for_publication([secret.to_vec()]).unwrap();
+            assert_eq!(
+                checked_frames(&mut redactor, &[&source[..split], &source[split..]]),
+                expected,
+                "source split at byte {split}"
+            );
+        }
+        assert_eq!(known_values(br"\u0042", [b"B".to_vec()]).unwrap(), REDACTED);
+    }
+
+    #[test]
+    fn publication_stream_masks_full_and_mixed_unicode_json_escapes_at_every_split() {
+        fn escape(text: &str, escape_even: bool) -> String {
+            use std::fmt::Write as _;
+            let mut encoded = String::new();
+            for (index, character) in text.chars().enumerate() {
+                if !escape_even || index % 2 == 0 {
+                    let mut units = [0; 2];
+                    for unit in character.encode_utf16(&mut units) {
+                        write!(&mut encoded, "\\u{unit:04x}").unwrap();
+                    }
+                } else {
+                    encoded.push(character);
+                }
+            }
+            encoded
+        }
+
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789π🔒";
+        let variants = [
+            format!("\"{}\"", escape(secret, false)),
+            format!("\"{}\"", escape(secret, true)),
+        ];
+        for encoded in variants {
+            let input = format!("before={encoded}; example=sk-example-value");
+            let expected = b"before=\"[REDACTED]\"; example=sk-example-value";
+            assert_eq!(
+                publication_text(input.as_bytes(), [secret.as_bytes().to_vec()]).unwrap(),
+                expected,
+                "finite publication helper"
+            );
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::for_publication([secret.as_bytes().to_vec()]).unwrap();
+                assert_eq!(
+                    checked_frames(
+                        &mut redactor,
+                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                    ),
+                    expected,
+                    "source split at byte {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_credential_names_reuse_assignment_key_boundaries() {
+        for name in [
+            b"GH_TOKEN".as_slice(),
+            b"GITHUB_TOKEN",
+            b"OPENAI_API_KEY",
+            b"AWS_SECRET_ACCESS_KEY",
+            b"AWS_ACCESS_KEY_ID",
+            b"DATABASE_URL",
+            b"AZURE_CLIENT_SECRET",
+        ] {
+            assert!(credential_variable_name(name), "{name:?}");
+        }
+        for name in [b"OAUTH_CLIENT_ID".as_slice(), b"COMPASS", b"PROJECT"] {
+            assert!(!credential_variable_name(name), "{name:?}");
+        }
     }
 
     #[test]
@@ -2522,12 +3140,37 @@ mod tests {
         );
     }
 
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn scoped_descriptor_value_is_masked_in_session_history()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let candidate = root.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let history = candidate.join("history.jsonl");
+        let secret = b"plain-descriptor-secret-3391";
+        let input = format!(
+            "{} sk-unregistered-example-3391",
+            std::str::from_utf8(secret)?
+        );
+        std::fs::write(&history, input)?;
+        let _scope = publication_scope([secret.to_vec()])?;
+        assert_eq!(scrub_session_history(root)?, 1);
+        assert_eq!(
+            std::fs::read(&history)?,
+            b"[REDACTED] sk-unregistered-example-3391"
+        );
+        Ok(())
+    }
+
     #[test]
     fn settlement_scrub_removes_tokens_from_session_text_and_keeps_binaries()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
         let codex = root.join("candidate-0/sessions/2026/10/24");
         std::fs::create_dir_all(&codex)?;
         let rollout = codex.join("rollout-2026-10-24T00-00-00-thread.jsonl");
@@ -2567,6 +3210,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
         let candidate = root.join("candidate-0");
         let texts = [
             ".cursor/chats/project/session/messages.json",
@@ -2619,6 +3263,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
         let outside = root.join("outside.jsonl");
         std::fs::write(&outside, token)?;
         let sessions = root.join("candidate-0/sessions");
@@ -2637,23 +3282,27 @@ mod tests {
     }
 
     #[test]
-    fn session_scrub_keeps_going_after_an_overlong_authority()
+    fn session_scrub_keeps_long_examples_and_masks_registered_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        // A `://` run longer than the frame bound cannot be filtered, so the file is refused.
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
+        // An unregistered URL example does not impose a shape-scanner frame limit.
         let sessions = root.join("candidate-0/sessions");
         std::fs::create_dir_all(&sessions)?;
         let overlong = format!("https://{}\n", "a".repeat(FRAME_LIMIT + 1));
-        std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
-        // Layout order scrubs `sessions` before `claude-config`, so the good
-        // file comes after the refused one.
+        std::fs::write(sessions.join("overlong.jsonl"), &overlong)?;
+        // A later file still masks its explicitly registered credential.
         let good = root.join("candidate-0/claude-config/projects/key/session.jsonl");
         std::fs::create_dir_all(good.parent().ok_or("parent")?)?;
         std::fs::write(&good, format!("{{\"message\":\"{token}\"}}\n"))?;
 
-        assert!(scrub_session_history(root).is_err());
+        assert_eq!(scrub_session_history(root)?, 1);
+        assert_eq!(
+            std::fs::read_to_string(sessions.join("overlong.jsonl"))?,
+            overlong
+        );
         assert!(!std::fs::read_to_string(&good)?.contains(token));
         assert!(std::fs::read_to_string(&good)?.contains("[REDACTED]"));
         Ok(())
@@ -2665,6 +3314,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
         let mut deep = root.join("candidate-0/sessions");
         for level in 0..=SESSION_DEPTH {
             deep.push(format!("d{level}"));
@@ -2697,6 +3347,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
         // The token starts ten bytes before the first read ends, so it spans two reads.
         let mut text = " ".repeat(SESSION_CHUNK - 10);
         text.push_str(token);
@@ -2721,6 +3372,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
         let results = root.join("candidate-0/claude-config/projects/key/session/tool-results");
         std::fs::create_dir_all(&results)?;
         let text = results.join("toolu_text.txt");
