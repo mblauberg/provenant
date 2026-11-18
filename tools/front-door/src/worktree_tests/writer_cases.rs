@@ -153,22 +153,24 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
         &holder,
         &call,
     )?;
-    assert!(matches!(
-        started.as_slice(),
-        [provenant_run::Started::Refused { attempt, kind: provenant_run::RefusalKind::WorktreeBusy, .. }]
-            if *attempt == second_attempt
-    ));
+    // Worktree occupancy is a shared lease: both holders launch concurrently.
+    assert!(
+        matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == second_attempt),
+        "{started:?}"
+    );
+
+    // Removal and GC refuse while any holder is live (exclusive removal custody).
+    let refused = command(&rig, &["worktree", "remove", "writer", "--json"])?;
+    let refusal = json(&refused)?;
+    assert_eq!(refusal["status"], "refused", "{refusal}");
+    assert_eq!(refusal["error"]["code"], "WORKTREE_LOCK_BUSY", "{refusal}");
+
+    let second_terminal = await_terminal(&store, second_attempt, &call)?;
+    assert_terminal_outcome(&second_terminal, provenant_run::Outcome::Succeeded)?;
 
     fs::write(&release, b"release")?;
     let first_terminal = await_terminal(&store, first_attempt, &call)?;
     assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
-    assert!(matches!(
-        store.record(second_attempt, &call)?.state,
-        provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::Rejected,
-            ..
-        }
-    ));
     wait_for_writer_release(&store)?;
     cleanup.disarm();
     Ok(())

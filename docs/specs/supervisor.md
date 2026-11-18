@@ -436,11 +436,15 @@ refuses credential-bearing URLs.
 ### Shared occupancy; removal never forces
 
 Git's own inventory is the worktree registry. A worktree's owning lane decides
-who else writes in it. Writers share occupancy leases, and custody outlives the
-requesting call. Each attempt also holds its own holder lease; proof that a
-sibling has settled cannot release another attempt's custody. Removal requires
-exclusive occupancy with zero live holders. `worktree remove` refuses
-the primary, a live writer or observed process, and has no force. Dirty work
+who else writes in it. Worktree occupancy is a shared lease: any number of lanes
+may hold one worktree simultaneously. By maintainer decision (#3451), path claims
+are advisory and overlapping claims refuse nothing; a live conflicting writer is
+not excluded by Provenant. Data is protected by Git's index.lock, pathspec commits
+and exclusive removal custody. Custody outlives the requesting call. Each attempt
+also holds its own holder lease; proof that a sibling has settled cannot release
+another attempt's custody. Removal requires exclusive occupancy with zero live holders.
+`worktree remove` refuses the primary, a live writer or observed process, and has
+no force. Dirty work
 requires explicit discard, with its recoverable archive captured before removal;
 it deletes a branch only with current landing evidence or explicit discard.
 A persisted writer reservation remains a custody fence when its kernel lock is

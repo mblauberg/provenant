@@ -26,9 +26,13 @@ Shared launches observe the live branch and never advance the parent's
 checkout. Direct host requests retain authority to select existing checkouts.
 Optional `write_scope` paths are advisory claims: overlaps in one worktree warn
 the owning lane in its admission receipt and checkpoint and refuse nothing.
-Writers use pathspec commits (`git commit -- <owned paths>`) to avoid committing
-a sibling's staged paths. Shared budget commits use the immutable minimal
-shared Git context, letting Git retain its index lock through the branch CAS.
+By maintainer decision (#3451), path overlap is advisory rather than exclusive;
+a live conflicting writer is not refused. Provenant holds no lock around Git.
+Data is protected by Git's index.lock with brief jittered retry, pathspec commits
+(`git commit -- <owned paths>`) avoiding committing a sibling's staged paths,
+and exclusive removal custody requiring zero live holders. Shared budget commits
+use the immutable minimal shared Git context, letting Git retain its index lock
+through the branch CAS.
 - Why: sharing follows the owner's decision while unrelated lanes stay isolated.
 
 Authorised writers share incarnation- and branch-bound private Git data,
