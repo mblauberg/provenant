@@ -4526,37 +4526,49 @@ fn graph_writer_restarts_fresh() -> Result {
 
 /// A real owner observation must retain a non-adapter preparation refusal.
 fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
-    for routes in [
+    let rig = policy_codex_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
+    let committed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&committed), 0, "{committed:?}");
+    let routes = [
         json!([{"adapter": "codex", "model": "gpt-6-luna", "effort": "low"}]),
         json!([
             {"adapter": "codex", "model": "gpt-6-luna", "effort": "low"},
             {"adapter": "codex", "model": "gpt-6-luna", "effort": "medium"}
         ]),
-    ] {
-        let expected_attempts = routes.as_array().ok_or("routes")?.len();
-        let rig = policy_codex_fixture()?;
-        let _cleanup = rig.process_cleanup();
-        let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
-        let committed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
-        assert_eq!(code(&committed), 0, "{committed:?}");
-        let document = rig.project.join("preparation-refusal.json");
-        fs::write(
-            &document,
-            serde_json::to_vec(&json!({
-                "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "preparation-refusal", "nodes": [{
-                    "id": "lane", "prompt": "reply OK", "access": "read_only",
-                    "attempt": {"account": "not-registered"},
-                    "routes": routes
-                }]
-            }))?,
-        )?;
-        let settled = rig.run_and_wait(&["--file", "preparation-refusal.json"], "5s")?;
-        let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
-        assert_eq!(settled.exit(), 1, "{response}");
-        let node = &response["data"]["checkpoint"]["nodes"][0];
+    ];
+    let nodes = routes
+        .iter()
+        .enumerate()
+        .map(|(index, routes)| {
+            json!({
+                "id": format!("lane-{index}"), "prompt": "reply OK", "access": "read_only",
+                "attempt": {"account": "not-registered"}, "routes": routes
+            })
+        })
+        .collect::<Vec<_>>();
+    let document = rig.project.join("preparation-refusal.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "preparation-refusal", "nodes": nodes
+        }))?,
+    )?;
+    let settled = rig.run_and_wait(&["--file", "preparation-refusal.json"], "5s")?;
+    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
+    assert_eq!(settled.exit(), 1, "{response}");
+    for (index, routes) in routes.iter().enumerate() {
+        let node = response["data"]["checkpoint"]["nodes"]
+            .as_array()
+            .ok_or("nodes")?
+            .iter()
+            .find(|node| node["id"] == format!("lane-{index}"))
+            .ok_or("node")?;
         assert_eq!(
             node["attempts"].as_array().ok_or("attempts")?.len(),
-            expected_attempts,
+            routes.as_array().ok_or("routes")?.len(),
             "{node}"
         );
         assert_eq!(node["state"], "failed", "{response}");
@@ -5002,19 +5014,21 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
     let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
     let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
     support::register_account(&rig, "codex", "fixture", &key, &rig.root.join("codex"))?;
+    let mut launches = Vec::new();
     for (prompt, expected) in [
         ("fixture uncatalogued success", 0),
         ("fixture uncatalogued refusal", 1),
     ] {
-        let settled = rig.run_and_wait(
-            &[
-                "task",
-                prompt,
-                "--model",
-                "codex/uncatalogued-fixture-model",
-            ],
-            "30s",
-        )?;
+        let (launch, value) = rig.launch(&[
+            "task",
+            prompt,
+            "--model",
+            "codex/uncatalogued-fixture-model",
+        ])?;
+        launches.push((expected, launch, value));
+    }
+    for (expected, launch, value) in launches {
+        let settled = rig.wait_launched(launch, value, "30s")?;
         assert_eq!(settled.exit(), expected, "{:?}", settled.wait);
         assert!(
             String::from_utf8_lossy(&settled.launch.stderr.bytes).contains("not in the catalogue"),
