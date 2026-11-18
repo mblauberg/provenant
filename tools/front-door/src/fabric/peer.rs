@@ -1842,6 +1842,7 @@ pub(super) fn peer_retained_receipt(
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // The custom worktree driver compiles without a test harness.
 mod console_tree_tests {
     use super::*;
 

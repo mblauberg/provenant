@@ -62,26 +62,23 @@ fn observation_json_edge_replays_after_project_cursor() -> Result {
     assert_eq!(lines[0]["cursor"]["seq"], second);
 
     // The first line confirms subscription and replay before the next append.
+    use std::ffi::OsString;
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
     use std::time::Duration;
     let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
-    let mut child = Command::new(binary)
-        .current_dir(&rig.project)
-        .env_clear()
-        .envs(rig.env.iter().map(|(key, value)| (key, value)))
-        .args([
-            "--state-dir",
-            rig.state.to_str().ok_or("state")?,
-            "events",
-            "--json",
-            "--follow",
-            "--from",
-            &first.to_string(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let args = [
+        "--state-dir",
+        rig.state.to_str().ok_or("state")?,
+        "events",
+        "--json",
+        "--follow",
+        "--from",
+        &first.to_string(),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    let mut child = rig.spawn_stream(binary.as_ref(), &args)?;
     let output = child.stdout.take().ok_or("stdout")?;
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {

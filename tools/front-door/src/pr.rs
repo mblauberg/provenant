@@ -414,6 +414,7 @@ type Observed = std::result::Result<Vec<observer::Check>, observer::ObserveError
 /// with no check yet, or only skipped ones, waits `UNREPORTED_WAIT` for one
 /// that runs.
 #[cfg(test)] // Retained as the pre-journal polling baseline.
+#[allow(dead_code)] // The custom worktree driver compiles without a test harness.
 fn watch_with(
     read: &mut dyn FnMut() -> Observed,
     sleep: &dyn Fn(Duration),

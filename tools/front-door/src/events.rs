@@ -109,6 +109,7 @@ fn consumer_id(name: &str) -> Result<ActorId, &'static str> {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // The custom worktree driver compiles without a test harness.
 mod tests {
     use super::*;
 

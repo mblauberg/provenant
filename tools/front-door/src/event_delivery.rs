@@ -1138,6 +1138,7 @@ fn index_notes(roots: &Roots, project: ProjectId) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)] // The custom worktree driver compiles without a test harness.
     fn fixture() -> (tempfile::TempDir, Roots, ProjectId) {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
