@@ -80,41 +80,6 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "land_plain_singleton_uses_batch_driver"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "land_refuses_a_rest_merge_405_with_a_next_step"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "land_refuses_a_rest_merge_409_as_head_moved"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr_watch_failure_and_head_changes_report_fail_with_head"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
 name = "session_save_warns_once_only_when_disk_is_low"
 issue = "#3305"
 owner = "chair"
