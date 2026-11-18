@@ -3552,7 +3552,11 @@ impl BoundGraphOwner<'_> {
                 && let Some(model) = route.model.as_deref()
                 && let Ok(model) =
                     provenant_routing::ModelId::parse(&exact_model(route.adapter.as_deref(), model))
-                && let Ok(catalogue) = provenant_routing::Catalogue::bundled()
+                // Resolve against the same effective (bundled + discovered)
+                // catalogue and revision that `route list` uses, not just the
+                // bundled catalogue. One lookup shared with the CLI warning.
+                && let Ok(catalogue) =
+                    provenant_cli::route::effective_catalogue(&self.factory.context.roots)
                 && catalogue.model(&model).is_none()
             {
                 let warning = format!(
