@@ -68,7 +68,8 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     # Spec: docs/specs/ci.md#pull-requests-start-from-green-evidence
     docs = commit('notes.md', 'docs')
     covered = {n: ('run' if n == 'checks' else 'covered') for n in names}
-    run(docs, covered)
+    # Main evidence comes from full runs, so coverage from it defers no tests.
+    assert run(docs, covered)['deferred_tests'] == {}
     code = commit('tools/front-door/crates/workflow/src/x.rs', 'code')
     normal = {'checks': 'run', 'rust': 'run', 'macos_lint': 'deferred', 'macos_native': 'deferred', 'macos_release': 'deferred'}
     sel = run(code, normal)
