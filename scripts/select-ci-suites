@@ -231,7 +231,8 @@ def select(config, env):
             else:
                 state, why, evidence = 'run', 'relevant paths: ' + ', '.join(relevant_main[:5]), None
             result['suites'][name] = {'state': state, 'reason': why, 'evidence': evidence}
-            if state == 'run' and event == 'pull_request' and s.get('main_tests'):
+            # Tests deferred by the run that produced PR evidence stay deferred.
+            if event == 'pull_request' and s.get('main_tests') and (state == 'run' or (state == 'covered' and evidence == p)):
                 result['deferred_tests'][name] = s['main_tests']
     except Exception as error:
         result.update(full=True, full_reason=f'selection error: {error}', rust_base='', deferred_tests={})

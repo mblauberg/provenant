@@ -101,7 +101,9 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     sync = {'PR_ACTION': 'synchronize', 'PR_BEFORE': code}
     first = run(code, normal, pr(base, code))
     assert (first['base'], first['tree']) == (artifact['base'], artifact['tree']), first
-    run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, {**sync, **pr(base, doc_after)}, state_override=pstate)
+    carried = run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, {**sync, **pr(base, doc_after)}, state_override=pstate)
+    # Coverage carried from a pull-request run keeps that run's deferred tests named.
+    assert 'rust' in carried['deferred_tests'] and 'deferred to main' in summary.read_text(), carried
     code_after = commit('another.rs', 'new')
     run(code_after, normal, {**sync, **pr(base, code_after)}, state_override=pstate)
     run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={'main': [mainrun(base)], 'pr': [prrun]})
