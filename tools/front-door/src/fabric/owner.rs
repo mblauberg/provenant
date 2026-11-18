@@ -807,6 +807,23 @@ pub(crate) fn graph_journal_error(
     error: provenant_fabric_runtime::graph::JournalError,
 ) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
+    let unsupported_version = match error.root_cause() {
+        JournalError::Decode(decode) => match decode.root_cause() {
+            provenant_records::DecodeError::UnsupportedVersion { found, .. } if *found > 1 => {
+                Some(*found)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(version) = unsupported_version {
+        return FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph checkpoint schema".into(),
+            version,
+        };
+    }
     if let JournalError::Graph { ref source, .. } = error {
         return match source.root_cause() {
             JournalError::TooLarge => FacadeError::DispatchRefused {
@@ -818,15 +835,6 @@ pub(crate) fn graph_journal_error(
             JournalError::Filesystem(_)
             | JournalError::Io(_)
             | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
-            JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-                found,
-                ..
-            }) if *found > 1 => FacadeError::UpgradeRequired {
-                reader_release: env!("CARGO_PKG_VERSION").into(),
-                writer_release: "unknown".into(),
-                record: "graph checkpoint schema".into(),
-                version: *found,
-            },
             _ if source.is_unreadable() => FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,
@@ -836,14 +844,6 @@ pub(crate) fn graph_journal_error(
         };
     }
     match error {
-        JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-            found, ..
-        }) if found > 1 => FacadeError::UpgradeRequired {
-            reader_release: env!("CARGO_PKG_VERSION").into(),
-            writer_release: "unknown".into(),
-            record: "graph checkpoint schema".into(),
-            version: found,
-        },
         JournalError::TooLarge => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -3683,6 +3683,33 @@ impl BoundGraphOwner<'_> {
                 } else {
                     (None, None)
                 };
+                let result_warning = result_warning.or_else(|| {
+                    if let Some(delivery) = effective_delivery
+                        && let provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } = &delivery.state
+                    {
+                        Some(reason.clone())
+                    } else {
+                        None
+                    }
+                });
+                let stop = if effective_delivery.as_ref().is_some_and(|delivery| {
+                    matches!(
+                        &delivery.state,
+                        provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } if reason.contains("integration_conflict") || reason.contains("merge conflict")
+                    )
+                }) {
+                    Some(provenant_records::StopCause::Blocked)
+                } else {
+                    stop
+                };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
                 // route fallback for authentication or quota failures.
@@ -4599,6 +4626,21 @@ mod journal_error_tests {
         assert!(super::repair_touches_risk(&review, &paths));
         assert!(!super::repair_touches_risk(&review, &[]));
         assert!(!super::repair_touches_risk(&review, &["README.md".into()]));
+    }
+
+    #[test]
+    fn graph_journal_future_context_requires_upgrade() {
+        let source = provenant_records::DecodeError::UnsupportedVersion {
+            found: 2,
+            line: 1,
+            column: 1,
+        }
+        .with_context("/fixture/checkpoint.json", "GraphRecord");
+        let error = provenant_fabric_runtime::graph::JournalError::Decode(source);
+        assert!(matches!(
+            super::graph_journal_error(error),
+            super::FacadeError::UpgradeRequired { version: 2, .. }
+        ));
     }
 
     #[test]

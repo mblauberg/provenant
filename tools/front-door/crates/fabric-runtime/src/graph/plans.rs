@@ -1272,6 +1272,57 @@ pub(super) fn add_floor_uses(
     Ok(())
 }
 
+pub(super) fn provision_paths(
+    nodes: &mut [GraphNode],
+    graph: &str,
+    prefix: &str,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
+) -> Result<(), String> {
+    for child in nodes {
+        let id = if prefix.is_empty() {
+            child.id.clone()
+        } else {
+            format!("{prefix}--{}", child.id)
+        };
+        if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
+            child.worktree = Some(
+                super::relay::child_worktree(worktree_layout, graph, &id)
+                    .map_err(|error| error.to_string())?,
+            );
+            child.provision_worktree = true;
+        }
+        if let Some(composite) = &mut child.composite {
+            // A composite exporting one member writer's commit (a planned
+            // implementation) names that checkout after itself, as a
+            // relayed add of the same child does.
+            let mut exported = composite
+                .exports
+                .iter()
+                .filter(|export| export.outputs.contains(&OutputKind::Commit));
+            if let (Some(export), None) = (exported.next(), exported.next())
+                && let Some(writer) = composite.nodes.iter_mut().find(|member| {
+                    member.id == export.node
+                        && member.access == AccessMode::WorktreeWrite
+                        && member.worktree.is_none()
+                        && member.composite.is_none()
+                        && member.loop_body.is_none()
+                })
+            {
+                writer.worktree = Some(
+                    super::relay::child_worktree(worktree_layout, graph, &id)
+                        .map_err(|error| error.to_string())?,
+                );
+                writer.provision_worktree = true;
+            }
+            provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
+        }
+        if let Some(body) = &mut child.loop_body {
+            provision_paths(&mut body.body, graph, &id, worktree_layout)?;
+        }
+    }
+    Ok(())
+}
+
 /// Expand a patch's compiled nodes (composites and loops included), check
 /// them as one graph, then namespace them under their parent and share
 /// checkouts between overlapping writers.
@@ -1309,56 +1360,6 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
-    fn provision_paths(
-        nodes: &mut [GraphNode],
-        graph: &str,
-        prefix: &str,
-        worktree_layout: &provenant_config::WorktreeLayoutPort,
-    ) -> Result<(), String> {
-        for child in nodes {
-            let id = if prefix.is_empty() {
-                child.id.clone()
-            } else {
-                format!("{prefix}--{}", child.id)
-            };
-            if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
-                child.worktree = Some(
-                    super::relay::child_worktree(worktree_layout, graph, &id)
-                        .map_err(|error| error.to_string())?,
-                );
-                child.provision_worktree = true;
-            }
-            if let Some(composite) = &mut child.composite {
-                // A composite exporting one member writer's commit (a planned
-                // implementation) names that checkout after itself, as a
-                // relayed add of the same child does.
-                let mut exported = composite
-                    .exports
-                    .iter()
-                    .filter(|export| export.outputs.contains(&OutputKind::Commit));
-                if let (Some(export), None) = (exported.next(), exported.next())
-                    && let Some(writer) = composite.nodes.iter_mut().find(|member| {
-                        member.id == export.node
-                            && member.access == AccessMode::WorktreeWrite
-                            && member.worktree.is_none()
-                            && member.composite.is_none()
-                            && member.loop_body.is_none()
-                    })
-                {
-                    writer.worktree = Some(
-                        super::relay::child_worktree(worktree_layout, graph, &id)
-                            .map_err(|error| error.to_string())?,
-                    );
-                    writer.provision_worktree = true;
-                }
-                provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
-            }
-            if let Some(body) = &mut child.loop_body {
-                provision_paths(&mut body.body, graph, &id, worktree_layout)?;
-            }
-        }
-        Ok(())
-    }
     provision_paths(
         &mut local_nodes,
         &document.graph_id,

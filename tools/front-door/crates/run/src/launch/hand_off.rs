@@ -105,6 +105,7 @@ fn custody_local(
         custody::CustodyError::Fenced
         | custody::CustodyError::UnknownIdentity
         | custody::CustodyError::InvalidRecord
+        | custody::CustodyError::Decode(_)
         | custody::CustodyError::HandoffUnknown
         | custody::CustodyError::ProfileHandoffUnknown => boundary_handoff(
             policy,

@@ -26,6 +26,8 @@ pub struct FabricConfig {
     pub lanes: Lanes,
     #[serde(default)]
     pub implement: ImplementConfig,
+    #[serde(default)]
+    pub batch: BatchConfig,
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
@@ -48,6 +50,19 @@ impl Default for ImplementConfig {
             plan: false,
             warn_unbounded_junior: true,
         }
+    }
+}
+
+/// Defaults for batch templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BatchConfig {
+    pub max_parallel: usize,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self { max_parallel: 4 }
     }
 }
 
@@ -943,6 +958,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     ),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
+    FieldMetadata::int("batch.max_parallel", 1, 64),
     FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
@@ -1258,6 +1274,7 @@ mod tests {
             lanes: Lanes::default(),
             plan: Default::default(),
             implement: Default::default(),
+            batch: Default::default(),
             steer: Default::default(),
             limits: Limits {
                 body_bytes: 65536,

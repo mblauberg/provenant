@@ -16,6 +16,7 @@ pub(crate) use unified::{
 };
 pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;
+mod graph_auto_settle;
 mod graph_document;
 pub(crate) mod owner;
 mod peer;

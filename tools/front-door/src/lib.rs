@@ -649,6 +649,76 @@ fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
+/// The effective verify port for `config show`: each value with the layer that
+/// supplied it. An unset base is inferred from the effective remote's HEAD and
+/// labelled with the ref it came from; a port table that cannot be read stays
+/// a warning instead of stopping a command that does not need verify.
+fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serde_json::Value {
+    use provenant_os::exec::{SystemExecutor, Termination};
+    let ports = match provenant_config::PortTable::read_for_inspection(Some(project), state) {
+        Ok(ports) => ports,
+        Err(error) => {
+            return serde_json::json!({
+                "warning": format!("port table could not be read: {error}")
+            });
+        }
+    };
+    let remote = ports.verify.remote.clone();
+    let base = if ports.verify.base.is_empty() {
+        let inferred = if remote.is_empty() {
+            None
+        } else {
+            SystemExecutor::new(1)
+                .ok()
+                .and_then(|executor| {
+                    crate::gc_support::host_git_with_stderr(
+                        project,
+                        &executor,
+                        &[
+                            "symbolic-ref",
+                            "--quiet",
+                            &format!("refs/remotes/{remote}/HEAD"),
+                        ],
+                        std::time::Duration::from_secs(5),
+                        false,
+                    )
+                    .ok()
+                })
+                .and_then(|outcome| {
+                    (outcome.termination == Termination::Exit(0)).then(|| {
+                        String::from_utf8_lossy(&outcome.stdout.bytes)
+                            .trim()
+                            .to_owned()
+                    })
+                })
+                .and_then(|target| provenant_config::infer_verify_base(&remote, &target))
+        };
+        match inferred {
+            Some((base, source)) => serde_json::json!({
+                "value": base,
+                "source": format!("inferred from {source}"),
+            }),
+            None => serde_json::json!({
+                "value": serde_json::Value::Null,
+                "source": "unresolved",
+                "remedy": provenant_config::verify_base_unset_error().to_string(),
+            }),
+        }
+    } else {
+        serde_json::json!({
+            "value": ports.verify.base,
+            "source": provenant_config::port_source_layer(ports.verify.source),
+        })
+    };
+    serde_json::json!({
+        "verify.base": base,
+        "verify.remote": {
+            "value": remote,
+            "source": provenant_config::port_source_layer(ports.verify.source),
+        },
+    })
+}
+
 /// Run one config action and print the result: the effective config read back
 /// for show and edits, or the schema, apply report or history.
 fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::Globals) -> u8 {
@@ -706,6 +776,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 );
                 value["policy"] = serde_json::to_value(&policy)?;
                 value["policy_render"] = policy.render().into();
+                value["ports"] = config_show_ports(&context.project, roots.state.as_path());
                 value
             }
             ConfigAction::Schema { all } => {

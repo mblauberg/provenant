@@ -349,10 +349,10 @@ fn project_lane_inner(
             None => format!("{outcome}; {releasing}"),
         });
     }
-    if host_artifacts && let Some(blocked) = run::settlement::blocking_reason_for(root, lane) {
+    if host_artifacts && let Some(blocked) = run::settlement::diagnostic_for(root, lane, now_wall) {
         projected.reason = Some(match projected.reason.take() {
-            Some(reason) => format!("{reason}; settlement retry pending: {blocked}"),
-            None => format!("settlement retry pending: {blocked}"),
+            Some(reason) => format!("{reason}; {blocked}"),
+            None => blocked,
         });
     }
     if projected.reason == projected.waiting_for {

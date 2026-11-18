@@ -222,6 +222,17 @@ pub enum WorktreeError {
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
+    #[error(
+        "writer lease held by attempt {holder} (branch {branch}, worktree {}, reservation age {age}, live: {live})",
+        .worktree.display(), live = .live.map_or("unknown", |live| if live { "true" } else { "false" })
+    )]
+    WriterLeaseHeld {
+        holder: AttemptId,
+        branch: String,
+        worktree: PathBuf,
+        age: String,
+        live: Option<bool>,
+    },
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
     #[error(

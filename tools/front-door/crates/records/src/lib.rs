@@ -50,7 +50,10 @@ pub use canonical::{
 };
 pub use finding::Finding;
 pub use input::{InputWarning, decode_input};
-pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
+pub use json::{
+    DecodeError, EncodeError, Limits, RecordHeader, decode, decode_stored_record,
+    decode_stored_record_v1, decode_v1, encode,
+};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use port_receipt::{

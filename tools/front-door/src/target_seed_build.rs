@@ -214,8 +214,9 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
 }
 
 /// The pinned remote-tracking commit every seed build starts from: the
-/// project's declared verify base (`verify.base` in the port table), so a
-/// repository with another remote or default branch needs no `origin/main`.
+/// project's declared verify base (`verify.base` in the port table), inferred
+/// from the effective remote's HEAD when no layer declares it. A repository
+/// with another remote or default branch needs no compiled `origin/main`.
 struct VerifyBase {
     commit: String,
     project_key: String,
@@ -326,6 +327,48 @@ fn verify_base_file_blob(
     })?)?))
 }
 
+/// Resolve an unset `verify.base` from the effective remote's HEAD symref. The
+/// read-only repository is the same one used for an explicit base, so the
+/// inferred value goes through the identical validation and object reads.
+fn infer_verify_base(
+    remote: &str,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    executor: &dyn Executor,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Result<String> {
+    use provenant_confinement::{
+        GitRead, repo::GitRefName, repo::GitRevision, utility::run_read_utility,
+    };
+    if remote.is_empty() {
+        return Err(provenant_config::verify_base_unset_error().into());
+    }
+    let head = GitRefName::remote_tracking(format!("{remote}/HEAD"))?;
+    let revision = GitRevision::new(head.as_str())?;
+    let outcome = run_read_utility(
+        executor,
+        GitRead::SymbolicRevision { revision },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .map_err(|error| seed_error("reading remote HEAD", &error))?;
+    if outcome.termination != Termination::Exit(0)
+        || outcome.timed_out
+        || outcome.stdout.truncated
+        || outcome.stdout.read_failed
+    {
+        return Err(provenant_config::verify_base_unset_error().into());
+    }
+    let target = String::from_utf8(outcome.stdout.bytes)
+        .map_err(|error| seed_error("reading remote HEAD", &error))?;
+    provenant_config::infer_verify_base(remote, target.trim())
+        .map(|(base, _)| base)
+        .ok_or_else(|| provenant_config::verify_base_unset_error().into())
+}
+
 fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<VerifyBase> {
     use provenant_confinement::{
         repo::GitRefName,
@@ -344,9 +387,12 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
         .map_err(|error| seed_error("opening repository", &error))?;
     let project_key = target_seed::project_key(repo.common_git_dir());
     let facts = RepoFacts::default();
-    let base = provenant_config::PortTable::read_for(Some(project), host_state)?
-        .verify
-        .base;
+    let verify = provenant_config::PortTable::read_for(Some(project), host_state)?.verify;
+    let base = if verify.base.is_empty() {
+        infer_verify_base(&verify.remote, &repo, &executor, &utility, budget, &cancel)?
+    } else {
+        verify.base
+    };
     let reference = GitRefName::remote_tracking(&base)?;
     let commit = facts
         .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)
@@ -867,6 +913,54 @@ mod checkout_tests {
     #[allow(unused_imports)]
     // This module is also included by a harness-free integration target.
     use super::*;
+
+    #[test]
+    fn verify_base_infers_a_non_main_default_branch_from_remote_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote");
+        let project = temp.path().join("project");
+        fs::create_dir(&remote).unwrap();
+        git(&remote, &["init".into(), "--initial-branch=master".into()]).unwrap();
+        fs::write(
+            remote.join("Cargo.toml"),
+            "[package]\nname='seed-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            remote.join("rust-toolchain.toml"),
+            include_str!("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        git(
+            &remote,
+            &[
+                "add".into(),
+                "Cargo.toml".into(),
+                "rust-toolchain.toml".into(),
+            ],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&remote, &["commit", "-m", "base"]).unwrap();
+        git(
+            temp.path(),
+            &[
+                "clone".into(),
+                "--".into(),
+                remote.as_os_str().into(),
+                project.as_os_str().into(),
+            ],
+        )
+        .unwrap();
+        let expected = String::from_utf8(
+            git(&project, &["rev-parse".into(), "origin/master".into()]).unwrap(),
+        )
+        .unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let workspace = workspace_relative(&state, &project).unwrap().unwrap();
+        let base = verify_base(&state, &project, &workspace).unwrap();
+        assert_eq!(base.commit, expected.trim());
+    }
 
     #[test]
     fn checkout_transfers_remote_tracking_commit_ahead_of_local_branch() {
