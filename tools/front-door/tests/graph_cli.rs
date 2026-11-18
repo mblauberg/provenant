@@ -561,12 +561,11 @@ fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
         } else {
             assert!(output.status.success(), "{source}: {value}");
             if source == "template" {
-                // Explain exposes the lowered expansion. The authored template
-                // key/use remain in the unchanged local source checked above.
-                assert_eq!(
-                    value["data"]["document"]["nodes"][0]["prompt"], "Inspect",
-                    "{value}"
-                );
+                // A shorthand document lowers into a composite. Its member
+                // retains both the authored template identity and prompt.
+                let member = &value["data"]["document"]["nodes"][0]["composite"]["nodes"][0];
+                assert_eq!(member["prompt"], "Inspect");
+                assert_eq!(member["template"], shaped);
             } else {
                 assert!(
                     value["data"]["document"].to_string().contains(&shaped),
