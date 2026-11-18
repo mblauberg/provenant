@@ -161,26 +161,24 @@ impl crate::LaunchSpec {
             text(gate.provenant)?,
             text(gate.cargo)?,
         );
-        let nextest_target = if let Some(nextest) = gate.nextest {
-            format!("{} \"$@\"", text(nextest)?)
-        } else if let Some(cargo_nextest) = gate.cargo_nextest {
-            format!("{} nextest \"$@\"", text(cargo_nextest)?)
-        } else {
-            format!("{} nextest \"$@\"", text(gate.cargo)?)
+        // Gate nextest only where a real executable exists. A cargo-nextest
+        // shim that ran `cargo nextest` would find itself on PATH and recurse;
+        // without one, Cargo reports its own missing-subcommand error.
+        let provenant = text(gate.provenant)?;
+        let nextest_target = match (gate.nextest, gate.cargo_nextest) {
+            (Some(nextest), _) => Some(format!("{} \"$@\"", text(nextest)?)),
+            (None, Some(cargo_nextest)) => Some(format!("{} nextest \"$@\"", text(cargo_nextest)?)),
+            (None, None) => None,
         };
-        let nextest_script = format!(
-            "{env_prefix}exec {} admit build -- {nextest_target}\n",
-            text(gate.provenant)?,
-        );
-        let cargo_nextest_target = if let Some(cargo_nextest) = gate.cargo_nextest {
-            format!("{} \"$@\"", text(cargo_nextest)?)
-        } else {
-            format!("{} nextest \"$@\"", text(gate.cargo)?)
+        let nextest_script = nextest_target
+            .map(|target| format!("{env_prefix}exec {provenant} admit build -- {target}\n"));
+        let cargo_nextest_script = match gate.cargo_nextest {
+            Some(cargo_nextest) => Some(format!(
+                "{env_prefix}exec {provenant} admit build -- {} \"$@\"\n",
+                text(cargo_nextest)?,
+            )),
+            None => None,
         };
-        let cargo_nextest_script = format!(
-            "{env_prefix}exec {} admit build -- {cargo_nextest_target}\n",
-            text(gate.provenant)?,
-        );
         // Validate the environment before mutating setup or grants. The caller
         // can then omit this optional shim if its paths cannot be represented.
         let path_index = self
@@ -204,14 +202,17 @@ impl crate::LaunchSpec {
             path: bin.join("cargo"),
             bytes: cargo_script.into_bytes(),
         });
-        self.setup.push(SetupStep::WriteExecutable {
-            path: bin.join("nextest"),
-            bytes: nextest_script.into_bytes(),
-        });
-        self.setup.push(SetupStep::WriteExecutable {
-            path: bin.join("cargo-nextest"),
-            bytes: cargo_nextest_script.into_bytes(),
-        });
+        for (name, script) in [
+            ("nextest", nextest_script),
+            ("cargo-nextest", cargo_nextest_script),
+        ] {
+            if let Some(script) = script {
+                self.setup.push(SetupStep::WriteExecutable {
+                    path: bin.join(name),
+                    bytes: script.into_bytes(),
+                });
+            }
+        }
         self.setup.push(SetupStep::CreateLock(
             bin.join(provenant_os::admission::WAIT_FILE),
         ));
@@ -2529,6 +2530,13 @@ mod tests {
                 .any(|step| matches!(step, SetupStep::CreateDir(path) if path.starts_with(&slots))),
             "the lane never creates the slot directory"
         );
+        // No real nextest: no nextest shim, so `cargo nextest` cannot find a
+        // shim that calls `cargo nextest` again.
+        assert!(!spec.setup.iter().any(|step| matches!(
+            step,
+            SetupStep::WriteExecutable { path, .. }
+                if path.ends_with("cargo-bin/nextest") || path.ends_with("cargo-bin/cargo-nextest")
+        )));
         let bytes = spec
             .setup
             .iter()
