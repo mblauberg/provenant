@@ -1930,7 +1930,11 @@ pub(crate) fn graph_listing(
             }
             graph.digests = super::graph_status::node_digests(&rows);
         }
-        Ok(finish_listing(listing, settled_count, globals.full))
+        Ok(finish_listing(
+            listing,
+            settled_count,
+            command.all || globals.full,
+        ))
     })();
     match result {
         Ok(listing) => {
@@ -1987,8 +1991,8 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
-            let more = if globals.full {
-                "--all --cursor"
+            let more = if command.all || globals.full {
+                "--cursor"
             } else {
                 "--full"
             };
