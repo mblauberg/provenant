@@ -195,7 +195,7 @@ pub struct LadderChoice {
 #[error("{message}")]
 pub struct PatchError {
     /// Stable cause: `stale_revision`, `idempotency_conflict`, `cycle`,
-    /// `conflict`, `started`, `edit_scope`, `journal`, `credential_value` or `invalid`.
+    /// `conflict`, `started`, `edit_scope`, `journal` or `invalid`.
     pub code: &'static str,
     pub message: String,
     /// Closed diagnostic fact retained when a planner uses this admission path.

@@ -160,7 +160,6 @@ pub(super) fn graph_patch_error(error: patch::PatchError) -> FacadeError {
         return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));
     }
     let cause = match error.code {
-        "credential_value" => Some(GraphRelayCause::CredentialValue),
         "cycle" => Some(GraphRelayCause::Cycle),
         "conflict" | "stale_revision" | "idempotency_conflict" => Some(GraphRelayCause::Conflict),
         "started" => Some(GraphRelayCause::StartedNode),
@@ -2550,7 +2549,8 @@ impl Factory {
     ) -> Result<(), FacadeError> {
         if let Some(brief) = input.get("brief").and_then(Value::as_str) {
             match provenant_redact::matches_credential_value(brief.as_bytes()) {
-                Ok(true) | Err(_) => {
+                Err(_) => return Err(FacadeError::io("check retry brief credentials")),
+                Ok(true) => {
                     return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
                         provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue,
                     )));

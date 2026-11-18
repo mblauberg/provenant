@@ -478,7 +478,7 @@ fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route()
 }
 
 #[test]
-fn a_stopped_writer_restarts_when_handoff_holds_an_ambient_credential() {
+fn a_stopped_writer_restarts_when_handoff_holds_a_known_credential() {
     let secret = "plain-registered-restart-credential-3391";
     let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
     let document = document("worktree_write", serde_json::Value::Null);

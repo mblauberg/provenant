@@ -1785,7 +1785,7 @@ pub fn matches_credential_value(bytes: &[u8]) -> Result<bool, RedactorError> {
 }
 
 /// Mask typed and ambient credential values in text that is about to be
-/// persisted or published. Shape-like examples are unchanged unless their
+/// published. Shape-like examples are unchanged unless their
 /// exact value is registered as a credential.
 pub fn publication_text(
     bytes: &[u8],
@@ -1800,7 +1800,10 @@ pub fn publication_text(
 fn publication_secrets(
     secrets: impl IntoIterator<Item = Vec<u8>>,
 ) -> Result<Vec<Vec<u8>>, RedactorError> {
-    let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
+    let mut secrets: Vec<Vec<u8>> = secrets
+        .into_iter()
+        .filter(|secret| secret.len() >= MIN_EXACT_BYTES && secret.as_slice() != REDACTED)
+        .collect();
     secrets.sort();
     secrets.dedup();
     let mut secrets = validate_secrets(secrets)?;
@@ -1997,13 +2000,20 @@ mod tests {
             b"ollama".to_vec(),
             b"EMPTY".to_vec(),
             b"[REDACTED]".to_vec(),
+            b"1234567".to_vec(),
+            b"12345678".to_vec(),
             b"exact-credential-3391".to_vec(),
         ])
         .unwrap();
 
         assert!(!matches_credential_value(b"plain retry brief with ollama and EMPTY").unwrap());
         assert!(!matches_credential_value(b"brief with [REDACTED] placeholder").unwrap());
+        assert!(!matches_credential_value(b"brief with 1234567 embedded").unwrap());
+        assert!(matches_credential_value(b"brief with 12345678 embedded").unwrap());
         assert!(matches_credential_value(b"brief with exact-credential-3391 embedded").unwrap());
+        let prose = b"ollama EMPTY [REDACTED] 1234567";
+        assert_eq!(publication_text(prose, []).unwrap(), prose);
+        assert_eq!(publication_text(b"12345678", []).unwrap(), REDACTED);
     }
 
     #[test]

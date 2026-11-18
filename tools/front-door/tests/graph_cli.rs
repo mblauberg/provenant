@@ -66,7 +66,7 @@ fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn graph_metadata_warns_and_masks_known_values_before_preview() -> Result {
+fn graph_metadata_warns_and_preserves_local_preview() -> Result {
     let rig = GraphProject::new()?;
     let credential = "plain-registered-metadata-3391";
     let example = "password=fixture-metadata-example-3391";
@@ -83,8 +83,10 @@ fn graph_metadata_warns_and_masks_known_values_before_preview() -> Result {
     let reply: Value = serde_json::from_slice(&output.stdout)?;
     assert!(output.status.success(), "{reply}");
     let wire = reply.to_string();
-    assert!(!wire.contains(credential), "{reply}");
-    assert!(wire.contains("[REDACTED]"), "{reply}");
+    assert!(
+        wire.contains(credential),
+        "local preview retains exact bytes: {reply}"
+    );
     assert!(wire.contains(example), "{reply}");
     assert!(
         reply["data"]["warnings"]
@@ -114,7 +116,7 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
         ])
         .output()?;
     let reply: Value = serde_json::from_slice(&output.stdout)?;
-    // The fixture adapter cannot execute. Successful admission still publishes
+    // The fixture adapter cannot execute. Successful admission still retains
     // a checkpoint and events before that unrelated provider refusal.
     assert!(reply["error"].is_null(), "{reply}");
     assert!(
@@ -136,18 +138,22 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
         let bytes = std::fs::read(path)?;
         let text = String::from_utf8_lossy(&bytes);
         retained_raw |= text.contains(credential);
-        if let Ok(exported) = projector.project(
-            provenant_confinement::publication::Destination::ArtifactExport,
+        let exported = projector.project(
+            provenant_confinement::publication::Destination::GraphPublication,
             &bytes,
-        ) {
-            let exported_text = String::from_utf8_lossy(exported.bytes());
-            assert!(
-                !exported_text.contains(credential),
-                "publication disclosed credential in {}",
-                path.display()
-            );
-            published_has_mask |= exported_text.contains("[REDACTED]");
-        }
+        )?;
+        let exported_text = String::from_utf8_lossy(exported.bytes());
+        assert!(
+            !exported_text.contains(credential),
+            "publication disclosed credential in {}",
+            path.display()
+        );
+        published_has_mask |= exported_text.contains("[REDACTED]");
+        assert_eq!(
+            std::fs::read(path)?,
+            bytes,
+            "publication preserves local bytes"
+        );
     }
     assert!(retained_raw, "local graph records keep the exact bytes");
     assert!(
