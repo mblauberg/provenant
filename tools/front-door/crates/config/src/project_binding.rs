@@ -516,10 +516,7 @@ fn materialize_gc_selection(
         }
         let epoch = gc_selection_page_epoch(name).ok_or(ConfigError::InvalidProjectBinding)?;
         let tick = tick.ok_or(ConfigError::InvalidProjectBinding)?;
-        let Some(bytes) = tick.read_stable(OsStr::new(name), GC_SELECTION_PAGE_LIMIT as u64)?
-        else {
-            return Err(ConfigError::InvalidProjectBinding);
-        };
+        let bytes = tick.read_stable(OsStr::new(name), GC_SELECTION_PAGE_LIMIT as u64)?;
         let page: GcSelectionPage =
             serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
         if page.version != GC_SELECTION_PAGE_VERSION
