@@ -13,6 +13,8 @@ use std::{
 
 const LIMIT: usize = 16 * 1024 * 1024;
 const MASK: &str = "[REDACTED]";
+// Short values are too ambiguous for document-wide substring replacement.
+const MIN_EXACT_BYTES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,8 +140,23 @@ impl<'a> CrossHostTransport<'a> {
         Self { projector }
     }
 
-    pub fn json(&self, bytes: &[u8]) -> Result<Projection, ProjectionError> {
-        self.projector.json(Destination::CrossHostTransport, bytes)
+    /// Project only the caller's declared free-text fields. Typed credentials
+    /// found in one field protect copies in the other fields, never wire metadata.
+    pub fn texts(&self, texts: &mut [&mut String]) -> Result<(), ProjectionError> {
+        let mut secrets = self.projector.secrets.clone();
+        for text in texts.iter() {
+            visit_documents(text, &mut |value| collect(value, &mut secrets));
+        }
+        let projector = Projector::new(secrets)?;
+        for text in texts {
+            **text = String::from_utf8(
+                projector
+                    .project(Destination::CrossHostTransport, text.as_bytes())?
+                    .into_bytes(),
+            )
+            .map_err(|_| ProjectionError::Encoding)?;
+        }
+        Ok(())
     }
 
     pub fn inspect_text<'b>(&self, bytes: &'b [u8]) -> Result<&'b str, ProjectionError> {
@@ -156,7 +173,10 @@ impl<'a> CrossHostTransport<'a> {
 
 impl Projector {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, ProjectionError> {
-        let mut secrets: Vec<_> = secrets.into_iter().collect();
+        let mut secrets: Vec<_> = secrets
+            .into_iter()
+            .filter(|secret| secret.len() >= MIN_EXACT_BYTES && secret != MASK.as_bytes())
+            .collect();
         // Reuse the primitive's bounded secret-set contract, not its heuristic
         // token detection. Unrelated secret-shaped prose must remain lossless.
         secrets.sort();
@@ -195,7 +215,6 @@ impl Projector {
         // Discover typed values before masking, including copies elsewhere in
         // the same document. Decode JSON escapes before exact-value matching.
         visit_documents(text, &mut |value| collect(value, &mut secrets));
-        collect_assignments(text, &mut secrets);
         let projector = Self::new(secrets)?;
         let mut out = transform_documents(text, &projector)?;
         out = mask_assignments(&out);
@@ -398,12 +417,23 @@ impl Projector {
         // argument, so copies in another field are also protected.
         let mut secrets = self.secrets.clone();
         for arg in &args {
-            collect_assignments(arg, &mut secrets);
             visit_documents(arg, &mut |value| collect(value, &mut secrets));
+        }
+        for (index, arg) in args.iter().enumerate() {
+            let (flag, value) = arg.split_once('=').map_or_else(
+                || (arg.as_str(), args.get(index + 1).map(String::as_str)),
+                |(flag, value)| (flag, Some(value)),
+            );
+            if matches!(flag, "-f" | "-F" | "--field" | "--raw-field") {
+                if let Some((key, value)) = value.and_then(|value| value.split_once('=')) {
+                    if secret_field(key) {
+                        secrets.push(value.as_bytes().to_vec());
+                    }
+                }
+            }
         }
         if let Some(bytes) = &input {
             let text = std::str::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
-            collect_assignments(text, &mut secrets);
             visit_documents(text, &mut |value| collect(value, &mut secrets));
         }
         let projector = Self::new(secrets)?;
@@ -587,7 +617,6 @@ fn collect(value: &Value, secrets: &mut Vec<Vec<u8>>) {
         }
         Value::String(text) => {
             visit_documents(text, &mut |value| collect(value, secrets));
-            collect_assignments(text, secrets);
         }
         _ => {}
     }
@@ -707,16 +736,6 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
     }
     spans
 }
-fn collect_assignments(text: &str, secrets: &mut Vec<Vec<u8>>) {
-    for (start, end) in assignments(text) {
-        let raw = &text[start..end];
-        let value = serde_json::from_str::<String>(raw)
-            .unwrap_or_else(|_| raw.trim_matches(['\'', '"']).into());
-        if !value.is_empty() && value != MASK {
-            secrets.push(value.into_bytes());
-        }
-    }
-}
 fn mask_assignments(text: &str) -> String {
     let mut out = String::new();
     let mut offset = 0;
@@ -759,13 +778,60 @@ mod tests {
         assert!(projection.matches_source(Destination::PeerPublication, raw));
         assert!(!projection.matches_source(Destination::GraphPublication, raw));
         assert!(!projection.matches_source(Destination::PeerPublication, b"different"));
+        // Short typed/ambient values never become global substring masks.
+        let short = Projector::new([b"it".to_vec()]).unwrap();
+        let short_raw = br#"{"token":"it","it":"it","message":"token: it; it stays here"}"#;
+        let projected = short.json(Destination::PeerPublication, short_raw).unwrap();
+        let value: Value = serde_json::from_slice(projected.bytes()).unwrap();
+        assert_eq!(value["token"], MASK);
+        assert_eq!(value["it"], "it");
+        assert_eq!(value["message"], "token: [REDACTED]; it stays here");
+        // CLI field flags are typed declarations too, including joined forms.
+        for field in [
+            vec!["--raw-field", "token=hidden-value"],
+            vec!["--field=token=hidden-value"],
+            vec!["-ftoken=hidden-value"],
+            vec!["-Ftoken=hidden-value"],
+        ] {
+            let arguments = [
+                vec!["api", "endpoint"],
+                field,
+                vec![
+                    "--title",
+                    "ordinary",
+                    "--body",
+                    "copy hidden-value; token: ordinary; ordinary stays",
+                ],
+            ]
+            .concat()
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            let operation = Projector::new([])
+                .unwrap()
+                .forge(
+                    ForgeOperation::Cli {
+                        arguments,
+                        input: None,
+                    },
+                    Path::new("."),
+                )
+                .unwrap();
+            let ForgeOperation::Cli { arguments, .. } = operation else {
+                unreachable!()
+            };
+            let arguments: Vec<_> = arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
+            assert!(arguments.iter().any(|arg| arg.contains("token=[REDACTED]")));
+            assert!(arguments.contains(&"ordinary"));
+            assert!(arguments.contains(&"copy [REDACTED]; token: [REDACTED]; ordinary stays"));
+        }
         projection.bytes.push(b'!');
         assert!(!projection.matches_source(Destination::PeerPublication, raw));
     }
 
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
-    fn publication_masks_typed_assignments_and_preserves_unrelated_text() {
+    fn publication_masks_assignments_only_in_their_spans() {
         let projector = Projector::new([b"explicit-value".to_vec()]).unwrap();
         let raw =
             b"password=private-value; copy private-value, explicit-value; ordinary ghp_unrelated";
@@ -773,9 +839,20 @@ mod tests {
             .project(Destination::GraphPublication, raw)
             .unwrap();
         let output = std::str::from_utf8(projection.bytes()).unwrap();
-        assert!(!output.contains("private-value"));
+        assert_eq!(
+            output,
+            "password=[REDACTED]; copy private-value, [REDACTED]; ordinary ghp_unrelated"
+        );
         assert!(!output.contains("explicit-value"));
         assert!(output.contains("ordinary ghp_unrelated"));
+        let prose = b"token: ordinary; ordinary stays outside its span, as does it";
+        let projected = projector
+            .project(Destination::GraphPublication, prose)
+            .unwrap();
+        assert_eq!(
+            projected.bytes(),
+            b"token: [REDACTED]; ordinary stays outside its span, as does it"
+        );
         assert_eq!(projection.raw.bytes, raw.len() as u64);
         assert_eq!(projection.published.bytes, projection.bytes().len() as u64);
     }

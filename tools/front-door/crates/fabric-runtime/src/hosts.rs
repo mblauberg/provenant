@@ -918,36 +918,415 @@ pub struct SshTransport<'a> {
     pub executable: std::path::PathBuf,
     pub seconds: u64,
 }
+fn request_draft_texts<'a>(
+    request: &'a mut provenant_records::inbox::RequestDraft,
+    texts: &mut Vec<&'a mut String>,
+) {
+    texts.push(&mut request.title);
+    texts.push(&mut request.body);
+    texts.extend(request.proceeding_with.iter_mut());
+    for option in &mut request.options {
+        texts.push(&mut option.label);
+        texts.push(&mut option.description);
+    }
+}
+
+fn human_request_texts<'a>(
+    request: &'a mut provenant_records::inbox::HumanRequest,
+    texts: &mut Vec<&'a mut String>,
+) {
+    request_draft_texts(&mut request.request, texts);
+    texts.extend(request.closure_reason.iter_mut());
+}
+
+fn attempt_state_texts<'a>(
+    state: &'a mut provenant_records::run::AttemptState,
+    texts: &mut Vec<&'a mut String>,
+) {
+    if let provenant_records::run::AttemptState::Terminal {
+        reason,
+        terminal_note,
+        ..
+    } = state
+    {
+        texts.extend(reason.iter_mut());
+        texts.extend(terminal_note.iter_mut());
+    }
+}
+
+fn route_texts<'a>(
+    route: &'a mut provenant_records::run::RouteRecord,
+    texts: &mut Vec<&'a mut String>,
+) {
+    texts.extend(route.availability_warning.iter_mut());
+    texts.extend(route.launch_warnings.iter_mut());
+    if let Some(warnings) = &mut route.discovery_warnings {
+        texts.extend(warnings.iter_mut());
+    }
+    if let Some(sandbox) = &mut route.sandbox {
+        texts.extend(sandbox.warning.iter_mut());
+    }
+    if let Some(preparation) = &mut route.dependency_preparation {
+        texts.extend(preparation.reason.iter_mut());
+    }
+    if let Some(paths) = &mut route.project_paths {
+        for warning in &mut paths.warnings {
+            texts.extend(warning.reason.iter_mut());
+            texts.extend(warning.policy_message.iter_mut());
+        }
+    }
+    if let Some(skills) = &mut route.user_skills {
+        for warning in &mut skills.warnings {
+            texts.push(&mut warning.reason);
+        }
+    }
+    if let Some(tools) = &mut route.tool_closure {
+        for tool in tools {
+            texts.extend(tool.reason.iter_mut());
+            texts.extend(tool.reasons.iter_mut());
+        }
+    }
+    if let Some(access) = &mut route.applied_access {
+        for omitted in &mut access.omitted_grants {
+            texts.push(&mut omitted.reason);
+        }
+    }
+}
+
+fn attempt_texts<'a>(
+    attempt: &'a mut provenant_records::run::AttemptRecord,
+    texts: &mut Vec<&'a mut String>,
+) {
+    texts.extend(attempt.title.iter_mut());
+    texts.extend(attempt.publication_error.iter_mut());
+    attempt_state_texts(&mut attempt.state, texts);
+    for route in [
+        &mut attempt.resolved_route,
+        &mut attempt.applied_route,
+        &mut attempt.observed_route,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        route_texts(route, texts);
+    }
+    if let Some(delivery) = &mut attempt.delivery {
+        if let provenant_records::run::WriterDeliveryState::Failed { reason, .. } =
+            &mut delivery.state
+        {
+            texts.extend(reason.iter_mut());
+        }
+    }
+    for skipped in &mut attempt.skipped_routes {
+        texts.push(&mut skipped.detail);
+    }
+}
+
+// Doctor and console are JSON views. Select their declared prose by path;
+// a coincidentally named field in an extension is still opaque metadata.
+fn report_texts<'a>(
+    value: &'a mut serde_json::Value,
+    paths: &[&str],
+    texts: &mut Vec<&'a mut String>,
+) {
+    match value {
+        serde_json::Value::String(text) if paths.contains(&"") => texts.push(text),
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let paths: Vec<_> = paths
+                    .iter()
+                    .filter_map(|path| {
+                        let (first, rest) = path.split_once('/').unwrap_or((path, ""));
+                        (first == key || first == "*").then_some(rest)
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    report_texts(value, &paths, texts);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let paths: Vec<_> = paths
+                .iter()
+                .filter_map(|path| {
+                    let (first, rest) = path.split_once('/').unwrap_or((path, ""));
+                    (first == "*").then_some(rest)
+                })
+                .collect();
+            if !paths.is_empty() {
+                for item in items {
+                    report_texts(item, &paths, texts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Encode a response after projecting its declared prose. Output is already
+/// projected and digest-bound before paging; it must never be inspected again.
+pub fn encode_peer_response(
+    mut response: PeerResponse,
+    projector: &provenant_confinement::publication::Projector,
+) -> Result<Vec<u8>, PeerError> {
+    use crate::inbox::{InboxReply, InboxResult};
+    use crate::runs::RunResult;
+    let mut texts = Vec::new();
+    match &mut response.result {
+        PeerResult::Inbox { data, .. } => match data {
+            InboxReply::Error { message, .. } => texts.push(message),
+            InboxReply::Ok { result, .. } => match result.as_mut() {
+                InboxResult::Item { item, .. } => {
+                    human_request_texts(&mut item.request, &mut texts);
+                    for request in &mut item.history {
+                        human_request_texts(request, &mut texts);
+                    }
+                    if let Some(answer) = &mut item.answer {
+                        texts.extend(answer.text.iter_mut());
+                    }
+                    if let Some(delivery) = &mut item.delivery {
+                        texts.extend(delivery.error.iter_mut());
+                    }
+                }
+                InboxResult::Listed { items, .. } => {
+                    for request in items {
+                        human_request_texts(request, &mut texts);
+                    }
+                }
+                InboxResult::Saved { receipt } => {
+                    if let Some(delivery) = &mut receipt.delivery {
+                        texts.extend(delivery.error.iter_mut());
+                    }
+                }
+                InboxResult::Control { receipt } => texts.push(&mut receipt.reason),
+            },
+        },
+        PeerResult::Run { data, .. } => match data.as_mut() {
+            RunResult::List { page, .. } => {
+                for item in &mut page.items {
+                    texts.extend(item.reason.iter_mut());
+                    if let Some(route) = &mut item.applied_route {
+                        route_texts(route, &mut texts);
+                    }
+                }
+            }
+            RunResult::Status { attempt, .. }
+            | RunResult::Cancel { attempt, .. }
+            | RunResult::Resume { attempt, .. } => attempt_texts(attempt, &mut texts),
+            RunResult::Wait {
+                observation,
+                attempts,
+                ..
+            } => {
+                texts.extend(observation.iter_mut());
+                for attempt in attempts {
+                    attempt_texts(attempt, &mut texts);
+                }
+            }
+        },
+        PeerResult::RunStatuses { data, .. } => {
+            for attempt in data {
+                attempt_texts(attempt, &mut texts);
+            }
+        }
+        PeerResult::RunEvents { data, .. } => {
+            for event in &mut data.items {
+                attempt_state_texts(&mut event.change, &mut texts);
+            }
+        }
+        PeerResult::Coordination { data, .. } => match data {
+            CoordinationResult::Mail {
+                result: MailResult::Read { page, .. },
+                ..
+            } => {
+                for delivery in &mut page.items {
+                    texts.push(&mut delivery.message.body);
+                }
+            }
+            CoordinationResult::Events {
+                result:
+                    EventsResult::Read {
+                        page, observation, ..
+                    },
+                ..
+            } => {
+                for event in &mut page.items {
+                    texts.push(&mut event.record.detail);
+                }
+                if let Some(observation) = observation {
+                    if let crate::coordination::EventObservation::PacedReread { reason, .. } =
+                        observation.as_mut()
+                    {
+                        texts.push(reason);
+                    }
+                }
+            }
+            _ => {}
+        },
+        PeerResult::SessionHandoff { data, .. } => match data {
+            crate::handoff::HandoffReceipt::Refused { message, .. } => texts.push(message),
+            crate::handoff::HandoffReceipt::Delivered {
+                launch_error,
+                worktrees,
+                ..
+            } => {
+                texts.extend(launch_error.iter_mut());
+                for worktree in worktrees {
+                    texts.extend(worktree.error.iter_mut());
+                }
+            }
+        },
+        PeerResult::Error { data, .. } => match &mut data.error {
+            facade::FacadeError::RecordedRefusal { diagnostic, .. } => {
+                texts.extend(diagnostic.detail.iter_mut());
+                texts.extend(diagnostic.next.iter_mut());
+            }
+            facade::FacadeError::StateCorruptDetail { detail } => texts.push(detail),
+            _ => {}
+        },
+        PeerResult::Doctor { data, .. } => report_texts(
+            data,
+            &[
+                "managed_error",
+                "warnings/*",
+                "tick_agent/last_exit_reason",
+                "tick_agent/warning",
+                "tick_agent/repair",
+                "login_accounts/*/repair",
+            ],
+            &mut texts,
+        ),
+        PeerResult::Console { data, .. } => {
+            let mut paths: Vec<String> = [
+                "reason",
+                "lanes/*/metadata/attempt/title",
+                "lanes/*/metadata/attempt/state/reason",
+                "lanes/*/metadata/attempt/state/terminal_note",
+                "lanes/*/metadata/attempt/publication_error",
+                "lanes/*/metadata/attempt/skipped_routes/*/detail",
+                "lanes/*/metadata/operation/blocked_reason",
+                "lanes/*/metadata/operation/refusal/detail",
+                "lanes/*/metadata/operation/refusal/next",
+                "nodes/*/metadata/attempt/title",
+                "nodes/*/metadata/attempt/state/reason",
+                "nodes/*/metadata/attempt/state/terminal_note",
+                "nodes/*/metadata/attempt/publication_error",
+                "nodes/*/metadata/attempt/skipped_routes/*/detail",
+                "nodes/*/metadata/operation/blocked_reason",
+                "nodes/*/metadata/operation/refusal/detail",
+                "nodes/*/metadata/operation/refusal/next",
+                "unfetched/*/detail",
+                "delivery/state/reason",
+                "linked_inbox_requests/*/title",
+                "items/*/request/title",
+                "items/*/request/body",
+                "items/*/request/proceeding_with",
+                "items/*/request/options/*/label",
+                "items/*/request/options/*/description",
+                "items/*/closure_reason",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect();
+            for prefix in ["lanes/*/metadata/attempt", "nodes/*/metadata/attempt"] {
+                paths.push(format!("{prefix}/delivery/state/reason"));
+                for route in ["resolved_route", "applied_route", "observed_route"] {
+                    for field in [
+                        "availability_warning",
+                        "launch_warnings/*",
+                        "discovery_warnings/*",
+                        "sandbox/warning",
+                        "dependency_preparation/reason",
+                        "project_paths/warnings/*/reason",
+                        "project_paths/warnings/*/policy_message",
+                        "user_skills/warnings/*/reason",
+                        "tool_closure/*/reason",
+                        "tool_closure/*/reasons/*",
+                        "applied_access/omitted_grants/*/reason",
+                    ] {
+                        paths.push(format!("{prefix}/{route}/{field}"));
+                    }
+                }
+            }
+            let paths: Vec<_> = paths.iter().map(String::as_str).collect();
+            report_texts(data, &paths, &mut texts);
+        }
+        PeerResult::Output { .. }
+        | PeerResult::Health { .. }
+        | PeerResult::Submitted { .. }
+        | PeerResult::SubmissionCancelled { .. }
+        | PeerResult::LaneWaits { .. } => {}
+    }
+    provenant_confinement::publication::CrossHostTransport::new(projector)
+        .texts(&mut texts)
+        .map_err(|_| PeerError::Frame)?;
+    let bytes = serde_json::to_vec(&response).map_err(|_| PeerError::Frame)?;
+    if bytes.len() >= MAX_FRAME {
+        return Err(PeerError::Frame);
+    }
+    Ok(bytes)
+}
+
 /// Encode and validate the request before any peer contact.
 pub fn encode_peer_request(request: &PeerRequest) -> Result<Vec<u8>, PeerError> {
     let projector =
         provenant_confinement::publication::Projector::ambient().map_err(|_| PeerError::Frame)?;
     let boundary = provenant_confinement::publication::CrossHostTransport::new(&projector);
     let mut outbound = request.clone();
-    // Attachments are opaque to JSON projection. Inspect their decoded bytes,
-    // withholding binary or malformed data rather than exporting it unexamined.
-    if let PeerAction::SessionHandoff { input, .. } = &mut outbound.action {
-        for attachment in &mut input.attachments {
-            let bytes =
-                crate::handoff::decode_base64(&attachment.base64).ok_or(PeerError::Frame)?;
-            attachment.base64 = boundary
-                .inspect_text(&bytes)
-                .map_err(|_| PeerError::Frame)?
-                .to_owned();
+    let mut texts = Vec::new();
+    match &mut outbound.action {
+        PeerAction::Submit { input, .. } => {
+            let facade::SubmitInput::Submit { task, .. } = input.as_mut();
+            texts.push(&mut task.prompt);
+            texts.extend(task.title.iter_mut());
         }
+        PeerAction::Run {
+            input: facade::RunInput::Resume { prompt, .. },
+            ..
+        } => texts.push(prompt),
+        PeerAction::Inbox { input, .. } => match input {
+            crate::inbox::InboxInput::Ask { request, .. } => {
+                request_draft_texts(request, &mut texts);
+            }
+            crate::inbox::InboxInput::Answer { text, .. } => texts.extend(text.iter_mut()),
+            crate::inbox::InboxInput::Close { reason, .. } => texts.push(reason),
+            crate::inbox::InboxInput::Steer { text, .. }
+            | crate::inbox::InboxInput::ChairMessage { text, .. } => texts.push(text),
+            _ => {}
+        },
+        PeerAction::Coordination { input, .. } => match input {
+            CoordinationInput::Mail {
+                input: MailInput::Send { body, .. },
+                ..
+            } => texts.push(body),
+            CoordinationInput::Events {
+                input: EventsInput::Note { note, .. },
+                ..
+            } => texts.push(note),
+            _ => {}
+        },
+        PeerAction::SessionHandoff { input, .. } => {
+            texts.push(&mut input.prompt);
+            // Decode before collecting typed secrets shared with the prompt.
+            for attachment in &mut input.attachments {
+                let bytes =
+                    crate::handoff::decode_base64(&attachment.base64).ok_or(PeerError::Frame)?;
+                attachment.base64 = boundary
+                    .inspect_text(&bytes)
+                    .map_err(|_| PeerError::Frame)?
+                    .to_owned();
+                texts.push(&mut attachment.base64);
+            }
+        }
+        _ => {}
     }
-    let raw = serde_json::to_vec(&outbound).map_err(|_| PeerError::Frame)?;
-    let projection = boundary.json(&raw).map_err(|_| PeerError::Frame)?;
-    // Re-encode only after projection, so decoded attachments and all other
-    // fields share one inventory of typed and known credential values.
-    let mut projected: PeerRequest =
-        serde_json::from_slice(projection.bytes()).map_err(|_| PeerError::Frame)?;
-    if let PeerAction::SessionHandoff { input, .. } = &mut projected.action {
+    boundary.texts(&mut texts).map_err(|_| PeerError::Frame)?;
+    if let PeerAction::SessionHandoff { input, .. } = &mut outbound.action {
         for attachment in &mut input.attachments {
             attachment.base64 = crate::handoff::encode_base64(attachment.base64.as_bytes());
         }
     }
-    let mut input = serde_json::to_vec(&projected).map_err(|_| PeerError::Frame)?;
+    let mut input = serde_json::to_vec(&outbound).map_err(|_| PeerError::Frame)?;
     if input.len() >= MAX_FRAME {
         return Err(PeerError::RequestTooLarge);
     }
@@ -1563,6 +1942,131 @@ mod tests {
         assert!(!wire.contains(secret));
         assert!(wire.contains("[REDACTED]"));
         assert!(serde_json::to_string(&request).unwrap().contains(secret));
+
+        let mut prose = request.clone();
+        if let PeerAction::Submit { input, .. } = &mut prose.action {
+            let facade::SubmitInput::Submit { task, .. } = input.as_mut();
+            task.prompt = "token: it; it stays outside; token: ordinary; ordinary stays".into();
+            task.title = Some("it ordinary submit".into());
+        }
+        let wire: serde_json::Value =
+            serde_json::from_slice(&encode_peer_request(&prose).unwrap()).unwrap();
+        let mut expected = serde_json::to_value(&prose).unwrap();
+        expected["action"]["input"]["task"]["prompt"] = serde_json::json!(
+            "token: [REDACTED]; it stays outside; token: [REDACTED]; ordinary stays"
+        );
+        assert_eq!(wire, expected);
+
+        // A typed value shared with an operation ID is masked only in text.
+        if let PeerAction::Submit { input, .. } = &mut prose.action {
+            let facade::SubmitInput::Submit { task, .. } = input.as_mut();
+            task.prompt = r#"{"token":"submit-test"} copy submit-test"#.into();
+            task.title = Some("submit-test".into());
+        }
+        let wire = encode_peer_request(&prose).unwrap();
+        let decoded = decode_request(&wire).unwrap();
+        let actual: serde_json::Value = serde_json::to_value(decoded).unwrap();
+        let mut expected = serde_json::to_value(prose).unwrap();
+        expected["action"]["input"]["task"]["prompt"] =
+            serde_json::json!(r#"{"token":"[REDACTED]"} copy [REDACTED]"#);
+        expected["action"]["input"]["task"]["title"] = serde_json::json!("[REDACTED]");
+        assert_eq!(actual, expected);
+    }
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn cross_host_response_projects_only_declared_text_fields() {
+        let remote = HostId::from_bytes([2; 16]);
+        let projector = provenant_confinement::publication::Projector::new([]).unwrap();
+        for (message, projected) in [
+            ("token: it; it remains", "token: [REDACTED]; it remains"),
+            (
+                r#"{"token":"submit-test"} copy submit-test"#,
+                r#"{"token":"[REDACTED]"} copy [REDACTED]"#,
+            ),
+        ] {
+            let response = PeerResponse {
+                extra: [("submit-test".into(), serde_json::json!("submit-test"))].into(),
+                version: 1,
+                protocol: PROTOCOL,
+                host: remote,
+                project: project_key(Path::new("/h")),
+                result: PeerResult::Inbox {
+                    extra: Default::default(),
+                    data: crate::inbox::InboxReply::Error {
+                        extra: Default::default(),
+                        code: "submit-test".into(),
+                        message: message.into(),
+                    },
+                },
+            };
+            let mut expected = serde_json::to_value(&response).unwrap();
+            expected["result"]["data"]["message"] = serde_json::json!(projected);
+            let wire = encode_peer_response(response, &projector).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
+                expected
+            );
+            serde_json::from_slice::<PeerResponse>(&wire).unwrap();
+        }
+        let data = serde_json::json!({
+            "warnings": [r#"{"token":"submit-test"}"#],
+            "managed_error":"submit-test token: it; it stays",
+            "extension":{"message":"submit-test", "id":"it"},
+            "message":"submit-test"
+        });
+        let response = PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: PROTOCOL,
+            host: remote,
+            project: project_key(Path::new("/h")),
+            result: PeerResult::Doctor {
+                data,
+                extra: Default::default(),
+            },
+        };
+        let mut expected = serde_json::to_value(&response).unwrap();
+        expected["result"]["data"]["warnings"][0] = serde_json::json!(r#"{"token":"[REDACTED]"}"#);
+        expected["result"]["data"]["managed_error"] =
+            serde_json::json!("[REDACTED] token: [REDACTED]; it stays");
+        let wire = encode_peer_response(response, &projector).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
+            expected
+        );
+        let data = serde_json::json!({
+            "lanes":[{"metadata":{"attempt":{
+                "title":r#"{"token":"submit-test"}"#,
+                "state":{"state":"terminal", "reason":"submit-test token: it; it remains"},
+                "applied_route":{"account_key":"submit-test", "launch_warnings":["submit-test"]},
+                "extension":{"title":"submit-test"}
+            }}}],
+            "delivery":{"state":{"state":"failed", "reason":"submit-test"}},
+            "extension":{"reason":"submit-test"}
+        });
+        let response = PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: PROTOCOL,
+            host: remote,
+            project: project_key(Path::new("/h")),
+            result: PeerResult::Console {
+                data,
+                extra: Default::default(),
+            },
+        };
+        let mut expected = serde_json::to_value(&response).unwrap();
+        let attempt = &mut expected["result"]["data"]["lanes"][0]["metadata"]["attempt"];
+        attempt["title"] = serde_json::json!(r#"{"token":"[REDACTED]"}"#);
+        attempt["state"]["reason"] = serde_json::json!("[REDACTED] token: [REDACTED]; it remains");
+        attempt["applied_route"]["launch_warnings"][0] = serde_json::json!("[REDACTED]");
+        expected["result"]["data"]["delivery"]["state"]["reason"] = serde_json::json!("[REDACTED]");
+        let wire = encode_peer_response(response, &projector).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -2440,7 +2944,8 @@ mod tests {
         else {
             unreachable!()
         };
-        secret_input.attachments[0].base64 = encode_base64(b"token=attachment-private-value");
+        secret_input.attachments[0].base64 =
+            encode_base64(br#"{"token":"attachment-private-value"}"#);
         secret_input.prompt = format!("{PROMPT_HEADER} attachment-private-value");
         let wire = encode_peer_request(&secret_request).unwrap();
         let decoded = decode_request(&wire).unwrap();

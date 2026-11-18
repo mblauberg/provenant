@@ -411,12 +411,34 @@ fn project_peer_output_with(
             *bytes = OutputBytes::Utf8(text)
         }
     }
-    let encoded = serde_json::to_vec(&value).map_err(|_| failure())?;
-    let projection = provenant_confinement::publication::CrossHostTransport::new(projector)
-        .json(&encoded)
+    // Only complete free text is projected. Wire tags, IDs, extensions and
+    // artifact metadata are transport structure, never publication content.
+    let mut output = value;
+    let mut texts = Vec::new();
+    match &mut output {
+        OutputResult::Chunk {
+            bytes: OutputBytes::Utf8(text),
+            reason,
+            planner_fallback,
+            ..
+        } => {
+            texts.push(text);
+            texts.extend(reason.iter_mut());
+            texts.extend(planner_fallback.iter_mut());
+        }
+        OutputResult::Artifact {
+            bytes: OutputBytes::Utf8(text),
+            planner_fallback,
+            ..
+        } => {
+            texts.push(text);
+            texts.extend(planner_fallback.iter_mut());
+        }
+        _ => return Err(failure()),
+    }
+    provenant_confinement::publication::CrossHostTransport::new(projector)
+        .texts(&mut texts)
         .map_err(|_| failure())?;
-    let mut output: OutputResult =
-        serde_json::from_slice(projection.bytes()).map_err(|_| failure())?;
     match &mut output {
         OutputResult::Chunk {
             bytes,
@@ -520,6 +542,126 @@ mod output_projection_tests {
                 *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes()
             )
         );
+    }
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn paged_projection_survives_every_mask_boundary_and_response_encoding() {
+        use super::*;
+        use provenant_fabric_runtime::hosts::{PeerResponse, PeerResult, encode_peer_response};
+        let limit = provenant_records::run::OUTPUT_LIMIT as usize;
+        let secret = "long-private-value";
+        let projector =
+            provenant_confinement::publication::Projector::new([secret.as_bytes().to_vec()])
+                .unwrap();
+        let target: AttemptTarget = serde_json::from_value(
+            serde_json::json!({"attempt":"11111111111111111111111111111111"}),
+        )
+        .unwrap();
+        let mask = "[REDACTED]";
+        let mut cases: Vec<_> = (0..=mask.len())
+            .map(|split| {
+                let padding = "x".repeat(limit - split - " token=".len());
+                (
+                    format!("{padding} token={secret} tail"),
+                    format!("{padding} token={mask} tail"),
+                )
+            })
+            .collect();
+        // A page starting mid-word must not be scanned as a new assignment.
+        let text = format!("{}notatoken=public tail", "x".repeat(limit - 4));
+        cases.push((text.clone(), text));
+        let padding = "x".repeat(limit - 1);
+        cases.push((
+            format!("{padding}é{secret}tail"),
+            format!("{padding}é{mask}tail"),
+        ));
+        for (raw, expected) in cases {
+            assert!(raw.len() > limit);
+            let raw_digest = provenant_core::Digest::from_bytes(
+                *provenant_records::CanonicalV1::file_digest(raw.as_bytes()).bytes(),
+            );
+            let expected_digest = provenant_core::Digest::from_bytes(
+                *provenant_records::CanonicalV1::file_digest(expected.as_bytes()).bytes(),
+            );
+            let mut offset = 0;
+            let mut received = Vec::new();
+            loop {
+                let input = OutputInput::Read {
+                    extra: Default::default(),
+                    target: target.clone(),
+                    part: OutputPart::Result,
+                    offset,
+                    max_bytes: limit as u64,
+                };
+                let page = project_peer_output_with(&input, &projector, |request| {
+                    let OutputInput::Read { offset, max_bytes, .. } = request else { unreachable!() };
+                    let start = offset as usize;
+                    let end = (start + max_bytes as usize).min(raw.len());
+                    serde_json::from_value(serde_json::json!({
+                        "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
+                        "offset":start, "next_offset":end, "eof":end == raw.len(), "digest":raw_digest,
+                        "bytes":OutputBytes::from_bytes(raw.as_bytes()[start..end].to_vec()), "length":raw.len(),
+                        "extension_identifier":"long-private-value"
+                    })).map_err(|_| FacadeError::StateCorrupt)
+                }).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&page).unwrap()["extension_identifier"],
+                    secret
+                );
+                let response = PeerResponse {
+                    extra: Default::default(),
+                    version: 1,
+                    protocol: provenant_fabric_runtime::hosts::PROTOCOL,
+                    host: provenant_core::HostId::from_bytes([1; 16]),
+                    project: provenant_fabric_runtime::identity::CrossHostProjectKey::from_home(
+                        Path::new("/h"),
+                        Path::new("/h/repo/.git"),
+                    )
+                    .unwrap(),
+                    result: PeerResult::Output {
+                        data: Box::new(page.clone()),
+                        extra: Default::default(),
+                    },
+                };
+                let encoded = encode_peer_response(response, &projector).unwrap();
+                let response: PeerResponse = serde_json::from_slice(&encoded).unwrap();
+                let PeerResult::Output { data, .. } = response.result else {
+                    panic!("output frame")
+                };
+                assert_eq!(*data, page);
+                let OutputResult::Chunk {
+                    bytes,
+                    digest,
+                    length,
+                    next_offset,
+                    eof,
+                    ..
+                } = *data
+                else {
+                    panic!("chunk")
+                };
+                let bytes = match bytes {
+                    OutputBytes::Utf8(text) => text.into_bytes(),
+                    OutputBytes::Base64(text) => {
+                        provenant_fabric_runtime::handoff::decode_base64(&text).unwrap()
+                    }
+                };
+                assert_eq!(digest, expected_digest);
+                assert_eq!(length, Some(expected.len() as u64));
+                assert_eq!(
+                    bytes,
+                    expected.as_bytes()[offset as usize..next_offset as usize]
+                );
+                received.extend(bytes);
+                if eof {
+                    break;
+                }
+                assert!(next_offset > offset);
+                offset = next_offset;
+            }
+            assert_eq!(received, expected.as_bytes());
+        }
     }
 
     #[test]
@@ -696,11 +838,8 @@ pub fn peer(
         )?;
         if let Some(refusal) = protocol_refusal(&bytes)? {
             let projector = provenant_confinement::publication::Projector::ambient()?;
-            let raw = serde_json::to_vec(&refusal)?;
-            let mut reply = provenant_confinement::publication::CrossHostTransport::new(&projector)
-                .json(&raw)?
-                .into_bytes();
-            let _: PeerResponse = serde_json::from_slice(&reply)?;
+            let mut reply =
+                provenant_fabric_runtime::hosts::encode_peer_response(refusal, &projector)?;
             reply.push(b'\n');
             provenant_os::sys::hook_io::write_stdout(
                 &reply,
@@ -1467,21 +1606,9 @@ pub fn peer(
             project: request.project.key,
             result,
         };
-        let raw = serde_json::to_vec(&response)?;
         let projector = provenant_confinement::publication::Projector::ambient()?;
-        let mut bytes = provenant_confinement::publication::CrossHostTransport::new(&projector)
-            .json(&raw)?
-            .into_bytes();
-        // Output was projected before paging and its digest binds those exact
-        // bytes. A further envelope projection must not invalidate that binding.
-        if matches!(response.result, PeerResult::Output { .. }) {
-            let before: serde_json::Value = serde_json::from_slice(&raw)?;
-            let after: serde_json::Value = serde_json::from_slice(&bytes)?;
-            if before["result"] != after["result"] {
-                return Err(PeerError::Frame.into());
-            }
-        }
-        let _: PeerResponse = serde_json::from_slice(&bytes)?;
+        let mut bytes =
+            provenant_fabric_runtime::hosts::encode_peer_response(response, &projector)?;
         if bytes.len() >= MAX_FRAME {
             return Err(PeerError::Frame.into());
         }

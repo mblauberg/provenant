@@ -406,7 +406,9 @@ Local execution, graph inputs and retained state are intended to remain raw and
 lossless under their existing custody and integrity controls. Disclosure masking
 belongs at an external publication destination, including graph and peer
 exports, forge content and fixture exports. `publication::Projector` protects
-known exact credential values and typed secret fields; its projection binds the
+known exact credential values and typed secret fields. Exact-value matching
+uses typed-field and ambient credentials of at least eight bytes; prose
+assignments mask only their own value spans. Its projection binds the
 raw and published byte lengths and digests separately. A projection error withholds
 the affected publication and never substitutes raw bytes.
 
@@ -419,8 +421,11 @@ All cross-host payloads, including authenticated execution submissions and
 results, pass through `CrossHostTransport`; authentication never exempts
 disclosure. Same-host execution stays raw. Encoded hand-off attachments are
 decoded and projected as text, or withheld when they cannot be inspected. Peer
-output projects the complete verified text and envelope before
-paging, with published lengths and digests. Binary output, over-bound projections
+output projects the complete verified text before paging, with published lengths
+and digests. Cross-host projection selects declared free-text fields (prompts,
+decoded attachments, output text and messages), preserving envelope keys, tags,
+identifiers and metadata. Already projected output pages pass through response
+encoding untouched, including pages split inside a mask or a word. Binary output, over-bound projections
 and event pages that cannot be fully projected are withheld on projection failure.
 
 ### Checkpoint before launch
