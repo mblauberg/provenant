@@ -9,7 +9,7 @@ use provenant_core::SweepControl;
 use provenant_os::fs::{Directory, DirectoryPosition, FileKind, FsError, Metadata};
 use serde::{Deserialize, Serialize};
 
-const CURSOR_VERSION: u8 = 1;
+const CURSOR_VERSION: u8 = 2;
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Report {
@@ -69,6 +69,7 @@ struct Cursor {
     tree_detail: Option<String>,
     candidate_bytes: u64,
     partial_bytes: u64,
+    resurvey_after_remove: bool,
 }
 
 impl Cursor {
@@ -87,6 +88,7 @@ impl Cursor {
             tree_detail: None,
             candidate_bytes: 0,
             partial_bytes: 0,
+            resurvey_after_remove: false,
         })
     }
 }
@@ -287,7 +289,8 @@ fn resume_cursor(
         Phase::Staging | Phase::StagingCandidate => store_dir,
         _ => generations_dir,
     };
-    let root_matches = DirectoryStamp::from(root_dir.metadata()?) == cursor.root;
+    let current_root = DirectoryStamp::from(root_dir.metadata()?);
+    let root_matches = current_root == cursor.root;
     let expected_path = if matches!(
         cursor.phase,
         Phase::StagingCandidate
@@ -303,20 +306,46 @@ fn resume_cursor(
     if start == expected_path {
         let mut cursor = cursor;
         if !root_matches {
-            cursor.offset = DirectoryPosition::default();
-            cursor.best = None;
-            if matches!(cursor.phase, Phase::Measure | Phase::MeasureTree) {
-                cursor.total = 0;
-                cursor.tree_detail = None;
-            }
-            if cursor.phase == Phase::CountNewer {
-                cursor.newer = 0;
+            match cursor.phase {
+                Phase::Staging | Phase::Incomplete => {
+                    cursor.root = current_root;
+                    cursor.offset = DirectoryPosition::default();
+                }
+                Phase::StagingCandidate | Phase::IncompleteCandidate => {
+                    // Keep the in-flight candidate. Its directory cursor is
+                    // independently validated by the tree-measure owner.
+                    cursor.root = current_root;
+                    cursor.offset = DirectoryPosition::default();
+                }
+                Phase::RemoveCandidate => {
+                    // A partial removal has already changed this candidate's
+                    // tree. Finish that candidate before taking a fresh census.
+                    cursor.root = current_root;
+                    cursor.resurvey_after_remove = true;
+                }
+                _ => restart_measurement(&mut cursor, current_root),
             }
         }
         Ok(Some(cursor))
     } else {
         Ok(None)
     }
+}
+
+fn restart_measurement(cursor: &mut Cursor, root: DirectoryStamp) {
+    cursor.phase = Phase::Measure;
+    cursor.root = root;
+    cursor.offset = DirectoryPosition::default();
+    cursor.total = 0;
+    cursor.last = None;
+    cursor.best = None;
+    cursor.candidate = None;
+    cursor.project_key = None;
+    cursor.newer = 0;
+    cursor.tree_detail = None;
+    cursor.candidate_bytes = 0;
+    cursor.partial_bytes = 0;
+    cursor.resurvey_after_remove = false;
 }
 
 fn is_stage(_: &Directory, name: &std::ffi::OsStr) -> bool {
@@ -634,6 +663,21 @@ fn evict_generations(
                 cursor.offset = DirectoryPosition::default();
                 cursor.best = None;
                 cursor.root = DirectoryStamp::from(generations.metadata()?);
+                if cursor.resurvey_after_remove {
+                    let fresh_root = cursor.root.clone();
+                    restart_measurement(&mut cursor, fresh_root);
+                    let Some(measured) = measure_generations(
+                        generations_path,
+                        generations,
+                        control,
+                        report,
+                        Some(&cursor),
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    cursor = measured;
+                }
             }
         }
         if cursor.phase == Phase::CandidateTree {
@@ -1033,8 +1077,8 @@ mod tests {
     #[test]
     fn budget_stop_resumes_generation_inventory_and_eviction() {
         use std::sync::{
-            Arc,
             atomic::{AtomicUsize, Ordering},
+            Arc,
         };
         let state = tempfile::tempdir().unwrap();
         let old = generation(state.path(), "001", 3);
@@ -1074,6 +1118,114 @@ mod tests {
         .unwrap();
         assert!(resumed.interrupted_at.is_none());
         assert!(!old.exists() && middle.exists() && newest.exists());
+    }
+
+    #[test]
+    fn changed_generation_root_preserves_tree_measurement_progress() {
+        use std::cell::Cell;
+
+        let state = tempfile::tempdir().unwrap();
+        let generation = generation(state.path(), "001", 3);
+        make_tree_writable(&generation).unwrap();
+        let target = generation.join("target");
+        fs::create_dir(&target).unwrap();
+        for index in 0..400 {
+            fs::write(target.join(format!("artifact-{index:04}")), b"artifact").unwrap();
+        }
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&generation, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let mut cursor = None;
+        let mut tree_cursor = None;
+        for _ in 0..5 {
+            let checks = Cell::new(0);
+            let keep_going = || {
+                let count = checks.get();
+                checks.set(count + 1);
+                count < 100
+            };
+            let report = if let Some((at, detail)) = cursor.take() {
+                collect(
+                    state.path(),
+                    2,
+                    u64::MAX,
+                    false,
+                    &SweepControl {
+                        start_at: Some(&at),
+                        detail: Some(&detail),
+                        keep_going: Some(&keep_going),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            } else {
+                collect(
+                    state.path(),
+                    2,
+                    u64::MAX,
+                    false,
+                    &SweepControl {
+                        keep_going: Some(&keep_going),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            };
+            match (report.interrupted_at, report.continuation) {
+                (Some(at), Some(detail)) if at == generation => {
+                    tree_cursor = Some((at, detail));
+                    break;
+                }
+                (Some(at), Some(detail)) => cursor = Some((at, detail)),
+                _ => panic!("the bounded pass must leave a resumable cursor"),
+            }
+        }
+        let (at, detail) = tree_cursor.expect("the large target tree must stop mid-measurement");
+
+        // Change the generation inventory while preserving the candidate tree.
+        let inventory_noise = crate::target_seed::store_path(state.path())
+            .join("generations")
+            .join("cursor-change");
+        fs::create_dir(&inventory_noise).unwrap();
+
+        let mut cursor = Some((at, detail));
+        let mut completed = false;
+        for _ in 0..20 {
+            let checks = Cell::new(0);
+            let keep_going = || {
+                let count = checks.get();
+                checks.set(count + 1);
+                count < 100
+            };
+            let (at, detail) = cursor.take().expect("a continued pass has a cursor");
+            let report = collect(
+                state.path(),
+                2,
+                u64::MAX,
+                false,
+                &SweepControl {
+                    start_at: Some(&at),
+                    detail: Some(&detail),
+                    keep_going: Some(&keep_going),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            match (report.interrupted_at, report.continuation) {
+                (Some(at), Some(detail)) => cursor = Some((at, detail)),
+                (None, _) => {
+                    completed = true;
+                    break;
+                }
+                _ => panic!("an interrupted pass must preserve its cursor"),
+            }
+        }
+        assert!(
+            completed,
+            "tree measurement must advance after the root changes"
+        );
+        assert!(generation.exists());
+        fs::remove_dir(inventory_noise).unwrap();
     }
 
     fn allocated_size(path: &Path) -> io::Result<u64> {
