@@ -1138,7 +1138,10 @@ impl RunStore {
             report.accounted_bytes = total;
             report.pinned_bytes = ledger.pinned_bytes;
             report.total_reclaimed_bytes = ledger.reclaimed_bytes;
-            report.errors.push("payload census is incomplete; a complete measurement is required before cap eviction".into());
+            report.errors.push(ProviderStateIssue {
+                path: self.context.state_root.as_path().join(LEDGER),
+                reason: "payload census is incomplete; a complete measurement is required before cap eviction".into(),
+            });
             return Ok(report);
         }
         let mut changed = measure;
