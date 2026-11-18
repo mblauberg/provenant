@@ -37,3 +37,11 @@
 - name: mutants
   color: "fbca04"
   description: Run advisory mutation testing on this pull request
+
+- name: ci:full
+  color: "1d76db"
+  description: Run every CI suite on this pull request, including main-tier macOS suites
+
+- name: ci:red-main
+  color: "b60205"
+  description: CI failed on main; fix forward
