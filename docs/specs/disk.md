@@ -65,8 +65,10 @@ incomplete descriptor evidence and other unknown custody still prevent removal.
 Each sweep observes the overridable `gc.sweep_budget`, reports its value and
 source, and records where it stopped so a later sweep continues there. Its
 single-flight guard is released on every exit. A dead or over-budget holder is
-detected and takeover emits a warning. No takeover permits removal without
-fresh candidate custody checks.
+detected and takeover emits a warning. Recursive surveys persist bounded
+traversal progress and accumulated measurements so a large tree makes progress
+across passes. A survey snapshot never grants removal authority: takeover and
+resumption require fresh candidate custody checks.
 - Why: a large or abandoned sweep must not prevent later collection.
 
 Collection belongs to [worktrees](supervisor.md#worktrees) and
