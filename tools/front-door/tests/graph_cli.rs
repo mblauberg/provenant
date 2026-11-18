@@ -2,7 +2,7 @@
     clippy::disallowed_methods,
     reason = "integration tests exercise the CLI process"
 )]
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -145,7 +145,7 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
 
 #[test]
 // Spec: docs/specs/cli.md#results
-fn scanner_refusal_names_rule_without_echoing_brief() -> Result {
+fn scanner_warning_names_rule_without_echoing_brief() -> Result {
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";

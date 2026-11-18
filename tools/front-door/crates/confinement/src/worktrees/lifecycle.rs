@@ -112,7 +112,7 @@ pub fn list_cached(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    list_impl(context, cancel, |_, _| {}, true, true, |_, _| true)
+    list_impl(context, cancel, |_, _| {}, true, true, false, |_, _| true)
 }
 
 /// Report the inventory size before the census and each completed row after
@@ -123,7 +123,7 @@ pub fn list_streaming(
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    list_impl(context, cancel, report, true, false, |_, _| true)
+    list_impl(context, cancel, report, true, false, false, |_, _| true)
 }
 
 /// Inventory for GC. Cleanliness is checked only for candidates after the
@@ -135,6 +135,14 @@ pub fn list_for_gc(
     list_for_gc_matching(context, cancel, |_, _| true)
 }
 
+/// Preview bounds process census; a timeout leaves custody unknown.
+pub fn list_for_gc_preview(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    list_impl(context, cancel, |_, _| {}, false, false, true, |_, _| true)
+}
+
 /// Read registration and custody only for selected inventory entries. The
 /// predicate runs on Git's registration before opening any checkout.
 pub fn list_for_gc_matching(
@@ -142,7 +150,7 @@ pub fn list_for_gc_matching(
     cancel: &CancelToken,
     matches: impl Fn(&Path, Option<&str>) -> bool,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    list_impl(context, cancel, |_, _| {}, false, false, matches)
+    list_impl(context, cancel, |_, _| {}, false, false, false, matches)
 }
 
 fn list_impl(
@@ -151,6 +159,7 @@ fn list_impl(
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
     reuse_inventory: bool,
+    bounded_census: bool,
     matches: impl Fn(&Path, Option<&str>) -> bool,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
@@ -180,7 +189,35 @@ fn list_impl(
     let total = candidates.len();
     report(total, None);
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
-    let worker_evidence = context.workers.observe_evidence(&roots, false);
+    let worker_evidence = if bounded_census {
+        let started = context.clock.mono_now().as_micros();
+        let within_budget =
+            || context.clock.mono_now().as_micros().saturating_sub(started) < 2_000_000;
+        let (states, details) = context
+            .workers
+            .observe_roots_while(&roots, &within_budget)
+            .unwrap_or_else(|| {
+                (
+                    roots
+                        .iter()
+                        .map(|root| {
+                            (
+                                root.clone(),
+                                Occupancy::census_unknown(root.clone(), "preview census timed out"),
+                            )
+                        })
+                        .collect(),
+                    Default::default(),
+                )
+            });
+        WorkerEvidence {
+            states,
+            details,
+            ..Default::default()
+        }
+    } else {
+        context.workers.observe_evidence(&roots, false)
+    };
     let primary = context.layout.project().map(canonicalize).transpose()?;
     let mut result = Vec::with_capacity(candidates.len());
     for (path, entry) in candidates {
@@ -298,7 +335,11 @@ fn list_impl(
                 Occupancy::Observed { process } => Occupancy::Observed {
                     process: process
                         .or_else(|| worker_evidence.holders.get(&path).cloned())
-                        .or_else(|| context.workers.live_process(&path)),
+                        .or_else(|| {
+                            (!bounded_census)
+                                .then(|| context.workers.live_process(&path))
+                                .flatten()
+                        }),
                 },
                 Occupancy::Unknown { evidence, .. } => Occupancy::census_unknown(
                     path.clone(),

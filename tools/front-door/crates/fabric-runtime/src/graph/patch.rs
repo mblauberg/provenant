@@ -526,7 +526,7 @@ fn retry_node_scope(
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     if let Some(brief) = brief {
-        let safe = provenant_confinement::redact::publication_text(brief.as_bytes(), [])
+        let safe = provenant_redact::publication_text(brief.as_bytes(), [])
             .map_err(|_| PatchError::invalid("retry brief credential check failed"))?;
         if safe != brief.as_bytes() {
             return Err(PatchError::new(

@@ -12,6 +12,7 @@
       "lanes.budget_grace",
       "lanes.publish",
       "lanes.local_cargo",
+      "lanes.cargo_target",
       "lanes.ci_scope",
       "lanes.verification",
       "lanes.gh_budget",
@@ -688,6 +689,14 @@
       "reader": "tools/front-door/src/build_slot.rs",
       "effect": "Advisory cargo scope for lanes: all permits every command without a warning; check warns for compiling commands other than cargo check; none warns for every compiling command. Commands continue after a warning. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs].",
       "trade_off": "A narrower setting warns about extra resource use; the host build slot controls cooperative cargo concurrency."
+    },
+    "lanes.cargo_target": {
+      "type": "cargo_target",
+      "default": "shared",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/cargo_target.rs",
+      "effect": "CARGO_TARGET_DIR for lanes: shared (default; one target per project under the host cache), private (today's copy-on-write seed clone per worktree, under ~/Library/Caches/provenant-lane-cargo/<digest>) or an absolute path. The value and its source appear in the lane preamble and in provenant config show.",
+      "trade_off": "shared avoids cold builds across lanes of the same project. private isolates artifacts per worktree at the cost of disk and compile time."
     },
     "lanes.ci_scope": {
       "type": "enum",

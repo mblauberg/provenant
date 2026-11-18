@@ -1,5 +1,5 @@
 //! Native console contracts and replay fixture generation.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, code};
 

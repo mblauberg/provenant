@@ -1,7 +1,7 @@
 // Integration fixtures use real UTC timestamps in their filesystem records.
 #![allow(clippy::disallowed_methods)]
 
-mod support;
+use crate::support;
 use serde_json::json;
 use std::{
     fs,

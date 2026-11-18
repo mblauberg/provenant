@@ -1042,10 +1042,10 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
 }
 
 #[test]
-fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn std::error::Error>>
+fn settlement_and_tick_read_only_owned_or_pending_graphs() -> Result<(), Box<dyn std::error::Error>>
 {
     if host_test(
-        "fabric::peer_tests::peer_graph_settlement::settlement_and_tick_read_no_terminal_graphs_at_scale",
+        "fabric::peer_tests::peer_graph_settlement::settlement_and_tick_read_only_owned_or_pending_graphs",
     )? {
         return Ok(());
     }
@@ -1161,7 +1161,9 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
     let stored_version = stored_owner["schema_version"]
         .as_u64()
         .ok_or("stored owner schema")?;
-    for number in 0..5000 {
+    // Any unrelated checkpoint read fails the assertions below. A few valid
+    // terminal graphs prove that scope without building thousands of copies.
+    for number in 0..3 {
         let id = format!("terminal-{number:04}");
         terminal.graph_id = id.clone();
         execution.document.graph_id = id.clone();

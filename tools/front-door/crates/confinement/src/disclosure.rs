@@ -1,9 +1,9 @@
 //! Secret-pattern scan of an exact in-memory snapshot.
 //!
-//! Callers use this before sealing a prompt. A match refuses without naming
-//! the matching text.
-use crate::redact::{Redactor, RedactorError};
+//! Reports matches without exposing matched bytes. Shape matches are advisory;
+//! callers decide how to warn or mask at their boundary.
 use provenant_os::exec::CaptureFilter;
+use provenant_redact::{Redactor, RedactorError};
 use thiserror::Error;
 
 const BUFFER_SIZE: usize = 16 * 1024;
@@ -16,8 +16,8 @@ pub enum DisclosureError {
     InvalidSecretSet(#[source] RedactorError),
 }
 
-/// Scan one exact in-memory snapshot, such as a prompt about to be sealed,
-/// with the same secret patterns. A match refuses without naming the text.
+/// Scan one exact snapshot for credential patterns and supplied literal values.
+/// A match returns `SecretMatch` without including any matched bytes.
 pub fn scan_snapshot(bytes: &[u8], known_secrets: &[Vec<u8>]) -> Result<(), DisclosureError> {
     let mut redactor =
         Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
@@ -43,7 +43,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_refuses_known_secrets_without_returning_content() {
+    fn snapshot_reports_known_secrets_without_returning_content() {
         let result = scan_snapshot(b"private token-abc-123", &[b"token-abc-123".to_vec()]);
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
     }

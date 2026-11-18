@@ -159,7 +159,7 @@ impl RunStore {
 /// Redact decoded handoff values before a graph consumes local or peer output.
 pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
-        let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
+        let safe = provenant_redact::publication_text(text.as_bytes(), [])
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
@@ -277,7 +277,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
         Err(error) => {
             let mut value = serde_json::json!(error);
             let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
+                let safe = provenant_redact::publication_text(text.as_bytes(), [])
                     .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
                 String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
             });
@@ -307,6 +307,7 @@ pub struct BuildCap {
 pub struct PreambleExtras {
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
+    pub cargo_target: Option<crate::ResolvedCargoTarget>,
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
@@ -366,8 +367,13 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::VerificationResolution::paragraph)
                 .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
+            let cargo_target = extras
+                .cargo_target
+                .as_ref()
+                .map(crate::ResolvedCargoTarget::preamble)
+                .unwrap_or_else(|| crate::ResolvedCargoTarget::default().preamble());
             format!(
-                "{verification}{}{}{budget}",
+                "{verification}{cargo_target}{}{}{budget}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -416,10 +422,12 @@ mod tests {
         assert!(writer.contains("source: default"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
+        assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(!reader.contains("CI scope:"));
+        assert!(!reader.contains("Cargo target"));
         assert!(reader.contains("Progress handoff JSON:"));
         assert!(
             !lane_preamble("Model policy.", &Default::default(), None, None)
@@ -659,8 +667,7 @@ mod tests {
         let root = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&root, OsStr::new("candidate-1"), true)?;
         let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
-        let _scope =
-            provenant_confinement::redact::publication_scope([secret_shape.as_bytes().to_vec()])?;
+        let _scope = provenant_redact::publication_scope([secret_shape.as_bytes().to_vec()])?;
         let mut progress: serde_json::Value = serde_json::from_slice(&snapshot("stopped_early"))?;
         progress["note"] = serde_json::json!(format!(
             "Parser committed; renderer remains.\n{secret_shape}"
@@ -735,8 +742,7 @@ mod tests {
     #[test]
     fn captured_handoff_credential_keys_refuse_without_rewriting() -> TestResult {
         let registered = "registered-handoff-key-3391";
-        let _scope =
-            provenant_confinement::redact::publication_scope([registered.as_bytes().to_vec()])?;
+        let _scope = provenant_redact::publication_scope([registered.as_bytes().to_vec()])?;
         let embedded = format!("prefix-{registered}-suffix");
         for key in [registered, embedded.as_str()] {
             let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
@@ -757,7 +763,7 @@ mod tests {
 
     #[test]
     fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
-        let _scope = provenant_confinement::redact::publication_scope([
+        let _scope = provenant_redact::publication_scope([
             b"sk-abcdefghijklmnopqrstuvwx".to_vec(),
             b"a:b".to_vec(),
         ])?;
@@ -803,7 +809,7 @@ mod tests {
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
         handoff.note = note;
         let redact = |text: &str| {
-            let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
+            let safe = provenant_redact::publication_text(text.as_bytes(), [])
                 .map_err(|_| RunError::Validation("redaction"))?;
             String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
         };
@@ -1028,8 +1034,7 @@ mod tests {
                 HANDOFF_BYTES as u64,
             )?;
             let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-            let _scope =
-                provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()])?;
+            let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()])?;
             let value = serde_json::json!({"schema_version":2,"status":"done","note":format!("New note {secret}"),"remaining":["Unfinished work"],"decisions":[],"verify":[false]});
             let mut result = decoded();
             result.complete = complete;

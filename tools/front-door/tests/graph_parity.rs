@@ -4,7 +4,7 @@
 //! owner, then checks final state, cause, attempt count and that the event log
 //! (`graphs/<id>.events.jsonl`) tells the same story as the checkpoint.
 //! No native confinement is needed, so these run on Linux and macOS.
-mod support;
+use crate::support;
 use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
 use provenant_fabric_runtime::graph::{
     self, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, AttemptState, FileJournal,

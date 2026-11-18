@@ -2417,7 +2417,7 @@ fn no_work_stop_is_never_saved_without_its_restart() {
 fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
     // Registered credentials are masked before continuation; unregistered
     // credential-shaped examples remain intact.
-    let _scope = provenant_confinement::redact::publication_scope([
+    let _scope = provenant_redact::publication_scope([
         b"ghp_abcdefghijklmnopqrstuvwxyz0123456789".to_vec(),
     ]).unwrap();
     let mut work = node("work", route("first"));

@@ -765,7 +765,7 @@ fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     if joined.is_empty() {
         return None;
     }
-    let redacted = provenant_confinement::redact::publication_text(joined.as_bytes(), [])
+    let redacted = provenant_redact::publication_text(joined.as_bytes(), [])
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
@@ -779,7 +779,7 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
-    let redacted = provenant_confinement::redact::publication_text(line.as_bytes(), [])
+    let redacted = provenant_redact::publication_text(line.as_bytes(), [])
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(crate::bounded_text(&redacted, 160))
@@ -1217,7 +1217,7 @@ mod tests {
     #[test]
     fn provider_errors_preserve_shapes_and_mask_registered_values() {
         let secret = b"descriptor-credential-3391";
-        let _scope = provenant_confinement::redact::publication_scope([secret.to_vec()]).unwrap();
+        let _scope = provenant_redact::publication_scope([secret.to_vec()]).unwrap();
         let text = b"provider failed: descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
         for reason in [
             provider_error_from_result(text),

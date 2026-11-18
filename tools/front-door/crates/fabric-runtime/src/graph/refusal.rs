@@ -13,7 +13,7 @@ impl TryFrom<String> for GraphIdentifier {
         if super::valid_node_identifier(&value) {
             // This is a disclosure fact, never the graph's control identity.
             // Keep the typed cause even when its identifier needs masking.
-            let safe = match provenant_confinement::redact::publication_text(value.as_bytes(), []) {
+            let safe = match provenant_redact::publication_text(value.as_bytes(), []) {
                 Ok(bytes) if bytes == value.as_bytes() => Some(value),
                 _ => None,
             };
@@ -459,9 +459,7 @@ mod tests {
             matches!(error, super::super::CandidateError::Cycle { ref node } if node.to_string() == example)
         );
         for value in [example, "redacted"] {
-            let _scope =
-                provenant_confinement::redact::publication_scope([value.as_bytes().to_vec()])
-                    .unwrap();
+            let _scope = provenant_redact::publication_scope([value.as_bytes().to_vec()]).unwrap();
             let masked = GraphIdentifier::try_from(value.to_owned()).unwrap();
             assert!(masked.to_string().is_empty());
             assert!(serde_json::to_value(&masked).unwrap().is_null());

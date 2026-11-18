@@ -468,7 +468,7 @@ impl RunStore {
         let key = record.key.clone();
         let command = ProviderCommand {
             publication_values: provenant_os::exec::SecretValues(local_or_withdraw!(
-                provenant_confinement::redact::ambient_values()
+                provenant_redact::ambient_values()
                     .map_err(|error| local("capture credential values", &error))
             )),
             policy: policy.clone(),

@@ -34,7 +34,7 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                 let path = format!("{path}/{escaped}");
                 if value.as_str().is_some_and(|text| {
                     !text.is_empty()
-                        && (matches!(
+                        && matches!(
                             key.as_str(),
                             "prompt"
                                 | "brief"
@@ -44,7 +44,7 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                                 | "_artifact_findings"
                                 | "full_artifact_findings"
                                 | "full_disposition_findings"
-                        ) || text.len() > 4096)
+                        )
                 }) {
                     found.push(path);
                 } else {
@@ -52,6 +52,8 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                 }
             }
         }
+        // Apply the large-text rule to scalars in objects and arrays alike.
+        Value::String(text) if text.len() > 4096 => found.push(path.to_owned()),
         Value::Array(array) => {
             for (index, value) in array.iter().enumerate() {
                 text_paths(value, &format!("{path}/{index}"), found);
@@ -225,8 +227,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let secret = "AKIAIOSFODNN7EXAMPLE";
-        let _scope =
-            provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
         let mut value = json!({"execution": {"document": {"nodes": [
             {"id": "a", "prompt": format!("deploy with {secret} now")}
         ]}}});
@@ -259,6 +260,7 @@ mod tests {
         let original = json!({"execution":{"document":{
             "nodes":[{"id":"work","composite":{"nodes":[{"id":"child","prompt":brief}]}}],
             "provenance":{"parameters":{"brief":brief,"brief_digest":"user field","prompt_digest":"another user field","spec":brief}},
+            "template_resolvers":{"brief":[brief]},
             "submission_patch":{"nodes":[{"id":"work","with":{"brief":brief},
                 "composite":{"nodes":[{"id":"child","prompt":brief}]}}]}
         }},"checkpoint":{"expansions":[{"patterns":[{"parameters":{"brief":brief}}]}]}});

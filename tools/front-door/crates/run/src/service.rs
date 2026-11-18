@@ -119,7 +119,7 @@ impl<'a> Service<'a> {
         let (request, prompt) = {
             let mut task = input.task;
             task.prompt = String::from_utf8(
-                provenant_confinement::redact::publication_text(task.prompt.as_bytes(), [])
+                provenant_redact::publication_text(task.prompt.as_bytes(), [])
                     .map_err(|_| RunError::Validation("prompt redaction failed"))?,
             )
             .map_err(|_| RunError::Validation("prompt redaction is not UTF-8"))?;
@@ -669,7 +669,7 @@ impl<'a> Service<'a> {
         let warning = Self::input_warning(&input.prompt, &policy)?;
         let mut input = input.clone();
         input.prompt = String::from_utf8(
-            provenant_confinement::redact::publication_text(input.prompt.as_bytes(), [])
+            provenant_redact::publication_text(input.prompt.as_bytes(), [])
                 .map_err(|_| RunError::Validation("prompt redaction failed"))?,
         )
         .map_err(|_| RunError::Validation("prompt redaction is not UTF-8"))?;

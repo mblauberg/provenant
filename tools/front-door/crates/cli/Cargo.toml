@@ -1,6 +1,6 @@
 [package]
 name = "provenant-cli"
-version = "2.1.1"
+version = "2.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ fixture = [
     "provenant-quota/fixture",
     "provenant-config/fixture",
     "provenant-confinement/fixture",
+    "provenant-redact/fixture",
     "provenant-core/fixture",
     "provenant-fabric-runtime/fixture",
     "provenant-fabric-store/fixture",
@@ -35,6 +36,7 @@ jiff = { workspace = true }
 libc = { workspace = true }
 provenant-config = { workspace = true }
 provenant-confinement = { workspace = true }
+provenant-redact = { workspace = true }
 provenant-core = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
 provenant-fabric-store = { workspace = true }

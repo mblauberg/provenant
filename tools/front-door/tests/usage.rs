@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use serde_json::Value;
 use std::{fs, os::unix::fs::PermissionsExt};
 use support::{Result, TestRig, code};

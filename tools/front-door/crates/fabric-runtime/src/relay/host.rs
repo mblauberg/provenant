@@ -199,7 +199,7 @@ impl HostRelay {
         std::fs::set_permissions(&relay.path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let cancel = relay.cancel.clone();
-        let publication = provenant_confinement::redact::capture_publication_scope();
+        let publication = provenant_redact::capture_publication_scope();
         relay.thread = Some(thread::Builder::new().name("fabric-relay".into()).spawn(
             move || {
                 let _publication = publication.enter();
@@ -244,7 +244,7 @@ fn serve_connections(
 ) {
     let (send, receive) = mpsc::sync_channel::<UnixStream>(32);
     let receive = Mutex::new(receive);
-    let publication = provenant_confinement::redact::capture_publication_scope();
+    let publication = provenant_redact::capture_publication_scope();
     thread::scope(|scope| {
         for _ in 0..WORKERS {
             let receive = &receive;
@@ -648,12 +648,12 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("relay/socket");
         let secret = b"parent-descriptor-3391";
-        let _scope = provenant_confinement::redact::publication_scope([secret.to_vec()])?;
+        let _scope = provenant_redact::publication_scope([secret.to_vec()])?;
         let relay = HostRelay::start(
             path.clone(),
             provenant_records::Limits::CONFIG,
             |_, _, _| {
-                let safe = provenant_confinement::redact::publication_text(
+                let safe = provenant_redact::publication_text(
                     b"parent-descriptor-3391 sk-unregistered-example-3391",
                     [],
                 )

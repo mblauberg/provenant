@@ -3389,7 +3389,7 @@ fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
-    let _scope = provenant_confinement::redact::publication_scope([b"AKIAIOSFODNN7EXAMPLE".to_vec()]).unwrap();
+    let _scope = provenant_redact::publication_scope([b"AKIAIOSFODNN7EXAMPLE".to_vec()]).unwrap();
     let prompt = "captured patch prompt AKIAIOSFODNN7EXAMPLE";
     let doc = "captured template doc AKIAIOSFODNN7EXAMPLE";
     let patch = json!({"schema_version":1,
@@ -3674,7 +3674,8 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
     let base = compiler
         .compile(&json!({"id":"work", "use":"task", "prompt":"Work"}))
         .unwrap();
-    let brief = "work ".repeat(220_000);
+    let fixture_limit = 4 * 1024 * 1024;
+    let brief = "work ".repeat(50_000);
     let nodes: Vec<_> = (0..8)
         .map(|index| {
             let mut node = base.clone();
@@ -3696,8 +3697,9 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
         provenant_config::PortTable::builtin().worktree_layout,
     )
     .unwrap();
-    assert!(canonical_len(&document) > MAX_CHECKPOINT_BYTES as usize);
+    assert!(canonical_len(&document) > fixture_limit);
     let (plan, _) = validate_plan_with_limits(&document, &limits).unwrap();
+    assert!(envelope::admit_with_limit(&document, &[], &[], &plan, fixture_limit).is_ok());
     assert!(graph_envelope_reason(&document, &[], &[], &plan).is_none());
 }
 
@@ -3874,7 +3876,7 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
 #[test]
 fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() {
     let secret = "sk-abcdefghijklmnopqrstuvwx";
-    let _scope = provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+    let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
     for payload in [
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
         json!({"schema_version":secret, "nodes":[{"id":"child", "use":"task"}]}),

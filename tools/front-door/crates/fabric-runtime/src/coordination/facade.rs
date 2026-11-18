@@ -697,7 +697,7 @@ fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
             disk.reclaimed,
             disk.floor
         ),
-        None => provenant_confinement::redact::bounded_line(reason, 4096),
+        None => provenant_redact::bounded_line(reason, 4096),
     }
 }
 
@@ -737,7 +737,7 @@ fn dispatch_refused_wire<S: serde::Serializer>(
     let mut wire = serializer.serialize_struct("DispatchRefused", 3)?;
     wire.serialize_field(
         "reason",
-        &provenant_confinement::redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
+        &provenant_redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
     )?;
     if let Some(disk) = disk {
         wire.serialize_field("disk", disk)?;
@@ -1108,9 +1108,14 @@ impl FacadeError {
                 projected = projected.detail(format!("node {node}: dependency cycle"))
                     .next("remove the cyclic dependency and retry");
             }
-            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), .. } => {
-                projected = projected.detail("graph plan schema or topology is invalid")
-                    .next("inspect the graph schema and dependencies, then retry");
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
+                let reason = safe_graph_plan_reason(&provenant_redact::bounded_line(reason, 4096));
+                let next = if reason.contains("writer worktree") {
+                    "provide --worktree PATH, or --branch B --base REF"
+                } else {
+                    "fix the named graph node and validator reason, then retry"
+                };
+                projected = projected.detail(reason).next(next);
             }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
                 projected = fact.project(projected);
@@ -1139,7 +1144,7 @@ impl FacadeError {
             }
             Self::DispatchRefused { reason, .. } => {
                 projected = projected
-                    .detail(provenant_confinement::redact::bounded_line(reason, 4096))
+                    .detail(provenant_redact::bounded_line(reason, 4096))
                     .next("resolve the reported launch refusal, then retry");
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
@@ -1235,6 +1240,24 @@ impl FacadeError {
             Self::Timeout => "timeout",
             Self::GitMutationFailed { .. } | Self::Io { .. } => "io",
         }
+    }
+}
+
+/// Graph validator reasons are static contract text. Keep their useful words
+/// while refusing control characters and bounding malformed remote values.
+fn safe_graph_plan_reason(reason: &str) -> String {
+    let safe: String = reason
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, ' ' | '_' | '-' | '.' | ':' | '[' | ']' | '`')
+        })
+        .take(1024)
+        .collect();
+    if safe.is_empty() {
+        "graph plan validator refused the named node".into()
+    } else {
+        safe
     }
 }
 
@@ -2185,9 +2208,12 @@ mod diagnostic_tests {
         let wire = serde_json::to_string(&error).unwrap();
         assert!(!wire.contains(secret));
         let received: FacadeError = serde_json::from_str(&wire).unwrap();
-        assert_eq!(
-            received.diagnostic().detail.as_deref(),
-            Some("graph plan schema or topology is invalid")
+        assert!(
+            received
+                .diagnostic()
+                .detail
+                .unwrap()
+                .contains("writer worktree")
         );
     }
 

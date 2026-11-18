@@ -105,8 +105,9 @@ Owner: repository CI.
 ## Red main is visible
 
 A failed `ci-status` on a `main` push opens, or updates, one red-main issue
-naming the failed jobs and the commit range since the last green `main`. The
-next green `main` run closes it.
+naming the failed jobs and the commit range since the last green `main`. A cancelled
+run reports nothing, because jobs that still run after a cancellation fail on
+missing evidence rather than on `main`. The next green `main` run closes it.
 
 Why: `main` is fixed forward, so its breakage must reach the owner at once.
 

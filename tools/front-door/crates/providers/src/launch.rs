@@ -1182,10 +1182,12 @@ pub(crate) fn finalise_provider_env(
             binding
         }
     };
+    let (target, lint_target) = lane_targets(input);
     cargo_environment(
         &binding,
         input.home,
-        cache,
+        &target,
+        &lint_target,
         access,
         !input.sandboxed(),
         &mut spec.env,
@@ -1795,6 +1797,7 @@ pub(crate) fn rust_tools(
             &mut requirements.exec,
             setup,
         );
+        external_target_grants(input, access, requirements);
     }
     system_tools(access, &mut requirements.reads, &mut requirements.exec, env);
     crate::swift::swift_tools(input, access, requirements, env, setup);
@@ -1833,7 +1836,7 @@ fn rust_toolchain(
     let cargo = input.home.join(".cargo");
     let rustup = input.home.join(".rustup");
     let cache = lane_cache(input);
-    let target = cache.join("target");
+    let (target, _) = lane_targets(input);
     // The host prepares the writer cache itself under custody. Cargo
     // creates target/ after launch, so anchor the cache.
     // A read-only lane's cache is its scratch, which rustdoc also uses (via
@@ -1853,12 +1856,47 @@ fn rust_toolchain(
     }
 }
 
+/// The lane's Cargo build and lint targets: the host-resolved
+/// `lanes.cargo_target` paths, or the lane cache when none was passed.
+fn lane_targets(input: &PrepareInput<'_>) -> (PathBuf, PathBuf) {
+    let cache = lane_cache(input);
+    let target = (input.host_var)("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target"));
+    let lint = (input.host_var)(provenant_core::consumer_env::LANE_CARGO_LINT_TARGET)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target-lint"));
+    (target, lint)
+}
+
+/// A shared or configured target lies outside the lane cache, so its grants
+/// are not covered by the cache's. The host creates it before launch; the lane
+/// reads, writes and runs what it builds there.
+fn external_target_grants(
+    input: &PrepareInput<'_>,
+    access: Access,
+    requirements: &mut ToolRequirements,
+) {
+    let cache = lane_cache(input);
+    let (target, lint) = lane_targets(input);
+    let lint = (access == Access::WorktreeWrite).then_some(lint);
+    for path in std::iter::once(target).chain(lint) {
+        if path.starts_with(cache) {
+            continue;
+        }
+        requirements.reads.push(subtree(&path));
+        requirements.writes.push(subtree(&path));
+        requirements.exec.push(subtree(path));
+    }
+}
+
 /// One finalisation seam for all native adapters, including those that skip
 /// sandbox-only tool discovery. This must run before Run verifies target seeds.
 fn cargo_environment(
     binding: &provenant_confinement::cargo::CargoHome,
     home: &Path,
-    cache: &Path,
+    target: &Path,
+    lint_target: &Path,
     access: Access,
     native: bool,
     env: &mut Vec<(OsString, OsString)>,
@@ -1880,14 +1918,14 @@ fn cargo_environment(
             }
         }
     }
-    binding.lane_cargo_environment(home, cache, env);
+    binding.lane_cargo_environment_with_target(home, target, env);
     if access == Access::WorktreeWrite {
         // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
         // this sibling. Cargo locks the build directory, so they then do not
         // queue behind test and build runs in the lane's own target/.
         env.push((
             provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-            cache.join("target-lint").into_os_string(),
+            lint_target.as_os_str().to_os_string(),
         ));
     }
 }

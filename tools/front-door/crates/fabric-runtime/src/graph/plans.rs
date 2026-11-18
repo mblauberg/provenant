@@ -2016,8 +2016,7 @@ pub(super) fn settle(
             Some((preview, plan, positions))
         }
         Err(reason) => {
-            let reason =
-                provenant_confinement::redact::bounded_line(&reason, MAX_ADVANCE_ERROR_BYTES);
+            let reason = provenant_redact::bounded_line(&reason, MAX_ADVANCE_ERROR_BYTES);
             if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                 let warning = bounded(&format!("patch refused: {reason}"), WARNING_BYTES);
                 if !outputs.warnings.contains(&warning) {

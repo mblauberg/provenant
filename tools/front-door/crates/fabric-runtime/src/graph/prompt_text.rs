@@ -11,7 +11,7 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
             trace.push(text.to_owned());
         }
     });
-    let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
+    let safe = provenant_redact::publication_text(text.as_bytes(), [])
         .map_err(|_| "graph text redaction failed")?;
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
 }
@@ -172,11 +172,10 @@ pub(super) fn validate_identities(
     value: &serde_json::Value,
     context: Context,
 ) -> Result<(), &'static str> {
-    let scan =
-        |text: &str| match provenant_confinement::redact::publication_text(text.as_bytes(), []) {
-            Ok(safe) if safe == text.as_bytes() => Ok(()),
-            _ => Err("credential in structured output identity or object key"),
-        };
+    let scan = |text: &str| match provenant_redact::publication_text(text.as_bytes(), []) {
+        Ok(safe) if safe == text.as_bytes() => Ok(()),
+        _ => Err("credential in structured output identity or object key"),
+    };
     match value {
         serde_json::Value::String(text)
             if matches!(context, Context::Identity | Context::CiTarget) =>
@@ -337,8 +336,7 @@ mod tests {
     #[test]
     fn captured_findings_and_handoff_use_the_same_normal_form() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
-        let _scope =
-            provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
         let summary = format!("finding summary {secret}");
         let comment = format!("repair extension {secret}");
         let mut input = crate::result_capture::ResultCapture::new(None);
@@ -396,8 +394,7 @@ mod tests {
     #[test]
     fn captured_credentials_in_identities_or_keys_refuse_the_whole_block() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
-        let _scope =
-            provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
         let base = serde_json::json!({
             "schema_version": 1,
             "findings": [{"id":"F1", "file":"src/lib.rs", "severity":"high",
@@ -488,9 +485,7 @@ mod tests {
                 "route": {"alias": "senior", "model": "model", "account": "account"}}]
         });
         let registered = "registered-identity-3391";
-        let _scope =
-            provenant_confinement::redact::publication_scope([registered.as_bytes().to_vec()])
-                .unwrap();
+        let _scope = provenant_redact::publication_scope([registered.as_bytes().to_vec()]).unwrap();
         let embedded = format!("prefix-{registered}-suffix");
         for secret in [registered, embedded.as_str()] {
             for pointer in [

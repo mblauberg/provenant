@@ -88,9 +88,10 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
 
 #[test]
 fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
-    let _scope = provenant_confinement::redact::publication_scope([
-        b"ghp_abcdefghijklmnopqrstuvwxyz0123456789".to_vec(),
-    ])?;
+    let _scope =
+        provenant_redact::publication_scope(
+            [b"ghp_abcdefghijklmnopqrstuvwxyz0123456789".to_vec()],
+        )?;
     for (answer, expected) in [
         ("plain answer", "plain answer"),
         (
@@ -170,7 +171,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    let _scope = provenant_confinement::redact::publication_scope([token.as_bytes().to_vec()])?;
+    let _scope = provenant_redact::publication_scope([token.as_bytes().to_vec()])?;
     let attempt = store
         .context
         .state_root
@@ -641,7 +642,7 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    let _scope = provenant_confinement::redact::publication_scope([token.as_bytes().to_vec()])?;
+    let _scope = provenant_redact::publication_scope([token.as_bytes().to_vec()])?;
     artifacts::seal(&dir, "result.md", token.as_bytes(), RESULT_LIMIT)?;
     // An independent session traversal failure must not rewrite an orphan.
     let deep = store

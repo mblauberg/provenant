@@ -673,7 +673,7 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         .and_then(|projection| projection.detail.as_deref())
         .filter(|detail| !detail.is_empty())
         .unwrap_or(&fail.message);
-    let reason = provenant_confinement::redact::bounded_line(reason, 4096);
+    let reason = provenant_redact::bounded_line(reason, 4096);
     match fail.detail.map(|detail| *detail) {
         Some(detail @ FacadeError::DispatchRefused { .. }) => detail,
         _ => FacadeError::DispatchRefused {

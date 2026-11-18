@@ -59,6 +59,8 @@ pub struct Report {
     /// Profile directories kept because they were written within the grace.
     pub recent: Vec<PathBuf>,
     pub errors: Vec<String>,
+    /// Preview omitted the recursive profile census.
+    pub measurement_skipped: bool,
 }
 
 struct Candidate {
@@ -112,11 +114,14 @@ pub fn collect(
     limits: Limits,
     dry_run: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
+    if dry_run {
+        return Ok(Report {
+            measurement_skipped: true,
+            ..Report::default()
+        });
+    }
     let mut free = || free_bytes(home);
     let mut survey = survey(home, &mut free);
-    if dry_run {
-        return Ok(prune(survey, limits, true, wall_ns()?, &mut free));
-    }
     if survey.satisfied(limits) {
         return Ok(survey.finish());
     }
@@ -564,6 +569,16 @@ mod tests {
             ForeignLock::Acquired(guard) => guard,
             other => panic!("lock {name} is not free: {other:?}"),
         }
+    }
+
+    #[test]
+    fn dry_run_skips_profile_census_without_changes() {
+        let fixture = Fixture::new();
+        let profile = fixture.profile('a', "debug", 4096, 100);
+        let report = collect(fixture.home.path(), fixture.home.path(), limits(0, 0), true).unwrap();
+        assert!(report.measurement_skipped);
+        assert!(report.removed.is_empty());
+        assert!(profile.join("deps/payload").is_file());
     }
 
     #[test]
