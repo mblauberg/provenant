@@ -704,6 +704,10 @@ fn transform_documents(text: &str, projector: &Projector) -> Result<String, Proj
 
 // Typed assignments are useful for prose diagnostics and shell/config snippets;
 // only a declared credential key consumes its value. Other prose is untouched.
+fn quote(byte: u8) -> bool {
+    matches!(byte, b'"' | b'\'' | b'`')
+}
+
 fn quoted_end(bytes: &[u8], start: usize) -> Option<usize> {
     let quote = bytes[start];
     let mut i = start + 1;
@@ -755,7 +759,7 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
         }
         let start = i;
         let key: std::borrow::Cow<'_, str>;
-        if matches!(bytes[i], b'"' | b'\'') {
+        if quote(bytes[i]) {
             let end = quoted_end(&bytes[..limit], i);
             let mut after = end.unwrap_or(limit);
             while after < limit && matches!(bytes[after], b' ' | b'\t') {
@@ -764,10 +768,8 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
             if !end.is_some_and(|_| after < limit && matches!(bytes[after], b'=' | b':')) {
                 // Inspect prose within quotes while keeping its closing quote
                 // outside any unquoted assignment value. Use a stack, not recursion.
-                if bytes[i] == b'"' {
-                    if let Some(end) = end {
-                        quotes.push(end - 1);
-                    }
+                if let Some(end) = end {
+                    quotes.push(end - 1);
                 }
                 i += 1;
                 continue;
@@ -806,7 +808,7 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
         let start = i;
         if doc < docs.len() && i == docs[doc].0 {
             i = docs[doc].1;
-        } else if i < limit && matches!(bytes[i], b'"' | b'\'') {
+        } else if i < limit && quote(bytes[i]) {
             i = quoted_end(&bytes[..limit], i).unwrap_or(limit);
         } else {
             while i < limit && !bytes[i].is_ascii_whitespace() && !b",;}".contains(&bytes[i]) {
@@ -824,14 +826,11 @@ fn mask_assignments(text: &str) -> String {
     let mut offset = 0;
     for (start, end) in assignments(text) {
         out.push_str(&text[offset..start]);
-        if text.as_bytes()[start] == b'"' {
-            out.push('"');
+        if quote(text.as_bytes()[start]) {
+            let delimiter = char::from(text.as_bytes()[start]);
+            out.push(delimiter);
             out.push_str(MASK);
-            out.push('"');
-        } else if text.as_bytes()[start] == b'\'' {
-            out.push('\'');
-            out.push_str(MASK);
-            out.push('\'');
+            out.push(delimiter);
         } else {
             out.push_str(MASK);
         }
@@ -1023,6 +1022,25 @@ mod tests {
             quoted_sentence,
             r#"diagnostic "token: [REDACTED]"; copy private-value"#
         );
+        for (raw, expected) in [
+            (
+                "diagnostic 'token: private-value'; copy private-value",
+                "diagnostic 'token: [REDACTED]'; copy private-value",
+            ),
+            (
+                "diagnostic `token: private-value`; copy private-value",
+                "diagnostic `token: [REDACTED]`; copy private-value",
+            ),
+            (
+                "`api key`=`private-value`; copy private-value",
+                "`api key`=`[REDACTED]`; copy private-value",
+            ),
+        ] {
+            let projected = projector
+                .project(Destination::CrossHostTransport, raw.as_bytes())
+                .unwrap();
+            assert_eq!(projected.bytes(), expected.as_bytes());
+        }
         let json_prose = br#"{"message":"ordinary stays; token: ordinary","ordinary":"ordinary","tag":"submit","id":"submit-test"}"#;
         let projected = projector
             .project(Destination::CrossHostTransport, json_prose)
