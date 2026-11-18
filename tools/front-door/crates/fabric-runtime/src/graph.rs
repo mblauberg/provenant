@@ -1487,7 +1487,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &patch::PatchContext {
                         library: &library,
                         resolvers: &resolvers,
-                        scan: &patch::scan_for_secrets,
                         journal: None,
                         limits,
                         worktree_layout: worktree_layout.clone(),
@@ -2124,7 +2123,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let context = patch::PatchContext {
                                         library: &library,
                                         resolvers: &resolvers,
-                                        scan: &patch::scan_for_secrets,
                                         journal: None,
                                         limits,
                                         worktree_layout: worktree_layout.clone(),

@@ -96,9 +96,13 @@ Use `sandboxed_routes` to select routes for sandboxing and `--no-sandbox` to
 request an unsandboxed run. Configure `sandbox_cache_reads` for host caches a
 sandboxed lane needs. Explicit network restrictions and host path denials select
 an enforcing profile even when the sandbox setting is off. If the backend is
-unavailable, the lane launches without that profile and records a warning naming
-the restriction and reason. Its prepared environment keeps its narrower settings.
-Check the attempt receipt for the effective mode and source.
+unavailable, a selected enforcing profile fails with a capability error. An
+inherited sandbox alone does not establish equivalent protection. Select a
+trusted unsandboxed route explicitly when that is the intended authority.
+A route that defaults to trusted, or an explicit `--no-sandbox`, retains an
+existing OS sandbox without requiring a new profile only when no explicit
+restriction or parent floor requires one.
+Check the attempt receipt for the selected mode and source.
 See [ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md) and the
 [supervisor spec](../specs/supervisor.md) for boundaries.
 

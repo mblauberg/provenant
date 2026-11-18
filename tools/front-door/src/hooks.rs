@@ -1474,12 +1474,10 @@ fn run_local_gate_with(
             Err(error) => (Some(format!("execution failed: {error}")), Vec::new()),
         };
         if let Some(failure) = failure {
-            let safe = provenant_redact::known_shapes(&output)
-                .unwrap_or_else(|_| b"[output withheld: redaction failed]".to_vec());
             let message = format!(
                 "local gate command {:?}: {failure}\n{}",
-                provenant_redact::bounded_line(command, 200),
-                String::from_utf8_lossy(&safe)
+                provenant_core::bounded_line(command, 200),
+                String::from_utf8_lossy(&output)
             );
             if settings.mode == LocalGateMode::Enforce {
                 return Err(message.into());
@@ -1573,13 +1571,16 @@ mod answer_delivery_tests {
         let dir = tempfile::tempdir()?;
         let settings = provenant_cli::domains::LocalGateSettings {
             mode: provenant_cli::domains::LocalGateMode::Enforce,
-            commands: vec!["printf 'gate output'; printf ' failure tail' >&2; exit 1".into()],
+            commands: vec![
+                "printf 'gate output pass: fix the code'; printf ' failure tail' >&2; exit 1"
+                    .into(),
+            ],
             timeout_seconds: 2,
         };
         let diagnostic = run_local_gate(&settings, dir.path())
             .unwrap_err()
             .to_string();
-        assert!(diagnostic.contains("gate output failure tail"));
+        assert!(diagnostic.contains("gate output pass: fix the code failure tail"));
         Ok(())
     }
 

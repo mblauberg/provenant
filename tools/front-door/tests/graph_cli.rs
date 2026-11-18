@@ -12,22 +12,20 @@ type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
 #[test]
 // Spec: docs/specs/cli.md#results
-fn scanner_refusal_names_rule_without_echoing_brief() -> Result {
+fn scanner_shape_keeps_local_brief_without_refusal() -> Result {
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
-    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    let (output, value) = rig.run(&["run", "task", "--brief", secret, "--explain"])?;
-    let wire = value.to_string();
-    assert!(!wire.contains(secret), "credential reached output");
-    if output.status.success() {
-        assert_eq!(
-            value["data"]["document"]["nodes"][0]["prompt"],
-            "[REDACTED]"
-        );
-    } else {
-        assert!(wire.contains("brief"), "missing field in refusal");
-        assert!(wire.contains("credential token"), "missing rule in refusal");
-    }
+    let shaped = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (output, value) = rig.run(&["run", "task", "--brief", shaped, "--explain"])?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], shaped);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        warning.contains("field=graph.") && warning.contains("rule=known_secret_shape"),
+        "{warning}"
+    );
+    assert!(!warning.contains(shaped), "warning disclosed matched value");
+    assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
 
@@ -510,48 +508,76 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
 }
 
 #[test]
-fn graph_secrets_are_refused_before_publication() -> Result {
+fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
     // Spec: docs/specs/fabric.md#checkpoint-envelope
-    // Free-form briefs are normalised at ingress. Schema identities and object
-    // keys must instead be rejected, without publishing graph or scratch state.
-    let secret = format!("ghp_{}", "a1".repeat(18));
-    for explain in [false, true] {
-        for source in ["graph_id", "node_id", "route", "context_key", "template"] {
-            let rig = GraphProject::new()?;
-            let mut document = json!({
-                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
-                "graph_id":"safe-graph", "nodes":[{
-                    "id":"safe-node", "prompt":"Inspect", "access":"read_only",
-                    "route":{"alias":"junior"}
-                }]
-            });
-            match source {
-                "graph_id" => document["graph_id"] = secret.clone().into(),
-                "node_id" => document["nodes"][0]["id"] = secret.clone().into(),
-                "route" => document["nodes"][0]["route"]["alias"] = secret.clone().into(),
-                "context_key" => document["context"] = json!({(secret.clone()):"note"}),
-                "template" => {
-                    document = json!({"nodes":[{"id":"x","use":secret}],
-                        "templates":{(secret.clone()):{"brief":"Inspect","tier":"senior"}}});
-                }
-                _ => unreachable!(),
+    // Explain is a host-local read, not publication. Token shape alone must
+    // neither rewrite identities nor bypass graph-handle validation.
+    let shaped = format!("ghp_{}", "a1".repeat(18));
+    for source in ["graph_id", "node_id", "route", "context_key", "template"] {
+        let rig = GraphProject::new()?;
+        let mut document = json!({
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id":"safe-graph", "nodes":[{
+                "id":"safe-node", "prompt":"Inspect", "access":"read_only",
+                "route":{"alias":"junior"}
+            }]
+        });
+        match source {
+            "graph_id" => document["graph_id"] = shaped.clone().into(),
+            "node_id" => document["nodes"][0]["id"] = shaped.clone().into(),
+            "route" => document["nodes"][0]["route"]["alias"] = shaped.clone().into(),
+            "context_key" => document["context"] = json!({(shaped.clone()):"note"}),
+            "template" => {
+                document = json!({"nodes":[{"id":"x","use":shaped}],
+                    "templates":{(shaped.clone()):{"brief":"Inspect","tier":"senior"}}});
             }
-            let path = rig.document(&document)?;
-            let mut command = rig.command();
-            command.args(["run", "--file"]).arg(path);
-            if explain {
-                command.arg("--explain");
-            }
-            let output = command.output()?;
-            assert!(!output.status.success(), "{source}: {output:?}");
-            assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
-            assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
-            assert!(graph_records(&rig.state())?.is_empty(), "{source}");
-            assert!(
-                graph_records(&rig.project.join(".provenant/scratch"))?.is_empty(),
-                "{source}"
-            );
+            _ => unreachable!(),
         }
+        let path = rig.document(&document)?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(&path)
+            .arg("--explain")
+            .output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
+            document,
+            "explain rewrote local source"
+        );
+        assert!(
+            !value.to_string().contains("credential token"),
+            "{source}: {value}"
+        );
+        if source == "graph_id" {
+            // A ghp_ value is not a valid graph handle (underscores are
+            // forbidden). This schema check remains mandatory, independently
+            // of shape. Explain retains aliases for later route resolution.
+            assert!(
+                !output.status.success(),
+                "schema validation must still fail: {source}: {value}"
+            );
+        } else {
+            assert!(output.status.success(), "{source}: {value}");
+            if source == "template" {
+                // A shorthand document lowers into a composite. Its member
+                // retains both the authored template identity and prompt.
+                let member = &value["data"]["document"]["nodes"][0]["composite"]["nodes"][0];
+                assert_eq!(member["prompt"], "Inspect");
+                assert_eq!(member["template"], shaped);
+            } else {
+                assert!(
+                    value["data"]["document"].to_string().contains(&shaped),
+                    "{source}: {value}"
+                );
+            }
+        }
+        assert!(graph_records(&rig.state())?.is_empty(), "{source}");
+        assert!(
+            graph_records(&rig.project.join(".provenant/scratch"))?.is_empty(),
+            "{source}"
+        );
     }
     Ok(())
 }

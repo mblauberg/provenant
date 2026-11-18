@@ -681,6 +681,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "update_timeout_seconds",
             "runtime_deadline_seconds",
             "models",
+            "clean_config",
             "out_of_scope_pin",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());

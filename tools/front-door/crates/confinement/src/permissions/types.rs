@@ -163,8 +163,11 @@ impl PermissionError {
             | Self::ProcessPolicyMissing
             | Self::NonUtf8Path
             | Self::BackendUnavailable
-            | Self::BackendNotAvailable(_)
-            | Self::NestedConfinementUnsupported => B::Authority,
+            | Self::BackendNotAvailable(_) => B::Authority,
+            // Unsupported nested execution is a capability result. A caller
+            // may only proceed through independently verified equivalent
+            // enforcement or an explicitly trusted route.
+            Self::NestedConfinementUnsupported => B::None,
             _ => B::None,
         }
     }
@@ -262,6 +265,7 @@ mod repository_error_tests {
                 PermissionError::BackendNotAvailable(super::AvailabilityReason::ProbeFailed),
                 B::Authority,
             ),
+            (PermissionError::NestedConfinementUnsupported, B::None),
         ] {
             assert_eq!(error.boundary_class(), expected, "{error:?}");
         }
@@ -336,12 +340,8 @@ pub struct ProviderProfileSpec {
     pub allow_process_fork: bool,
     /// Host-global SysV IPC for explicitly declared database lanes only.
     pub allow_database_ipc: bool,
-    /// Deny keychain IPC and its CLI even when a tool can execute system programs.
-    pub deny_keychain_access: bool,
-    /// Deny all known credential stores, including networked GitHub access.
-    pub deny_credential_access: bool,
-    /// An offline adapter denies even the runtime's DNS socket exception.
-    pub deny_network: bool,
+    /// Effective provider restrictions, resolved with host and lane ceilings.
+    pub confinement: ResolvedConfinementPolicy,
     /// The CLI runs its tools' commands on a pseudo-terminal: open `/dev/ptmx`
     /// and only the terminals this sandbox allocates, never another `ttys`.
     pub allow_pseudo_tty: bool,
@@ -481,13 +481,15 @@ pub fn write_grants(plan: &PlanPermissions, profile: &ProviderProfile) -> Vec<Wr
     for grant in &profile.spec.state_writes {
         push(WriteSource::StateWrite, grant, grant.scope);
     }
-    if let Some(selected) = plan.selected_authentication.as_ref().and_then(|mechanism| {
-        profile
-            .spec
-            .authentication
-            .iter()
-            .find(|auth| &auth.mechanism == mechanism)
-    }) {
+    if profile.spec.confinement.credentials_permitted()
+        && let Some(selected) = plan.selected_authentication.as_ref().and_then(|mechanism| {
+            profile
+                .spec
+                .authentication
+                .iter()
+                .find(|auth| &auth.mechanism == mechanism)
+        })
+    {
         for grant in &selected.in_place_writes {
             push(WriteSource::CredentialWrite, grant, PathScope::Exact);
         }

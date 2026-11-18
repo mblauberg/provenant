@@ -731,7 +731,7 @@ fn lock_worktree_impl(
                 use std::io::Write;
                 let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
             }
-            Effect::Refuse(_) => {
+            Effect::Refuse(_) | Effect::Stop(_) => {
                 return Err(live_refusal(context.workers, &canonical));
             }
         }

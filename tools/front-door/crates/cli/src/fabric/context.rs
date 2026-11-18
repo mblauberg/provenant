@@ -918,6 +918,13 @@ impl Context {
                 graph_context.as_ref().map(|context| &context.launch_actor)
             }
             PeerAction::CancelSubmission { graph_context, .. } => Some(&graph_context.launch_actor),
+            PeerAction::Output {
+                audience:
+                    provenant_fabric_runtime::hosts::OutputAudience::GraphExecution {
+                        launch_actor, ..
+                    },
+                ..
+            } => Some(launch_actor),
             PeerAction::Inbox {
                 input:
                     provenant_fabric_runtime::inbox::InboxInput::Steer {
