@@ -2,6 +2,108 @@
 mod support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, call, code};
+
+// Spec: docs/specs/lane-contracts.md#observation-events
+#[test]
+fn observation_json_edge_replays_after_project_cursor() -> Result {
+    use provenant_core::{CancelToken, Clock, ProjectId, RootInputs};
+    use provenant_fabric_store::{Request, Store};
+    use provenant_records::{
+        RecordHeader,
+        lane_contract::{
+            Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
+        },
+    };
+    let rig = support::rig()?;
+    let identity = call(&rig, &["fabric", "identity"], 0)?;
+    let project: ProjectId = identity["data"]["project"]
+        .as_str()
+        .ok_or("project")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = Store::open(&roots.state, &request)?;
+    let mut event = ObservationEvent {
+        header: RecordHeader::V1,
+        id: "one".into(),
+        cursor: ObservationCursor { project, seq: 0 },
+        lineage: ObservationLineage {
+            attempt: None,
+            parent_attempt: None,
+            work: None,
+            extra: Default::default(),
+        },
+        kind: ObservationKind::PullRequest,
+        coverage: Coverage::Partial,
+        detail: json!({"pr": 1}),
+        extra: Default::default(),
+    };
+    let at = clock.wall_now()?;
+    let first = store.append_observation(&event, at, &request)?;
+    event.id = "two".into();
+    let second = store.append_observation(&event, at, &request)?;
+    let output = rig.command(&["events", "--json", "--from", &first.to_string()])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let lines = support::json_lines(&output.stdout.bytes)?;
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["id"], "two");
+    assert_eq!(lines[0]["cursor"]["seq"], second);
+
+    // The first line confirms subscription and replay before the next append.
+    use std::ffi::OsString;
+    use std::io::{BufRead, BufReader};
+    use std::time::Duration;
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+    let args = [
+        "--state-dir",
+        rig.state.to_str().ok_or("state")?,
+        "events",
+        "--json",
+        "--follow",
+        "--from",
+        &first.to_string(),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    let mut child = rig.spawn_stream(binary.as_ref(), &args)?;
+    let output = child.stdout.take().ok_or("stdout")?;
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let followed = (|| -> Result {
+        let replay: Value = serde_json::from_str(&receive.recv_timeout(Duration::from_secs(10))??)?;
+        assert_eq!(replay["id"], "two");
+        event.id = "three".into();
+        let third = store.append_observation(&event, at, &request)?;
+        let live: Value = serde_json::from_str(&receive.recv_timeout(Duration::from_secs(10))??)?;
+        assert_eq!(live["id"], "three");
+        assert_eq!(live["cursor"]["seq"], third);
+        Ok(())
+    })();
+    child.kill()?;
+    child.wait()?;
+    reader.join().map_err(|_| "reader thread panicked")?;
+    followed?;
+    Ok(())
+}
 #[test]
 fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
     let rig = support::rig()?;

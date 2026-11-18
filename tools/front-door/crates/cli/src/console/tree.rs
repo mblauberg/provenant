@@ -232,6 +232,110 @@ pub(super) fn read_inner(
     )
 }
 
+/// Select descendants across dispatch and continuation edges from a bounded snapshot.
+/// Missing roots and depth cuts remain explicit because the snapshot may be partial.
+pub(super) fn select_subtree(tree: &mut Value, root: &str, max_depth: u64) -> Result<(), Error> {
+    let nodes = tree["nodes"].as_array().ok_or(Error::Encode)?;
+    let edges = tree["edges"].as_array().ok_or(Error::Encode)?;
+    let roots: Vec<_> = nodes
+        .iter()
+        .filter(|n| n["lane_id"]["attempt_id"] == root)
+        .map(|n| n["lane_id"]["project_id"].clone())
+        .collect();
+    let mut selected = BTreeMap::new();
+    for project in roots {
+        selected.insert(
+            (
+                project.as_str().ok_or(Error::Encode)?.to_owned(),
+                root.to_owned(),
+            ),
+            0u64,
+        );
+    }
+    let mut cut = false;
+    loop {
+        let mut changed = false;
+        for edge in edges {
+            let project = edge["project_id"].as_str().ok_or(Error::Encode)?;
+            let parent = edge["parent_attempt"].as_str().ok_or(Error::Encode)?;
+            let child = edge["child_attempt"].as_str().ok_or(Error::Encode)?;
+            if let Some(depth) = selected
+                .get(&(project.to_owned(), parent.to_owned()))
+                .copied()
+            {
+                let key = (project.to_owned(), child.to_owned());
+                if let std::collections::btree_map::Entry::Vacant(entry) = selected.entry(key) {
+                    if depth + 1 >= max_depth {
+                        cut = true;
+                    } else {
+                        entry.insert(depth + 1);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let missing = selected.is_empty();
+    let selected_node = |node: &Value| {
+        selected.contains_key(&(
+            node["lane_id"]["project_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+            node["lane_id"]["attempt_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+        ))
+    };
+    let mut kept: Vec<_> = nodes.iter().filter(|n| selected_node(n)).cloned().collect();
+    let kept_edges: Vec<_> = edges
+        .iter()
+        .filter(|edge| {
+            let project = edge["project_id"].as_str().unwrap_or("").to_owned();
+            selected.contains_key(&(
+                project.clone(),
+                edge["parent_attempt"].as_str().unwrap_or("").to_owned(),
+            )) && selected.contains_key(&(
+                project,
+                edge["child_attempt"].as_str().unwrap_or("").to_owned(),
+            ))
+        })
+        .cloned()
+        .collect();
+    for node in &mut kept {
+        let project = node["lane_id"]["project_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let attempt = node["lane_id"]["attempt_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        node["depth"] = json!(selected[&(project.clone(), attempt.clone())]);
+        node["children"] = json!(
+            kept_edges
+                .iter()
+                .filter(|e| e["project_id"] == project && e["parent_attempt"] == attempt)
+                .map(|e| json!({"kind":e["kind"],"attempt_id":e["child_attempt"]}))
+                .collect::<Vec<_>>()
+        );
+    }
+    tree["nodes"] = json!(kept);
+    tree["edges"] = json!(kept_edges);
+    // Host-wide totals cannot describe a selected subtree.
+    tree["totals"] = json!({"attempts":kept.len()});
+    tree["subtree"] =
+        json!({"root":root,"status":if missing { "missing" } else { "found" },"depth_limited":cut});
+    if missing || cut {
+        tree["coverage"]["nested_runs"] = json!("partial");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +484,26 @@ mod tests {
                 .iter()
                 .any(|n| n["children"].as_array().is_some_and(|c| !c.is_empty()))
         );
+        // Spec: docs/specs/lane-contracts.md#observation-events
+        let mut subtree = tree.clone();
+        select_subtree(&mut subtree, &AttemptId::from_bytes([2; 16]).to_string(), 3)?;
+        assert_eq!(subtree["subtree"]["status"], "found");
+        assert_eq!(subtree["totals"]["attempts"], 2);
+        assert!(
+            subtree["edges"]
+                .as_array()
+                .ok_or("edges")?
+                .iter()
+                .any(|e| e["kind"] == "continuation")
+        );
+        let mut bounded = tree.clone();
+        select_subtree(&mut bounded, &AttemptId::from_bytes([2; 16]).to_string(), 1)?;
+        assert_eq!(bounded["subtree"]["depth_limited"], true);
+        assert_eq!(bounded["coverage"]["nested_runs"], "partial");
+        let mut missing = tree.clone();
+        select_subtree(&mut missing, &AttemptId::from_bytes([8; 16]).to_string(), 3)?;
+        assert_eq!(missing["subtree"]["status"], "missing");
+        assert_eq!(missing["coverage"]["nested_runs"], "partial");
         let detailed = read(&roots, None, 3, 100, true)?;
         assert!(detailed["nodes"][0]["metadata"]["operation"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());

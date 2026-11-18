@@ -112,7 +112,7 @@ pub fn compose_tree(mut local: Value, peers: Vec<PeerTree>) -> Result<Value, &'s
             "included":included,"invalid_rows":invalid,"duplicate_rows":duplicates,"truncated":truncated,
             "source_incomplete":source_incomplete,"totals":tree["totals"],
             "identity_conflicts":tree["identity_conflicts"],"unfetched_children":tree["unfetched_children"],
-            "children_absent":tree["children_absent"]}));
+            "children_absent":tree["children_absent"],"warning":tree["peer_warning"]}));
     }
     local["nodes"]
         .as_array_mut()
@@ -211,5 +211,37 @@ mod tests {
         assert_eq!(result["coverage"]["peers"][0]["state"], "partial");
         assert_eq!(result["coverage"]["peers"][0]["duplicate_rows"], 1);
         assert_eq!(result["coverage"]["peers"][0]["invalid_rows"], 1);
+    }
+
+    // Spec: docs/specs/lane-contracts.md#shared-notes
+    #[test]
+    fn peer_subtree_result_keeps_local_partial_coverage_and_legacy_warning() {
+        let local_host = HostId::from_bytes([11; 16]);
+        let remote = HostId::from_bytes([12; 16]);
+        let project = ProjectId::from_bytes([13; 16]);
+        let attempt = AttemptId::from_bytes([14; 16]);
+        let key = WorkKey::new(project, "graph", "node", 1).unwrap();
+        let node =
+            json!({"lane_id":{"host":remote,"project_id":project,"key":key,"attempt_id":attempt}});
+        let remote_tree = json!({
+            "nodes":[node],"edges":[],"truncated":false,
+            "subtree":{"root":attempt,"status":"found","depth_limited":false},
+            "coverage":{"host":remote,"runs":"complete","nested_runs":"partial"},
+            "peer_warning":"peer does not support subtree selection; returned whole tree"
+        });
+        let result = compose_tree(
+            json!({"nodes":[],"edges":[],"coverage":{"host":local_host,"nested_runs":"complete"}}),
+            vec![PeerTree {
+                host: remote,
+                observation: TreeObservation::Tree(remote_tree),
+            }],
+        )
+        .unwrap();
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["coverage"]["peers"][0]["state"], "partial");
+        assert_eq!(
+            result["coverage"]["peers"][0]["warning"],
+            "peer does not support subtree selection; returned whole tree"
+        );
     }
 }

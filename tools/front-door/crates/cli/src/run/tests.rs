@@ -1189,6 +1189,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             receipt.notice_done = true;
                             receipt.log_done = true;
                             receipt.ledger_done = true;
+                            receipt.observation_done = true;
                             Ok(())
                         })?;
                     let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);

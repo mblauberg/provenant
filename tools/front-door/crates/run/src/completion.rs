@@ -379,7 +379,7 @@ pub fn lane_preamble_with(
         })
         .unwrap_or_default();
     format!(
-        "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}",
+        "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
         limits.preamble(),
         handoff.map(handoff_progress_guidance).unwrap_or_default()
     )

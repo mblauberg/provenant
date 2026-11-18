@@ -68,7 +68,7 @@ fn no_graph(_: Value, _: &CancelToken, _: Duration) -> Result<Value, ServiceErro
     })
 }
 
-const MAX_BYTES: u64 = 1_048_576;
+const MAX_BYTES: u64 = provenant_records::COMMAND_RESULT_MAX_BYTES as u64;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Serialize, Deserialize)]
@@ -1087,6 +1087,9 @@ mod tests {
             |_, _, _| Ok(Value::Null),
         )?);
         std::fs::DirBuilder::new().mode(0o755).create(&parent)?;
+        // A private lane umask must not turn the deliberately unsafe fixture
+        // back into a safe directory before the boundary assertion.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))?;
         assert!(
             HostRelay::start(
                 path.clone(),

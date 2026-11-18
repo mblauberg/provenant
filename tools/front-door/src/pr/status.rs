@@ -44,11 +44,11 @@ struct Check {
     name: String,
     bucket: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Line {
     number: u64,
     state: String,
-    head: String,
+    pub(crate) head: String,
     draft: bool,
     checks_passed: Option<usize>,
     checks_total: Option<usize>,
@@ -56,6 +56,7 @@ pub(crate) struct Line {
     checks_pending: Option<usize>,
     /// Failed or cancelled check names, when checks were readable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     failing_checks: Vec<String>,
     merge: String,
     review: String,
@@ -565,8 +566,20 @@ pub(crate) fn wait_line_observed(
     request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
 ) -> Result<Line> {
-    use super::observer::{ObserveError, Observer};
+    use super::observer::Observer;
     let mut observer = Observer::open(state, project, repository, request)?;
+    Ok(poll_line(&mut observer, number, None, request, max_age)?.0)
+}
+
+/// One shared conditional host read of PR metadata and checks. Waiters use this
+/// only to reconcile; the tick indexes the same projection for replay.
+pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
+    observer: &mut super::observer::Observer<F, C>,
+    number: u64,
+    head_override: Option<&str>,
+    request: &provenant_config::ports::Request,
+    max_age: std::time::Duration,
+) -> Result<(Line, Vec<super::observer::Check>)> {
     let value = observer.resource(
         &format!("pulls/{number}"),
         std::time::Duration::ZERO,
@@ -588,12 +601,9 @@ pub(crate) fn wait_line_observed(
         draft: pull.draft,
         url: pull.html_url,
     };
-    let checks = match observer.checks(&view.head, max_age, request) {
-        Ok(checks) => Some(checks),
-        Err(ObserveError::Unavailable(_)) => None,
-        Err(error) => return Err(error.to_string().into()),
-    };
-    Ok(status_line(number, view, checks.as_deref()))
+    let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
+    let line = status_line(number, view, Some(&checks));
+    Ok((line, checks))
 }
 
 /// `max_age` is how old an observed CI answer may be: a waiter's poll, or

@@ -388,6 +388,10 @@ pub enum PeerAction {
         max_nodes: u64,
         detail: bool,
         selected: bool,
+        /// Optional for older senders; older receivers retain an unknown field
+        /// in `extra` and return the whole tree.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtree: Option<String>,
     },
     ConsoleDetail {
         #[serde(flatten)]
@@ -498,6 +502,7 @@ peer_feature_protocols! {
         }),
         (ConsoleTree, "console_tree", PeerAction::ConsoleTree {
             extra: Default::default(), max_depth: 8, max_nodes: 100, detail: false, selected: false,
+            subtree: None,
         }),
     ],
     INBOX_PROTOCOL = 14 => [
@@ -1747,6 +1752,31 @@ mod tests {
     }
 
     #[test]
+    fn console_tree_subtree_is_optional_for_older_peer_messages() {
+        let action = PeerAction::ConsoleTree {
+            extra: Default::default(),
+            max_depth: 8,
+            max_nodes: 100,
+            detail: false,
+            selected: false,
+            subtree: Some("attempt-root".into()),
+        };
+        let encoded = serde_json::to_value(&action).unwrap();
+        assert_eq!(encoded["subtree"], "attempt-root");
+        let decoded: PeerAction = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(
+            matches!(decoded, PeerAction::ConsoleTree { subtree: Some(root), .. } if root == "attempt-root")
+        );
+
+        let mut old_message = encoded;
+        old_message.as_object_mut().unwrap().remove("subtree");
+        assert!(matches!(
+            serde_json::from_value::<PeerAction>(old_message).unwrap(),
+            PeerAction::ConsoleTree { subtree: None, .. }
+        ));
+    }
+
+    #[test]
     fn graph_peer_contexts_round_trip_and_reject_malformed_values() {
         let submit = GraphSubmitContext {
             launch_actor: ActorId::from_bytes([1; 16]),
@@ -2607,6 +2637,7 @@ mod tests {
                 max_nodes: 100,
                 detail: false,
                 selected: false,
+                subtree: Some("attempt".into()),
             },
         ] {
             let old = Canned(Mutex::new(Some(Ok(outcome(

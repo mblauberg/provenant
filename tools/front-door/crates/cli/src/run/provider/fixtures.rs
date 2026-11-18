@@ -123,6 +123,7 @@ pub(crate) fn start_fabric_relay(
     let attempt = context.attempt_id.to_string();
     let graph_clock = provenant_os::clock::SystemClock::new();
     let graph_holder = context.clone();
+    let notes_holder = context.clone();
     provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         LaneRuntime::fabric_socket(context.attempt_id),
         provenant_records::Limits {
@@ -131,6 +132,9 @@ pub(crate) fn start_fabric_relay(
             max_members: 100_000,
         },
         move |call, cancel, within| {
+            if let provenant_fabric_runtime::relay::ToolCall::Notes(input) = call {
+                return crate::notes::serve_lane(&ctx, &notes_holder, input, &clock, cancel);
+            }
             let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
             let coordination = CoordinationService::for_identity(
                 &ctx.roots.state,
