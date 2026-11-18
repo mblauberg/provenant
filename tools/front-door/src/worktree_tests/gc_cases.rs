@@ -450,7 +450,7 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
         rig.state.join("config.toml"),
         b"schema_version=1\n[gc]\nfree_floor='1B'\nschedule=false\n",
     )?;
-    let disabled = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
+    let disabled = ok(&rig, &["gc", "--scheduled", "--idle", "1d", "--json"])?;
     assert!(
         disabled["data"]["removed"]
             .as_array()
@@ -465,8 +465,8 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
             "--scheduled",
             "--pressure",
             "--apply",
-            "--idle-days",
-            "1",
+            "--idle",
+            "1d",
             "--json",
         ],
     )?;
@@ -481,11 +481,24 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
         rig.state.join("config.toml"),
         b"schema_version=1\n[gc]\nfree_floor='1B'\n",
     )?;
+    let above_floor = ok(&rig, &["gc", "--scheduled", "--idle", "1d", "--json"])?;
+    assert!(
+        above_floor["data"]["removed"]
+            .as_array()
+            .ok_or("removed")?
+            .is_empty(),
+        "a healthy free-space reading skips the full sweep"
+    );
+    assert!(cache.is_dir());
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+    )?;
     let held = provenant_os::fs::Directory::open_anchor(&registration)?.try_lock_existing(
         std::ffi::OsStr::new("writer.lock"),
         provenant_os::fs::LockMode::Exclusive,
     )?;
-    let reserved = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
+    let reserved = ok(&rig, &["gc", "--scheduled", "--idle", "1d", "--json"])?;
     assert!(
         reserved["data"]["removed"]
             .as_array()
@@ -496,34 +509,33 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
     drop(held);
     let dry = ok(
         &rig,
-        &[
-            "gc",
-            "--scheduled",
-            "--idle-days",
-            "1",
-            "--dry-run",
-            "--json",
-        ],
+        &["gc", "--scheduled", "--idle", "1d", "--dry-run", "--json"],
     )?;
     assert_eq!(dry["data"]["removed"][0]["reason"], "idle");
     assert!(cache.is_dir());
     fs::write(cache.join("artifact"), b"recent build")?;
-    let removed = ok(
+    let recent = ok(
         &rig,
         &[
             "gc",
             "--scheduled",
-            "--idle-days",
-            "1",
+            "--idle",
+            "1d",
             "--free-floor",
             "18446744073709551615B",
             "--json",
         ],
     )?;
-    assert_eq!(removed["data"]["removed"][0]["reason"], "free_floor");
-    assert!(removed["data"]["free_bytes_before"].is_u64());
-    assert!(removed["data"]["free_bytes_after"].is_u64());
-    assert!(!cache.exists());
+    assert!(
+        recent["data"]["removed"]
+            .as_array()
+            .ok_or("removed")?
+            .is_empty(),
+        "recently written shared cache remains warm during pressure GC"
+    );
+    assert!(recent["data"]["free_bytes_before"].is_u64());
+    assert!(recent["data"]["free_bytes_after"].is_u64());
+    assert!(cache.join("artifact").is_file());
     let project_id = project
         .file_name()
         .ok_or("project id")?
@@ -649,7 +661,7 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
             }
         );
         for dry_run in [true, false] {
-            let mut args = vec!["gc", "--idle-days", "1", "--json"];
+            let mut args = vec!["gc", "--idle", "1d", "--json"];
             if dry_run {
                 args.push("--dry-run");
             }
@@ -856,7 +868,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\nalert_below='18446744073709551615B'\n{output_config}"
+            "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\nalert_below='18446744073709551615B'\n{output_config}"
         ),
     )?;
     fs::create_dir(rig.state.join("gc"))?;
@@ -979,7 +991,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let attempt = prepared.attempt_id;
     store.create(&prepared, &call)?;
     let config = format!(
-        "schema_version=1\n[gc]\nfree_floor='1B'\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
+        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
         context.project_id
     );
     fs::write(rig.state.join("config.toml"), &config)?;
@@ -1073,7 +1085,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     Ok(())
 }
 
-pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
+pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result {
     use std::os::unix::fs::DirBuilderExt;
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "gc-tmp", "--json"])?;
@@ -1097,6 +1109,10 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
     input.created_at = provenant_core::WallTime::from_micros(1)?;
     store.create(&input, &call)?;
     let id = input.attempt_id;
+    let attempt = rig.state.join(format!("attempts/{id}"));
+    let temporary = attempt.join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
+    fs::write(temporary.join("payload"), vec![1; 8192])?;
     store.withdraw(
         id,
         provenant_run::AttemptState::Queued {
@@ -1107,10 +1123,10 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
         provenant_core::WallTime::from_micros(2)?,
         &call,
     )?;
-    let attempt = rig.state.join(format!("attempts/{id}"));
-    let temporary = attempt.join("tmp");
-    fs::DirBuilder::new().mode(0o700).create(&temporary)?;
-    fs::write(temporary.join("payload"), vec![1; 8192])?;
+    assert!(
+        temporary.exists(),
+        "release must preserve scratch for follow-up"
+    );
     // Durable evidence and provider history must survive applied GC byte for byte.
     let mut retained = BTreeMap::new();
     for name in [
@@ -1150,12 +1166,7 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
     let text = command(&rig, &["gc", "--dry-run"])?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
-    assert!(text.contains("would remove attempt tmp"), "{text}");
-    assert!(
-        text.contains(temporary.to_str().ok_or("tmp path")?),
-        "{text}"
-    );
-    assert!(text.contains(&format!("{bytes} bytes")), "{text}");
+    assert!(text.contains("1 attempt scratch directories"), "{text}");
     assert!(temporary.exists());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     assert_eq!(
