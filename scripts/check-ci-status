@@ -1,41 +1,93 @@
 #!/usr/bin/env python3
-"""Evaluate the aggregate CI gate, including missing jobs."""
+"""Fail the required gate unless every selected job succeeded."""
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
+from pathlib import Path
 
-MACOS = frozenset({"rust-macos-archive", "rust-macos-tests", "rust-macos-inventory", "rust-macos-release", "rust-macos-lint"})
-RUST = frozenset({"generated-reference", "rust-test-archive", "rust", "rust-dependencies", "quarantine-filter", "quarantine-validation"})
-REQUIRED = MACOS | RUST | {"macos-scope", "rust-lint"}
+loader = importlib.machinery.SourceFileLoader('ci_selector', str(Path(__file__).with_name('select-ci-suites')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+selector = importlib.util.module_from_spec(spec)
+loader.exec_module(selector)
 
 
-def failures(needs, run_macos, run_rust="true"):
+def evaluate(config, needs, selection):
+    required = {'schema_version', 'tested', 'head', 'event', 'pr_number', 'full', 'full_reason', 'evidence', 'rust_base', 'suites'}
+    if not isinstance(needs, dict) or not isinstance(selection, dict) or not required <= selection.keys() or selection.get('schema_version') != 1:
+        raise ValueError('invalid needs or selection')
+    if (not isinstance(selection.get('event'), str) or not selection['event']
+            or type(selection.get('full')) is not bool
+            or (selection.get('full_reason') is not None and not isinstance(selection['full_reason'], str))
+            or (selection['full'] and not selection.get('full_reason'))
+            or not isinstance(selection.get('evidence'), dict)
+            or set(selection['evidence']) != {'main', 'pr'}
+            or not isinstance(selection.get('rust_base'), str)):
+        raise ValueError('invalid selection metadata')
+    for value in [*selection['evidence'].values(), selection['rust_base'] or None]:
+        if value is not None and (not isinstance(value, str) or not selector.SHA.fullmatch(value)):
+            raise ValueError('invalid selection evidence')
+    suites = selection.get('suites')
+    if not isinstance(suites, dict) or set(suites) != {s['name'] for s in config['suite']}:
+        raise ValueError('invalid suite selection')
+    for key in ('tested', 'head'):
+        if not isinstance(selection.get(key), str) or not selector.SHA.fullmatch(selection[key]):
+            raise ValueError(f'invalid {key}')
+    if 'pr_number' not in selection:
+        raise ValueError('missing PR number')
+    if selection.get('pr_number') is not None and (type(selection['pr_number']) is not int or selection['pr_number'] < 1):
+        raise ValueError('invalid PR number')
+    mapping = {name: None for name in config['jobs']['always']}
+    for suite in config['suite']:
+        entry = suites[suite['name']]
+        if not isinstance(entry, dict) or entry.get('state') not in ('run', 'covered', 'deferred') or not isinstance(entry.get('reason'), str) or not entry['reason']:
+            raise ValueError('invalid suite record')
+        evidence = entry.get('evidence')
+        if evidence is not None and (not isinstance(evidence, str) or not selector.SHA.fullmatch(evidence)):
+            raise ValueError('invalid suite evidence')
+        if entry['state'] == 'covered' and (evidence is None or evidence not in selection['evidence'].values()):
+            raise ValueError('covered suite has no matching evidence')
+        if selection['full'] and entry['state'] != 'run':
+            raise ValueError('full selection contains a skipped suite')
+        for job in suite['jobs']:
+            mapping[job] = suite['name']
     errors = []
-    for name in sorted(REQUIRED | needs.keys()):
-        result = needs.get(name, {}).get("result", "absent")
-        skippable = (name in MACOS and run_macos == "false") or (name in RUST and run_rust == "false")
-        if result != "success" and not (skippable and result == "skipped"):
-            errors.append(f"{name}={result}")
+    for job in sorted(mapping.keys() | needs.keys()):
+        result = needs.get(job, {}).get('result', 'absent') if isinstance(needs.get(job, {}), dict) else 'invalid'
+        suite = mapping.get(job)
+        allowed = ('success', 'skipped') if suite and suites[suite]['state'] != 'run' else ('success',)
+        if job not in mapping or result not in allowed:
+            errors.append(f'{job}={result}' if job in mapping else f'{job}=unmapped')
     return errors
 
 
 def main():
     try:
-        needs = json.loads(os.environ["NEEDS_JSON"])
-        run_macos = os.environ["RUN_MACOS"]
-        run_rust = os.environ.get("RUN_RUST", "true")
-        if not isinstance(needs, dict) or run_macos not in ("true", "false") or run_rust not in ("true", "false"):
-            raise ValueError("invalid needs or macOS selection")
-        errors = failures(needs, run_macos, run_rust)
-    except (KeyError, ValueError, TypeError) as error:
-        print(f"Invalid CI status input: {error}", file=sys.stderr)
-        return 1
-    if errors:
-        print("Blocking job results: " + ", ".join(errors), file=sys.stderr)
-        return 1
-    print("All required jobs succeeded or were explicitly unselected.")
-    return 0
+        config = selector.manifest()
+        needs = json.loads(os.environ['NEEDS_JSON'])
+        selection = json.loads(os.environ['SELECTION_JSON'])
+        errors = evaluate(config, needs, selection)
+        lines = ['| Suite | State | Reason | Job results |', '| --- | --- | --- | --- |']
+        for suite in config['suite']:
+            entry = selection['suites'][suite['name']]
+            jobs = ', '.join(f"{job}: {needs.get(job, {}).get('result', 'absent')}" for job in suite['jobs'])
+            reason = entry['reason'].replace('|', '\\|').replace('\n', ' ')
+            lines.append(f"| {suite['name']} | {entry['state']} | {reason} | {jobs} |")
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                f.write('\n'.join(lines) + '\n')
+        if errors:
+            print('Blocking job results: ' + ', '.join(errors), file=sys.stderr); return 1
+        if os.environ.get('CI_EVIDENCE_FILE'):
+            evidence = {k: selection[k] for k in ('schema_version', 'tested', 'head', 'pr_number')}
+            evidence['suites'] = {name: entry['state'] for name, entry in selection['suites'].items()}
+            Path(os.environ['CI_EVIDENCE_FILE']).write_text(json.dumps(evidence, separators=(',', ':')) + '\n')
+        print('All required jobs succeeded or were explicitly unselected.')
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f'Blocking job results: invalid CI status input: {error}', file=sys.stderr); return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

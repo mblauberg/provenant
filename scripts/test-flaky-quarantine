@@ -40,6 +40,10 @@ filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/qua
 test "$filter" = '(package(=provenant-cli) & test(=network::flaky_case)) | (package(=provenant-cli) & test(=network::macos_case))'
 independent=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --filter-only --today 2030-01-01)
 test "$independent" = "$filter"
+# Spec: docs/specs/ci.md#skips-are-named
+partial=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --partial-inventory --today 2030-01-01 2>"$scratch/warnings")
+test "$partial" = "$filter"
+grep -F 'provenant-cli::network::macos_case; native list was not built on this run' "$scratch/warnings" >/dev/null
 # A platform-specific identity is accepted by the union but not by Linux alone.
 if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --today 2030-01-01 >"$scratch/output" 2>&1; then
   echo 'Expected a missing platform-specific identity to fail' >&2
