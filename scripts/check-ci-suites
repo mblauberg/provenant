@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Check that workflow job bindings agree with the CI suite manifest."""
+import importlib.machinery
+import importlib.util
+import os
+import re
+import sys
+from pathlib import Path
+
+loader = importlib.machinery.SourceFileLoader('ci_selector', str(Path(__file__).with_name('select-ci-suites')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+selector = importlib.util.module_from_spec(spec)
+loader.exec_module(selector)
+
+
+def check(config, workflow):
+    jobs = workflow['jobs']
+    if not isinstance(jobs, dict):
+        raise ValueError('workflow jobs must be a mapping')
+    always = set(config['jobs']['always']); ungated = set(config['jobs']['ungated'])
+    mapped = always | ungated | {j for s in config['suite'] for j in s['jobs']}
+    errors = []
+    for job in sorted(mapped - jobs.keys()):
+        errors.append(f'missing workflow job {job}')
+    if 'ci-status' not in jobs:
+        return errors + ['missing ci-status']
+    needs = jobs['ci-status'].get('needs', [])
+    if isinstance(needs, str):
+        needs = [needs]
+    if not isinstance(needs, list) or any(not isinstance(n, str) for n in needs) or len(needs) != len(set(needs)):
+        errors.append('invalid ci-status needs'); needs = []
+    expected = set(jobs) - {'ci-status'} - ungated
+    if set(needs) != expected:
+        errors.append('ci-status needs do not match gated workflow jobs')
+    if set(needs) != mapped - ungated:
+        errors.append('ci-status needs do not match manifest jobs')
+    for suite in config['suite']:
+        name = suite['name']
+        for job in suite['jobs']:
+            condition = str(jobs.get(job, {}).get('if', ''))
+            if 'needs.scope.outputs.suites' not in condition or not re.search(r'\.' + re.escape(name) + r'\b|\[[\'\"]' + re.escape(name) + r'[\'\"]\]', condition):
+                errors.append(f'{job} does not bind suite {name}')
+    for job in always | ungated:
+        if 'needs.scope.outputs.suites' in str(jobs.get(job, {}).get('if', '')):
+            errors.append(f'{job} must not bind a suite')
+    return errors
+
+
+def main():
+    try:
+        import yaml
+        config = selector.manifest()
+        workflow_path = Path(os.environ.get('CI_WORKFLOW', selector.ROOT / '.github/workflows/ci.yml'))
+        workflow = yaml.safe_load(workflow_path.read_text())
+        errors = check(config, workflow)
+        if errors:
+            print('\n'.join(errors), file=sys.stderr); return 1
+        print('CI workflow matches suite manifest.'); return 0
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as error:
+        print(f'CI suite check failed: {error}', file=sys.stderr); return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
