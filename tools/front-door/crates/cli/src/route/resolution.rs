@@ -1245,14 +1245,56 @@ pub fn resolve_review_family(
                             pools: &pools,
                         };
                         let selected_account = route.get("account").and_then(serde_json::Value::as_str);
-                        let recorded = recorded_model_readiness(settings, &model, &pools, selected_account, None, |scope| {
+                        let mut recorded = recorded_model_readiness(settings, &model, &pools, selected_account, None, |scope| {
                             context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now))
                         });
+                        let local = provenant_records::AdapterSpec::get(&selected.adapter)
+                            .filter(|spec| spec.local_login);
+                        if let Some(spec) = local {
+                            let key = spec.local_account.1;
+                            let mut scope = provenant_quota::ReadinessScope {
+                                extra: Default::default(),
+                                host: provenant_quota::LOCAL_HOST.into(),
+                                adapter: selected.adapter.clone(),
+                                account_key: key.into(),
+                                route: model.as_str().into(),
+                            };
+                            let lookup = |scope: &provenant_quota::ReadinessScope| context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now));
+                            let mut observation = lookup(&scope);
+                            if observation.state != provenant_quota::ReadinessState::Unavailable {
+                                for pool in &pools {
+                                    scope.route.clone_from(pool);
+                                    let pool_observation = lookup(&scope);
+                                    if pool_observation.state == provenant_quota::ReadinessState::Unavailable {
+                                        observation = pool_observation;
+                                        break;
+                                    }
+                                }
+                            }
+                            if observation.observed_scope.is_some()
+                                && !recorded.iter().any(|read| read.account_key == key)
+                            {
+                                recorded.push(RecordedReadiness {
+                                    host: scope.host,
+                                    account: spec.local_account.0.into(),
+                                    account_key: key.into(),
+                                    model: model.as_str().into(),
+                                    observation,
+                                });
+                            }
+                        }
                         let keys: BTreeSet<_> = recorded.iter().map(|read| read.account_key.as_str())
-                            .chain(records.iter().filter(|record| record.account.adapter == selected.adapter).map(|record| record.account.account_key.as_str()))
+                            // Debt holders do not establish a provider identity.
+                            .chain(records.iter().filter(|record| record.account.adapter == selected.adapter
+                                && (record.snapshot.is_some() || record.last_error.is_some()
+                                    || record.auth_state.is_some() || record.auth_verified_unix_seconds.is_some()))
+                                .map(|record| record.account.account_key.as_str()))
                             .filter(|key| selected_account.is_none_or(|selected| selected == *key))
                             .collect();
                         let mut accounts = Vec::new();
+                        if keys.is_empty() && local.is_some() {
+                            accounts.push("no observed local login".into());
+                        }
                         for key in keys {
                             if matches!(request.choice, RouteChoice::NamedRoute(_))
                                 && let Some(rule) = rules.iter().find(|rule| matches!(&rule.selector, provenant_routing::ExclusionSelector::Account { adapter, key: excluded } if adapter == &selected.adapter && excluded == key))

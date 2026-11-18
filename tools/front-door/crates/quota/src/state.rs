@@ -424,6 +424,9 @@ pub struct UpdateIntent {
     pub account: AccountScope,
     pub expected: Option<AccountRecord>,
     pub replacement: Option<AccountRecord>,
+    /// Remove all derived provider readiness and login observations, even when
+    /// the account record remains solely to carry local allowance debt.
+    pub clear_provider_observations: bool,
     /// Probe result metadata stays in the in-memory write intent, never the
     /// v1 quota account JSON. `Some(None)` means a successful probe cleared it.
     pub readiness_probe_result: Option<Option<crate::ReadinessReason>>,

@@ -432,6 +432,7 @@ pub(crate) fn reserve_allowance_launch(
             account: scope,
             expected: current,
             replacement: Some(next),
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         },
@@ -656,6 +657,7 @@ pub(crate) fn persist_provider_success(
         account: next.account.clone(),
         expected: current,
         replacement: Some(next),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     };
@@ -884,7 +886,10 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         None => None,
     };
     let mut file = current.clone().unwrap_or_default();
-    if let Some(record) = &intent.replacement {
+    if intent.clear_provider_observations {
+        file.records.clear();
+        file.login = None;
+    } else if let Some(record) = &intent.replacement {
         // Default policies date the clearing reading; a custom probe interval
         // only moves when a fresh reading stops counting as fresh.
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
@@ -1209,6 +1214,7 @@ fn refresh_auth_metadata(
                 account: next.account.clone(),
                 expected: current,
                 replacement: Some(next),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -1629,6 +1635,7 @@ fn probe_account(
                     account: next.account.clone(),
                     expected: current,
                     replacement: Some(next),
+                    clear_provider_observations: false,
                     readiness_probe_result: None,
                     login_probe_expiry: None,
                 },
@@ -2688,57 +2695,66 @@ mod tests {
 
     // Spec: docs/specs/routing.md#monthly-allowance-ledger
     #[test]
-    fn local_login_booking_survives_ordinary_quota_tick() -> Result<(), Box<dyn std::error::Error>>
-    {
-        use provenant_records::{
-            ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility,
-            RouteReadiness,
-        };
+    fn local_login_tick_clears_published_provider_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
         let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+            provenant_core::RootInputs::new(home.clone(), temp.path().join("checkout"));
         inputs.state_dir = Some(temp.path().join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let catalogue = provenant_routing::Catalogue::bundled()?;
-        let config: provenant_routing::RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"cursor/local":{"monthly":{"initial_launch_cost_basis_points":600}}}}
-        }))?;
-        let settings = Settings::default();
-        let policies =
-            provenant_providers::scheduling_policies(&settings, provenant_providers::REGISTRY);
-        let now = provenant_core::WallTime::from_unix_seconds(100)?;
-        let route = ResolvedRoute {
-            selection_context: Default::default(),
-            diagnostics: Default::default(),
-            user_skills: true,
+        let root = private(roots.state.as_path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        let account = AccountScope {
             extra: Default::default(),
             adapter: "cursor".into(),
-            model: "composer-2.5".into(),
-            effort: None,
-            catalogue_revision: catalogue.revision().to_owned(),
-            account_key: Some("local".into()),
-            host: "fixture".into(),
-            alternatives: RouteAlternatives::default(),
-            exclusions: vec![],
-            eligibility: RouteEligibility::Eligible,
-            readiness: RouteReadiness::Ready {
-                extra: Default::default(),
-                availability_warning: None,
-                availability_ref: "fixture".into(),
-                expires_unix_seconds: 200,
-            },
-            confidentiality: RouteConfidentiality {
-                extra: Default::default(),
-                evidence_ref: "fixture".into(),
-            },
-            pool_selection: None,
+            account_key: "local".into(),
+            label: "default".into(),
         };
-        let reserve =
-            |id| reserve_allowance_launch(&roots, &route, id, &config, &catalogue, &policies, now);
-        reserve("first")?;
+        let now = SystemClock::new().unix_seconds();
+        let mut observed = AccountRecord::empty(account.clone());
+        observed.revision = 1;
+        observed.allowance.record_launch("first", now, 600)?;
+        observed.last_error = Some(ProbeFailure::Network);
+        observed.failures = 1;
+        observed.auth_state = Some(provenant_quota::AuthState {
+            signed_in: Some(true),
+            observed_unix_seconds: Some(now),
+            ..Default::default()
+        });
+        let allowance = observed.allowance.clone();
+        let mut records = Vec::new();
+        write_intent(
+            &directory,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(observed),
+                clear_provider_observations: false,
+                readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
+                login_probe_expiry: Some((Some(now + 600), 300)),
+            },
+            &mut records,
+        )?;
+        let scope = ReadinessScope {
+            extra: Default::default(),
+            host: LOCAL_HOST.into(),
+            adapter: account.adapter.clone(),
+            account_key: account.account_key.clone(),
+            route: "cursor/composer-2.5".into(),
+        };
+        assert_eq!(
+            read_readiness(roots.state.as_path(), &scope, now).reason,
+            Some(ReadinessReason::ProbeTimeout)
+        );
+        let readiness_path = roots.state.as_path().join("readiness/local/cursor.json");
+        let stale_readiness = std::fs::read(&readiness_path)?;
+        let published: ReadinessFile = serde_json::from_slice(&stale_readiness)?;
+        assert!(published.login.is_some());
         let effects = provenant_providers::quota_live::LiveQuota::new(
             &roots,
-            &temp.path().join("home"),
+            &home,
             &provenant_providers::accounts::Settings::default(),
         )?;
         let tick = Quota::Tick {
@@ -2746,35 +2762,36 @@ mod tests {
             trigger: Trigger::Timer,
             power: Power::Ac,
         };
-        execute(&tick, &roots, provenant_providers::REGISTRY, &effects)?;
-        assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
-        let root = private(roots.state.as_path())?;
-        let directory = child(&root, OsStr::new("quota"))?;
-        let mut records = read_records(&directory)?;
-        let previous = records[0].clone();
-        let mut observed = previous.clone();
-        observed.revision += 1;
-        observed.last_error = Some(ProbeFailure::Auth);
-        write_intent(
-            &directory,
-            roots.state.as_path(),
-            &UpdateIntent {
-                account: observed.account.clone(),
-                expected: Some(previous),
-                replacement: Some(observed),
-                readiness_probe_result: None,
-                login_probe_expiry: None,
-            },
-            &mut records,
-        )?;
-        execute(&tick, &roots, provenant_providers::REGISTRY, &effects)?;
-        let records = read_cache(&roots)?;
-        assert_eq!(records[0].allowance.launches, 1);
-        assert_eq!(records[0].last_error, None);
-        assert!(
-            reserve("second").is_err(),
-            "the first booking consumes the cycle budget"
-        );
+        for already_ledger_only in [false, true] {
+            if already_ledger_only {
+                // A prior failed derived publication must be repaired on the
+                // next ordinary tick even when the account is already stripped.
+                let dir = child(
+                    &private(roots.state.as_path())?,
+                    OsStr::new(READINESS_DIRECTORY),
+                )?;
+                let account_dir = child(&dir, OsStr::new("local"))?;
+                durable(Directory::atomic_write_with_permissions(
+                    &account_dir,
+                    OsStr::new("cursor.json"),
+                    ".readiness",
+                    &stale_readiness,
+                    0o600,
+                    PublishMode::Replace,
+                )?)?;
+            }
+            execute(&tick, &roots, provenant_providers::REGISTRY, &effects)?;
+            let records = read_cache(&roots)?;
+            let mut ledger_only = AccountRecord::empty(account.clone());
+            ledger_only.revision = records[0].revision;
+            ledger_only.allowance = allowance.clone();
+            assert_eq!(records, vec![ledger_only]);
+            assert!(!readiness_path.exists());
+            assert_eq!(
+                read_readiness(roots.state.as_path(), &scope, now).state,
+                ReadinessState::Unknown
+            );
+        }
         Ok(())
     }
 
@@ -2859,6 +2876,7 @@ mod tests {
                 account: scope,
                 expected: None,
                 replacement: Some(record),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -2995,6 +3013,7 @@ mod tests {
                 account: scope,
                 expected: Some(expected),
                 replacement: Some(next),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3078,6 +3097,7 @@ mod tests {
             account,
             expected: None,
             replacement: Some(record),
+            clear_provider_observations: false,
             readiness_probe_result: Some(Some(ReadinessReason::LoginExpired)),
             login_probe_expiry: Some((Some(now - 1), 300)),
         };
@@ -3729,6 +3749,7 @@ mod tests {
                 account,
                 expected: None,
                 replacement: Some(record),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3870,6 +3891,7 @@ mod tests {
                 account: account.clone(),
                 expected: None,
                 replacement: Some(record),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3937,6 +3959,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(reserved.clone()),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -3952,6 +3975,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(failed),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -4033,6 +4057,7 @@ mod tests {
                     account,
                     expected: None,
                     replacement: Some(record),
+                    clear_provider_observations: false,
                     readiness_probe_result: None,
                     login_probe_expiry: None,
                 },
@@ -4431,6 +4456,7 @@ mod tests {
                 account,
                 expected: Some(current),
                 replacement: Some(next),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -4446,6 +4472,7 @@ mod tests {
             account: records[0].account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
@@ -4798,6 +4825,7 @@ mod tests {
                 account: account.clone(),
                 expected: None,
                 replacement: Some(initial),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
@@ -4812,6 +4840,7 @@ mod tests {
             account: account.clone(),
             expected: Some(current),
             replacement: Some(failed),
+            clear_provider_observations: false,
             readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
             login_probe_expiry: None,
         };
@@ -4835,6 +4864,7 @@ mod tests {
             account,
             expected: Some(current),
             replacement: Some(succeeded),
+            clear_provider_observations: false,
             readiness_probe_result: Some(None),
             login_probe_expiry: None,
         };
@@ -4875,6 +4905,7 @@ mod tests {
             account: account.clone(),
             expected: None,
             replacement: Some(initial),
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
@@ -4888,6 +4919,7 @@ mod tests {
             account: account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            clear_provider_observations: false,
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
@@ -5324,6 +5356,7 @@ mod tests {
                 account: previous.account.clone(),
                 expected: Some(previous),
                 replacement: Some(replacement),
+                clear_provider_observations: false,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             },
