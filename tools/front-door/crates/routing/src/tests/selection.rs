@@ -579,7 +579,7 @@ fn required_provider_family_filters_pool_and_records_exclusions()
     assert_eq!(error.code(), "no_eligible_pool_member");
     assert!(matches!(
         error,
-        RoutingError::NoEligiblePoolMember { exclusions } if !exclusions.is_empty()
+        RoutingError::NoEligiblePoolMember { exclusions, .. } if !exclusions.is_empty()
     ));
     // Exact routes are constrained too, and cannot escape through a fallback.
     query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
@@ -612,5 +612,183 @@ fn required_provider_family_filters_pool_and_records_exclusions()
         )
         .is_err()
     );
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#unknown-never-means-ready
+#[test]
+fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_quota::{ReadinessRead, ReadinessReason, ReadinessState};
+    let catalogue = Catalogue::bundled()?;
+    let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model":"codex/gpt-6-luna", "weight":1},
+            {"model":"claude/claude-haiku-5-5", "weight":0}
+        ]}
+    }))?;
+    // Missing identity is advisory by default so adapters with a HOME login
+    // can route. Exercise a genuinely unresolved account with the refusing policy.
+    config.launch_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "QUOTA_IDENTITY_UNKNOWN".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "claude",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    for (missing_key, stale, login) in [
+        (true, false, None),
+        (true, true, None),
+        (false, false, Some(ReadinessReason::SignedOut)),
+        (false, false, Some(ReadinessReason::LoginExpired)),
+    ] {
+        let mut first = availability();
+        if missing_key {
+            first.account_key = None;
+        }
+        if stale {
+            first.expires_unix_seconds = 90;
+        }
+        let second = AvailabilityRecord {
+            adapter: "claude".into(),
+            ..availability()
+        };
+        let records = [first, second];
+        let readiness = |scope: &provenant_quota::ReadinessScope, _: i64| {
+            if scope.adapter != "codex" || login.is_none() {
+                return ReadinessRead::absent();
+            }
+            ReadinessRead {
+                observed_scope: Some(scope.clone()),
+                state: ReadinessState::Unavailable,
+                reason: login,
+                observed_unix_seconds: Some(90),
+                expires_unix_seconds: Some(110),
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }
+        };
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &records;
+        ctx.access = &access;
+        ctx.readiness = Some(&readiness);
+        let selected = resolve(&query, &ctx)?;
+        assert_eq!(selected.adapter, "claude");
+        let receipt = selected.pool_selection.ok_or("receipt")?;
+        assert!(receipt.candidates[0].exclusion.is_some());
+        // No ready alternative must not resurrect a known unusable account.
+        let mut only_first: RoutingConfig = serde_json::from_value(serde_json::json!({
+            "pools": {"trial": [{"model":"codex/gpt-6-luna", "weight":1}]}
+        }))?;
+        only_first.launch_policy = config.launch_policy.clone();
+        ctx.config = &only_first;
+        let expected = if missing_key {
+            RouteExclusionReason::UnknownAccount
+        } else if login == Some(ReadinessReason::SignedOut) {
+            RouteExclusionReason::AuthRequired
+        } else {
+            RouteExclusionReason::LoginExpired
+        };
+        assert!(matches!(
+            resolve(&query, &ctx),
+            Err(RoutingError::NoEligiblePoolMember { cause: Some(reason), .. }) if reason == expected
+        ));
+    }
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    // An expired sign-out and a configured exclusion still form a typed exhausted pool.
+    let mixed = config.clone();
+    let excluded = [rule(ExclusionSelector::Provider("claude".into()))];
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "claude".into(),
+            ..availability()
+        },
+    ];
+    let mut file = provenant_quota::ReadinessFile::default();
+    let mut account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        account_key: records[0].account_key.clone().ok_or("fixture account")?,
+        label: "work".into(),
+    });
+    file.sync_probe_result(
+        &account,
+        provenant_quota::LOCAL_HOST,
+        10,
+        30,
+        Some(ReadinessReason::SignedOut),
+    )?;
+    let readiness = |scope: &provenant_quota::ReadinessScope, now| file.get(scope, now);
+    let mut ctx = context(&catalogue, &mixed, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.readiness = Some(&readiness);
+    assert!(matches!(
+        resolve_for_account_with_seed_excluding(&query, &ctx, None, "mixed", 0, &[], &excluded),
+        Err(RoutingError::NoEligiblePoolMember {
+            preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+            ..
+        })
+    ));
+    account.auth_state = Some(provenant_quota::AuthState {
+        signed_in: Some(true),
+        observed_unix_seconds: Some(80),
+        ..Default::default()
+    });
+    file.sync_probe_result(&account, provenant_quota::LOCAL_HOST, 80, 30, None)?;
+    let readiness = |scope: &provenant_quota::ReadinessScope, now| file.get(scope, now);
+    let mut ctx = context(&catalogue, &mixed, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.readiness = Some(&readiness);
+    assert_eq!(
+        resolve_for_account_with_seed_excluding(&query, &ctx, None, "mixed", 0, &[], &excluded)?
+            .adapter,
+        "codex"
+    );
+    // Different login failures still have the same preparation fallback class.
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "claude".into(),
+            ..availability()
+        },
+    ];
+    let readiness = |scope: &provenant_quota::ReadinessScope, _: i64| ReadinessRead {
+        observed_scope: Some(scope.clone()),
+        state: ReadinessState::Unavailable,
+        reason: Some(if scope.adapter == "codex" {
+            ReadinessReason::SignedOut
+        } else {
+            ReadinessReason::LoginExpired
+        }),
+        observed_unix_seconds: Some(90),
+        expires_unix_seconds: Some(110),
+        reset_unix_seconds: None,
+        evidence_ref: Some("fixture".into()),
+    };
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.readiness = Some(&readiness);
+    assert!(matches!(resolve(&query, &ctx),
+        Err(RoutingError::NoEligiblePoolMember { cause: Some(reason), .. })
+            if crate::FallbackOutcome::from_exclusion(&reason) == crate::FallbackOutcome::AuthRequired
+    ));
     Ok(())
 }

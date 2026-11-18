@@ -974,7 +974,6 @@ mod tests {
                 library: &library,
                 resolvers: &resolvers,
                 limits: &limits,
-                scan: &|_| Ok(()),
                 journal: None,
 
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

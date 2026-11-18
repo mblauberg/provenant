@@ -1075,7 +1075,10 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
-                deny_keychain_access: true,
+                confinement:
+                    provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                        .without_keychain()
+                        .resolve_for(input.confined.permissions()),
                 tool_exec_roots,
                 tool_writes,
                 // Never the user's .claude.json, which can hold MCP secrets.
@@ -1289,7 +1292,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             });
         match message.filter(|message| !message.is_empty()) {
             Some(message) => {
-                ProviderError::MalformedResult(provenant_redact::bounded_line(&message, 2048))
+                ProviderError::MalformedResult(provenant_core::bounded_line(&message, 2048))
             }
             None => error,
         }

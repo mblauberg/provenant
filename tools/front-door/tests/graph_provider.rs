@@ -5141,19 +5141,19 @@ fn opencode_stderr_live_quota() -> Result {
     Ok(())
 }
 
-fn codex_writer_shell_edits_instructions_and_redacts_logs() -> Result {
-    writer_shell_edits_instructions_and_redacts_logs("codex")
+fn codex_writer_shell_edits_instructions_and_keeps_private_logs() -> Result {
+    writer_shell_edits_instructions_and_keeps_private_logs("codex")
 }
 
-fn claude_writer_shell_edits_instructions_and_redacts_logs() -> Result {
-    writer_shell_edits_instructions_and_redacts_logs("claude")
+fn claude_writer_shell_edits_instructions_and_keeps_private_logs() -> Result {
+    writer_shell_edits_instructions_and_keeps_private_logs("claude")
 }
 
 /// Medium: a real confined writer shell for one primary adapter; each adapter
 /// is its own case so a writer launch fits one test's budget. The files are
 /// tracked before launch so quarantine/protected-root regressions cannot hide
 /// behind a newly created, unprotected instruction filename.
-fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
+fn writer_shell_edits_instructions_and_keeps_private_logs(adapter: &str) -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -5268,12 +5268,15 @@ fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
         );
         let attempt = rig.state.join("attempts").join(id);
         let result = fs::read_to_string(attempt.join("result.md"))?;
-        assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
+        assert!(
+            result.contains("shell completed\nghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{result}"
+        );
         assert_eq!(
             fs::read_to_string(attempt.join("stderr.log"))?,
             "shell stderr ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
         );
-        assert_no_printed_credential_in_derived_files(&attempt)?;
+        assert_private_retention_and_projected_exports(&attempt)?;
         cleanup.disarm();
     }
     Ok(())
@@ -5329,30 +5332,51 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
     Ok(())
 }
 
-fn assert_no_printed_credential_in_derived_files(root: &std::path::Path) -> Result {
+fn assert_private_retention_and_projected_exports(root: &std::path::Path) -> Result {
+    use provenant_confinement::publication::{Destination, Projector};
+    let secret = b"ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let projector = Projector::new([secret.to_vec()])?;
+    // All retained artifacts are owner-only evidence, including decoded results
+    // and handoffs. Only the destination projection is safe for export.
+    assert_eq!(fs::metadata(root)?.permissions().mode() & 0o077, 0);
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let kind = entry.file_type()?;
             if kind.is_dir() {
-                pending.push(entry.path());
-            } else if kind.is_file() {
-                // Host-local captures are replay evidence. All derived and
-                // published run files must still be safe to disclose.
-                if entry.path() == root.join("stdout.log")
-                    || entry.path() == root.join("stderr.log")
-                {
-                    continue;
-                }
-                let bytes = fs::read(entry.path())?;
-                assert!(
-                    !bytes
-                        .windows(40)
-                        .any(|window| window == b"ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
-                    "plaintext in {}",
+                assert_eq!(
+                    entry.metadata()?.permissions().mode() & 0o077,
+                    0,
+                    "{}",
                     entry.path().display()
                 );
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                assert_eq!(
+                    entry.metadata()?.permissions().mode() & 0o077,
+                    0,
+                    "{}",
+                    entry.path().display()
+                );
+                let bytes = fs::read(entry.path())?;
+                if std::str::from_utf8(&bytes).is_ok() {
+                    let exported = projector.project(Destination::ArtifactExport, &bytes)?;
+                    assert!(
+                        !exported
+                            .bytes()
+                            .windows(secret.len())
+                            .any(|window| window == secret),
+                        "exported plaintext in {}",
+                        entry.path().display()
+                    );
+                    assert!(exported.matches_source(Destination::ArtifactExport, &bytes));
+                    assert_eq!(
+                        fs::read(entry.path())?,
+                        bytes,
+                        "export changed local evidence"
+                    );
+                }
             }
         }
     }
@@ -5379,7 +5403,9 @@ fn raw_capture_settlement_keeps_final_answer_and_redacts_disclosure() -> Result 
         let attempt = rig.state.join("attempts").join(id);
         assert_eq!(
             fs::read_to_string(attempt.join("result.md"))?,
-            format!("Review in progress.\nFinal answer: credential [REDACTED]{DONE_FENCE}")
+            format!(
+                "Review in progress.\nFinal answer: credential ghp_abcdefghijklmnopqrstuvwxyz0123456789{DONE_FENCE}"
+            )
         );
         assert_eq!(
             fs::read(attempt.join("stderr.log"))?,
@@ -5402,14 +5428,13 @@ fn raw_capture_settlement_keeps_final_answer_and_redacts_disclosure() -> Result 
         for part in ["result", "stderr"] {
             let output = rig.command(&["output", &target, "--part", part, "--json"])?;
             assert_eq!(code(&output), 0, "{output:?}");
-            let public = String::from_utf8(output.stdout.bytes)?;
-            assert!(public.contains("[REDACTED]"), "{public}");
+            let local = String::from_utf8(output.stdout.bytes)?;
             assert!(
-                !public.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
-                "{public}"
+                local.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                "{local}"
             );
         }
-        assert_no_printed_credential_in_derived_files(&attempt)?;
+        assert_private_retention_and_projected_exports(&attempt)?;
     }
     // A genuinely damaged retained frame must not turn the preceding progress
     // into a task result, even when the provider later exits with a done handoff.
@@ -5945,12 +5970,12 @@ fn main() -> ExitCode {
                 simultaneous_first_launches_pass_cutover_guard,
             ),
             (
-                "codex_writer_shell_edits_instructions_and_redacts_logs",
-                codex_writer_shell_edits_instructions_and_redacts_logs,
+                "codex_writer_shell_edits_instructions_and_keeps_private_logs",
+                codex_writer_shell_edits_instructions_and_keeps_private_logs,
             ),
             (
-                "claude_writer_shell_edits_instructions_and_redacts_logs",
-                claude_writer_shell_edits_instructions_and_redacts_logs,
+                "claude_writer_shell_edits_instructions_and_keeps_private_logs",
+                claude_writer_shell_edits_instructions_and_keeps_private_logs,
             ),
             (
                 "graph_preparation_refusal_retains_non_adapter_cause",

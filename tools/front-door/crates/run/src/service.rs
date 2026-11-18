@@ -100,7 +100,7 @@ impl<'a> Service<'a> {
         };
         let mut contribution_branch = None;
         let mut nested_refusal = None;
-        // Refuse an unsupported launch or a secret prompt before preparing a writer.
+        // Refuse unsupported launches before preparing a writer.
         {
             let task = &input.task;
             let route = Self::route(task.route.clone())?;
@@ -111,15 +111,7 @@ impl<'a> Service<'a> {
                 nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
-        {
-            let task = &input.task;
-            if let Err(error) = Self::scan(&task.prompt) {
-                if input.parent_attempt.is_none() {
-                    return self.preflight_refusal(&input, task, cwd, error, call);
-                }
-                nested_refusal.get_or_insert((error, task.worktree.clone()));
-            }
-        }
+        Self::warn_for_secrets("task.prompt", &input.task.prompt);
         let (request, prompt) = {
             let mut task = input.task;
             if task
@@ -556,13 +548,14 @@ impl<'a> Service<'a> {
             )),
         }
     }
-    pub fn scan(prompt: &str) -> Result<()> {
-        provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).map_err(|_| {
-            RunError::Input {
-                kind: ErrorKind::SecretInput,
-                message: "input matches a secret pattern; remove the secret and retry".into(),
-            }
-        })
+    fn warn_for_secrets(field: &str, prompt: &str) {
+        if provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).is_err() {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "provenant: warning: field={field} rule=known_secret_shape"
+            );
+        }
     }
     pub fn status(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.custody_state(self.store.record(id, call)?, call)
@@ -645,7 +638,7 @@ impl<'a> Service<'a> {
             .start_checked(attempt, expected, providers, holder, call)
     }
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<AttemptRecord> {
-        Self::scan(&input.prompt)?;
+        Self::warn_for_secrets("resume.prompt", &input.prompt);
         self.store.resume(input, call)
     }
     pub fn events(

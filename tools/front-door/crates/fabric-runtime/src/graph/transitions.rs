@@ -187,6 +187,7 @@ pub(super) struct ObservationFacts {
     pub usage: Option<AttemptUsage>,
     pub fallback_evidence: Option<PreparationFallbackEvidence>,
     pub evidence_unreadable: bool,
+    pub fallback_evidence_retry: Option<FallbackEvidenceRetry>,
     pub fallback_cause: Option<provenant_records::RouteExclusionReason>,
     /// Accounts an unlaunched quota refusal passed over, by label.
     pub skipped_accounts: Vec<provenant_records::SkippedAccount>,
@@ -230,6 +231,7 @@ pub(super) fn apply_attempt_observation(
         usage,
         fallback_evidence,
         evidence_unreadable,
+        fallback_evidence_retry,
         fallback_cause,
         skipped_accounts,
         review_range,
@@ -278,6 +280,7 @@ pub(super) fn apply_attempt_observation(
         if retry_was_pending {
             progress.advance_owner_code = None;
         }
+        progress.fallback_evidence_retry = None;
         match observation {
             AttemptObservation::Pending { attempt_ref } => {
                 progress.review_settlement = None;
@@ -748,30 +751,37 @@ pub(super) fn apply_attempt_observation(
                     | AttemptOutcome::AdapterUnavailable
                     | AttemptOutcome::PreparationRefused(_)
                     | AttemptOutcome::Unclassified => {
-                        let review_limit_reached = review_preparation_substitution(node, attempt)
-                            && progress
-                                .attempts
-                                .iter()
-                                .filter(|attempt| attempt.review_substitution)
-                                .count()
-                                >= limits.review_substitutions;
-                        match next_step::settlement_fallback_decision(
-                            node,
-                            route_index,
-                            outcome,
-                            launched,
-                            FallbackEvidence {
-                                preparation: fallback_evidence,
-                                unreadable: evidence_unreadable,
-                                review_limit_reached,
-                                cause: fallback_cause.as_ref(),
-                                skipped_accounts: &skipped_accounts,
-                            },
-                        ) {
-                            SettlementFallback::Continue => true,
-                            SettlementFallback::Fail { code, message } => {
-                                fail_node(progress, code.map(str::to_owned), message);
-                                false
+                        if let Some(retry) = fallback_evidence_retry.clone() {
+                            progress.fallback_evidence_retry = Some(retry);
+                            progress.state = NodeState::Running;
+                            false
+                        } else {
+                            let review_limit_reached =
+                                review_preparation_substitution(node, attempt)
+                                    && progress
+                                        .attempts
+                                        .iter()
+                                        .filter(|attempt| attempt.review_substitution)
+                                        .count()
+                                        >= limits.review_substitutions;
+                            match next_step::settlement_fallback_decision(
+                                node,
+                                route_index,
+                                outcome,
+                                launched,
+                                FallbackEvidence {
+                                    preparation: fallback_evidence,
+                                    unreadable: evidence_unreadable,
+                                    review_limit_reached,
+                                    cause: fallback_cause.as_ref(),
+                                    skipped_accounts: &skipped_accounts,
+                                },
+                            ) {
+                                SettlementFallback::Continue => true,
+                                SettlementFallback::Fail { code, message } => {
+                                    fail_node(progress, code.map(str::to_owned), message);
+                                    false
+                                }
                             }
                         }
                     }
@@ -810,6 +820,7 @@ pub(super) fn apply_attempt_observation(
             }
         }
     };
+    asks::refresh_wake(checkpoint);
     Ok(AppliedObservation {
         settled_result,
         retry_was_pending,
@@ -923,6 +934,7 @@ pub(super) fn initial_checkpoint(
                 advance_error_code: None,
                 advance_owner_code: None,
                 launch_retry: None,
+                fallback_evidence_retry: None,
                 last_launch_retry: None,
                 outputs: None,
                 previous_attempts: Vec::new(),
@@ -1067,7 +1079,7 @@ pub(super) fn admit_attempt(
             Effect::Warn(message) => {
                 checkpoint.nodes[node_index].concurrency_warning = Some(message);
             }
-            Effect::Refuse(diagnostic) => {
+            Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
                 return Admission::PolicyRefused {
                     code: "concurrency_cap",
                     detail: diagnostic
@@ -1167,6 +1179,7 @@ pub(super) fn begin_attempt(
         .is_some_and(|attempt| {
             review_substitution(node, attempt) || review_preparation_substitution(node, attempt)
         });
+    checkpoint.nodes[node_index].fallback_evidence_retry = None;
     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
         // Persist placement before the launch can lose its reply.
         // Recovery must not treat an absent local operation as
@@ -1311,7 +1324,7 @@ pub(super) fn redraw_quota_alias(
             library: &library,
             resolvers: &resolvers,
             limits,
-            scan: &patch::scan_for_secrets,
+
             journal: None,
             worktree_layout: worktree_layout.clone(),
         },
@@ -2042,6 +2055,7 @@ mod tests {
                     usage: None,
                     fallback_evidence: None,
                     evidence_unreadable: false,
+                    fallback_evidence_retry: None,
                     fallback_cause: None,
                     skipped_accounts: Vec::new(),
                     review_range: ReviewRange::Unknown,
@@ -2124,6 +2138,7 @@ mod tests {
                     usage: None,
                     fallback_evidence: None,
                     evidence_unreadable: false,
+                    fallback_evidence_retry: None,
                     fallback_cause: None,
                     skipped_accounts: Vec::new(),
                     review_range: ReviewRange::Unknown,
@@ -2165,6 +2180,7 @@ mod tests {
                 usage: None,
                 fallback_evidence: None,
                 evidence_unreadable: false,
+                fallback_evidence_retry: None,
                 fallback_cause: None,
                 skipped_accounts: Vec::new(),
                 review_range: ReviewRange::Unknown,

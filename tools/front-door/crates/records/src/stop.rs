@@ -297,7 +297,7 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(Quarantined, CHAIR, crate::run::CauseSource::Host),
         rule(HandoffMalformed, CHAIR, crate::run::CauseSource::Provider),
         pinned(Steered, crate::run::CauseSource::Host),
-        rule(Unclassified, NEW, crate::run::CauseSource::Provider),
+        once(Unclassified, NEW, crate::run::CauseSource::Provider),
     ]
 };
 
@@ -709,6 +709,12 @@ impl Stop {
 
     pub fn handoff_result(&self) -> &HandoffResult {
         &self.handoff
+    }
+
+    /// Derive a view with a new handoff while preserving the cause and extensions.
+    /// The retained stop is untouched and the usual sealed-stop checks still apply.
+    pub fn with_handoff(&self, handoff: HandoffResult) -> Result<Self, StopError> {
+        Self::with_extra(self.cause, handoff, self.extra.clone())
     }
 
     /// The writer's own one-line account, such as what blocks a `blocked`

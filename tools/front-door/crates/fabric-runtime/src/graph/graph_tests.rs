@@ -112,6 +112,7 @@ struct FakeOwner {
     fallback_evidence:
         std::collections::BTreeMap<String, provenant_records::run::PreparationFailure>,
     omit_fallback_evidence: bool,
+    fallback_custody_pending: bool,
     fail_fallback_evidence: bool,
     fallback_cause: Option<provenant_records::RouteExclusionReason>,
 }
@@ -186,7 +187,7 @@ impl AttemptOwner for FakeOwner {
             .map(|failure| PreparationFallbackEvidence {
                 failure,
                 handoff: provenant_routing::FallbackHandoff::Local,
-                custody_released: true,
+                custody_released: !self.fallback_custody_pending,
             }))
     }
 

@@ -424,6 +424,7 @@ fn node_bound(
         previous_attempts: Vec::new(),
         attempts: Vec::new(),
         launch_retry: None,
+        fallback_evidence_retry: None,
         last_launch_retry: None,
     };
     // A refused automatic verdict correction retains its bounded admission error.

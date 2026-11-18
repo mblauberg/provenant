@@ -40,6 +40,27 @@ fn request(root: &Path) -> PlanRequest {
     }
 }
 
+// Spec: docs/specs/run-launch.md#policy-and-confinement
+#[test]
+fn unsupported_nested_confinement_is_reported_as_a_capability_error() {
+    let temp = fixture();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let mut input = request(&root);
+    input.permissions.nested_confinement = true;
+
+    let error = ConfinedPlan::new(input)
+        .err()
+        .expect("nested backend is unavailable");
+    assert!(matches!(
+        &error,
+        PlanError::Permission(PermissionError::NestedConfinementUnsupported)
+    ));
+    assert_eq!(
+        error.boundary_class(),
+        provenant_records::diagnostic::BoundaryClass::None
+    );
+}
+
 #[test]
 fn required_credential_grant_refusal_names_the_declared_source() {
     let temp = fixture();

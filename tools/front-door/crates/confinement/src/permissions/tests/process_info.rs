@@ -1,4 +1,4 @@
-//! Native libproc causal probe and own-sandbox RSS visibility.
+//! Native process sampling: same-sandbox visibility and host-process privacy.
 #![cfg(target_os = "macos")]
 
 use super::*;
@@ -14,10 +14,8 @@ const PROBE: &str = r#"
 #include <unistd.h>
 
 int main(int argc, char **argv) {
-    if (argc != 3) return 90;
-    int baseline = strcmp(argv[1], "baseline") == 0;
-    int allowed = strcmp(argv[1], "denied") != 0;
-    pid_t host = (pid_t)strtol(argv[2], NULL, 10);
+    if (argc != 2) return 90;
+    pid_t host = (pid_t)strtol(argv[1], NULL, 10);
     int ready[2];
     if (pipe(ready) != 0) return 91;
     pid_t child = fork();
@@ -40,29 +38,20 @@ int main(int argc, char **argv) {
     errno = 0;
     int count = proc_pidinfo(child, PROC_PIDTASKALLINFO, 0, &own, sizeof(own));
     int query_errno = errno;
-    if (allowed) {
-        if (count != sizeof(own) || own.ptinfo.pti_resident_size == 0 ||
-            own.pbsd.pbi_pid != (unsigned)child ||
-            own.pbsd.pbi_ppid != (unsigned)getpid() ||
-            own.pbsd.pbi_pgid != (unsigned)getpgrp()) {
-            fprintf(stderr, "own proc_pidinfo(PROC_PIDTASKALLINFO): count=%d errno=%d rss=%llu\n",
-                count, query_errno, own.ptinfo.pti_resident_size);
-            failed = 1;
-        }
-    } else if (count != 0 || query_errno != EPERM) {
-        fprintf(stderr, "control proc_pidinfo(PROC_PIDTASKALLINFO): count=%d errno=%d\n",
-            count, query_errno);
+    if (count != sizeof(own) || own.ptinfo.pti_resident_size == 0 ||
+        own.pbsd.pbi_pid != (unsigned)child ||
+        own.pbsd.pbi_ppid != (unsigned)getpid() ||
+        own.pbsd.pbi_pgid != (unsigned)getpgrp()) {
+        fprintf(stderr, "same-sandbox proc_pidinfo(PROC_PIDTASKALLINFO): count=%d errno=%d rss=%llu\n",
+            count, query_errno, own.ptinfo.pti_resident_size);
         failed = 1;
-    } else {
-        puts("proc_pidinfo(PROC_PIDTASKALLINFO) denied with EPERM");
     }
     struct proc_taskinfo outside;
     errno = 0;
     count = proc_pidinfo(host, PROC_PIDTASKINFO, 0, &outside, sizeof(outside));
     query_errno = errno;
-    if (baseline ? (count != sizeof(outside) || outside.pti_resident_size == 0) :
-        (count != 0 || (query_errno != EPERM && query_errno != ESRCH))) {
-        fprintf(stderr, "outside proc_pidinfo(PROC_PIDTASKINFO): count=%d errno=%d\n",
+    if (count != 0 || (query_errno != EPERM && query_errno != ESRCH)) {
+        fprintf(stderr, "host proc_pidinfo(PROC_PIDTASKINFO) must be private: count=%d errno=%d\n",
             count, query_errno);
         failed = 1;
     }
@@ -73,7 +62,9 @@ int main(int argc, char **argv) {
 "#;
 
 #[test]
-fn process_info_includes_host_and_reports_own_rss() -> Result<(), Box<dyn std::error::Error>> {
+// Spec: docs/specs/supervisor.md#network-ipc-and-process-information
+fn same_sandbox_process_info_is_open_and_host_process_info_is_private()
+-> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
     let env = [("LC_ALL".into(), "C".into())];
@@ -128,7 +119,6 @@ fn process_info_includes_host_and_reports_own_rss() -> Result<(), Box<dyn std::e
     };
     let host_pid = std::process::id().to_string();
     let mut failures = Vec::new();
-    let mut passed = Vec::new();
     let run = |source: &str, args: &[OsString]| {
         let mut argv = [SANDBOX_EXEC, "-p", source].map(OsString::from).to_vec();
         argv.extend_from_slice(args);
@@ -171,45 +161,20 @@ fn process_info_includes_host_and_reports_own_rss() -> Result<(), Box<dyn std::e
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
-        // Single-operation A/B identifies process-info-pidinfo, rather than
-        // attributing a different syscall denial to this libproc operation.
-        for (rule, expected) in [
-            ("(allow process-info*)", "baseline"),
-            ("(deny process-info*)", "denied"),
-            (
-                "(deny process-info*)\n(allow process-info-pidinfo (target same-sandbox))",
-                "allowed",
-            ),
-            (
-                "(deny process-info*)\n(allow process-info* (target same-sandbox))",
-                "allowed",
-            ),
-        ] {
-            let variant = source.replace("(allow process-info*)", rule);
-            let args = [
-                helper.as_os_str().to_owned(),
-                expected.into(),
-                host_pid.clone().into(),
-            ];
-            let result = run(&variant, &args)?;
-            if !successful_probe(&result) {
-                failures.push(format!(
-                    "writer={writer}: {rule:?} libproc: {:?}; {}; {}",
-                    result.termination,
-                    String::from_utf8_lossy(&result.stdout.bytes),
-                    String::from_utf8_lossy(&result.stderr.bytes)
-                ));
-            } else {
-                passed.push(format!(
-                    "writer={writer}: {rule:?} libproc {expected}: PASS"
-                ));
-            }
+        let args = [helper.as_os_str().to_owned(), host_pid.clone().into()];
+        let result = run(&source, &args)?;
+        if !successful_probe(&result) {
+            failures.push(format!(
+                "writer={writer}: same-sandbox process info should remain available while host process info stays private: {:?}; {}; {}",
+                result.termination,
+                String::from_utf8_lossy(&result.stdout.bytes),
+                String::from_utf8_lossy(&result.stderr.bytes)
+            ));
         }
     }
     assert!(
         failures.is_empty(),
-        "process-info causal matrix passed:\n{}\nfailed:\n{}",
-        passed.join("\n"),
+        "production process-info boundary failed:\n{}",
         failures.join("\n")
     );
     Ok(())

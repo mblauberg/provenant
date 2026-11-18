@@ -19,6 +19,7 @@ fn executable_unavailable(program: &str) -> PrepareError {
             .detail()
             .into(),
         cause: provenant_records::run::TerminalCause::CommandUnavailable,
+        fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
         note: Some(format!(
             "executable {}",
             provenant_records::diagnostic::safe_text(program)
@@ -731,7 +732,8 @@ fn check_sandbox_off_build_disk(
             );
             Ok(())
         }
-        provenant_records::policy::Effect::Refuse(diagnostic) => Err(format!(
+        provenant_records::policy::Effect::Refuse(diagnostic)
+        | provenant_records::policy::Effect::Stop(diagnostic) => Err(format!(
             "{}; refusing to start a sandbox-off lane that can build",
             diagnostic.detail.unwrap_or_default()
         )),
@@ -845,6 +847,7 @@ mod refusal_tests {
             message,
             cause,
             note,
+            ..
         } = error
         else {
             unreachable!();

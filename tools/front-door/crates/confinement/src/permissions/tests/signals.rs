@@ -1,4 +1,4 @@
-//! Native signalling and process-info boundaries, including identical-profile peers.
+//! Native signalling boundaries and process privacy between identical-profile peers.
 #![cfg(target_os = "macos")]
 
 use super::*;
@@ -24,8 +24,9 @@ int main(int argc, char **argv) {
     count = proc_pidinfo((pid_t)strtol(argv[1], NULL, 10), PROC_PIDTASKINFO,
         0, &peer, sizeof(peer));
     int error = errno;
-    if (count != sizeof(peer) || peer.pti_resident_size == 0) {
-        fprintf(stderr, "peer PROC_PIDTASKINFO: count=%d errno=%d\n", count, error);
+    if (count != 0 || (error != EPERM && error != ESRCH)) {
+        fprintf(stderr, "external peer PROC_PIDTASKINFO must be private: count=%d errno=%d\n",
+            count, error);
         return 1;
     }
     return 0;
@@ -247,7 +248,7 @@ test "$notified" = yes
             let peer_info = executor.execute(options)?;
             assert!(
                 successful_probe(&peer_info),
-                "writer={writer}: byte-identical peer proc_pidinfo must succeed: {:?}; {}",
+                "writer={writer}: byte-identical peer process info must stay private: {:?}; {}",
                 peer_info.termination,
                 String::from_utf8_lossy(&peer_info.stderr.bytes)
             );

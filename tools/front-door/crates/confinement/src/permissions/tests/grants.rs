@@ -59,7 +59,7 @@ pub(super) fn write_grants_fixture() -> (PlanPermissions, ProviderProfile) {
 
 #[test]
 fn write_grants_list_every_write_source() {
-    let (mut plan, profile) = write_grants_fixture();
+    let (mut plan, mut profile) = write_grants_fixture();
     let grant = |source, path: &str, scope| WriteGrant {
         source,
         path: path.into(),
@@ -126,6 +126,16 @@ fn write_grants_list_every_write_source() {
         )
     }));
     assert_eq!(write_grants(&plan, &profile), expected);
+
+    // Spec: docs/specs/supervisor.md#permission-policy
+    // Disabled authentication is absent from the disclosed write authority,
+    // even when a mechanism is selected and recorded by the provider.
+    profile.spec.confinement = profile.spec.confinement.clone().without_credentials();
+    assert!(
+        write_grants(&plan, &profile)
+            .iter()
+            .all(|g| g.source != WriteSource::CredentialWrite)
+    );
 
     plan.selected_authentication = None;
     assert!(

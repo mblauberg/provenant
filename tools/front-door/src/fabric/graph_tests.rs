@@ -2548,7 +2548,7 @@ mod result_tests {
         );
         let refusal_reason = status.checkpoint.nodes[0].advance_error.as_deref().unwrap();
         assert!(refusal_reason.contains("setup script failed: missing pnpm"));
-        assert!(!refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+        assert!(refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
         assert!(!refusal_reason.contains("receipt"));
         assert!(status.checkpoint.nodes[0].attempts.is_empty());
         assert!(human.contains("setup script failed: missing pnpm"));
@@ -2650,7 +2650,7 @@ mod result_tests {
         let mut reply = PeerResponse {
             extra: Default::default(),
             version: 1,
-            protocol: PROTOCOL,
+            protocol: provenant_fabric_runtime::hosts::OUTPUT_AUDIENCE_PROTOCOL,
             host: remote_host,
             project: locator.key,
             result: PeerResult::Output {
@@ -2688,6 +2688,7 @@ mod result_tests {
                 route_index: 0,
                 attempt: 1,
             }),
+            launch_actor: attempt_ref.map(|_| factory.context.identity.inbox.actor.to_string()),
             inline_findings: None,
             finding_prefix: None,
         };
@@ -2759,7 +2760,7 @@ mod result_tests {
                 provenant_config::PortTable::builtin().worktree_layout
             }
             fn actor(&self) -> String {
-                "fixture".into()
+                self.factory.context.identity.inbox.actor.to_string()
             }
             fn materialise_inputs(
                 &mut self,
@@ -2969,6 +2970,7 @@ mod result_tests {
                 label: "ci".into(),
                 attempt_ref: None,
                 attempt_key: None,
+                launch_actor: None,
                 inline_findings: Some(vec![finding]),
                 finding_prefix: None,
             }],
@@ -4040,7 +4042,7 @@ mod provisioned_writer_submission_tests {
                     &graph::patch::PatchContext {
                         library: &graph::template::TemplateLibrary::bundled(),
                         resolvers: &Default::default(),
-                        scan: &|_| Ok(()),
+
                         journal: None,
                         limits: &Default::default(),
 

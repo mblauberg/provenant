@@ -39,12 +39,14 @@ priorities) is in the [run spec](../specs/run.md) and
   cannot write rebase state, stop with `needs_host_rebase`; never create a clone
   or second checkout to bypass it. A host-authorised merge of `origin/main` is
   the alternative.
-- Linux has no enforcing backend and refuses lane launch rather than run
-  unconfined. Each macOS lane resolves a
+- Linux has no enforcing backend, so a selected enforcing profile fails rather
+  than silently running unconfined. Host-authorised trusted routes remain available.
+  Each lane resolves a
   [sandbox mode](configuration.md#lane-sandbox-mode); `status` shows
-  `sandboxed(<source>)` on sandboxed lanes. Sandboxed lanes cannot create hard
-  links or bind Unix sockets outside granted paths; `cargo nextest run --profile lane` excludes fixtures
-  needing them and CI's `ci` profile keeps them.
+  `sandboxed(<source>)` on sandboxed lanes. Credential, state, read-only source
+  and shared Git roots retain link and write protection; ordinary hard links
+  outside those roots are available. `cargo nextest run --profile lane`
+  excludes fixtures requiring host control and CI's `ci` profile keeps them.
 
 ## Delivery
 
@@ -62,7 +64,7 @@ refs intact. Failed and cancelled lanes keep their worktrees. Publishing from a
 writer is on by default and gives it your GitHub credential; set
 `lanes.publish=false` to withhold it so the chair publishes through host-side
 delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
-`projects/PROJECT_ID/github.json`; it guards against accident, not as a boundary.
+`projects/PROJECT_ID/github.json`; matching calls warn and continue.
 The provider receipt's `github_credential` names the identity, source and
 delivery each lane got. The `gh` shim warns at every `lanes.gh_budget` calls
 (default 100, 0 off) and settlement records the count; it never stops a call.

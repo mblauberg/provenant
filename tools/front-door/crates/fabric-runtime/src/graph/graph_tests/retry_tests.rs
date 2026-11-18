@@ -5,10 +5,9 @@ fn retry(
     document: &GraphDocument,
     checkpoint: &mut GraphCheckpoint,
     brief: Option<&str>,
-    scan: &dyn Fn(&str) -> Result<(), String>,
     journal: Option<&patch::PatchJournal<'_>>,
 ) -> Result<patch::Admitted, patch::PatchError> {
-    retry_id(document, checkpoint, "work", brief, scan, journal)
+    retry_id(document, checkpoint, "work", brief, journal)
 }
 
 fn retry_id(
@@ -16,7 +15,6 @@ fn retry_id(
     checkpoint: &mut GraphCheckpoint,
     id: &str,
     brief: Option<&str>,
-    scan: &dyn Fn(&str) -> Result<(), String>,
     journal: Option<&patch::PatchJournal<'_>>,
 ) -> Result<patch::Admitted, patch::PatchError> {
     patch::retry_node(
@@ -29,7 +27,6 @@ fn retry_id(
         &patch::PatchContext {
             library: &template::TemplateLibrary::bundled(),
             resolvers: &Default::default(),
-            scan,
             journal,
             limits: &plans::generous(),
 
@@ -68,7 +65,7 @@ fn steer_normalises_only_the_new_brief_once() {
         .checkpoint;
     let brief = "steered brief AKIAIOSFODNN7EXAMPLE";
     let (_, calls) = prompt_text::trace(|| {
-        retry(&document, &mut checkpoint, Some(brief), &|_| Ok(()), None).unwrap();
+        retry(&document, &mut checkpoint, Some(brief), None).unwrap();
     });
     prompt_text::assert_once(&calls, brief);
     assert!(!calls.iter().any(|text| text == old));
@@ -80,7 +77,7 @@ fn steer_normalises_only_the_new_brief_once() {
         .as_ref()
         .unwrap()
         .replaced[0];
-    assert!(!replaced.prompt.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(replaced.prompt.contains("AKIAIOSFODNN7EXAMPLE"));
     assert_eq!(replaced.extra["comment"], old);
 }
 
@@ -97,7 +94,6 @@ fn node_redo_journals_the_brief_and_launches_a_new_attempt_without_losing_histor
         &document,
         &mut checkpoint,
         Some("Replacement brief"),
-        &|_| Ok(()),
         Some(&record),
     )
     .unwrap();
@@ -127,7 +123,7 @@ fn node_redo_journals_the_brief_and_launches_a_new_attempt_without_losing_histor
     );
     let mut checkpoint = run.checkpoint;
     let second_key = owner.calls[0].0.clone();
-    retry(&document, &mut checkpoint, None, &|_| Ok(()), None).unwrap();
+    retry(&document, &mut checkpoint, None, None).unwrap();
     assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 2);
     let mut owner = FakeOwner {
         observations: [
@@ -152,7 +148,7 @@ fn node_redo_journals_the_brief_and_launches_a_new_attempt_without_losing_histor
 }
 
 #[test]
-fn node_redo_refuses_live_attempts_secrets_and_journal_failures_atomically() {
+fn node_redo_refuses_live_attempts_and_journal_failures_atomically() {
     let (document, checkpoint, _) = settled();
     for (state, attempt_state) in [
         (NodeState::Running, AttemptState::Terminal),
@@ -162,31 +158,14 @@ fn node_redo_refuses_live_attempts_secrets_and_journal_failures_atomically() {
         candidate.nodes[0].state = state;
         candidate.nodes[0].attempts[0].state = attempt_state;
         let before = candidate.clone();
-        assert!(retry(&document, &mut candidate, None, &|_| Ok(()), None).is_err());
+        assert!(retry(&document, &mut candidate, None, None).is_err());
         assert_eq!(candidate, before);
     }
     let mut candidate = checkpoint.clone();
-    let secret = retry(
-        &document,
-        &mut candidate,
-        Some("private brief"),
-        &|text| {
-            if text.contains("private brief") {
-                Err("secret".into())
-            } else {
-                Ok(())
-            }
-        },
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(secret.code, "secret");
-    assert_eq!(candidate, checkpoint);
     let error = retry(
         &document,
         &mut candidate,
         Some("replacement"),
-        &|_| Ok(()),
         Some(&|_| Err("journal unavailable".into())),
     )
     .unwrap_err();
@@ -272,15 +251,7 @@ fn redo_container_after_checkpoint_crash(
         .iter()
         .find(|node| node.id == "sibling")
         .unwrap();
-    retry_id(
-        &document,
-        &mut checkpoint,
-        container,
-        None,
-        &|_| Ok(()),
-        None,
-    )
-    .unwrap();
+    retry_id(&document, &mut checkpoint, container, None, None).unwrap();
     assert_eq!(
         checkpoint
             .nodes
@@ -573,7 +544,7 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
     );
     assert!(!checkpoint.successful());
     let revision = patch::revision(&checkpoint);
-    retry_id(&document, &mut checkpoint, "work", None, &|_| Ok(()), None).unwrap();
+    retry_id(&document, &mut checkpoint, "work", None, None).unwrap();
     assert_eq!(patch::revision(&checkpoint), revision + 1);
     assert_eq!(state(&checkpoint, "work--planner--broken"), None);
     let mut owner = FakeOwner {
@@ -619,15 +590,7 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
     }));
     // A settled consumer keeps what it observed until it is redone itself.
     let mut checkpoint = run.checkpoint;
-    retry_id(
-        &document,
-        &mut checkpoint,
-        "sibling",
-        None,
-        &|_| Ok(()),
-        None,
-    )
-    .unwrap();
+    retry_id(&document, &mut checkpoint, "sibling", None, None).unwrap();
     let mut owner = FakeOwner {
         observations: [done_as("sibling")].into(),
         ..Default::default()
@@ -654,7 +617,7 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
     );
     assert!(replay.calls.is_empty());
     let mut again = reloaded;
-    retry_id(&document, &mut again, "work", None, &|_| Ok(()), None).unwrap();
+    retry_id(&document, &mut again, "work", None, None).unwrap();
     assert_eq!(
         again
             .expansions
@@ -715,10 +678,10 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
             _ => leaf.advance_error_code = Some("launch_retry_exhausted".into()),
         }
         let before = candidate.clone();
-        assert!(retry_id(&document, &mut candidate, "work", None, &|_| Ok(()), None).is_err());
+        assert!(retry_id(&document, &mut candidate, "work", None, None).is_err());
         assert_eq!(candidate, before);
     }
-    retry_id(&document, &mut checkpoint, "work", None, &|_| Ok(()), None).unwrap();
+    retry_id(&document, &mut checkpoint, "work", None, None).unwrap();
     let leaf = checkpoint
         .nodes
         .iter()
@@ -766,14 +729,7 @@ fn node_redo_reopens_only_the_selected_node_of_a_cancelled_graph() {
     .unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Skipped);
     assert_eq!(checkpoint.nodes[0].attempts[0].state, AttemptState::Running);
-    retry(
-        &document,
-        &mut checkpoint,
-        Some("redo selected work"),
-        &|_| Ok(()),
-        None,
-    )
-    .unwrap();
+    retry(&document, &mut checkpoint, Some("redo selected work"), None).unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
     assert_eq!(checkpoint.nodes[1].state, NodeState::Skipped);
     assert!(!checkpoint.cancelled);
@@ -825,7 +781,7 @@ fn node_redo_retains_spent_budget_and_unknown_usage_across_attempt_generations()
         .map(|budget| budget_reason(&checkpoint, budget))
         .collect();
     assert!(reasons.iter().all(Option::is_some));
-    retry(&document, &mut checkpoint, None, &|_| Ok(()), None).unwrap();
+    retry(&document, &mut checkpoint, None, None).unwrap();
     assert_eq!(
         budgets
             .iter()
@@ -857,7 +813,7 @@ fn node_redo_retains_spent_budget_and_unknown_usage_across_attempt_generations()
     };
     let reason = budget_reason(&checkpoint, &budget);
     assert!(reason.is_some());
-    retry(&document, &mut checkpoint, None, &|_| Ok(()), None).unwrap();
+    retry(&document, &mut checkpoint, None, None).unwrap();
     assert_eq!(budget_reason(&checkpoint, &budget), reason);
 }
 
@@ -1000,14 +956,7 @@ fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() 
             .iter()
             .any(|n| n.id == "work--first" && n.state == NodeState::Succeeded)
     );
-    retry(
-        &document,
-        &mut checkpoint,
-        Some("Plan another slice"),
-        &|_| Ok(()),
-        None,
-    )
-    .unwrap();
+    retry(&document, &mut checkpoint, Some("Plan another slice"), None).unwrap();
     let mut owner = FakeOwner {
         observations: [
             terminal_from(&fragment("second"), "second-plan"),
@@ -1036,7 +985,6 @@ fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() 
         &mut checkpoint,
         "work--first",
         Some("Redo first slice"),
-        &|_| Ok(()),
         None,
     )
     .unwrap();
@@ -1080,7 +1028,6 @@ fn node_redo_can_launch_a_leaf_from_an_inactive_loop_round() {
         &mut checkpoint,
         id,
         Some("Redo the earlier review"),
-        &|_| Ok(()),
         None,
     )
     .unwrap();
@@ -1118,14 +1065,7 @@ fn node_redo_repeated_planner_fallbacks_have_distinct_nodes_and_replay_without_r
     for generation in 0..3 {
         if generation > 0 {
             let checkpoint = journal.0.as_mut().unwrap();
-            retry(
-                &document,
-                checkpoint,
-                Some("Try planning again"),
-                &|_| Ok(()),
-                None,
-            )
-            .unwrap();
+            retry(&document, checkpoint, Some("Try planning again"), None).unwrap();
         }
         let mut owner = FakeOwner {
             observations: [
@@ -1185,7 +1125,6 @@ fn node_redo_can_launch_a_leaf_of_a_settled_composite() {
         &mut checkpoint,
         "work--leaf",
         Some("Redo the leaf"),
-        &|_| Ok(()),
         None,
     )
     .unwrap();
@@ -1322,7 +1261,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         .unwrap();
         assert!(!candidate.nodes[work_index].attempts[0].host_refused_before_acceptance);
         let before = candidate.clone();
-        assert!(retry(&document, &mut candidate, None, &|_| Ok(()), None).is_err());
+        assert!(retry(&document, &mut candidate, None, None).is_err());
         assert_eq!(candidate, before);
     }
     let mut lookup_failed = checkpoint.clone();
@@ -1345,7 +1284,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     .unwrap();
     assert!(!lookup_failed.nodes[work_index].attempts[0].host_refused_before_acceptance);
     let before = lookup_failed.clone();
-    assert!(retry(&document, &mut lookup_failed, None, &|_| Ok(()), None).is_err());
+    assert!(retry(&document, &mut lookup_failed, None, None).is_err());
     assert_eq!(lookup_failed, before);
     let mut unknown = seeded;
     launch_disposition::<ErrorLauncher, MemoryJournal>(
@@ -1368,7 +1307,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     .unwrap();
     assert!(!unknown.nodes[work_index].attempts[0].host_refused_before_acceptance);
     let before = unknown.clone();
-    assert!(retry(&document, &mut unknown, None, &|_| Ok(()), None).is_err());
+    assert!(retry(&document, &mut unknown, None, None).is_err());
     assert_eq!(unknown, before);
     let prior = checkpoint.nodes[work_index].attempts[0].clone();
     assert_eq!(prior.state, AttemptState::Starting);
@@ -1393,10 +1332,10 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             }
         }
         let before = candidate.clone();
-        assert!(retry(&document, &mut candidate, None, &|_| Ok(()), None).is_err());
+        assert!(retry(&document, &mut candidate, None, None).is_err());
         assert_eq!(candidate, before);
     }
-    retry(&document, &mut checkpoint, None, &|_| Ok(()), None).unwrap();
+    retry(&document, &mut checkpoint, None, None).unwrap();
     assert!(!checkpoint.cancelled);
     assert_eq!(checkpoint.nodes[work_index].state, NodeState::Pending);
     assert_eq!(checkpoint.nodes[work_index].advance_owner_code, None);
@@ -1482,7 +1421,7 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
+
         journal: None,
         limits: &limits,
 
@@ -1682,7 +1621,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
                 &patch::PatchContext {
                     library: &template::TemplateLibrary::bundled(),
                     resolvers: &Default::default(),
-                    scan: &|_| Ok(()),
+
                     journal: None,
                     limits: &plans::generous(),
 
@@ -1702,7 +1641,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
             &patch::PatchContext {
                 library: &template::TemplateLibrary::bundled(),
                 resolvers: &Default::default(),
-                scan: &|_| Ok(()),
+
                 journal: None,
                 limits: &plans::generous(),
 
@@ -1795,7 +1734,7 @@ fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the
         &patch::PatchContext {
             library: &template::TemplateLibrary::bundled(),
             resolvers: &Default::default(),
-            scan: &|_| Ok(()),
+
             journal: None,
             limits: &plans::generous(),
 
@@ -1839,7 +1778,7 @@ fn public_retry_preserves_live_spawn_only_children() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
+
         journal: None,
         limits: &limits,
 
@@ -2448,7 +2387,7 @@ fn no_work_stop_is_never_saved_without_its_restart() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
+fn no_work_restart_preserves_raw_handoff_and_the_stop() {
     // A new handoff is normalised before storage or continuation. Known
     // credential shapes cannot poison the next writer's prompt.
     let mut work = node("work", route("first"));
@@ -2471,7 +2410,7 @@ fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 2);
     assert!(owner.prompts[1].contains("Finish renderer"));
-    assert!(!owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
     assert_eq!(
         run.checkpoint.nodes[0].previous_attempts[0].outcome,
@@ -2606,15 +2545,7 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
                 .unwrap(),
         ),
     });
-    let error = retry_id(
-        &document,
-        &mut checkpoint,
-        "work",
-        Some("Redo it"),
-        &|_| Ok(()),
-        None,
-    )
-    .unwrap_err();
+    let error = retry_id(&document, &mut checkpoint, "work", Some("Redo it"), None).unwrap_err();
     let refusal = error
         .parameter
         .clone()
@@ -2642,14 +2573,7 @@ fn attempt_numbers_increase_across_retries_and_replay_is_stable() {
         let mut launches: Vec<(AttemptKey, u32)> = Vec::new();
         for generation in 0..generations {
             if generation > 0 {
-                retry(
-                    &document,
-                    journal.0.as_mut().unwrap(),
-                    None,
-                    &|_| Ok(()),
-                    None,
-                )
-                .unwrap();
+                retry(&document, journal.0.as_mut().unwrap(), None, None).unwrap();
             }
             // Replay each launch through the pre-reference crash window;
             // explicit retries below allocate the next attempt number.

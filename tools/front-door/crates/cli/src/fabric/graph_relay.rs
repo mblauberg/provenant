@@ -10,7 +10,7 @@ use super::Context;
 use provenant_core::{CancelToken, Clock, Pause, WaitBudget};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
-    patch::{LiveGraph, PatchContext, scan_for_secrets},
+    patch::{LiveGraph, PatchContext},
     relay::{self, RelayOp},
     template::{Layer, TemplateLibrary},
 };
@@ -39,7 +39,6 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         "invalid_template" => Some(Cause::InvalidTemplate),
         "invalid_config" => Some(Cause::InvalidConfig),
         "invalid_review" => Some(Cause::InvalidReview),
-        "secret" => Some(Cause::Secret),
         "cycle" => Some(Cause::Cycle),
         "conflict" => Some(Cause::Conflict),
         "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),
@@ -594,7 +593,7 @@ fn serve_authorized(
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,
-                scan: &scan_for_secrets,
+
                 limits: &context.config.graph.limits,
                 worktree_layout: context.port_table.worktree_layout.clone(),
             };
@@ -816,7 +815,7 @@ fn serve_authorized(
                     journal: None,
                     library: &library,
                     resolvers: &resolvers,
-                    scan: &scan_for_secrets,
+
                     limits: &context.config.graph.limits,
                     worktree_layout: context.port_table.worktree_layout.clone(),
                 },
@@ -4140,7 +4139,7 @@ mod panel_tests {
                     library: &library,
                     resolvers: &resolvers,
                     limits: &limits,
-                    scan: &scan_for_secrets,
+
                     journal: None,
                     worktree_layout: worktree_layout.clone(),
                 },
@@ -4347,7 +4346,7 @@ mod panel_tests {
                 library: &library,
                 resolvers: &crucial,
                 limits: &limits,
-                scan: &|_| Ok(()),
+
                 journal: None,
 
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

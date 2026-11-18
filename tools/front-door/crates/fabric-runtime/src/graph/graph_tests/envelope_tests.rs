@@ -330,6 +330,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 subtree_cancel: None,
                 yielded_slot: false,
                 stop_fence: false,
+                fallback_evidence_retry: None,
                 owner_notified: false,
                 retry: Some(RetryAllowance { retries: u8::MAX, origin: "shipped_default".into() }),
                 quota_redraw_spent: 0,
