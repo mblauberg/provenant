@@ -159,7 +159,7 @@ impl RunStore {
 /// Redact decoded handoff values before a graph consumes local or peer output.
 pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
-        let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+        let safe = provenant_redact::known_shapes(text.as_bytes())
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
@@ -277,7 +277,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
         Err(error) => {
             let mut value = serde_json::json!(error);
             let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+                let safe = provenant_redact::known_shapes(text.as_bytes())
                     .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
                 String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
             });
@@ -773,7 +773,7 @@ mod tests {
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
         handoff.note = note;
         let redact = |text: &str| {
-            let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+            let safe = provenant_redact::known_shapes(text.as_bytes())
                 .map_err(|_| RunError::Validation("redaction"))?;
             String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
         };

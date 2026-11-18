@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use support::{Result, TestRig, code, git, json};
 
 // Install inspection intentionally refuses a device crossing from its anchor.

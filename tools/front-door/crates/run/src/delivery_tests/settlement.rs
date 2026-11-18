@@ -507,10 +507,7 @@ fn delivery_diagnostics_redact_url_userinfo() {
         ("u:a@b@h:repo", "[REDACTED]@h:repo"),
         ("https://truncated-secret/path", "https://[REDACTED]/path"),
     ] {
-        assert_eq!(
-            provenant_confinement::redact::delivery_diagnostics(input),
-            expected
-        );
+        assert_eq!(provenant_redact::delivery_diagnostics(input), expected);
         let error =
             super::delivery::prepare_error(DeliveryPrepareStep::RemoteUrl, input).to_string();
         assert!(error.ends_with(expected), "{error}");

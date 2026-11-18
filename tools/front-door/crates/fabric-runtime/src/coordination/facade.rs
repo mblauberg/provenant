@@ -644,7 +644,7 @@ fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
             disk.reclaimed,
             disk.floor
         ),
-        None => provenant_confinement::redact::bounded_line(reason, 4096),
+        None => provenant_redact::bounded_line(reason, 4096),
     }
 }
 
@@ -684,7 +684,7 @@ fn dispatch_refused_wire<S: serde::Serializer>(
     let mut wire = serializer.serialize_struct("DispatchRefused", 3)?;
     wire.serialize_field(
         "reason",
-        &provenant_confinement::redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
+        &provenant_redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
     )?;
     if let Some(disk) = disk {
         wire.serialize_field("disk", disk)?;
@@ -951,7 +951,7 @@ impl FacadeError {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
-                let reason = safe_graph_plan_reason(&provenant_confinement::redact::bounded_line(reason, 4096));
+                let reason = safe_graph_plan_reason(&provenant_redact::bounded_line(reason, 4096));
                 let next = if reason.contains("writer worktree") {
                     "provide --worktree PATH, or --branch B --base REF"
                 } else {
@@ -984,7 +984,7 @@ impl FacadeError {
             }
             Self::DispatchRefused { reason, .. } => {
                 projected = projected
-                    .detail(provenant_confinement::redact::bounded_line(reason, 4096))
+                    .detail(provenant_redact::bounded_line(reason, 4096))
                     .next("resolve the reported launch refusal, then retry");
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),

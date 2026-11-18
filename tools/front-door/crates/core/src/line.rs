@@ -5,7 +5,7 @@
 /// overrides) collapse to one space. Longer text is cut to `max_chars - 1`
 /// characters and ends with `…`, so the result never exceeds `max_chars`.
 ///
-/// This does not redact. Use `provenant_confinement::redact::bounded_line`
+/// This does not redact. Use `provenant_redact::bounded_line`
 /// for text that came from a lane or a server.
 pub fn bounded_line(text: &str, max_chars: usize) -> String {
     let spaced: String = text

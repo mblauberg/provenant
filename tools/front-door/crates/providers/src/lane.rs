@@ -2257,9 +2257,9 @@ mod tests {
     #[test]
     fn writer_publishing_redacts_credentials() -> Result<(), Box<dyn std::error::Error>> {
         use crate::{Access, Adapter, Prompt, codex::Codex};
-        use provenant_confinement::redact::Redactor;
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use provenant_redact::Redactor;
         use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
         let temp = tempfile::tempdir()?;

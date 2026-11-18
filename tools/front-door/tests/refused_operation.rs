@@ -1,6 +1,6 @@
 //! A dirty writer is refused before admission but remains observable by its operation.
 #![allow(clippy::disallowed_methods)]
-mod support;
+use crate::support;
 use provenant_core::{CancelToken, RootInputs};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, OperationState, Request, RunStore};

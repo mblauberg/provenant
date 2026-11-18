@@ -2026,7 +2026,7 @@ impl RunStore {
                 if let Err(error) =
                     crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new(child), true)
                 {
-                    staging_failure = Some(provenant_confinement::redact::bounded_line(
+                    staging_failure = Some(provenant_redact::bounded_line(
                         &format!("launch staging failed: {error}"),
                         240,
                     ));
@@ -2128,7 +2128,7 @@ impl RunStore {
                         && let Err(error) =
                             self.record_skipped_routes(id, &refusal.skipped_routes, call)
                     {
-                        let reason = provenant_confinement::redact::bounded_line(
+                        let reason = provenant_redact::bounded_line(
                             &format!("launch preparation failed: {error}"),
                             240,
                         );
@@ -2162,10 +2162,7 @@ impl RunStore {
                                 ))
                             }
                             // The refusal's own message, redacted and bounded.
-                            None => Some(provenant_confinement::redact::bounded_line(
-                                &refusal.message,
-                                240,
-                            )),
+                            None => Some(provenant_redact::bounded_line(&refusal.message, 240)),
                         },
                     };
                     let terminal_note = if continuation_reason.is_some() {
@@ -2222,7 +2219,7 @@ impl RunStore {
                     });
                     continue;
                 }
-                let reason = provenant_confinement::redact::bounded_line(
+                let reason = provenant_redact::bounded_line(
                     &format!("launch preparation failed: {error}"),
                     240,
                 );
@@ -2294,7 +2291,7 @@ impl RunStore {
             if !plan.skipped_routes.is_empty()
                 && let Err(error) = self.record_skipped_routes(id, &plan.skipped_routes, call)
             {
-                let reason = provenant_confinement::redact::bounded_line(
+                let reason = provenant_redact::bounded_line(
                     &format!("launch preparation failed: {error}"),
                     240,
                 );
@@ -2335,7 +2332,7 @@ impl RunStore {
                     continue;
                 }
                 Err(error) => {
-                    let reason = provenant_confinement::redact::bounded_line(
+                    let reason = provenant_redact::bounded_line(
                         &format!("launch preparation failed: {error}"),
                         240,
                     );

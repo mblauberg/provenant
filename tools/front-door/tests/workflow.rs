@@ -1,5 +1,5 @@
 //! Workflow leaves through the isolated binary: receipts, review coverage, sessions.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use support::git;

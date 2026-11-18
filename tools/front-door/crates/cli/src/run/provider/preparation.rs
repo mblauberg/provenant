@@ -424,7 +424,7 @@ pub(super) fn dependency_preparation_event(
     match result {
         Ok(event) => Some(event),
         Err(error) => {
-            let warning = provenant_confinement::redact::bounded_line(
+            let warning = provenant_redact::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
@@ -584,7 +584,7 @@ fn prepare_writer_dependencies_with_policy(
 ) -> Result<serde_json::Value, String> {
     let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
     if let Err(error) = &result {
-        let detail = provenant_confinement::redact::bounded_line(
+        let detail = provenant_redact::bounded_line(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
