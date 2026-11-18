@@ -154,7 +154,9 @@ pub(super) fn inspect(
             }
             WorkingFile::Missing => {
                 let Some((rule, message)) = required_file(&path) else {
-                    return Err(CheckError::Evidence("tracked working file is missing"));
+                    return Err(CheckError::EvidencePath(format!(
+                        "tracked working file is missing: {path}"
+                    )));
                 };
                 scan.note(format!("release:working-missing:{path}"), b"missing");
                 scan.finding(rule, Path::new(&path), 1, message)?;
@@ -834,6 +836,17 @@ mod tests {
                 .any(|finding| finding.0 == "release.github-token")
         );
     }
+    #[test]
+    fn missing_working_file_error_names_the_path() {
+        let error = CheckError::EvidencePath(format!(
+            "tracked working file is missing: {}",
+            Path::new("docs/guide.md").display()
+        ));
+        let message = error.to_string();
+        assert!(message.contains("docs/guide.md"), "{message}");
+        assert!(message.contains("tracked working file is missing"), "{message}");
+    }
+
     #[test]
     fn tree_and_index_parsers_preserve_tabs_and_newlines_in_names() {
         let input = format!("100644 blob {} 2\tname\twith\nspaces\0", "a".repeat(40));
