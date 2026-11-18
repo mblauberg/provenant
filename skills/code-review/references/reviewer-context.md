@@ -36,8 +36,8 @@ tooling inside the host boundary cooperates: a peer tool that forges the
 host's own state or ignores its locks is not a trigger.
 
 Should-fix is a concrete cost on a default path that does not meet that test,
-such as a broken repository convention. Everything else is a note, three at
-most: a finding with no trigger, and anything off the default path that
+such as a broken repository convention. Everything else is a note, if worth
+acting on: a finding with no trigger, and anything off the default path that
 neither breaches a boundary nor loses data. Use `blocking`, `should-fix` or
 `note` as the finding's `severity`. Notes are reported, not repaired.
 

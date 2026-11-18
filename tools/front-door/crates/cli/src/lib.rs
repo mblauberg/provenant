@@ -32,6 +32,7 @@ pub mod install;
 pub mod limits;
 mod metadata;
 pub mod mileage;
+pub mod notes;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
@@ -1195,6 +1196,16 @@ fn constraints(path: &str) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    #[test]
+    fn run_accepts_pinned_review_pr() {
+        let invocation = valid(&["run", "review.security", "--pr", "3465"]);
+        let Command::Run(request) = invocation.command else {
+            panic!("expected run");
+        };
+        assert_eq!(request.pr, Some(3465));
+        invalid(&["run", "review", "--pr", "0"]);
+    }
+
     #[test]
     fn run_accepts_writer_branch_base_and_named_route() {
         let invocation = valid(&[
@@ -2994,6 +3005,21 @@ mod tests {
         }
         assert!(catalog.error_codes.iter().all(|c| !c.summary.is_empty()));
     }
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn events_accepts_a_named_consumer_and_rejects_an_ambiguous_start() {
+        assert!(matches!(
+            parsed(&["events", "--follow", "--json", "--consumer", "chair"]),
+            ParseOutcome::Invocation(_)
+        ));
+        invalid(&["events", "--consumer", "chair", "--from", "1"]);
+        assert!(matches!(
+            parsed(&["events", "--from", "0"]),
+            ParseOutcome::Invocation(_)
+        ));
+        invalid(&["events", "--from", "-1"]);
+    }
+
     #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [

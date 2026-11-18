@@ -1154,14 +1154,30 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
             };
             if let Some(store) = provenant_run::RunStore::open_disk_read_only(&execution, &call)? {
                 let store = store.with_writer_registry(resolved.roots.state.as_path());
-                match &census {
-                    Some(census) => {
-                        store.reap_with_census(&call, census)?;
-                    }
-                    None => {
-                        store.reap_without_census(&call)?;
-                    }
-                }
+                reap_before_index(
+                    || -> Result<(), Box<dyn std::error::Error>> {
+                        match &census {
+                            Some(census) => {
+                                store.reap_with_census(&call, census)?;
+                            }
+                            None => {
+                                store.reap_without_census(&call)?;
+                            }
+                        }
+                        Ok(())
+                    },
+                    || {
+                        provenant_run::RunStore::open(&execution, &call)?
+                            .requeue_unindexed_observations(&call)?;
+                        crate::event_delivery::ingest_lifecycle(
+                            &resolved.roots,
+                            binding.project_id(),
+                            context.identity.host,
+                            &store,
+                        )?;
+                        Ok(())
+                    },
+                )?;
             }
             Ok(())
         })();
@@ -1174,6 +1190,15 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
     } else {
         Err(errors.join("; "))
     }
+}
+
+// Indexing is retryable and must never prevent orphan recovery.
+fn reap_before_index<E>(
+    reap: impl FnOnce() -> Result<(), E>,
+    index: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    reap()?;
+    index()
 }
 
 fn tick(
@@ -1267,6 +1292,11 @@ fn tick(
         target_seed,
         steward::run(&config.domains.steward, &resolved, workers),
         settlement,
+        Task::run("forge_events", || {
+            crate::event_delivery::tick(&resolved)
+                .map(|()| "observed")
+                .map_err(|error| error.to_string())
+        }),
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
     ];
@@ -1336,6 +1366,20 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
 mod tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn reaping_proceeds_when_indexing_fails() {
+        let reaped = std::cell::Cell::new(false);
+        let result = reap_before_index(
+            || {
+                reaped.set(true);
+                Ok(())
+            },
+            || Err("index unavailable"),
+        );
+        assert!(result.is_err());
+        assert!(reaped.get());
+    }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     /// Spec: docs/specs/run-git.md#project-layout-ownership

@@ -76,8 +76,8 @@ pub use install::{
 mod command_result;
 pub mod wire;
 pub use command_result::{
-    CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode,
-    HelpGroup, Outcome,
+    COMMAND_RESULT_MAX_BYTES, CommandError, CommandResult, HelpArgument, HelpCatalogue,
+    HelpCommand, HelpErrorCode, HelpGroup, Outcome,
 };
 
 mod resolved_route;
@@ -88,6 +88,7 @@ pub use resolved_route::{
     RouteSelectionReceipt, RouteSelectionRedraw, SkippedAccount, TooManyAlternatives,
 };
 
+pub mod lane_contract;
 pub mod result_capture;
 pub mod run;
 

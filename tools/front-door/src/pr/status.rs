@@ -44,24 +44,45 @@ struct Check {
     name: String,
     bucket: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Line {
     number: u64,
     state: String,
-    head: String,
+    pub(crate) head: String,
+    #[serde(default, deserialize_with = "display_default")]
     draft: bool,
+    #[serde(default, deserialize_with = "display_default")]
     checks_passed: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_total: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_failed: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_pending: Option<usize>,
     /// Failed or cancelled check names, when checks were readable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "display_default")]
     failing_checks: Vec<String>,
+    #[serde(default, deserialize_with = "display_default")]
     merge: String,
+    #[serde(default, deserialize_with = "display_default")]
     review: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "display_default"
+    )]
     error: Option<String>,
 }
+fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 impl Line {
     /// The state an operator acts on, most urgent first.
     pub(crate) fn class(&self) -> &'static str {
@@ -565,8 +586,20 @@ pub(crate) fn wait_line_observed(
     request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
 ) -> Result<Line> {
-    use super::observer::{ObserveError, Observer};
+    use super::observer::Observer;
     let mut observer = Observer::open(state, project, repository, request)?;
+    Ok(poll_line(&mut observer, number, None, request, max_age)?.0)
+}
+
+/// One shared conditional host read of PR metadata and checks. Waiters use this
+/// only to reconcile; the tick indexes the same projection for replay.
+pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
+    observer: &mut super::observer::Observer<F, C>,
+    number: u64,
+    head_override: Option<&str>,
+    request: &provenant_config::ports::Request,
+    max_age: std::time::Duration,
+) -> Result<(Line, Vec<super::observer::Check>)> {
     let value = observer.resource(
         &format!("pulls/{number}"),
         std::time::Duration::ZERO,
@@ -588,12 +621,9 @@ pub(crate) fn wait_line_observed(
         draft: pull.draft,
         url: pull.html_url,
     };
-    let checks = match observer.checks(&view.head, max_age, request) {
-        Ok(checks) => Some(checks),
-        Err(ObserveError::Unavailable(_)) => None,
-        Err(error) => return Err(error.to_string().into()),
-    };
-    Ok(status_line(number, view, checks.as_deref()))
+    let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
+    let line = status_line(number, view, Some(&checks));
+    Ok((line, checks))
 }
 
 /// `max_age` is how old an observed CI answer may be: a waiter's poll, or

@@ -96,6 +96,8 @@ impl ChildRequest {
 pub enum RelayOp {
     /// Read the calling graph through the host service; never open lane journals.
     Read { input: Value },
+    /// Resolve and compile a review launch on the host before child admission.
+    Run { request_id: String, input: Value },
     /// Add a child of the calling node.
     Add(ChildRequest),
     /// Apply a revisioned patch to the calling lane's graph.
@@ -134,7 +136,32 @@ pub struct StoredChildReceipt {
     #[serde(flatten)]
     pub header: provenant_records::RecordHeader,
     pub request_digest: String,
+    /// Bounded identity of the raw host-prepared request behind this receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_request: Option<RunRequestIdentity>,
     pub receipt: ChildReceipt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRequestIdentity {
+    pub id: String,
+    pub digest: String,
+}
+
+impl RunRequestIdentity {
+    /// Caller observation controls do not change a child launch's identity.
+    pub fn for_input(input: &Value) -> Result<Self, provenant_records::CanonicalError> {
+        let mut launch = input.clone();
+        if let Some(fields) = launch.as_object_mut() {
+            fields.remove("explain");
+            fields.remove("wait_seconds");
+        }
+        let digest = provenant_records::CanonicalV1::record_digest("relay-run", 1, &launch)?;
+        Ok(Self {
+            id: provenant_core::hex(&digest.as_bytes()[..16]),
+            digest: digest.to_string(),
+        })
+    }
 }
 
 fn persist_child_receipt(
@@ -145,6 +172,7 @@ fn persist_child_receipt(
     let stored = StoredChildReceipt {
         header: provenant_records::RecordHeader::V1,
         request_digest: request_digest.to_owned(),
+        run_request: None,
         receipt: receipt.clone(),
     };
     record.child_receipt = Some(stored);

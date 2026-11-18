@@ -2,7 +2,7 @@
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Pr, domains::MergeMethod};
 use provenant_confinement::worktrees::WorkerObserver;
-use provenant_core::GitOid;
+use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
@@ -414,6 +414,8 @@ type Observed = std::result::Result<Vec<observer::Check>, observer::ObserveError
 /// every check passed or was skipped and that at least one passed. A head
 /// with no check yet, or only skipped ones, waits `UNREPORTED_WAIT` for one
 /// that runs.
+#[cfg(test)] // Retained as the pre-journal polling baseline.
+#[allow(dead_code)] // The custom worktree driver compiles without a test harness.
 fn watch_with(
     read: &mut dyn FnMut() -> Observed,
     sleep: &dyn Fn(Duration),
@@ -460,6 +462,106 @@ fn watch_with(
         return Ok(());
     }
 }
+fn watch_timeout(number: &str, head: &str, checks: &[String]) -> Box<dyn std::error::Error> {
+    let states: std::collections::BTreeSet<_> = checks.iter().map(String::as_str).collect();
+    wait::failure(
+        "CI_TIMEOUT",
+        format!(
+            "watch timed out for #{number}; last known head={head} check_states={states:?}; subscription retained; next: provenant pr watch {number}"
+        ),
+    )
+}
+fn indexed_watch(
+    read: &mut dyn FnMut() -> Observed,
+    next_event: &mut dyn FnMut(Duration) -> Result<Option<serde_json::Value>>,
+    request: &provenant_config::ports::Request,
+    expected_head: &str,
+    number: &str,
+) -> Result<()> {
+    fn buckets(checks: Vec<observer::Check>) -> Vec<String> {
+        checks.into_iter().map(|check| check.bucket).collect()
+    }
+    fn evaluate(checks: &[String], unreported: Duration, number: &str) -> Result<bool> {
+        if checks.iter().all(|check| check == "skipping") {
+            if unreported >= UNREPORTED_WAIT && !checks.is_empty() {
+                return Err("CI checks have not passed".into());
+            }
+            if unreported >= UNREPORTED_WAIT {
+                return Err(wait::failure(
+                    "CI_NOT_SCHEDULED",
+                    format!(
+                        "no checks were reported for #{number} within {}s; next: check the workflow triggers or push an empty commit to start CI",
+                        UNREPORTED_WAIT.as_secs()
+                    ),
+                ));
+            }
+            return Ok(false);
+        }
+        if checks.iter().any(|check| check == "pending") {
+            return Ok(false);
+        }
+        if !checks.iter().any(|check| check == "pass")
+            || checks
+                .iter()
+                .any(|check| !matches!(check.as_str(), "pass" | "skipping"))
+        {
+            return Err("CI checks have not passed".into());
+        }
+        Ok(true)
+    }
+
+    let mut checks = buckets(
+        read().map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?,
+    );
+    let mut unreported = Duration::ZERO;
+    loop {
+        if evaluate(&checks, unreported, number)? {
+            return Ok(());
+        }
+        let remaining = request.remaining();
+        if remaining.is_zero() {
+            return Err(watch_timeout(number, expected_head, &checks));
+        }
+        let maximum = remaining.min(Duration::from_secs(60));
+        let detail = next_event(maximum)?;
+        let waited = remaining.saturating_sub(request.remaining()).min(maximum);
+        if checks.iter().all(|check| check == "skipping") {
+            unreported = unreported.saturating_add(waited);
+        }
+        match detail {
+            Some(detail) if detail["heartbeat"] == true => continue,
+            Some(detail)
+                if detail["head"].as_str() == Some(expected_head)
+                    && detail["checks"].is_array() =>
+            {
+                let rows = detail["checks"]
+                    .as_array()
+                    .ok_or_else(|| "PR journal event has no checks array".to_owned())?;
+                checks = rows
+                    .iter()
+                    .map(|row| {
+                        row["bucket"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "PR journal check has no bucket".into())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+            }
+            Some(_) | None => {
+                if request.remaining().is_zero() {
+                    return Err(watch_timeout(number, expected_head, &checks));
+                }
+                checks = buckets(read().map_err(|error| match error {
+                    observer::ObserveError::Expired => {
+                        watch_timeout(number, expected_head, &checks)
+                    }
+                    error => wait::ci_failure(error, &format!("provenant pr watch {number}")),
+                })?);
+            }
+        }
+    }
+}
+
 // The `pr watch` edge owns its real clock and sleep.
 #[allow(clippy::disallowed_methods)]
 fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &str) -> Result<()> {
@@ -469,16 +571,26 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
     let mut ci = observer::Observer::open(state, project, repository, &request)
         .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
     let commit = head.to_string();
-    let max_age = ci.fast_interval();
-    let next_poll = std::cell::Cell::new(max_age);
-    watch_with(
-        &mut || {
-            let result = ci.checks(&commit, max_age, &request);
-            next_poll.set(ci.next_poll_interval());
-            result
+    let number_value = number.parse::<u64>()?;
+    let mut journal = crate::event_delivery::Journal::open(state, project)?;
+    journal.register_pr(repository, number_value, Some(&commit))?;
+    let cancel = CancelToken::new();
+    indexed_watch(
+        &mut || ci.checks(&commit, Duration::ZERO, &request),
+        &mut |maximum| {
+            let event = journal.next_pr(repository, number_value, maximum, &cancel)?;
+            if event.is_none()
+                && journal
+                    .source_current(repository, number_value, Some(&commit))
+                    .unwrap_or(false)
+            {
+                Ok(Some(serde_json::json!({"heartbeat":true})))
+            } else {
+                Ok(event)
+            }
         },
-        &std::thread::sleep,
-        &|| next_poll.get(),
+        &request,
+        &commit,
         number,
     )?;
     let pull = ci
@@ -684,15 +796,28 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
                 globals,
             );
         };
-        let status = if result.is_ok() { "pass" } else { "fail" };
+        let timeout = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<wait::Failure>())
+            .is_some_and(|error| matches!(error.code, "CI_TIMEOUT" | "CI_NOT_SCHEDULED"));
+        let status = if result.is_ok() {
+            "pass"
+        } else if timeout {
+            "timeout"
+        } else {
+            "fail"
+        };
         if let Err(error) = result {
-            failures.push(format!("fail #{number} {head}: {error}"));
+            failures.push(format!("{status} #{number} {head}: {error}"));
         }
         human.push_str(&format!("{status} #{number} {head}\n"));
         pulls.push(serde_json::json!({"number": number, "head": head, "result": status}));
     }
     let outcome = if failures.is_empty() {
         Outcome::Ok
+    } else if pulls.iter().all(|pull| pull["result"] != "fail") {
+        Outcome::Timeout
     } else {
         Outcome::Error
     };
@@ -806,13 +931,15 @@ mod branch_pull_tests {
 #[cfg(test)]
 #[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod unreported_checks_tests {
+    const HEAD: &str = "watched-head";
+    const OTHER: &str = "another-head";
     use super::observer::{Check, ObserveError};
     use super::*;
     use std::cell::Cell;
 
     fn check(bucket: &str) -> Check {
         Check {
-            head: "head".into(),
+            head: HEAD.into(),
             name: format!("ci-{bucket}"),
             bucket: bucket.into(),
             app: None,
@@ -822,6 +949,162 @@ mod unreported_checks_tests {
             url: None,
             excerpt: String::new(),
         }
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_timeout_reports_the_last_snapshot_and_keeps_the_subscription() {
+        let request = provenant_config::ports::Request::within(Duration::ZERO);
+        let events = Cell::new(0);
+        let error = indexed_watch(
+            &mut || Ok(vec![check("pending")]),
+            &mut |_| {
+                events.set(events.get() + 1);
+                Ok(None)
+            },
+            &request,
+            HEAD,
+            "7",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<wait::Failure>().unwrap().code,
+            "CI_TIMEOUT"
+        );
+        assert!(error.to_string().contains(HEAD));
+        assert!(error.to_string().contains("pending"));
+        assert!(error.to_string().contains("subscription retained"));
+        assert_eq!(events.get(), 0);
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_advances_from_pending_to_pass_without_another_check_read() {
+        use serde_json::json;
+
+        let reads = Cell::new(0);
+        let events = Cell::new(0);
+        let request = provenant_config::ports::Request::within(Duration::from_secs(30));
+        let mut read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![check("pending")])
+        };
+        let mut next = |maximum| {
+            assert!(maximum > Duration::ZERO && maximum <= Duration::from_secs(30));
+            events.set(events.get() + 1);
+            Ok(Some(if events.get() == 1 {
+                json!({"heartbeat":true})
+            } else {
+                json!({"head":HEAD,"checks":[{"bucket":"pass"}]})
+            }))
+        };
+        indexed_watch(&mut read, &mut next, &request, HEAD, "7")
+            .expect("the journal reports the passing checks");
+        // One complete Observer::checks invocation happens for the initial
+        // reconcile; journal delivery causes no further Forge reads.
+        assert_eq!(reads.get(), 1);
+        assert_eq!(events.get(), 2);
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_reconciles_after_a_quiet_journal_window() {
+        let reads = Cell::new(0);
+        let events = Cell::new(0);
+        let request = provenant_config::ports::Request::within(Duration::from_secs(30));
+        let mut read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![check(if reads.get() == 1 {
+                "pending"
+            } else {
+                "pass"
+            })])
+        };
+        let mut next = |maximum| {
+            assert!(maximum > Duration::ZERO && maximum <= Duration::from_secs(30));
+            events.set(events.get() + 1);
+            Ok(None)
+        };
+        indexed_watch(&mut read, &mut next, &request, HEAD, "7")
+            .expect("the quiet-window reconcile observes the settled checks");
+        assert_eq!(events.get(), 1);
+        assert_eq!(reads.get(), 2, "one initial read and one gap reconcile");
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_reconciles_a_head_mismatch_before_accepting_a_result() {
+        use serde_json::json;
+
+        let reads = Cell::new(0);
+        let events = Cell::new(0);
+        let request = provenant_config::ports::Request::within(Duration::from_secs(30));
+        let mut read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![check("pending")])
+        };
+        let mut next = |maximum| {
+            assert!(maximum > Duration::ZERO && maximum <= Duration::from_secs(30));
+            events.set(events.get() + 1);
+            Ok(Some(if events.get() == 1 {
+                json!({"head":OTHER,"checks":[{"bucket":"pass"}]})
+            } else {
+                json!({"head":HEAD,"checks":[{"bucket":"pass"}]})
+            }))
+        };
+        indexed_watch(&mut read, &mut next, &request, HEAD, "7")
+            .expect("only the watched head can settle the wait");
+        assert_eq!(events.get(), 2);
+        assert_eq!(reads.get(), 2, "the moved head triggered one reconcile");
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_reconciles_webhook_markers_even_when_the_head_matches() {
+        use serde_json::json;
+
+        let reads = Cell::new(0);
+        let events = Cell::new(0);
+        let request = provenant_config::ports::Request::within(Duration::from_secs(30));
+        let mut read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![check(if reads.get() == 1 {
+                "pending"
+            } else {
+                "pass"
+            })])
+        };
+        let mut next = |_| {
+            events.set(events.get() + 1);
+            Ok(Some(json!({
+                "repository":"owner/repo",
+                "number":7,
+                "head":HEAD,
+                "source":"webhook"
+            })))
+        };
+        indexed_watch(&mut read, &mut next, &request, HEAD, "7")
+            .expect("identifier marker triggers an authoritative check read");
+        assert_eq!(events.get(), 1);
+        assert_eq!(reads.get(), 2, "the webhook marker triggered one reconcile");
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_stops_on_a_failed_event_without_reconciling() {
+        use serde_json::json;
+
+        let reads = Cell::new(0);
+        let request = provenant_config::ports::Request::within(Duration::from_secs(30));
+        let mut read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![check("pending")])
+        };
+        let mut next = |_| Ok(Some(json!({"head":HEAD,"checks":[{"bucket":"fail"}]})));
+        let error = indexed_watch(&mut read, &mut next, &request, HEAD, "7")
+            .expect_err("a failed check event is terminal");
+        assert!(error.to_string().contains("CI checks have not passed"));
+        assert_eq!(reads.get(), 1, "failure came from the journal event");
     }
 
     #[test]

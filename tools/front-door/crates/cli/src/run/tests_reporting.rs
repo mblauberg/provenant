@@ -194,13 +194,27 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
                     Path::new("/unused"),
                 )
                 .unwrap();
-            assert_eq!(decoded.outcome, run::Outcome::Failed);
-            let expected = if result == "{" && suffix.is_empty() {
-                "provider protocol frame ended before the record was complete"
+            assert!(!decoded.complete);
+            assert!(decoded.result.is_empty(), "never publish an earlier answer");
+            let diagnostic = decoded.reason.unwrap();
+            if result == "{" {
+                // Lost framing is missing evidence, never a provider failure.
+                assert_eq!(decoded.outcome, run::Outcome::Unsettled);
+                let expected = if suffix.is_empty() {
+                    "provider protocol frame ended before the record was complete"
+                } else {
+                    reason.as_str()
+                };
+                assert!(
+                    diagnostic.contains("evidence defect at stdout.log line 2"),
+                    "{diagnostic}"
+                );
+                assert!(diagnostic.contains(expected), "{diagnostic}");
             } else {
-                reason.as_str()
-            };
-            assert_eq!(decoded.reason.as_deref(), Some(expected));
+                // A complete failure frame settles Failed with the provider's message.
+                assert_eq!(decoded.outcome, run::Outcome::Failed);
+                assert_eq!(diagnostic, reason);
+            }
         }
     }
 }

@@ -64,6 +64,9 @@ pub enum Command {
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests
     Inbox(Box<crate::inbox::Inbox>),
+    /// Share append-only observations with project lanes
+    #[command(subcommand)]
+    Notes(crate::notes::Notes),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
@@ -106,6 +109,18 @@ pub enum Command {
     /// Wait for graph work or pull requests to settle
     #[command(add = crate::metadata::CoreCommand(10, "provenant wait fix-login"))]
     Wait(Wait),
+    /// Replay project observations as JSON lines
+    Events {
+        /// Resume after this project sequence cursor
+        #[arg(long, catalog_i64_range = 0..)]
+        from: Option<i64>,
+        /// Continue delivering observations as they arrive
+        #[arg(long)]
+        follow: bool,
+        /// Persist delivery progress under this consumer name
+        #[arg(long, conflicts_with = "from")]
+        consumer: Option<String>,
+    },
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
@@ -646,6 +661,9 @@ pub struct GraphRunArgs {
     /// Git base for a new writer branch
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
+    /// Pin a review to this pull request (host resolves its base and head)
+    #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
+    pub pr: Option<u64>,
     /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,
@@ -1120,6 +1138,10 @@ pub enum Internal {
     },
     /// Detached cargo-seed refresh queued by the daily collector.
     TickSeed,
+    /// Host-owned forge forwarder; one instance per repository.
+    EventListen {
+        repository: String,
+    },
     /// Run Cargo through the selected build admission backend (the lane's cargo shim). Backend and source come from `PROVENANT_BUILD_ADMISSION_BACKEND` and `PROVENANT_BUILD_ADMISSION_SOURCE`; builtin slot directory/count use `PROVENANT_BUILD_SLOT_STATE` and `PROVENANT_BUILD_SLOTS`, never lane arguments.
     BuildSlot {
         /// The real cargo, then its arguments.

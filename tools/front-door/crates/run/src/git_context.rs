@@ -221,13 +221,20 @@ fn transport_args() -> Vec<String> {
 
 /// The host environment for talking to a remote, bound to this repository.
 fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+    transport_environment_from(env, std::env::vars_os())
+}
+
+fn transport_environment_from(
+    env: &[(OsString, OsString)],
+    host: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
     let bound = env.iter().filter(|(key, _)| {
         matches!(
             key.to_str(),
             Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
         )
     });
-    transport::environment(std::env::vars_os(), bound.cloned())
+    transport::environment(host, bound.cloned())
 }
 
 /// Where a lane can write: its linked worktree, the project's worktree and
@@ -498,6 +505,84 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     let env = repository_environment(&executor, git, cwd)
         .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
     resolve_fetching(&executor, git, cwd, base, &env, None)
+}
+
+/// Materialise a PR's immutable commit without changing refs or the checkout.
+/// Transport configuration is checked at the same boundary as tracking-ref fetches.
+pub fn resolve_review_commit(
+    git: &Path,
+    cwd: &Path,
+    host_state: &Path,
+    repository: &str,
+    reference: &str,
+    commit: &str,
+) -> Result<String> {
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    resolve_review_commit_with(
+        &executor,
+        git,
+        cwd,
+        host_state,
+        repository,
+        (reference, commit),
+        std::env::vars_os(),
+    )
+}
+
+fn resolve_review_commit_with(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    host_state: &Path,
+    repository: &str,
+    (reference, commit): (&str, &str),
+    host: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<String> {
+    provenant_core::GitOid::parse(commit).map_err(|_| RunError::InvalidBase(commit.into()))?;
+    if !repository.starts_with("https://") || repository.contains(['\n', '\r', '\0']) {
+        return Err(RunError::Validation("PR repository must be an HTTPS URL"));
+    }
+    let suffix = reference
+        .strip_prefix("refs/")
+        .ok_or(RunError::Validation("PR fetch requires a full ref"))?;
+    provenant_confinement::repo::GitRefName::branch(suffix)
+        .map_err(|_| RunError::Validation("invalid PR fetch ref"))?;
+    let env = repository_environment(executor, git, cwd)?;
+    if let Ok(oid) = resolve(executor, git, cwd, commit, &env, Some(host_state)) {
+        return Ok(oid);
+    }
+    let transport_env = transport_environment_from(&env, host);
+    check_transport(executor, git, cwd, &env, &transport_env, Some(host_state))?;
+    let hardening = transport_args();
+    let args: Vec<&str> = hardening
+        .iter()
+        .map(String::as_str)
+        .chain([
+            "fetch",
+            "--quiet",
+            "--no-auto-maintenance",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "--",
+            repository,
+            reference,
+        ])
+        .collect();
+    let (output, timed_out) = read_git_within(
+        executor,
+        git,
+        cwd,
+        &args,
+        CONTEXT_LIMIT,
+        &transport_env,
+        FETCH_TIMEOUT,
+    )?;
+    if timed_out || output.truncated {
+        return Err(RunError::Validation("PR commit fetch was incomplete"));
+    }
+    resolve(executor, git, cwd, commit, &env, Some(host_state))
 }
 
 /// Resolve a graph base with the command's caps while retaining the read-only
@@ -930,6 +1015,7 @@ impl GitContext {
         let base = resolve(executor, git, cwd, base, &env, Some(host_state))?;
         let head = resolve(executor, git, cwd, head, &env, Some(host_state))?;
         let range = format!("{base}..{head}");
+        let diff_range = format!("{base}...{head}");
         let (log, log_timed_out) = read_git_with_env(
             executor,
             git,
@@ -962,7 +1048,7 @@ impl GitContext {
                 "--ignore-submodules=none",
                 "--no-color",
                 "--no-relative",
-                &range,
+                &diff_range,
                 "--",
             ]
         };
@@ -1041,7 +1127,7 @@ impl GitContext {
             String::new()
         };
         Ok(format!(
-            "Host-written Git context for {}..{}: log at {}; per-file diff stat at {}; \
+            "Host-written Git context for {}...{}: log at {}; per-file diff stat at {}; \
              one patch slice per changed file in {} (index at {}); whole diff at {}; \
              bounds, truncation and timeouts at {}. The stat and slices are navigation aids, \
              not the scope of the review. Start from the stat and read the slice for each file \
@@ -1396,6 +1482,110 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    fn capture_review_diff_uses_merge_base_after_main_merges() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let git = |args: &[&str]| -> TestResult {
+            assert!(
+                provenant_os::fixture::git_command()
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()?
+                    .success()
+            );
+            Ok(())
+        };
+        git(&["init", "-q"])?;
+        git(&["checkout", "-qB", "main"])?;
+        git(&["commit", "--allow-empty", "-qm", "root"])?;
+        git(&["checkout", "-qb", "feature"])?;
+        std::fs::write(temp.path().join("feature.txt"), "feature\n")?;
+        git(&["add", "feature.txt"])?;
+        git(&["commit", "-qm", "feature"])?;
+        git(&["checkout", "-q", "main"])?;
+        std::fs::write(temp.path().join("merged.txt"), "main\n")?;
+        git(&["add", "merged.txt"])?;
+        git(&["commit", "-qm", "main change"])?;
+        git(&["checkout", "-q", "feature"])?;
+        git(&["merge", "-q", "--no-ff", "main", "-m", "merge main"])?;
+        git(&["checkout", "-q", "main"])?;
+        std::fs::write(temp.path().join("later.txt"), "later\n")?;
+        git(&["add", "later.txt"])?;
+        git(&["commit", "-qm", "later main change"])?;
+        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let context = GitContext::capture_at(&binary, temp.path(), temp.path(), "main", "feature")?;
+        let diff = String::from_utf8_lossy(&context.diff.bytes);
+        assert!(diff.contains("feature.txt"));
+        assert!(!diff.contains("merged.txt"));
+        assert!(!diff.contains("later.txt"));
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn review_commit_fetch_preserves_checkout_refs_and_fetch_head() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let host_state = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let upstream = small_history()?;
+        let local = small_history()?;
+        let run = |root: &Path, args: &[&str]| git(&local.executor, &local.binary, root, args);
+        run(
+            &upstream.root,
+            &["commit", "--allow-empty", "-qm", "PR head"],
+        )?;
+        let commit = read_git(
+            &local.executor,
+            &local.binary,
+            &upstream.root,
+            &["rev-parse", "HEAD"],
+            256,
+        )?;
+        let commit = std::str::from_utf8(&commit.bytes)?.trim();
+        run(&upstream.root, &["update-ref", "refs/pull/7/head", commit])?;
+        let before = read_git(
+            &local.executor,
+            &local.binary,
+            &local.root,
+            &["show-ref", "--head"],
+            4096,
+        )?;
+        let fetch_head = local.root.join(".git/FETCH_HEAD");
+        std::fs::write(&fetch_head, "retained fetch observation\n")?;
+        let rewrite = format!("url.file://{}/.insteadOf", upstream.root.display());
+        run(
+            &local.root,
+            &["config", &rewrite, "https://review.invalid/"],
+        )?;
+        assert_eq!(
+            resolve_review_commit_with(
+                &local.executor,
+                &local.binary,
+                &local.root,
+                host_state.path(),
+                "https://review.invalid/",
+                ("refs/pull/7/head", commit),
+                provenant_os::fixture::git_env(),
+            )?,
+            commit
+        );
+        let after = read_git(
+            &local.executor,
+            &local.binary,
+            &local.root,
+            &["show-ref", "--head"],
+            4096,
+        )?;
+        assert_eq!(before.bytes, after.bytes);
+        assert_eq!(
+            std::fs::read_to_string(fetch_head)?,
+            "retained fetch observation\n"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn git_context_accepts_stdout_overflow_but_refuses_stderr_overflow() -> TestResult {
         struct Completed(ExecOutcome);
         impl Executor for Completed {
@@ -1457,7 +1647,7 @@ mod tests {
             b"context"
         );
         assert!(prompt.contains(&scratch.path().join("git-log.txt").display().to_string()));
-        assert!(prompt.contains(&format!("{OID}..{OID}")));
+        assert!(prompt.contains(&format!("{OID}...{OID}")));
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
@@ -1732,7 +1922,7 @@ mod tests {
     fn small_history() -> std::result::Result<HistoryFixture, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
-        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let binary = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         let executor = SystemExecutor::new(1)?;
         git(&executor, &binary, &root, &["init", "--quiet"])?;
         for text in ["original line\n", "changed line\n"] {

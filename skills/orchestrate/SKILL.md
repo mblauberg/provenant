@@ -10,7 +10,7 @@ and inline templates. Dotted names select flavours such as `review.security`.
 
 ## Commands
 
-Use `provenant help --all` for commands and options. Explain a graph before
+Use `provenant help --all` for commands and options; pin a PR with `provenant run review-panel --pr 123 --brief-file brief.md`. Explain a graph before
 submitting it; check its authority, write scope and gates first.
 
 ## Divide the work
@@ -20,7 +20,8 @@ subscription; keep small, coupled and user-facing steps with the chair. Split
 by context and dependency, settle shared interfaces first, and budget roughly
 1.4–3.3 times the tokens for concurrent work. Integrate each return as it
 finishes and land ready work independently. Any lane may launch child lanes.
-`implement` starts a junior writer directly; `--plan` sizes the brief first.
+`implement` starts a junior writer by default; `--route` picks another tier and
+`--plan` sizes the brief first.
 
 Sources: [dynamic concurrency](https://arxiv.org/abs/2610.10263),
 [agent loop](https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop),
@@ -49,6 +50,13 @@ Recover an existing graph with `status`, `output` and `retry` before launching
 replacement work. Read a settled lane with `result NAME`, which carries its
 handoff, head and verification; do not parse provider logs. An idle run or empty queue means no eligible work now, not
 done.
+
+For a Claude Code chair, arm a Monitor on `provenant events --follow --json
+--consumer chair-<session>`. Each JSON line is a notification while the chair
+continues working. Monitors expire after 30 to 60 minutes; re-arm with the same
+consumer to resume from its host cursor. For one outcome, run `provenant wait
+… --json` in the background and receive the notification on exit. Delivery is
+at least once: reconcile the result and deduplicate by event identity.
 
 ## Collect
 

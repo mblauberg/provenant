@@ -38,7 +38,8 @@ pub fn host_budget(
 const GRAPH_LAUNCH_MAX_SECONDS: u64 = provenant_core::WaitTransport::Cli.maximum_seconds() + 1;
 
 fn request_max_seconds(request: &Request) -> u64 {
-    if request.tool == GRAPH_TOOL && request.arguments["op"] == "add" {
+    if request.tool == GRAPH_TOOL && matches!(request.arguments["op"].as_str(), Some("add" | "run"))
+    {
         GRAPH_LAUNCH_MAX_SECONDS
     } else {
         super::MAX_WAIT_SECONDS
@@ -67,7 +68,7 @@ fn no_graph(_: Value, _: &CancelToken, _: Duration) -> Result<Value, ServiceErro
     })
 }
 
-const MAX_BYTES: u64 = 1_048_576;
+const MAX_BYTES: u64 = provenant_records::COMMAND_RESULT_MAX_BYTES as u64;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Serialize, Deserialize)]
@@ -1087,6 +1088,9 @@ mod tests {
             |_, _, _| Ok(Value::Null),
         )?);
         std::fs::DirBuilder::new().mode(0o755).create(&parent)?;
+        // A private lane umask must not turn the deliberately unsafe fixture
+        // back into a safe directory before the boundary assertion.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))?;
         assert!(
             HostRelay::start(
                 path.clone(),
@@ -1138,6 +1142,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         for (tool, arguments, long) in [
             (GRAPH_TOOL, serde_json::json!({"op":"add"}), true),
+            (GRAPH_TOOL, serde_json::json!({"op":"run"}), true),
             (GRAPH_TOOL, serde_json::json!({"op":"children"}), false),
             ("fabric_events", request().arguments, false),
         ] {
