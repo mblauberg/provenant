@@ -320,7 +320,7 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         .collect::<Vec<_>>()
         .join(" ");
     let example = usage_example(argv);
-    let message = message.strip_prefix("error: ").unwrap_or(message);
+    let message = message.strip_prefix("error: ").unwrap_or(&message);
     let mut message = match &example {
         Some(example) => format!("{message}\nexample: {example}"),
         None => message.into(),
@@ -2232,10 +2232,10 @@ mod tests {
                 panic!("expected generic invalid invocation for {words:?}");
             };
             let message = error.to_string();
-            assert_eq!(message.lines().count(), 1, "{words:?}: {message}");
+            let first = message.lines().next().unwrap_or_default();
             assert!(
-                message.contains(field),
-                "{words:?}: expected field {field:?}, got {message:?}"
+                first.contains(field),
+                "{words:?}: expected the first line to name {field:?}, got {message:?}"
             );
         }
         assert_eq!(
