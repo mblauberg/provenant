@@ -373,9 +373,16 @@ pub(crate) fn reserve_allowance_launch(
         &model,
         Some(key),
         observation.as_ref(),
-    ) && assessment.constrained
-    {
-        return Err(EdgeError::Display(assessment.detail));
+    ) {
+        if assessment.constrained {
+            return Err(EdgeError::Display(assessment.detail));
+        }
+        next.allowance.reservation_cost_basis_points = Some(
+            next.allowance
+                .reservation_cost_basis_points
+                .unwrap_or(0)
+                .max(assessment.initial_launch_cost_basis_points),
+        );
     }
     next.allowance
         .record_launch(launch_id, now.unix_seconds())?;

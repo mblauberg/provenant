@@ -21,6 +21,8 @@ pub fn monthly_window(window: &QuotaWindow) -> bool {
 #[serde(default, deny_unknown_fields)]
 pub struct AllowanceLedger {
     pub launches: u64,
+    /// Cost used to reserve launches until provider samples can calibrate it.
+    pub reservation_cost_basis_points: Option<u64>,
     pub windows: BTreeMap<String, AllowanceWindow>,
     // Bounded replay protection for launch preparation of an existing attempt.
     pub recent_launches: Vec<AllowanceLaunch>,
@@ -42,6 +44,8 @@ pub struct AllowanceWindow {
     pub observed: i64,
     pub reported_basis_points: u64,
     pub anchor_launches: u64,
+    #[serde(default)]
+    pub confirmation_credit_basis_points: u64,
     pub cost_basis_points: Option<u64>,
 }
 
@@ -57,7 +61,10 @@ impl AllowanceWindow {
 
 impl AllowanceLedger {
     pub fn validate(&self) -> Result<(), QuotaError> {
-        if self.windows.len() > crate::MAX_WINDOWS
+        if self
+            .reservation_cost_basis_points
+            .is_some_and(|cost| cost == 0 || cost > 10_000)
+            || self.windows.len() > crate::MAX_WINDOWS
             || self.recent_launches.len() > MAX_LAUNCH_JOURNAL
             || self.recent_launches.len() as u64 > self.launches
             || self
@@ -170,24 +177,43 @@ impl AllowanceLedger {
                     continue;
                 }
             }
-            let cost = same_cycle
-                .and_then(|previous| {
-                    let launches = observed_launches.saturating_sub(previous.anchor_launches);
-                    if launches == 0 {
-                        return previous.cost_basis_points;
-                    }
-                    let measured = window
-                        .used_basis_points
-                        .saturating_sub(previous.reported_basis_points)
-                        .div_ceil(launches)
-                        .clamp(1, 10_000);
-                    Some(
-                        previous
-                            .cost_basis_points
-                            .map_or(measured, |old| (3 * old + measured).div_ceil(4)),
-                    )
-                })
-                .or_else(|| previous.and_then(|w| w.cost_basis_points));
+            // A provider increase may cover only some of the outstanding launches.
+            // Never infer a lower per-launch cost from an ambiguous partial report.
+            let (anchor_launches, cost, credit) = if let Some(previous) = same_cycle {
+                let pending = observed_launches.saturating_sub(previous.anchor_launches);
+                let delta = window
+                    .used_basis_points
+                    .saturating_sub(previous.reported_basis_points);
+                let floor = previous
+                    .cost_basis_points
+                    .unwrap_or(0)
+                    .max(self.reservation_cost_basis_points.unwrap_or(100));
+                let credit = previous
+                    .confirmation_credit_basis_points
+                    .saturating_add(delta);
+                let confirmed = (credit / floor).min(pending);
+                let remaining_credit = if confirmed < pending {
+                    credit % floor
+                } else {
+                    0
+                };
+                let cost = Some(if pending == 1 && confirmed == 1 {
+                    floor.max(delta).min(10_000)
+                } else {
+                    floor
+                });
+                (
+                    previous.anchor_launches.saturating_add(confirmed),
+                    cost,
+                    remaining_credit,
+                )
+            } else {
+                (
+                    observed_launches,
+                    previous.and_then(|w| w.cost_basis_points),
+                    0,
+                )
+            };
             self.windows.insert(
                 window.pool.clone(),
                 AllowanceWindow {
@@ -195,7 +221,8 @@ impl AllowanceLedger {
                     duration,
                     observed: snapshot.observed_unix_seconds,
                     reported_basis_points: window.used_basis_points.min(10_000),
-                    anchor_launches: observed_launches,
+                    anchor_launches,
+                    confirmation_credit_basis_points: credit,
                     cost_basis_points: cost,
                 },
             );
@@ -261,21 +288,21 @@ mod tests {
             );
         }
         ledger.observe(&snapshot(30, 1400, 30 * 86400));
-        assert_eq!(ledger.windows["billing_cycle"].cost_basis_points, Some(200));
+        assert_eq!(ledger.windows["billing_cycle"].cost_basis_points, Some(100));
         assert_eq!(
             ledger.windows["billing_cycle"].estimated(ledger.launches, 100),
             1400
         );
         ledger.record_launch("launch-c", 35).unwrap();
         ledger.observe(&snapshot(40, 1800, 30 * 86400));
-        assert_eq!(ledger.windows["billing_cycle"].cost_basis_points, Some(250));
+        assert_eq!(ledger.windows["billing_cycle"].cost_basis_points, Some(400));
         ledger.record_launch("launch-d", 45).unwrap();
         ledger.observe(&snapshot(30 * 86400 + 10, 0, 60 * 86400));
         assert_eq!(
             ledger.windows["billing_cycle"].estimated(ledger.launches, 100),
             0
         );
-        assert_eq!(ledger.windows["billing_cycle"].cost_basis_points, Some(250));
+        assert_eq!(ledger.windows["billing_cycle"].cost_basis_points, Some(400));
         // Completion can race a launch after the provider's observation instant.
         let mut slow_probe = AllowanceLedger::default();
         slow_probe.observe(&snapshot(10, 0, 30 * 86400));
@@ -295,6 +322,64 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<AllowanceLedger>(&persisted).unwrap(),
             ledger
+        );
+    }
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn partial_reports_keep_unconfirmed_launch_debt() {
+        let mut ledger = AllowanceLedger::default();
+        ledger.observe(&snapshot(10, 0, 30 * 86400));
+        for n in 0..10 {
+            ledger.record_launch(&format!("launch-{n}"), 15).unwrap();
+        }
+        ledger.observe(&snapshot(20, 100, 30 * 86400));
+        assert_eq!(
+            ledger.windows["billing_cycle"].estimated(ledger.launches, 100),
+            1000
+        );
+        assert!(
+            ledger.windows["billing_cycle"]
+                .cost_basis_points
+                .unwrap_or(100)
+                >= 100
+        );
+        for used in [100, 99] {
+            ledger.observe(&snapshot(21, used, 30 * 86400));
+            assert_eq!(
+                ledger.windows["billing_cycle"].estimated(ledger.launches, 100),
+                1000
+            );
+        }
+        ledger.observe(&snapshot(22, 1000, 30 * 86400));
+        assert_eq!(
+            ledger.windows["billing_cycle"].estimated(ledger.launches, 100),
+            1000
+        );
+        assert_eq!(ledger.windows["billing_cycle"].anchor_launches, 10);
+        let mut increments = AllowanceLedger::default();
+        increments.observe(&snapshot(10, 0, 30 * 86400));
+        increments.record_launch("increment", 15).unwrap();
+        increments.observe(&snapshot(20, 50, 30 * 86400));
+        assert_eq!(increments.windows["billing_cycle"].anchor_launches, 0);
+        increments.observe(&snapshot(21, 100, 30 * 86400));
+        assert_eq!(
+            increments.windows["billing_cycle"].estimated(increments.launches, 100),
+            100
+        );
+        let mut configured = AllowanceLedger {
+            reservation_cost_basis_points: Some(250),
+            ..Default::default()
+        };
+        configured.observe(&snapshot(10, 0, 30 * 86400));
+        for n in 0..4 {
+            configured
+                .record_launch(&format!("configured-{n}"), 15)
+                .unwrap();
+        }
+        configured.observe(&snapshot(20, 250, 30 * 86400));
+        assert_eq!(
+            configured.windows["billing_cycle"].estimated(configured.launches, 250),
+            1000
         );
     }
 }

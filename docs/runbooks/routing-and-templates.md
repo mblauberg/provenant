@@ -52,9 +52,9 @@ recorded, and failed launches retain their reservation conservatively.
 
 Between reports, estimated spend is the last reported percentage plus launches
 since the anchor times estimated cost. Positive provider-reported usage changes
-calibrate cost by dividing the change by intervening launches, rounded up.
-Subsequent samples blend 75% previous cost with 25% new cost. Before calibration,
-the configured initial launch cost applies. Flat or decreasing readings in the
+confirm only the launches covered at the current cost estimate. A single-launch
+sample can increase that estimate; ambiguous partial samples cannot lower it.
+Before calibration, the configured initial launch cost applies. Flat or decreasing readings in the
 same cycle retain pending launch estimates. A new cycle resets spend but retains
 learned cost. Timestamps keep launches at or after a slow probe's observation
 pending even when they were recorded before it completed; insufficient retained

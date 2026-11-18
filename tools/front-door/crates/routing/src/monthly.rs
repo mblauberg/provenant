@@ -7,6 +7,7 @@ use crate::{
 #[derive(Debug)]
 pub struct MonthlyAllowanceAssessment {
     pub constrained: bool,
+    pub initial_launch_cost_basis_points: u64,
     pub detail: String,
 }
 
@@ -88,6 +89,7 @@ pub fn monthly_allowance_assessment(
     if policy != PacingPolicy::Pace || !settings.enabled || !monthly_selected {
         return Some(MonthlyAllowanceAssessment {
             constrained: false,
+            initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
             detail: format!("{prefix}; monthly cap bypassed"),
         });
     }
@@ -105,6 +107,7 @@ pub fn monthly_allowance_assessment(
         };
         Some(MonthlyAllowanceAssessment {
             constrained,
+            initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
             detail: format!("{prefix}; monthly window missing, stale or incomplete; {outcome}"),
         })
     };
@@ -182,6 +185,7 @@ pub fn monthly_allowance_assessment(
     }
     Some(MonthlyAllowanceAssessment {
         constrained,
+        initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
         detail: format!(
             "{prefix}; {}{}",
             details.join("; "),

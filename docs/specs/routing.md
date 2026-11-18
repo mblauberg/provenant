@@ -167,9 +167,9 @@ providers at the same tier before stopping at the chair.
 account. `monthly_allowance_assessment` makes `pace` monthly eligibility:
 estimated spend including the next launch must fit elapsed cycle fraction plus
 burst, capped at 100%. Defaults are 10 percentage points burst and 100 basis
-points per uncalibrated launch. Positive usage deltas calibrate cost against
-intervening launches, then smooth 75% previous/25% new. Unchanged reports retain
-debt; launches at or after observation remain pending. Rollover retains learned
+points per uncalibrated launch. Positive usage deltas confirm only reservations covered at the current cost
+estimate. Ambiguous partial reports cannot lower that estimate; a single-launch
+sample may raise it. Unchanged or decreasing reports retain debt; launches at or after observation remain pending. Rollover retains learned
 cost. Failed launches conservatively retain reservations.
 
 `monthly_window` generalises cycle detection. Adapter declarations identify
