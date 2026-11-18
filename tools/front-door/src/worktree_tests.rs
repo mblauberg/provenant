@@ -580,18 +580,32 @@ pub(super) fn writer_backend_available() -> Result<bool> {
     }
 }
 
-/// Run Git as the lane does: against its private view of refs and objects,
-/// bound to the writer worktree.
-fn lane_git(rig: &TestRig, scratch: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
-    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-    let common = scratch.join("git-common");
+/// Run Git against the writer's shared ref and object view, bound to its worktree.
+fn lane_git(
+    rig: &TestRig,
+    context: &provenant_run::ExecutionContext,
+    worktree: &Path,
+    args: &[&str],
+) -> Result<String> {
+    let git =
+        provenant_os::git::resolve_git_executable(None).ok_or("Git executable unavailable")?;
+    let request =
+        provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, worktree)?;
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    let shared = provenant_confinement::permissions::worktree_git_state_path(
+        &fs::canonicalize(&rig.home)?,
+        &writer.worktree,
+        &writer.branch,
+    )?;
+    let common = shared.join("git-common");
     let binding = [
         format!("GIT_DIR={}", common.display()),
         format!("GIT_COMMON_DIR={}", common.display()),
         format!("GIT_WORK_TREE={}", worktree.display()),
         format!(
             "GIT_OBJECT_DIRECTORY={}",
-            scratch.join("git-objects").display()
+            shared.join("git-objects").display()
         ),
         "GIT_AUTHOR_NAME=Lane".to_owned(),
         "GIT_AUTHOR_EMAIL=lane@example.invalid".to_owned(),

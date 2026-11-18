@@ -279,10 +279,23 @@ fn delete_ref_leased_when_inner(
         return Err(WorktreeError::InvalidRequest);
     }
     context.repo.revalidate()?;
+    let mut stale = Vec::new();
     if name.starts_with("refs/heads/") {
         let fresh = context.facts.fresh_inventory(context, cancel)?;
         if checked_out_elsewhere(&fresh, reference, None)? {
             return Ok(RefDeletion::CheckedOut);
+        }
+        for entry in fresh
+            .iter()
+            .filter(|entry| entry.prunable && entry.branch.as_ref() == Some(reference))
+        {
+            if entry.locked {
+                return Ok(RefDeletion::CheckedOut);
+            }
+            let Some(candidate) = stale_registration(context, entry, reference)? else {
+                return Ok(RefDeletion::CheckedOut);
+            };
+            stale.push(candidate);
         }
     }
     match context
@@ -299,7 +312,7 @@ fn delete_ref_leased_when_inner(
     let mut prepared_check_result = None;
     let mut prepared_check = || {
         after_prepare();
-        match branch_registered_as_checked_out(context.repo, reference) {
+        match branch_registered_as_checked_out(context.repo, reference, &stale) {
             Ok(checked_out) => {
                 prepared_check_result = Some(Ok(checked_out));
                 !checked_out
@@ -331,12 +344,88 @@ fn delete_ref_leased_when_inner(
     })
 }
 
+// The absence and exclusive occupancy proof stays held until the prepared ref
+// transaction completes. A changed or newly created registration fails closed.
+struct StaleRegistration {
+    name: OsString,
+    identity: provenant_os::fs::Metadata,
+    gitdir: Vec<u8>,
+    parent: Directory,
+    parent_path: PathBuf,
+    leaf: OsString,
+    _lease: LockGuard,
+}
+
+fn stale_registration(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    branch: &GitRefName,
+) -> Result<Option<StaleRegistration>, WorktreeError> {
+    let (Some(parent_path), Some(leaf)) = (entry.path.parent(), entry.path.file_name()) else {
+        return Ok(None);
+    };
+    let parent = match Directory::open_anchor(parent_path) {
+        Ok(parent) => parent,
+        Err(_) => return Ok(None),
+    };
+    if parent.current_path()? != parent_path {
+        return Ok(None);
+    }
+    match parent.metadata_at(leaf, false) {
+        Err(error) if error.is_not_found() => {}
+        _ => return Ok(None),
+    }
+    let lease = match cache_writer_guard(context.project_state, &entry.path) {
+        Ok(lease) => lease,
+        Err(_) => return Ok(None),
+    };
+    let registrations = match context
+        .repo
+        .common_dir()
+        .open_verified_directory(OsStr::new("worktrees"))
+    {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let expected = entry.path.join(".git");
+    let expected = expected.as_os_str().as_bytes();
+    for (index, name) in registrations.entries()?.enumerate() {
+        if index >= MAX_WORKTREES {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let name = name?;
+        let identity = registrations.metadata_at(&name, false)?;
+        if identity.kind != FileKind::Directory {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let admin = registrations.open_verified_directory(&name)?;
+        if !head_targets_branch(&admin, branch)? {
+            continue;
+        }
+        let gitdir = admin.read_stable(OsStr::new("gitdir"), 4096)?;
+        if gitdir.strip_suffix(b"\n").unwrap_or(&gitdir) == expected {
+            return Ok(Some(StaleRegistration {
+                name,
+                identity,
+                gitdir,
+                parent,
+                parent_path: parent_path.to_owned(),
+                leaf: leaf.to_owned(),
+                _lease: lease,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// Check the checked-out branch refs from Git's stable worktree HEAD files
 /// while `update-ref` is prepared. Any existing worktree registration that has
 /// already recorded this branch is observed, preserving the branch.
 fn branch_registered_as_checked_out(
     repo: &VerifiedRepo,
     branch: &GitRefName,
+    stale: &[StaleRegistration],
 ) -> Result<bool, WorktreeError> {
     if head_targets_branch(repo.common_dir(), branch)? {
         return Ok(true);
@@ -365,7 +454,18 @@ fn branch_registered_as_checked_out(
         }
         let worktree = registrations.open_verified_directory(&name)?;
         if head_targets_branch(&worktree, branch)? {
-            return Ok(true);
+            let Some(candidate) = stale.iter().find(|candidate| candidate.name == name) else {
+                return Ok(true);
+            };
+            if !candidate
+                .identity
+                .same_identity(&registrations.metadata_at(&name, false)?)
+                || worktree.read_stable(OsStr::new("gitdir"), 4096)? != candidate.gitdir
+                || candidate.parent.current_path()? != candidate.parent_path
+                || !matches!(candidate.parent.metadata_at(&candidate.leaf, false), Err(error) if error.is_not_found())
+            {
+                return Ok(true);
+            }
         }
     }
     Ok(false)

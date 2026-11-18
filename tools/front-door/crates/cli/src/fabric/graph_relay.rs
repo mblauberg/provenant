@@ -3850,6 +3850,20 @@ mod provisioning_tests {
         journal.save(&reloaded)?;
         drop(journal);
         let restarted = Context::open(context.roots.clone(), &home, &project)?;
+        let slot = restarted
+            .roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(restarted.identity.project.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &project.canonicalize()?.join(path),
+            ));
+        let slot = provenant_os::fs::Directory::open_anchor(&slot)?;
+        let held = slot.try_lock_existing(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
         let short = WaitBudget::up_to(
             clock.mono_now(),
             provenant_core::DurationMicros::from_micros(100_000),
@@ -3874,6 +3888,7 @@ mod provisioning_tests {
         );
         assert_eq!(saved.nodes[1].state, NodeState::Pending);
         assert!(saved.nodes[1].advance_owner_code.is_none());
+        drop(held);
 
         // A mismatched source is another refusal before mutation; it cannot
         // reconcile the original checkout either.

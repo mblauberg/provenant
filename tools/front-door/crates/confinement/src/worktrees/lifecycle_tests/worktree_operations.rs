@@ -202,6 +202,16 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
         &branch,
         Some(&fixture.root)
     )?);
+    // Even an absent checkout cannot justify deleting its branch while an
+    // occupant still holds its worktree slot.
+    let tip = ref_tip(&context, &branch, &cancel())?.ok_or("stale branch tip")?;
+    let held = cache_writer_guard(context.project_state, &stale.path)
+        .map_err(|occupancy| format!("writer slot unavailable: {occupancy:?}"))?;
+    assert_eq!(
+        delete_ref_leased(&context, &branch, tip, &cancel())?,
+        RefDeletion::CheckedOut
+    );
+    drop(held);
     let integration = common_integration(&context, &cancel())?.0;
     let result = remove_with_port(
         &test_context,

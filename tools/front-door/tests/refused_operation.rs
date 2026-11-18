@@ -1,17 +1,17 @@
 //! A dirty writer is refused before admission but remains observable by its operation.
 #![allow(clippy::disallowed_methods)]
 use crate::support;
-use provenant_core::{CancelToken, RootInputs};
+use provenant_core::{CancelToken, Clock, RootInputs};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, OperationState, Request, RunStore};
 use serde_json::{Value, json};
-use std::fs;
+use std::{fs, os::unix::fs::PermissionsExt};
 use support::{Result, TestRig, code};
 
 #[test]
 fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
     for notice in ["inbox", "off"] {
-        let rig = TestRig::new()?;
+        let mut rig = TestRig::new()?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         fs::write(rig.project.join("tracked"), "original")?;
         for args in [vec!["add", "tracked"], vec!["commit", "-qm", "initial"]] {
@@ -29,6 +29,58 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
                 },
             ),
         )?;
+        // Route selection must reach writer admission without consulting a
+        // real account or provider installation.
+        let account_dir = rig.root.join("codex");
+        fs::set_permissions(&account_dir, fs::Permissions::from_mode(0o700))?;
+        let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+        let auth_path = account_dir.join("auth.json");
+        fs::write(&auth_path, auth)?;
+        fs::set_permissions(&auth_path, fs::Permissions::from_mode(0o600))?;
+        let account = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+        support::register_account(&rig, "codex", "fixture", &account, &account_dir)?;
+        let bin = rig.root.join("provider-bin");
+        fs::create_dir_all(&bin)?;
+        let codex = bin.join("codex");
+        fs::write(&codex, "#!/bin/sh\nprintf 'codex 1.0.0\\n'\n")?;
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let now = SystemClock::new().unix_seconds();
+        let readiness = provenant_quota::ReadinessFile {
+            schema_version: 1,
+            login: None,
+            extra: Default::default(),
+            records: vec![provenant_quota::RouteReadiness {
+                schema_version: 1,
+                extra: Default::default(),
+                scope: provenant_quota::ReadinessScope {
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: "codex".into(),
+                    account_key: account.clone(),
+                    route: "codex/gpt-6-luna".into(),
+                    extra: Default::default(),
+                },
+                state: provenant_quota::ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }],
+        };
+        let readiness_root = rig.state.join("readiness");
+        let readiness_dir = readiness_root.join(&account);
+        fs::create_dir_all(&readiness_dir)?;
+        for directory in [&readiness_root, &readiness_dir] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        }
+        let readiness_path = readiness_dir.join("codex.json");
+        fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+        fs::set_permissions(&readiness_path, fs::Permissions::from_mode(0o600))?;
         let shown = rig.command(&["config", "show", "--json"])?;
         assert_eq!(code(&shown), 0, "{shown:?}");
         let shown: Value = serde_json::from_slice(&shown.stdout.bytes)?;
@@ -62,9 +114,9 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
             serde_json::to_vec(&json!({
                 "graph_id":"dirty-writer", "nodes":[{
                     "id":"writer", "use":"write", "worktree":writer,
-                    "write_scope":["."]
+                    "write_scope":["."], "route":{"adapter":"codex", "model":"gpt-6-luna"}
                 }], "templates":{"write":{
-                    "prompt":"PROMPT_SENTINEL", "tier":"senior",
+                    "prompt":"PROMPT_SENTINEL",
                     "access":"worktree_write", "outputs":["result"]
                 }}
             }))?,

@@ -131,6 +131,7 @@ pub(super) fn worktree_git_state_namespace(
 }
 
 /// Host-maintained Git files stay immutable within the writable data children.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) fn worktree_git_state_host_files(container: &PathGrant) -> [PathGrant; 10] {
     [
         container.path.join("git-common/config"),

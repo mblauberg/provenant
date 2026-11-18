@@ -726,13 +726,13 @@ _provenant_git_retryable_lock() {
             add:*|commit:*)
                 case "$_provenant_git_line" in
                     "fatal: Unable to create '"*".lock': File exists.") ;;
-                    ""|"Another git process seems to be running in this repository, e.g."|"an editor opened by 'git commit'. Please make sure all processes"|"are terminated then try again. If it still fails, a git process"|"may have crashed in this repository earlier:"|"remove the file manually to continue.") continue ;;
+                    ""|"Another git process seems to be running in this repository, e.g."|"Another git process seems to be running in this repository, or the lock file may be stale"|"an editor opened by 'git commit'. Please make sure all processes"|"are terminated then try again. If it still fails, a git process"|"may have crashed in this repository earlier:"|"remove the file manually to continue.") continue ;;
                     *) return 1 ;;
                 esac ;;
             update-ref:*)
                 case "$_provenant_git_line" in
                     "fatal: update_ref failed for ref '"*"': cannot lock ref '"*"': Unable to create '"*".lock': File exists.") ;;
-                    ""|"Another git process seems to be running in this repository, e.g."|"an editor opened by 'git commit'. Please make sure all processes"|"are terminated then try again. If it still fails, a git process"|"may have crashed in this repository earlier:"|"remove the file manually to continue.") continue ;;
+                    ""|"Another git process seems to be running in this repository, e.g."|"Another git process seems to be running in this repository, or the lock file may be stale"|"an editor opened by 'git commit'. Please make sure all processes"|"are terminated then try again. If it still fails, a git process"|"may have crashed in this repository earlier:"|"remove the file manually to continue.") continue ;;
                     *) return 1 ;;
                 esac ;;
             *) return 1 ;;
@@ -1792,7 +1792,7 @@ mod tests {
         fs::create_dir_all(&repo)?;
         fs::create_dir_all(&scratch)?;
         fs::create_dir_all(home.join(".config/gh"))?;
-        let real_git = provenant_os::git::git_executable()
+        let real_git = provenant_os::git::resolve_git_executable(None)
             .ok_or("Git unavailable")?
             .canonicalize()?;
         let init = |path: &Path, bare: bool| -> Result<(), Box<dyn std::error::Error>> {
@@ -1833,7 +1833,7 @@ mod tests {
         fs::write(
             &git,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = config ] && [ \"$2\" = --global ] || [ -z \"$GIT_CONFIG_GLOBAL\" ]; then GIT_CONFIG_GLOBAL={}; export GIT_CONFIG_GLOBAL; fi\nprintf called > {}\nexec {} \"$@\"\n",
+                "#!/bin/sh\nGIT_CONFIG_GLOBAL={}; export GIT_CONFIG_GLOBAL\nGIT_CONFIG_NOSYSTEM=1; export GIT_CONFIG_NOSYSTEM\nprintf called > {}\nexec {} \"$@\"\n",
                 shell_quote(home.join(".gitconfig").to_str().ok_or("global config")?),
                 shell_quote(marker.to_str().ok_or("marker")?),
                 shell_quote(real_git.to_str().ok_or("git")?)
@@ -1857,6 +1857,9 @@ mod tests {
         );
         let mut permissions = base.permissions().clone();
         permissions.scratch.path = scratch.clone();
+        let mut mode = serde_json::to_value(&permissions.mode)?;
+        mode["authority"]["git_state"] = serde_json::json!({"path": scratch, "scope": "subtree"});
+        permissions.mode = serde_json::from_value(mode)?;
         let plan = ConfinedPlan::new(PlanRequest {
             scope: base.scope(),
             permissions,
@@ -2520,7 +2523,7 @@ mod tests {
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
         let git = root.join("git fixture's executable");
         std::os::unix::fs::symlink(
-            provenant_os::git::git_executable()
+            provenant_os::git::resolve_git_executable(None)
                 .ok_or("Git unavailable")?
                 .canonicalize()?,
             &git,
@@ -2554,6 +2557,9 @@ mod tests {
         let base = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
         let mut permissions = base.permissions().clone();
         permissions.scratch.path = scratch.clone();
+        let mut mode = serde_json::to_value(&permissions.mode)?;
+        mode["authority"]["git_state"] = serde_json::json!({"path": scratch, "scope": "subtree"});
+        permissions.mode = serde_json::from_value(mode)?;
         if let Some(private) = &mut permissions.private_state {
             private.path = attempt.join("provider-state");
         }

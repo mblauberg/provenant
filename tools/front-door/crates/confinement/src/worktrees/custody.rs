@@ -600,6 +600,10 @@ pub fn writer_custody(
     if entry.branch.as_ref() != Some(branch) {
         return Err(WorktreeError::IdentityChanged);
     }
+    // A registered checkout may have been created directly by Git. Give it
+    // the same durable incarnation identity as a Provenant-created tree
+    // before deriving the writer's shared Git-state authority.
+    acquire_worktree_subject(worktree.repo())?;
     let state = writer_directory(project_state, &canonical)?;
     let binding = WriterBinding::from_verified(
         worktree.repo().root_dir(),

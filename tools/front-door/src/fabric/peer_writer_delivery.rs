@@ -528,10 +528,10 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
         Ok(_) => return Err("non-repository unexpectedly opened".into()),
         Err(error) => super::run_error(error),
     };
-    assert_eq!(
-        serde_json::to_value(error)?,
-        serde_json::json!({"code": "confinement_refused"})
-    );
+    let public = serde_json::to_value(error)?;
+    assert_eq!(public["code"], "io");
+    assert!(public["path"].is_null());
+    assert!(!public.to_string().contains(root.to_str().ok_or("fixture path")?));
     Ok(())
 }
 

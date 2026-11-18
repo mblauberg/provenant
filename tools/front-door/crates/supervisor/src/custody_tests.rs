@@ -298,8 +298,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
             &clock,
         )
     };
-    assert!(matches!(admit(), Err(CustodyError::Busy)));
-    drop(first);
     let second = admit()?;
     assert!(matches!(
         slot.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
@@ -322,6 +320,7 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
     );
     second.withdraw_unlaunched()?;
     assert_eq!(std::fs::read(&first_path)?, first_bytes);
+    drop(first);
     let recovery = acquire_recovery(
         slot.try_clone()?,
         scope(),

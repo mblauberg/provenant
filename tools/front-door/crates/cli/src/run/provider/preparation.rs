@@ -5408,6 +5408,7 @@ mod user_skills_tests {
                         serde_json::json!({
                             "git_grants_digest": vec![0; 32], "publishing": false,
                             "common_git_dir": root.join("repo/.git"),
+                            "git_state": {"path": root.join("git-state"), "scope": "subtree"},
                             "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
                         }),
                     )?));

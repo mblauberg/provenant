@@ -244,7 +244,7 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
         .join("attempts")
         .join(attempt.to_string())
         .join("tmp/candidate-0");
-    let lane = |args: &[&str]| lane_git(&rig, &scratch, &path, args);
+    let lane = |args: &[&str]| lane_git(&rig, &context, &path, args);
     fs::write(path.join("writer.txt"), b"writer change")?;
     lane(&["add", "writer.txt"])?;
     lane(&["commit", "-qm", "Writer change"])?;
@@ -422,16 +422,10 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
         || ready.exists(),
         |exists| *exists,
     )?;
-    // A lane now rewinds its private ref. Rewinding the shared ref instead is
-    // a competing host update, which correctly blocks CAS publication.
+    // Rewind the lane's shared Git view, keeping the host ref separate until
+    // settlement verifies and publishes it.
     let previous = git(&rig, &["-C", path_text, "rev-parse", "HEAD^"])?;
-    let scratch = context
-        .state_root
-        .as_path()
-        .join("attempts")
-        .join(attempt.to_string())
-        .join("tmp/candidate-0");
-    lane_git(&rig, &scratch, &path, &["reset", "--hard", &previous])?;
+    lane_git(&rig, &context, &path, &["reset", "--hard", &previous])?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Succeeded)?;

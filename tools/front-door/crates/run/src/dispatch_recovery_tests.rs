@@ -685,8 +685,14 @@ fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> 
         )
     };
     assert!(
-        take_writer(Directory::open_anchor(&slot)?).is_err(),
-        "a live launcher still holds the writer"
+        provenant_supervisor::custody::lock_writer_exclusion(
+            &Directory::open_anchor(&slot)?,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        )
+        .is_err(),
+        "a live launcher still excludes worktree removal"
     );
     // The first launcher dies before the provider launches; cancel settles
     // the attempt and frees its writer and fence before returning.

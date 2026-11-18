@@ -304,6 +304,12 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         linked.path().to_owned(),
         private.clone(),
         common.clone(),
+        authority
+            .git_state
+            .path
+            .parent()
+            .ok_or("git state namespace")?
+            .to_owned(),
         authority.git_state.path.clone(),
         authority.git_state.path.join("git-common"),
         authority.git_state.path.join("git-objects"),

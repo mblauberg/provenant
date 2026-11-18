@@ -1040,7 +1040,8 @@ mod reboot_tests {
                 "schema_version": 1, "scope": scope, "guardian_process": null,
                 "attempt": identity(attempt.metadata()?), "guardian": identity(guardian.metadata()?),
                 "writer": identity(attempt.metadata_at(std::ffi::OsStr::new("writer.lock"), false)?),
-                "custody": identity(native_custody.metadata()?)
+                "custody": identity(native_custody.metadata()?),
+                "holder": identity(evidence.metadata_at(std::ffi::OsStr::new("holder.lock"), false)?)
             }))?,
             RECORD_LIMIT,
         )?;

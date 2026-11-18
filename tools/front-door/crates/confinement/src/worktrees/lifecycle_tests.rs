@@ -562,6 +562,15 @@ impl Executor for TimesOutWorktreeAdd<'_> {
         }
         Ok(outcome)
     }
+    fn execute_prepared_ref_transaction(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+        commands: &[u8],
+        commit: &mut dyn FnMut() -> bool,
+    ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+        self.0
+            .execute_prepared_ref_transaction(options, commands, commit)
+    }
 }
 
 pub(super) fn branch_exists(fixture: &Fixture, name: &str) -> bool {
@@ -1128,6 +1137,15 @@ impl Executor for FailsFirstGcSettlement<'_> {
             outcome.termination = Termination::Exit(1);
         }
         Ok(outcome)
+    }
+    fn execute_prepared_ref_transaction(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+        commands: &[u8],
+        commit: &mut dyn FnMut() -> bool,
+    ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+        self.executor
+            .execute_prepared_ref_transaction(options, commands, commit)
     }
 }
 
