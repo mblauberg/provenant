@@ -1,0 +1,104 @@
+#!/bin/sh
+# Prepare a release: bump member versions, refresh the lock and the bug
+# template, warn about merges without a fragment, then collate the notes.
+#   prepare-release vX.Y.Z
+set -eu
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+cd "$(git rev-parse --show-toplevel)"
+export LC_ALL=C
+work=tools/front-door
+bug=.github/ISSUE_TEMPLATE/bug.yml
+notes=docs/release-notes/next.d
+
+usage() {
+  echo 'usage: prepare-release vX.Y.Z' >&2
+  exit 2
+}
+
+case "${1:-}" in
+  v[0-9]*.[0-9]*.[0-9]*) [ "$#" -eq 1 ] || usage ;;
+  *) usage ;;
+esac
+version=${1#v}
+tmp=$(mktemp "${TMPDIR:-/tmp}/prepare-release.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+
+# Bump only the [package] version of each workspace member; dependency
+# versions and the [workspace.dependencies] table stay as they are.
+for file in "$work/Cargo.toml" "$work"/crates/*/Cargo.toml; do
+  [ -f "$file" ] || continue
+  awk -v new="$version" '
+    /^[[:space:]]*\[/ { section = $0 }
+    section ~ /^\[package\][[:space:]]*$/ && /^[[:space:]]*version[[:space:]]*=/ {
+      sub(/"[^"]*"/, "\"" new "\"")
+    }
+    { print }
+  ' "$file" > "$tmp"
+  cat "$tmp" > "$file"
+done
+
+(cd "$work" && cargo update --workspace --offline)
+
+# The template placeholder carries the released provenant version and the
+# toolchain channel used to build it.
+rust_version=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$work/rust-toolchain.toml" | sed -n 1p)
+[ -n "$rust_version" ] || {
+  echo "prepare-release: $work/rust-toolchain.toml has no channel" >&2
+  exit 1
+}
+awk -v prov="$version" -v rust="$rust_version" '
+  /provenant [0-9]+\.[0-9]+\.[0-9]+/ {
+    gsub(/Rust [0-9]+\.[0-9]+\.[0-9]+/, "Rust " rust)
+    gsub(/provenant [0-9]+\.[0-9]+\.[0-9]+/, "provenant " prov)
+  }
+  { print }
+' "$bug" > "$tmp"
+cat "$tmp" > "$bug"
+
+# A fragment covers a merge when it names the PR or any issue the PR closes.
+covers() {
+  file=$1
+  shift
+  for num in "$@"; do
+    [ -n "$num" ] || continue
+    if grep -Eq "#${num}([^0-9]|$)" "$file"; then return 0; fi
+  done
+  return 1
+}
+
+fragment_check() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo 'prepare-release: warning: gh is unavailable; skipping the fragment check' >&2
+    return 0
+  fi
+  last_tag=$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null) || last_tag=
+  if [ -n "$last_tag" ]; then range="$last_tag..HEAD"; else range=HEAD; fi
+  git log --first-parent --format='%s' "$range" | while IFS= read -r subject; do
+    pr=$(printf '%s\n' "$subject" | sed -n 's/^Merge pull request #\([0-9][0-9]*\) .*/\1/p')
+    [ -n "$pr" ] || continue
+    closed=$(gh pr view "$pr" --json closingIssuesReferences 2>/dev/null |
+      sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | sort -u)
+    found=0
+    for f in "$notes"/*.md; do
+      [ -e "$f" ] || continue
+      [ "$f" = "$notes/_intro.md" ] && continue
+      # shellcheck disable=SC2086
+      if covers "$f" "$pr" $closed; then found=1; break; fi
+    done
+    if [ "$found" -eq 0 ]; then
+      echo "prepare-release: warning: merge #$pr since ${last_tag:-the start of history} has no next.d fragment naming #$pr or a closed issue" >&2
+    fi
+  done
+}
+
+# Check before collating: a release cut consumes the fragments.
+fragment_check
+"$script_dir/collate-release-notes" "$1"
+
+echo
+echo 'Next steps:'
+echo '  1. Review and commit these changes.'
+echo '  2. Run provenant check release (see MAINTAINING.md for the ancestor range).'
+echo '  3. Open a pull request for the release commit.'
+echo "  4. After it lands, tag $1 and push the tag."

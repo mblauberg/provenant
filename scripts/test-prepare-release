@@ -1,0 +1,128 @@
+#!/bin/sh
+set -eu
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
+script=$(cd "$(dirname "$0")" && pwd -P)/prepare-release
+PATH="/usr/bin:/bin:$PATH"
+export PATH
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-prepare-release.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+git -C "$tmp" init -q
+cd "$tmp"
+mkdir -p "$tmp/bin"
+
+# Stub gh for the fragment check; cargo only records its invocation.
+cat > "$tmp/bin/gh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$GH_LOG"
+if [ "$1 $2" = 'pr view' ]; then
+  case "$3" in
+    101)
+      printf '%s\n' '{"closingIssuesReferences": []}'
+      ;;
+    102)
+      printf '%s\n' '{"closingIssuesReferences": []}'
+      ;;
+    103)
+      printf '%s\n' '{"closingIssuesReferences": [{"number": 301}]}'
+      ;;
+  esac
+fi
+EOF
+cat > "$tmp/bin/cargo" <<'EOF'
+#!/bin/sh
+printf 'cwd=%s args=%s\n' "$PWD" "$*" >> "$CARGO_LOG"
+EOF
+chmod +x "$tmp/bin/gh" "$tmp/bin/cargo"
+export GH_LOG="$tmp/gh.log" CARGO_LOG="$tmp/cargo.log"
+export PATH="$tmp/bin:$PATH"
+
+mkdir -p tools/front-door/crates/core tools/front-door/crates/cli \
+  docs/release-notes/next.d .github/ISSUE_TEMPLATE
+cat > tools/front-door/Cargo.toml <<'EOF'
+[workspace]
+members = [".", "crates/*"]
+resolver = "2"
+
+[package]
+name = "provenant"
+version = "2.2.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.6" }
+EOF
+for crate in core cli; do
+  cat > "tools/front-door/crates/$crate/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "2.2.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0" }
+EOF
+done
+printf '[toolchain]\nchannel = "1.99.7"\n' > tools/front-door/rust-toolchain.toml
+printf 'placeholder: "macOS 15.3, Rust 1.100.0, provenant 2.2.0, Claude Code 2.1.0"\n' \
+  > .github/ISSUE_TEMPLATE/bug.yml
+printf 'Intro.\n' > docs/release-notes/next.d/_intro.md
+printf '## Fixes\n\n- Fix one. (#101)\n' > docs/release-notes/next.d/101-fix.md
+printf '## Fixes\n\n- Fix via issue. (#301)\n' > docs/release-notes/next.d/301-issue.md
+
+commit() {
+  git -c user.name=Fixture -c user.email=fixture@example.com \
+    commit -q --allow-empty -m "$1"
+}
+commit base
+git tag v2.2.0
+commit 'Merge pull request #101 from fixture/one'
+commit 'Merge pull request #102 from fixture/two'
+commit 'Merge pull request #103 from fixture/three'
+
+"$script" v2.3.0 > "$tmp/out" 2> "$tmp/err"
+
+# Every member's own version moved; dependency versions did not.
+grep -F 'version = "2.3.0"' tools/front-door/Cargo.toml > /dev/null
+grep -F 'version = "2.3.0"' tools/front-door/crates/core/Cargo.toml > /dev/null
+grep -F 'version = "2.3.0"' tools/front-door/crates/cli/Cargo.toml > /dev/null
+grep -F 'clap = { version = "4.6" }' tools/front-door/Cargo.toml > /dev/null
+grep -F 'serde = { version = "1.0" }' tools/front-door/crates/core/Cargo.toml > /dev/null
+if grep -F 'version = "2.2.0"' tools/front-door/Cargo.toml > /dev/null; then exit 1; fi
+
+grep -F 'provenant 2.3.0' .github/ISSUE_TEMPLATE/bug.yml > /dev/null
+grep -F 'Rust 1.99.7' .github/ISSUE_TEMPLATE/bug.yml > /dev/null
+if grep -F 'provenant 2.2.0' .github/ISSUE_TEMPLATE/bug.yml > /dev/null; then exit 1; fi
+if grep -F 'Rust 1.100.0' .github/ISSUE_TEMPLATE/bug.yml > /dev/null; then exit 1; fi
+
+grep -E 'cwd=.*/tools/front-door args=update --workspace --offline$' \
+  "$CARGO_LOG" > /dev/null
+[ "$(grep -c 'pr view' "$GH_LOG")" -eq 3 ]
+grep -F 'warning: merge #102 since v2.2.0' "$tmp/err" > /dev/null
+if grep -F 'warning: merge #101' "$tmp/err" > /dev/null; then exit 1; fi
+if grep -F 'warning: merge #103' "$tmp/err" > /dev/null; then exit 1; fi
+
+# collate-release-notes was reused, not reimplemented.
+[ -f docs/release-notes/v2.3.0.md ]
+grep -F 'Fix one. (#101)' docs/release-notes/v2.3.0.md > /dev/null
+[ ! -e docs/release-notes/next.d/101-fix.md ]
+[ -f docs/release-notes/next.d/_intro.md ]
+grep -F 'Next steps:' "$tmp/out" > /dev/null
+
+# Without gh the fragment check warns and is skipped, but the cut still runs.
+mkdir -p "$tmp/nogh"
+cp "$tmp/bin/cargo" "$tmp/nogh/cargo"
+printf '## Additions\n\n- Later fix.\n' > docs/release-notes/next.d/later.md
+commit 'Merge pull request #104 from fixture/four'
+PATH="$tmp/nogh:/usr/bin:/bin" "$script" v2.3.1 > "$tmp/out2" 2> "$tmp/err2"
+grep -F 'gh is unavailable; skipping the fragment check' "$tmp/err2" > /dev/null
+grep -F 'version = "2.3.1"' tools/front-door/Cargo.toml > /dev/null
+[ -f docs/release-notes/v2.3.1.md ]
+
+if "$script" 2.3.2 > "$tmp/out3" 2> "$tmp/err3"; then
+  echo 'prepare-release accepted a version without a v prefix' >&2
+  exit 1
+fi
+grep -F 'usage: prepare-release vX.Y.Z' "$tmp/err3" > /dev/null
+
+echo 'prepare-release version, template, lock, warning and collation checks passed'
