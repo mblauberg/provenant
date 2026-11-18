@@ -134,6 +134,102 @@ fn wait_pr_reports_the_observed_head_and_passes() -> Result {
     no_merge(&rig)
 }
 
+/// A wait pinned to `--head` cannot verdict the previous head's failed checks.
+/// The fake forge reports the stale head first (with failing checks) and the
+/// new head on the next process, where the passing verdict arrives.
+fn wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one() -> Result {
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("checks.json"),
+        r#"[{"name":"ci-status","bucket":"fail"}]"#,
+    )?;
+    fs::write(
+        rig.project.join("checks-1669.json"),
+        r#"[{"name":"ci-status","bucket":"pass"}]"#,
+    )?;
+    fs::write(rig.project.join("head-seq"), format!("{HEAD}\n{OTHER}"))?;
+
+    // GitHub still reports the stale head with failing checks. Pinned to the
+    // new SHA, the wait must stay pending and name the head it watches.
+    let stale = rig.command(&[
+        "wait",
+        "--pr",
+        "1668",
+        "--head",
+        OTHER,
+        "--timeout",
+        "5s",
+        "--json",
+    ])?;
+    let stale_text = String::from_utf8(stale.stdout.bytes.clone())?;
+    let stale_value: serde_json::Value = stale_text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("pinned wait emitted no JSON record")?;
+    assert_ne!(
+        code(&stale),
+        0,
+        "stale head produced a verdict: {stale_text}"
+    );
+    assert_eq!(stale_value["data"]["timed_out"], true, "{stale_value}");
+    assert_eq!(
+        stale_value["data"]["targets"][0]["settle"], "pending",
+        "{stale_value}"
+    );
+    assert_eq!(
+        stale_value["data"]["targets"][0]["data"]["awaiting"], OTHER,
+        "{stale_value}"
+    );
+    assert!(
+        stale_text.contains(&format!("head={OTHER}")),
+        "{stale_text}"
+    );
+    assert!(
+        fs::read_to_string(rig.project.join("gh-calls"))?
+            .contains(&format!("commits/{HEAD}/check-runs")),
+        "the stale head's checks were not read"
+    );
+
+    // GitHub now reports the pinned head; its passing checks settle the wait.
+    fs::write(rig.project.join("gh-calls"), "")?;
+    let current = rig.command(&[
+        "wait",
+        "--pr",
+        "1668",
+        "--head",
+        OTHER,
+        "--timeout",
+        "5s",
+        "--json",
+    ])?;
+    let current_text = String::from_utf8(current.stdout.bytes.clone())?;
+    let current_value: serde_json::Value = current_text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("settled wait emitted no JSON record")?;
+    assert_eq!(code(&current), 0, "{current_text}");
+    assert_eq!(
+        current_value["data"]["targets"][0]["settle"], "succeeded",
+        "{current_value}"
+    );
+    assert_eq!(
+        current_value["data"]["targets"][0]["data"]["head"], OTHER,
+        "{current_value}"
+    );
+    assert!(
+        current_text.contains(&format!("head={OTHER}")),
+        "{current_text}"
+    );
+    assert!(
+        fs::read_to_string(rig.project.join("gh-calls"))?
+            .contains(&format!("commits/{OTHER}/check-runs")),
+        "the pinned head's checks were not read"
+    );
+    no_merge(&rig)
+}
+
 fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
     for bucket in ["fail", "cancel", "unknown", "malformed"] {
         let rig = self::rig()?;
@@ -988,6 +1084,10 @@ fn main() -> ExitCode {
             (
                 "wait_pr_reports_the_observed_head_and_passes",
                 wait_pr_reports_the_observed_head_and_passes,
+            ),
+            (
+                "wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one",
+                wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one,
             ),
             (
                 "land_refuses_unpassed_missing_and_malformed_checks",

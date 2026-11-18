@@ -1318,6 +1318,9 @@ pub struct Wait {
     /// Pull request whose required checks, merge or close ends the wait (repeatable)
     #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
     pub prs: Vec<u64>,
+    /// Wait until GitHub reports this exact head; never verdict another SHA
+    #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
+    pub head: Option<String>,
     /// Wait until every target settles (the default)
     #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
     pub all: bool,
@@ -1340,6 +1343,12 @@ pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
+}
+
+fn parse_head_oid(value: &str) -> Result<String, String> {
+    GitOid::parse(value)
+        .map(|_| value.to_owned())
+        .map_err(|error| error.to_string())
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {

@@ -2736,6 +2736,13 @@ mod tests {
             "--any",
         ]);
         valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        let sha = "a".repeat(40);
+        let Command::Wait(wait) = valid(&["wait", "--pr", "2721", "--head", &sha]).command else {
+            panic!("wait command")
+        };
+        assert_eq!(wait.head.as_deref(), Some(sha.as_str()));
+        invalid(&["wait", "--pr", "2721", "--head", "abc"]);
+        invalid(&["wait", "--pr", "2721", "--head", "zz"]);
         invalid(&["wait", "--all", "--any"]);
         invalid(&["wait", "--any", "--fail-fast"]);
         for timeout in ["1", "4h", "14400"] {
