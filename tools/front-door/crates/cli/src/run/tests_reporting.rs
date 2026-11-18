@@ -203,16 +203,13 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
             if result == "{" {
                 // Lost framing is missing evidence, never a provider failure.
                 assert_eq!(decoded.outcome, run::Outcome::Unsettled);
-                let expected = if suffix.is_empty() {
-                    "provider protocol frame ended before the record was complete"
-                } else {
-                    reason.as_str()
-                };
+                // An unterminated final frame is still an undecodable frame: both
+                // spellings name the same capture line.
                 assert!(
                     diagnostic.contains("evidence defect at stdout.log line 2"),
                     "{diagnostic}"
                 );
-                assert!(diagnostic.contains(expected), "{diagnostic}");
+                assert!(diagnostic.contains(reason.as_str()), "{diagnostic}");
             } else {
                 // A complete failure frame settles Failed with the provider's message.
                 assert_eq!(decoded.outcome, run::Outcome::Failed);
