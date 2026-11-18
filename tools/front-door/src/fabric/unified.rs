@@ -27,6 +27,49 @@ pub(crate) fn resolve(
     })
 }
 
+/// The newest `NAME-k` graph when a changed-input launch superseded `NAME`.
+/// Only the suffix family the naming rule defines (`k >= 2`) counts. The old
+/// graph stays addressable; callers warn and name the newer handle as the next
+/// step rather than following it silently.
+pub(crate) fn superseding_handle(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    base: &str,
+) -> Option<String> {
+    let ids = FileJournal::reserved_graph_ids(root, project).ok()?;
+    let mut newest: Option<(u64, String)> = None;
+    for id in ids {
+        let Some(digits) = id
+            .strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix('-'))
+        else {
+            continue;
+        };
+        if digits.is_empty()
+            || digits.starts_with('0')
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(k) = digits.parse::<u64>() else {
+            continue;
+        };
+        if k >= 2 && newest.as_ref().is_none_or(|(best, _)| k > *best) {
+            newest = Some((k, id));
+        }
+    }
+    newest.map(|(_, id)| id)
+}
+
+/// The warning and `next:` lines a superseded name adds to a human view. The
+/// target is still read as asked; only the pointer moves to the newer handle.
+pub(crate) fn superseded_notice(name: &str, newest: &str, verb: &str) -> String {
+    crate::event_delivery::warn(&format!(
+        "graph `{name}` was superseded by `{newest}` (different input); reading the older graph"
+    ));
+    format!("next: provenant {verb} {newest}\n")
+}
+
 impl Factory {
     /// The graph work a `NAME[/NODE[#N]]` selector names, or `None` when it
     /// names nothing, including a numbered attempt that has not launched.
@@ -1408,6 +1451,16 @@ pub(crate) fn unified_graph_command(
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
+            if matches!(command, GraphCommand::Status)
+                && let Some(name) = graph
+                && let Some(newest) = superseding_handle(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    name,
+                )
+            {
+                human.push_str(&superseded_notice(name, &newest, "status"));
+            }
             data["digests"] = json!(super::graph_status::node_digests(rows));
             if matches!(command, GraphCommand::Stop { .. })
                 && data["cancellation_requested"]["pending_acknowledgement"] == true

@@ -230,19 +230,21 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     };
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
+    // A changed input under a known name starts a suffixed graph. Say so in
+    // the first line rather than burying it after the headline; the announce
+    // callback prints the same line at launch time so it leads in both paths.
+    let notice = data["named"]["superseded"]
+        .as_str()
+        .filter(|_| data["named"]["graph"].is_string())
+        .map(|superseded| format!("started {graph} ({superseded} exists with a different input)\n"))
+        .unwrap_or_default();
     let mut lanes = String::new();
-    if let (Some(taken), true) = (
-        data["named"]["taken"].as_str(),
-        data["named"]["graph"].is_string(),
-    ) {
-        lanes += &format!("{taken} exists with different input; started {graph}\n");
-    }
     lanes += &refusal_lines(&data["checkpoint"]);
     if announced {
         format!("{lanes}next: {next}\n")
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        format!("{headline}\n{lanes}next: {next}\n")
+        format!("{notice}{headline}\n{lanes}next: {next}\n")
     }
 }
 
@@ -299,9 +301,21 @@ fn invoke(
         let announce =
             |document: &provenant_fabric_runtime::graph::GraphDocument,
              checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint| {
-                let document = serde_json::to_value(document).unwrap_or_default();
-                let checkpoint = serde_json::to_value(checkpoint).unwrap_or_default();
-                let line = run_headline(&checkpoint, "pending", Some(&document), &input) + "\n";
+                let requested = input["name"]
+                    .as_str()
+                    .or_else(|| input["document"]["graph_id"].as_str())
+                    .or_else(|| input["graph_id"].as_str());
+                let line = match requested.filter(|name| *name != checkpoint.graph_id) {
+                    Some(superseded) => format!(
+                        "started {} ({} exists with a different input)\n",
+                        checkpoint.graph_id, superseded
+                    ),
+                    None => {
+                        let document = serde_json::to_value(document).unwrap_or_default();
+                        let checkpoint = serde_json::to_value(checkpoint).unwrap_or_default();
+                        run_headline(&checkpoint, "pending", Some(&document), &input) + "\n"
+                    }
+                };
                 let mut stdout = std::io::stdout().lock();
                 if stdout
                     .write_all(line.as_bytes())
@@ -1178,12 +1192,23 @@ mod tests {
 
     #[test]
     fn a_suffixed_name_is_announced_and_a_replay_is_not_a_failure() {
-        let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "taken":"fix"},
+        let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "superseded":"fix"},
             "checkpoint":{"graph_id":"fix-2", "nodes":[]}});
         let human = run_human(&data, &json!({}), false);
         assert!(
-            human.contains("fix exists with different input; started fix-2"),
+            human.starts_with("started fix-2 (fix exists with a different input)\n"),
             "{human}"
+        );
+        // An already-announced launch prints the next step only; the notice
+        // was the first line written at launch time and is never duplicated.
+        let announced = run_human(&data, &json!({}), true);
+        assert!(
+            !announced.contains("exists with a different input"),
+            "{announced}"
+        );
+        assert!(
+            announced.starts_with("next: provenant wait fix-2\n"),
+            "{announced}"
         );
         let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
         assert_eq!(response_outcome("run", &replay), Outcome::Ok);

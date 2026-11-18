@@ -1132,6 +1132,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         .map_err(|error| format!("cannot resolve project event logs: {error}"))
     };
     let local_host = project.as_ref().ok().map(|(_, host)| *host);
+    let project_id = project.as_ref().ok().map(|(id, _)| *id);
     let project_error = project.as_ref().err().cloned();
     let mut pending_index_error = None;
     let mut observation_path_error = None;
@@ -1850,6 +1851,19 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     // line of default human output.
     if globals.full && !graph_indices.is_empty() {
         human.push_str(&format!("local observation: {observation}\n"));
+    }
+    if let Some(project_id) = project_id {
+        for target in &command.targets {
+            if let Some(newest) =
+                crate::fabric::superseding_handle(&resolved.roots.state, project_id, &target.name)
+            {
+                human.push_str(&crate::fabric::superseded_notice(
+                    &target.name,
+                    &newest,
+                    "wait",
+                ));
+            }
+        }
     }
     human.push_str(&final_line(&sources, &latest, done));
     // Compact output keeps an owner summary, not a head-only truncation, so

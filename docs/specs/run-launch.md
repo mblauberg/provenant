@@ -52,6 +52,25 @@ Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.
 - Why: continuation must preserve both history and exclusive custody.
 
+## Graph naming
+
+A named launch treats its name as a handle for the launch input. The same
+input replays the existing graph and starts nothing. Changed input under that
+name starts the next free `NAME-k` (`NAME-2`, `NAME-3`, ...) and leaves earlier
+graphs alone; an unnamed launch takes the next `BASE-k` from 1 and never
+replays. A name is one lowercase letter, then lowercase letters, digits and
+single hyphens, ending in a letter or digit. A grammar refusal suggests the
+normalised form, so `--name Foo-` is refused with `try \`foo\``.
+- Why: a reused name must not silently attach a different brief to old work.
+
+A suffixed launch says so in its first output line:
+`started NAME-2 (NAME exists with a different input)`. The `--json` receipt
+carries the prior handle as `named.superseded` alongside `named.graph`.
+`wait NAME` and `status NAME` keep reading the older graph, but warn that it
+was superseded and print the newer handle as the next step
+(`next: provenant wait NAME-2`). They never redirect silently.
+- Why: the operator must see the new handle without losing access to the old graph.
+
 ## Policy and confinement
 
 Launch policy defaults to refusal only at credentials, Git isolation, data

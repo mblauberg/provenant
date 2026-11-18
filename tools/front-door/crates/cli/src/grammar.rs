@@ -1198,7 +1198,22 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
 
 #[cfg(test)]
 mod target_tests {
-    use super::since;
+    use super::{graph_name, since};
+
+    #[test]
+    fn graph_name_refusal_suggests_the_normalised_name() {
+        for (bad, suggestion) in [
+            ("Foo-", "foo"),
+            ("Foo", "foo"),
+            ("foo--bar", "foo-bar"),
+            ("UPPER", "upper"),
+        ] {
+            let error = graph_name(bad).expect_err(bad);
+            assert!(error.contains(suggestion), "{bad}: {error}");
+            assert!(error.contains("try `"), "{bad}: {error}");
+        }
+        assert_eq!(graph_name("foo-bar-2").unwrap(), "foo-bar-2");
+    }
 
     #[test]
     fn since_accepts_spans() {

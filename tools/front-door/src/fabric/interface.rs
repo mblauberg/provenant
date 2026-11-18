@@ -2265,7 +2265,7 @@ impl Factory {
         }
         result["warnings"] = json!(warnings);
         result["named"] = json!({
-            "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
+            "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
         Ok(result)
     }
