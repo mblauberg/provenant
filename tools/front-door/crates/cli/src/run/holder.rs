@@ -1013,12 +1013,10 @@ mod tests {
             decoded.terminal_cause,
             Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
         );
-        assert_eq!(
-            decoded.reason.as_deref(),
-            Some(
-                "provider capture evidence defect at stdout.log line 2; replay incomplete: provider protocol is malformed"
-            )
-        );
+        assert!(decoded.reason.as_deref().is_some_and(|reason| {
+            reason.contains("stdout.log line 2")
+                && reason.contains("provider protocol frame on line 2 is malformed")
+        }));
 
         let valid_tail = make_frames()?;
         assert_eq!(

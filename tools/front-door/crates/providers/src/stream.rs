@@ -546,7 +546,10 @@ impl StreamState {
             self.terminal = true;
             final_events.push(ProviderEvent::Text(text));
         }
-        let mut framing_loss = self.malformed;
+        // A malformed provider result can carry a useful typed diagnostic
+        // without losing the JSONL boundary. Only line framing failures mean
+        // the retained capture cannot support a terminal decision.
+        let mut framing_loss = self.malformed_line.is_some();
         if !self.pending.is_empty() && !self.malformed {
             let line = std::mem::take(&mut self.pending);
             match self.line(&line) {
@@ -557,6 +560,7 @@ impl StreamState {
                         error,
                         ProviderError::Malformed | ProviderError::IncompleteFrame
                     );
+                    let diagnostic = error.to_string();
                     let error = match error {
                         ProviderError::IncompleteFrame | ProviderError::Malformed => {
                             let line = self.line_count + 1;
@@ -565,7 +569,7 @@ impl StreamState {
                         }
                         other => other,
                     };
-                    protocol_error = Some(error.to_string());
+                    protocol_error = Some(diagnostic);
                 }
             }
         }

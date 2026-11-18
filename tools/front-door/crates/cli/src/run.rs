@@ -955,6 +955,9 @@ impl Registry<'_> {
                     decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
                     return Ok(decoded);
                 }
+                Err(error @ provenant_providers::ProviderError::MalformedFrame { line }) => {
+                    return Ok(capture_defect(line, &error.to_string()));
+                }
                 Err(
                     error @ (provenant_providers::ProviderError::Malformed
                     | provenant_providers::ProviderError::IncompleteFrame),
