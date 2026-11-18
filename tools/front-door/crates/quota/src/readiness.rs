@@ -106,6 +106,20 @@ impl RouteReadiness {
                 .reason
                 .is_some_and(ReadinessReason::is_authentication_failure)
     }
+
+    // A provider without a login observation must eventually be retried. An
+    // identity mismatch still needs positive identity evidence to clear it.
+    fn holds_after_expiry(&self) -> bool {
+        self.authentication_failure()
+            && (self.reason == Some(ReadinessReason::AccountMismatch)
+                || !provenant_records::AdapterSpec::get(&self.scope.adapter).is_some_and(|spec| {
+                    matches!(
+                        spec.login_observation,
+                        provenant_records::LoginObservation::ExecutableOnly
+                            | provenant_records::LoginObservation::None
+                    )
+                }))
+    }
 }
 
 /// Host identity under which this machine publishes its own observations.
@@ -325,7 +339,7 @@ impl ReadinessFile {
             } else {
                 r.expires_unix_seconds
             };
-            if now >= expires && !r.authentication_failure() {
+            if now >= expires && !r.holds_after_expiry() {
                 return ReadinessRead {
                     observed_scope: Some(r.scope.clone()),
                     observed_unix_seconds: Some(r.observed_unix_seconds),
@@ -395,7 +409,7 @@ impl ReadinessFile {
         let previous = self.records.clone();
         let now = admission.now_unix_seconds;
         self.records.retain(|r| {
-            (r.expires_unix_seconds > now || r.authentication_failure())
+            (r.expires_unix_seconds > now || r.holds_after_expiry())
                 && !(r.scope.host == host
                     && r.state == ReadinessState::Unavailable
                     && r.reason == Some(ReadinessReason::ProviderRefusal))
@@ -501,6 +515,7 @@ impl ReadinessFile {
                 .successful_login_observed_at()
                 .is_some_and(|at| at > record.observed_unix_seconds && at <= now);
             record.authentication_failure()
+                && (record.expires_unix_seconds > now || record.holds_after_expiry())
                 && (now <= record.observed_unix_seconds
                     || (!reason.is_some_and(ReadinessReason::is_authentication_failure)
                         && !newer_login))
@@ -508,7 +523,7 @@ impl ReadinessFile {
             return Ok(());
         }
         self.records.retain(|record| {
-            (record.expires_unix_seconds > now || record.authentication_failure())
+            (record.expires_unix_seconds > now || record.holds_after_expiry())
                 && !(record.scope.host == host
                     && record.scope.adapter == account.account.adapter
                     && record.scope.account_key == account.account.account_key
@@ -663,6 +678,45 @@ mod tests {
             file.get(&remote, 200).reason,
             Some(ReadinessReason::NotProbed)
         );
+    }
+
+    #[test]
+    fn unobservable_login_failures_expire_but_identity_mismatch_does_not() {
+        let account = crate::AccountRecord::empty(crate::AccountScope {
+            extra: Default::default(),
+            adapter: "opencode".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        });
+        let scope = ReadinessScope {
+            extra: Default::default(),
+            host: LOCAL_HOST.into(),
+            adapter: "opencode".into(),
+            account_key: "key".into(),
+            route: "opencode/model".into(),
+        };
+        for reason in [
+            ReadinessReason::SignedOut,
+            ReadinessReason::LoginExpired,
+            ReadinessReason::AccountMismatch,
+        ] {
+            let mut file = ReadinessFile::default();
+            file.sync_probe_result(&account, LOCAL_HOST, 100, 60, Some(reason))
+                .unwrap();
+            file.sync_probe_result(&account, LOCAL_HOST, 120, 60, None)
+                .unwrap();
+            assert_eq!(file.get(&scope, 159).reason, Some(reason));
+            if reason == ReadinessReason::AccountMismatch {
+                file.sync_probe_result(&account, LOCAL_HOST, 161, 60, None)
+                    .unwrap();
+                assert_eq!(file.get(&scope, 161).reason, Some(reason));
+            } else {
+                assert_ne!(file.get(&scope, 160).state, ReadinessState::Unavailable);
+                file.sync_probe_result(&account, LOCAL_HOST, 161, 60, None)
+                    .unwrap();
+                assert_ne!(file.get(&scope, 161).state, ReadinessState::Unavailable);
+            }
+        }
     }
 
     #[test]

@@ -912,6 +912,49 @@ fn missing_fallback_evidence_waits_briefly_then_refuses() {
 
 #[test]
 // Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+fn preparation_refusal_without_evidence_fails_immediately_with_its_cause() {
+    let mut task = node("node", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
+    let cause = provenant_records::run::TerminalCause::AccessPolicyRefused;
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(cause))]),
+        omit_fallback_evidence: true,
+        now: Some(at(0)),
+        ..Default::default()
+    };
+    let result = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let progress = &result.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Failed);
+    assert!(progress.fallback_evidence_retry.is_none());
+    assert!(progress.advance_error.as_deref().unwrap().contains(cause.detail()));
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+fn preparation_refusal_with_pending_adapter_evidence_waits() {
+    let mut task = node("node", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::AccessPolicyRefused))]),
+        fallback_evidence: [("host/attempt".into(), provenant_records::run::PreparationFailure::AdapterUnavailable)].into(),
+        fallback_custody_pending: true,
+        now: Some(at(0)),
+        ..Default::default()
+    };
+    let result = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let progress = &result.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Running);
+    assert!(progress.fallback_evidence_retry.is_some());
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
 fn fallback_evidence_reobservation_is_bounded_across_live_and_resumed_attempts() {
     for restart in [false, true] {
         for appears in [false, true] {

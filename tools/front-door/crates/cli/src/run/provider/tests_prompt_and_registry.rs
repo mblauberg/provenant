@@ -1193,7 +1193,7 @@ fn requester_path_uses_registered_primary_with_external_git_dir()
 }
 
 #[test]
-fn opencode_stale_auth_prepares_with_an_unverified_warning()
+fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
@@ -1206,7 +1206,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         let argv = [
             std::env::current_exe()?.into_os_string(),
             "--exact".into(),
-            "run::provider::tests::opencode_stale_auth_prepares_with_an_unverified_warning".into(),
+            "run::provider::tests::opencode_signout_expires_then_prepares_with_an_unverified_warning".into(),
             "--nocapture".into(),
         ];
         let mut env: Vec<_> = std::env::vars_os()
@@ -1236,6 +1236,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         let out = SystemExecutor::new(1)?.execute(options)?;
         assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
         assert!(!out.timed_out, "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout.bytes).contains("1 passed"), "{out:?}");
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -1273,27 +1274,16 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let now = provenant_os::clock::SystemClock::new().unix_seconds();
-    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope { extra: Default::default(),
+    let account = provenant_quota::AccountScope {
+        extra: Default::default(),
         adapter: "opencode".into(),
         account_key: "go".into(),
         label: "go".into(),
-    });
-    let mut readiness = provenant_quota::ReadinessFile::default();
-    readiness.sync_probe_result(
-        &account,
-        provenant_quota::LOCAL_HOST,
-        now - 301,
-        300,
-        Some(provenant_quota::ReadinessReason::SignedOut),
+    };
+    crate::quota::persist_preparation_login_failure(
+        &state, &account, provenant_quota::ReadinessReason::SignedOut, now,
     )?;
-    let readiness_dir = state.join("readiness/go");
-    std::fs::create_dir_all(&readiness_dir)?;
-    for dir in [state.join("readiness"), readiness_dir.clone()] {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let readiness_path = readiness_dir.join("opencode.json");
-    std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
-    std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
+    let readiness_path = state.join("readiness/go/opencode.json");
     let attempt_id = AttemptId::from_bytes([1; 16]);
     let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
@@ -1366,13 +1356,17 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         },
         None,
     );
-    let refused = prepare().err().ok_or("expired sign-out was accepted")?;
+    let refused = prepare().err().ok_or("fresh sign-out was accepted")?;
     assert!(matches!(
         refused,
         super::preparation::PrepareError::Candidates { skipped_routes, .. }
             if skipped_routes.iter().any(|route| route.cause == Some(provenant_records::RouteExclusionReason::AuthRequired))
     ));
-    std::fs::remove_file(readiness_path)?;
+    // Advance the persisted observation beyond its interval without deleting it.
+    let mut readiness: provenant_quota::ReadinessFile = serde_json::from_slice(&std::fs::read(&readiness_path)?)?;
+    readiness.records[0].observed_unix_seconds = now - 301;
+    readiness.records[0].expires_unix_seconds = now - 1;
+    std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
     let prepared = prepare()?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));

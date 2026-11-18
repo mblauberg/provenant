@@ -4361,7 +4361,7 @@ mod tests {
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let account = AccountScope {
             extra: Default::default(),
-            adapter: "opencode".into(),
+            adapter: "claude".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
@@ -4369,9 +4369,9 @@ mod tests {
         let scope = ReadinessScope {
             extra: Default::default(),
             host: LOCAL_HOST.into(),
-            adapter: "opencode".into(),
+            adapter: "claude".into(),
             account_key: "go".into(),
-            route: "opencode/another-model".into(),
+            route: "claude/another-model".into(),
         };
         for now in [101, 1000] {
             assert_eq!(

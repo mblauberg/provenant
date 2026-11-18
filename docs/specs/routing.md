@@ -188,10 +188,12 @@ A pool cannot draw a current login-required account, even when every other
 member is unavailable. A missing availability observation reaches preparation
 for its typed cause and cannot itself launch an account. An observed account
 with unknown identity follows the identity policy below.
-Account-wide sign-out and login-expiry failures remain unavailable after their
-observation interval, including across quota publication and independent dispatches.
-Only a strictly newer successful login observation or explicit sign-in clears them;
-a later timeout, failed command or executable-only probe cannot establish recovery.
+Account-wide sign-out and login-expiry failures for adapters with a login check
+remain unavailable after their observation interval. Only a strictly newer
+successful login observation or explicit sign-in clears them. For adapters
+without a login observation, including OpenCode, those failures expire after
+the observation interval: sign in and retry after it expires. An executable-only
+probe does not establish recovery. Identity mismatches still require identity evidence.
 Preparation publishes its first typed login failure through the quota/readiness
 owner, using the same account-scoped store as quota probes. A successful login
 reprobe publishes recovery through that owner too.
