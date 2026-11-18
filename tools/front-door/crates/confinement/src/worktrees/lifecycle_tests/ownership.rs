@@ -1205,16 +1205,19 @@ fn writer_worktrees_claim_concurrently_without_registry_exclusion() -> Result<()
                     };
                     barrier.wait();
                     // Deterministically overlap the claim with a same-slot
-                    // report probe. Release at the contention seam, not after
-                    // an elapsed sleep or a favourable scheduler interleaving.
+                    // report probe. Release only after the kernel lock has
+                    // contended and the bounded wait is about to pause.
                     let slot = local
                         .project_state
                         .open_verified_directory(&state_dir_name(tree.path()))?;
                     let observation =
                         provenant_supervisor::custody::writer_observation_guard(&slot)
                             .map_err(|_| WorktreeError::UnknownWriter)?;
-                    super::super::custody::CLAIM_OBSERVATION_WAIT_HOOK.with(|hook| {
-                        *hook.borrow_mut() = Some(Box::new(move || drop(observation)));
+                    let waited = std::rc::Rc::new(std::cell::Cell::new(false));
+                    let observed = waited.clone();
+                    provenant_os::fixture::on_existing_lock_wait(move || {
+                        observed.set(true);
+                        drop(observation);
                     });
                     let result = save_lane_owner_when_free(
                         &local,
@@ -1225,10 +1228,8 @@ fn writer_worktrees_claim_concurrently_without_registry_exclusion() -> Result<()
                         false,
                         &cancel(),
                     );
-                    let waited = super::super::custody::CLAIM_OBSERVATION_WAIT_HOOK
-                        .with(|hook| hook.borrow_mut().take().is_none());
                     assert!(
-                        waited,
+                        waited.get(),
                         "{} did not encounter the observation gate",
                         owner.branch
                     );

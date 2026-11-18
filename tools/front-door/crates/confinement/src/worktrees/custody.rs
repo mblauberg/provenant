@@ -1001,12 +1001,6 @@ fn retained_import(slot: &Directory) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    pub(super) static CLAIM_OBSERVATION_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 // A claim validates the published gate when it acquires it below. Looking at
 // it here would turn the observer we intend to queue behind into a refusal.
 pub(super) fn claim_writer_directory(
@@ -1026,25 +1020,19 @@ pub(super) fn claim_writer_guard(
     let directory = claim_writer_directory(context.project_state, path)?;
     let observation = match provenant_supervisor::custody::writer_observation_guard(&directory) {
         Ok(guard) => guard,
-        Err(provenant_supervisor::custody::CustodyError::Busy) => {
-            #[cfg(test)]
-            if let Some(hook) = CLAIM_OBSERVATION_WAIT_HOOK.with(|hook| hook.borrow_mut().take()) {
-                hook();
-            }
-            directory
-                .lock_existing(
-                    OsStr::new("writer-probe.lock"),
-                    LockMode::Exclusive,
-                    context.lock_budget,
-                    cancel,
-                    context.clock,
-                )
-                .map_err(|error| match error {
-                    FsError::LockTimeout { .. } => WorktreeError::LockBusy,
-                    FsError::Cancelled { .. } => WorktreeError::Cancelled,
-                    error => error.into(),
-                })?
-        }
+        Err(provenant_supervisor::custody::CustodyError::Busy) => directory
+            .lock_existing(
+                OsStr::new("writer-probe.lock"),
+                LockMode::Exclusive,
+                context.lock_budget,
+                cancel,
+                context.clock,
+            )
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
+                FsError::Cancelled { .. } => WorktreeError::Cancelled,
+                error => error.into(),
+            })?,
         Err(error) => return Err(custody_refusal(observation_occupancy(path, error))),
     };
     cache_writer_guard_under_gate(&directory, path, observation).map_err(custody_refusal)
