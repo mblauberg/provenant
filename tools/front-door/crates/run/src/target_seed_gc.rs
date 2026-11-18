@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use provenant_confinement::cache::TreeMeasureProgress;
 use provenant_core::SweepControl;
 use provenant_os::fs::{Directory, DirectoryPosition, FileKind, FsError, Metadata};
 use serde::{Deserialize, Serialize};
@@ -167,9 +168,11 @@ pub fn collect(
         )
     );
     if !measurement_phase_started {
-        if !matches!(phase, Some(Phase::Incomplete | Phase::IncompleteCandidate)) {
-            if let Some(_build_lock) = build_lock.as_ref() {
-                if let Some(cursor) = clean_root(
+        let staging_cursor =
+            if !matches!(phase, Some(Phase::Incomplete | Phase::IncompleteCandidate))
+                && build_lock.is_some()
+            {
+                clean_root(
                     &store,
                     &store_dir,
                     Phase::Staging,
@@ -181,11 +184,13 @@ pub fn collect(
                         matches!(saved.phase, Phase::Staging | Phase::StagingCandidate)
                     }),
                     is_stage,
-                )? {
-                    stop(&mut report, candidate_or_root(&store, &cursor), cursor);
-                    return Ok(report);
-                }
-            }
+                )?
+            } else {
+                None
+            };
+        if let Some(cursor) = staging_cursor {
+            stop(&mut report, candidate_or_root(&store, &cursor), cursor);
+            return Ok(report);
         }
         drop(build_lock);
         if let Some(cursor) = clean_root(
@@ -199,7 +204,7 @@ pub fn collect(
             cursor.as_ref().filter(|saved| {
                 matches!(saved.phase, Phase::Incomplete | Phase::IncompleteCandidate)
             }),
-            |root, name| is_incomplete(root, name),
+            is_incomplete,
         )? {
             stop(
                 &mut report,
@@ -216,7 +221,12 @@ pub fn collect(
         phase,
         Some(Phase::Select | Phase::CountNewer | Phase::CandidateTree | Phase::RemoveCandidate)
     ) {
-        cursor.expect("saved post-measure cursor")
+        cursor.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing seed GC cursor for post-measure phase",
+            )
+        })?
     } else {
         let measured = measure_generations(
             &generations_path,
@@ -232,7 +242,6 @@ pub fn collect(
         };
         cursor
     };
-    cursor.total = cursor.total.min(u64::MAX);
     evict_generations(
         &generations_path,
         &generations_dir,
@@ -547,10 +556,10 @@ fn measure_generations(
                 cursor.tree_detail.as_deref(),
                 &keep_going,
             ) {
-                Ok(progress) if progress.stats.is_some() => {
-                    cursor.total = cursor
-                        .total
-                        .saturating_add(progress.stats.unwrap().allocated_bytes);
+                Ok(TreeMeasureProgress {
+                    stats: Some(stats), ..
+                }) => {
+                    cursor.total = cursor.total.saturating_add(stats.allocated_bytes);
                     cursor.phase = Phase::Measure;
                     cursor.candidate = None;
                     cursor.tree_detail = None;
@@ -597,10 +606,10 @@ fn measure_generations(
             None,
             &keep_going,
         ) {
-            Ok(progress) if progress.stats.is_some() => {
-                cursor.total = cursor
-                    .total
-                    .saturating_add(progress.stats.unwrap().allocated_bytes);
+            Ok(TreeMeasureProgress {
+                stats: Some(stats), ..
+            }) => {
+                cursor.total = cursor.total.saturating_add(stats.allocated_bytes);
                 cursor.offset = offset_after;
             }
             Ok(progress) => {
@@ -626,6 +635,7 @@ fn measure_generations(
     Ok(Some(cursor))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evict_generations(
     generations_path: &Path,
     generations: &Directory,
@@ -637,48 +647,49 @@ fn evict_generations(
     mut cursor: Cursor,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        if cursor.phase == Phase::RemoveCandidate {
-            if let Some(id) = cursor.candidate.as_deref().and_then(decode_name) {
-                let path = generations_path.join(&id);
-                let mut freed = 0_u64;
-                let complete = if dry_run {
-                    true
-                } else {
-                    remove_tree(&path, control, &mut freed)?
-                };
-                report.bytes = report.bytes.saturating_add(freed);
-                if !complete {
-                    cursor.partial_bytes = cursor.partial_bytes.saturating_add(freed);
-                    cursor.root = DirectoryStamp::from(generations.metadata()?);
-                    stop(report, path, cursor);
-                    return Ok(());
-                }
-                report.removed.push(path);
-                cursor.total = cursor.total.saturating_sub(cursor.candidate_bytes);
-                cursor.last = cursor.candidate.take();
-                cursor.candidate_bytes = 0;
-                cursor.partial_bytes = 0;
-                cursor.project_key = None;
-                cursor.tree_detail = None;
-                cursor.phase = Phase::Select;
-                cursor.offset = DirectoryPosition::default();
-                cursor.best = None;
+        if let (Phase::RemoveCandidate, Some(id)) = (
+            cursor.phase,
+            cursor.candidate.as_deref().and_then(decode_name),
+        ) {
+            let path = generations_path.join(&id);
+            let mut freed = 0_u64;
+            let complete = if dry_run {
+                true
+            } else {
+                remove_tree(&path, control, &mut freed)?
+            };
+            report.bytes = report.bytes.saturating_add(freed);
+            if !complete {
+                cursor.partial_bytes = cursor.partial_bytes.saturating_add(freed);
                 cursor.root = DirectoryStamp::from(generations.metadata()?);
-                if cursor.resurvey_after_remove {
-                    let fresh_root = cursor.root.clone();
-                    restart_measurement(&mut cursor, fresh_root);
-                    let Some(measured) = measure_generations(
-                        generations_path,
-                        generations,
-                        control,
-                        report,
-                        Some(&cursor),
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    cursor = measured;
-                }
+                stop(report, path, cursor);
+                return Ok(());
+            }
+            report.removed.push(path);
+            cursor.total = cursor.total.saturating_sub(cursor.candidate_bytes);
+            cursor.last = cursor.candidate.take();
+            cursor.candidate_bytes = 0;
+            cursor.partial_bytes = 0;
+            cursor.project_key = None;
+            cursor.tree_detail = None;
+            cursor.phase = Phase::Select;
+            cursor.offset = DirectoryPosition::default();
+            cursor.best = None;
+            cursor.root = DirectoryStamp::from(generations.metadata()?);
+            if cursor.resurvey_after_remove {
+                let fresh_root = cursor.root.clone();
+                restart_measurement(&mut cursor, fresh_root);
+                let Some(measured) = measure_generations(
+                    generations_path,
+                    generations,
+                    control,
+                    report,
+                    Some(&cursor),
+                )?
+                else {
+                    return Ok(());
+                };
+                cursor = measured;
             }
         }
         if cursor.phase == Phase::CandidateTree {
@@ -704,8 +715,10 @@ fn evict_generations(
                 cursor.tree_detail.as_deref(),
                 &keep_going,
             ) {
-                Ok(progress) if progress.stats.is_some() => {
-                    cursor.candidate_bytes = progress.stats.unwrap().allocated_bytes;
+                Ok(TreeMeasureProgress {
+                    stats: Some(stats), ..
+                }) => {
+                    cursor.candidate_bytes = stats.allocated_bytes;
                     cursor.tree_detail = None;
                     if dry_run {
                         report.bytes = report.bytes.saturating_add(cursor.candidate_bytes);
@@ -898,7 +911,11 @@ fn remove_tree(path: &Path, control: &SweepControl<'_>, freed: &mut u64) -> io::
         if !control.should_continue() {
             return Ok(false);
         }
-        let next = stack.last_mut().expect("nonempty").entries.next();
+        let next = stack
+            .last_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty removal stack"))?
+            .entries
+            .next();
         match next {
             Some(entry) => {
                 let entry = entry?;
@@ -917,7 +934,9 @@ fn remove_tree(path: &Path, control: &SweepControl<'_>, freed: &mut u64) -> io::
                 }
             }
             None => {
-                let frame = stack.pop().expect("nonempty");
+                let frame = stack.pop().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "empty removal stack")
+                })?;
                 fs::remove_dir(&frame.path)?;
                 *freed = freed.saturating_add(frame.allocated);
             }
