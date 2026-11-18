@@ -195,6 +195,7 @@ fn land_explanation(
         ("gate.commands", "commands"),
         ("approval_sources", "approval"),
         ("approval_tier", "approval tier"),
+        ("approval_carry", "approval carry"),
         ("local_gate.mode", "local gate"),
         ("integration", "integration"),
         ("publish", "publication"),

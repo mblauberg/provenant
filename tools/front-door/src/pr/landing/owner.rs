@@ -536,6 +536,7 @@ impl Owner<'_> {
                 state: self.state,
                 approvals: Approvals::new(&settings.approval_sources, &reviews)
                     .governed(settings.approval_tier, &exempt, None)
+                    .with_carry(self.state, &settings.approval_carry)
                     .with_acceptances(&acceptances),
                 pins: &pins,
             },

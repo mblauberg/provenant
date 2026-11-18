@@ -218,7 +218,13 @@ incomplete required check evidence.
 ### Landing adds no merge authority
 
 Approval must cover the exact head and come from an authorised independent
-source or an explicit owner override. Graph landing uses the same policy.
+source or an explicit owner override. `domains.pr.land.approval_carry` defaults
+to `clean_merge` and `format`. A receipt from `pr sync` may carry approval over
+a clean merge of the PR base when the resulting tree equals Git's merge tree;
+any conflict resolution that changes the resulting tree is refused. Format carry
+is available only when the project has a configured formatter, and is accepted
+only when formatting both heads produces the same tree. Refusals name both
+heads and the changed paths. Graph landing uses the same policy.
 Approval evidence is the union of configured sources. A new passing independent
 review on the pinned head cannot invalidate an existing forge approval; loss of
 all current approvals still excludes the member. The publication lock fences
@@ -264,6 +270,11 @@ not proven merged; incomplete cleanup is reported.
 Approval sources default to Provenant review then forge and are overridable by project and tier; the first usable proof still covers the exact head.
 
 - Why: routine landing must not widen approval or delete unmerged work.
+
+`pr sync N [M ...]` merges each PR's base into its branch worktree and pushes
+the merge. A conflict is aborted, the worktree is left clean, and the output
+names conflicted paths plus a `run implement` command. `--repair` launches that
+implement lane automatically.
 
 ### Pull request bodies come from receipts
 

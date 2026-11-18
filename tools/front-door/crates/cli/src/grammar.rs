@@ -334,6 +334,14 @@ pub struct Review {
 }
 #[derive(Debug, Subcommand)]
 pub enum Pr {
+    /// Merge each pull request's base into its branch and push the result
+    Sync {
+        #[arg(required = true, catalog_u64_range = 1..)]
+        numbers: Vec<u64>,
+        /// Launch an implement lane to repair a merge conflict
+        #[arg(long)]
+        repair: bool,
+    },
     /// List retained local attempt contributions and missing peer coverage
     Contributions {
         #[arg(catalog_u64_range = 1..)]

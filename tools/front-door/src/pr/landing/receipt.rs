@@ -1,5 +1,108 @@
 use super::{LandingError, model::*};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalCarryReceipt {
+    pub repository: String,
+    pub number: u64,
+    pub approved_head: String,
+    pub current_head: String,
+    pub base_head: String,
+    pub kind: String,
+    #[serde(default)]
+    pub extra: provenant_records::ExtraFields,
+}
+
+fn carry_dir(state: &Path) -> PathBuf {
+    state.join("landing").join("approval-carry")
+}
+
+fn repository_key(repository: &str) -> String {
+    format!("{:x}", Sha256::digest(repository.as_bytes()))
+}
+
+pub fn write_approval_carry(
+    state: &Path,
+    receipt: &ApprovalCarryReceipt,
+) -> Result<(), LandingError> {
+    let name = format!(
+        "{}-{}-{}.json",
+        repository_key(&receipt.repository),
+        receipt.number,
+        component(&receipt.current_head)?
+    );
+    let bytes =
+        serde_json::to_vec_pretty(receipt).map_err(|e| failed("encode approval carry", e))?;
+    atomic_write(&carry_dir(state).join(name), &bytes)
+}
+
+pub fn read_approval_carry(
+    state: &Path,
+    repository: &str,
+    number: u64,
+    head: &str,
+) -> Result<Option<ApprovalCarryReceipt>, LandingError> {
+    let path = carry_dir(state).join(format!(
+        "{}-{number}-{}.json",
+        repository_key(repository),
+        component(head)?
+    ));
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(failed("read approval carry", error)),
+    };
+    let receipt: ApprovalCarryReceipt =
+        provenant_records::decode(file, provenant_records::Limits::default())
+            .map_err(|error| failed("decode approval carry", error))?;
+    if receipt.repository != repository || receipt.number != number || receipt.current_head != head
+    {
+        return Err(LandingError::Failed(
+            "approval carry identity mismatch".into(),
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+pub fn read_latest_approval_carry(
+    state: &Path,
+    repository: &str,
+    number: u64,
+) -> Result<Option<ApprovalCarryReceipt>, LandingError> {
+    let directory = carry_dir(state);
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(failed("list approval carries", error)),
+    };
+    let prefix = format!("{}-{number}-", repository_key(repository));
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let file = match std::fs::File::open(entry.path()) {
+            Ok(file) => file,
+            Err(error) => return Err(failed("read approval carry", error)),
+        };
+        let receipt: ApprovalCarryReceipt =
+            provenant_records::decode(file, provenant_records::Limits::default())
+                .map_err(|error| failed("decode approval carry", error))?;
+        if receipt.repository == repository && receipt.number == number {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            candidates.push((modified, receipt));
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, receipt)| receipt))
+}
 
 fn failed(context: &str, error: impl std::fmt::Display) -> LandingError {
     LandingError::Failed(format!("{context}: {error}"))

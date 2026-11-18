@@ -18,6 +18,7 @@ pub(crate) mod landing;
 pub(crate) mod observer;
 mod open;
 pub(crate) mod status;
+mod sync;
 mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -633,6 +634,7 @@ fn merge_with(
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
     let numbers = match command {
+        Pr::Sync { numbers, repair } => return sync::run(numbers, repair, globals),
         Pr::Watch { numbers } => numbers,
         Pr::Open(command) => return open::run(*command, globals),
         Pr::Status { numbers } => return status::run(numbers, globals),
