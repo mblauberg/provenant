@@ -4,14 +4,15 @@ use crate::permissions::{PermissionError, validate_absolute};
 use crate::worktrees::Occupancy;
 use provenant_config::RetentionIssue;
 use provenant_os::fs::{
-    Directory, FileKind, ForeignLock, FsError, LockGuard, LockMode, PayloadTree,
+    Directory, DirectoryPosition, Entries, FileKind, ForeignLock, FsError, LockGuard, LockMode,
+    Metadata, PayloadTree,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -23,7 +24,10 @@ pub(crate) const CARGO_CACHE_OWNER_VERSION: &[u8] = match CARGO_CACHE_OWNER_PREF
     None => CARGO_CACHE_OWNER_PREFIX,
 };
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
-const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_TREE_MEASURE_ENTRIES: usize = 4096;
+const MAX_TREE_CURSOR_BYTES: usize = 14 * 1024;
+const MAX_CACHE_CURSOR_BYTES: usize = 14 * 1024;
+const CACHE_DELETE_BATCH_ENTRIES: usize = 64;
 
 /// Why a lane cache was removed, would be removed or was kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -96,6 +100,12 @@ pub struct CacheGcReport {
     /// Dry-run free space predictions include estimated reclaimable bytes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub free_bytes_estimated: bool,
+    /// Candidate path at which this sweep stopped and can resume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<PathBuf>,
+    /// Owner-specific continuation for the interrupted candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
 }
 
 /// A failed sweep still reports completed removals and bytes already freed.
@@ -107,37 +117,356 @@ pub struct CacheGcError {
     pub source: Box<PermissionError>,
 }
 
-/// One full allocated-tree walk for preview and apply. Neither follows links.
-/// APFS clones and hard links can share physical blocks: allocated bytes are an
-/// observation, not a promise about the change in volume free space.
-struct MeasureBudget {
-    remaining: usize,
-    started: Option<std::time::Instant>,
-    limited: bool,
+/// Controls one resumable lane-cache sweep. A missing callback permits an
+/// unbounded one-off operation; the host GC supplies its expiring deadline.
+pub struct CacheGcScan<'a> {
+    pub start_at: Option<&'a Path>,
+    pub detail: Option<&'a str>,
+    pub keep_going: Option<&'a dyn Fn() -> bool>,
 }
-impl MeasureBudget {
-    fn new(preview: bool) -> Self {
+
+impl Default for CacheGcScan<'_> {
+    fn default() -> Self {
         Self {
-            remaining: if preview { 4096 } else { usize::MAX },
-            started: None,
-            limited: false,
+            start_at: None,
+            detail: None,
+            keep_going: None,
         }
-    }
-    fn exhausted(&mut self) -> bool {
-        if self.remaining == 0
-            || self
-                .started
-                .is_some_and(|started| started.elapsed() >= std::time::Duration::from_secs(1))
-        {
-            self.limited = true;
-        }
-        self.limited
     }
 }
 
+impl CacheGcScan<'_> {
+    fn permits(&self) -> bool {
+        self.keep_going.is_none_or(|keep_going| keep_going())
+    }
+}
+
+/// Allocated bytes and newest modification time for a fully measured tree.
+/// Both remain observations, not a promise about physical volume reclamation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeStats {
+    pub allocated_bytes: u64,
+    pub newest_modified_ns: i128,
+}
+
+/// Result of a bounded no-follow tree measurement. Partial statistics are
+/// deliberately omitted so they cannot be mistaken for a complete survey.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreeMeasureProgress {
+    pub stats: Option<TreeStats>,
+    pub interrupted_at: Option<PathBuf>,
+    pub continuation: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TreeMeasureCursor {
+    stats: TreeStats,
+    frames: Vec<TreeMeasureFrameCursor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TreeMeasureFrameCursor {
+    /// `None` is the supplied root; other names are hex-encoded OS bytes.
+    name: Option<String>,
+    cookie: DirectoryPosition,
+    metadata: TreeMeasureMetadata,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum CacheGcCursor {
+    Root {
+        metadata: TreeMeasureMetadata,
+        cookie: DirectoryPosition,
+    },
+    RootSearch {
+        metadata: TreeMeasureMetadata,
+        cookie: DirectoryPosition,
+        target: String,
+    },
+    Candidate {
+        root_metadata: TreeMeasureMetadata,
+        cookie: DirectoryPosition,
+        current: String,
+        next: Option<String>,
+        measure: Option<String>,
+    },
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct TreeMeasureMetadata {
+    device: u64,
+    inode: u64,
+    links: u64,
+    size: u64,
+    modified_ns: i128,
+    changed_ns: i128,
+    uid: u32,
+    mode: u32,
+}
+
+impl From<&Metadata> for TreeMeasureMetadata {
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.device,
+            inode: metadata.inode,
+            links: metadata.links,
+            size: metadata.size,
+            modified_ns: metadata.modified_ns,
+            changed_ns: metadata.changed_ns,
+            uid: metadata.uid,
+            mode: metadata.mode,
+        }
+    }
+}
+
+impl TreeMeasureMetadata {
+    fn matches(self, metadata: &Metadata) -> bool {
+        metadata.kind == FileKind::Directory
+            && self.device == metadata.device
+            && self.inode == metadata.inode
+            && self.links == metadata.links
+            && self.size == metadata.size
+            && self.modified_ns == metadata.modified_ns
+            && self.changed_ns == metadata.changed_ns
+            && self.uid == metadata.uid
+            && self.mode == metadata.mode
+    }
+}
+
+struct TreeMeasureFrame {
+    name: Option<OsString>,
+    path: PathBuf,
+    directory: Directory,
+    entries: Entries,
+    metadata: TreeMeasureMetadata,
+}
+
+/// Measure an allocated tree without following links. A pass stops after 4,096
+/// entries, one second, or the caller's deadline. Its opaque cursor resumes
+/// only while every open directory frame retains the same identity and content
+/// metadata. A stale cursor restarts at the supplied root.
+pub fn measure_tree_with_progress(
+    directory: &Directory,
+    display_root: &Path,
+    detail: Option<&str>,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<TreeMeasureProgress, PermissionError> {
+    let root_metadata = directory
+        .metadata()
+        .map_err(cache_fs_error("stat measured tree", display_root))?;
+    if root_metadata.kind != FileKind::Directory {
+        return Err(PermissionError::AnchorMismatch);
+    }
+
+    let resumed = detail
+        .filter(|detail| detail.len() <= MAX_TREE_CURSOR_BYTES)
+        .and_then(|detail| serde_json::from_str::<TreeMeasureCursor>(detail).ok())
+        .filter(|cursor| {
+            !cursor.frames.is_empty()
+                && cursor.frames.len() <= MAX_CACHE_SWEEP_DEPTH
+                && cursor.frames[0].name.is_none()
+                && cursor.frames[0].metadata.matches(&root_metadata)
+        });
+
+    let (mut stats, mut frames) = if let Some(cursor) = resumed {
+        match restore_tree_measure_frames(directory, display_root, &cursor.frames) {
+            Some(frames) => (cursor.stats, frames),
+            None => fresh_tree_measure(directory, display_root, root_metadata)?,
+        }
+    } else {
+        fresh_tree_measure(directory, display_root, root_metadata)?
+    };
+
+    let started = std::time::Instant::now();
+    let mut visited = 0_usize;
+    while let Some(frame) = frames.last_mut() {
+        if visited >= MAX_TREE_MEASURE_ENTRIES
+            || started.elapsed() >= std::time::Duration::from_secs(1)
+            || !keep_going()
+        {
+            let cursor = tree_measure_cursor(&stats, &mut frames)?;
+            let continuation = serde_json::to_string(&cursor).ok();
+            return Ok(TreeMeasureProgress {
+                stats: None,
+                interrupted_at: Some(display_root.to_owned()),
+                continuation: continuation.filter(|value| value.len() <= MAX_TREE_CURSOR_BYTES),
+            });
+        }
+
+        match frame.entries.next() {
+            Some(Ok(name)) => {
+                let path = frame.path.join(&name);
+                let metadata = frame
+                    .directory
+                    .metadata_at(&name, false)
+                    .map_err(cache_fs_error("stat measured entry", &path))?;
+                stats.allocated_bytes = stats.allocated_bytes.saturating_add(metadata.allocated);
+                stats.newest_modified_ns = stats.newest_modified_ns.max(metadata.modified_ns);
+                visited += 1;
+                if metadata.kind == FileKind::Directory {
+                    if frames.len() >= MAX_CACHE_SWEEP_DEPTH {
+                        return Err(PermissionError::CacheSweepDepth);
+                    }
+                    let child = frame
+                        .directory
+                        .open_verified_directory(&name)
+                        .map_err(cache_fs_error("open measured directory", &path))?;
+                    let child_metadata = child
+                        .metadata()
+                        .map_err(cache_fs_error("stat measured directory", &path))?;
+                    if !metadata.unchanged(&child_metadata) {
+                        return Err(PermissionError::AnchorMismatch);
+                    }
+                    let mut entries = child
+                        .entries()
+                        .map_err(cache_fs_error("opendir measured directory", &path))?;
+                    let _ = entries
+                        .position()
+                        .map_err(cache_fs_error("position measured directory", &path))?;
+                    frames.push(TreeMeasureFrame {
+                        name: Some(name),
+                        path,
+                        directory: child,
+                        entries,
+                        metadata: TreeMeasureMetadata::from(&child_metadata),
+                    });
+                }
+            }
+            Some(Err(error)) => {
+                return Err(cache_fs_error("readdir measured tree", &frame.path)(error));
+            }
+            None => {
+                frames.pop();
+            }
+        }
+    }
+
+    Ok(TreeMeasureProgress {
+        stats: Some(stats),
+        ..TreeMeasureProgress::default()
+    })
+}
+
+fn fresh_tree_measure(
+    directory: &Directory,
+    display_root: &Path,
+    metadata: Metadata,
+) -> Result<(TreeStats, Vec<TreeMeasureFrame>), PermissionError> {
+    let mut entries = directory
+        .entries()
+        .map_err(cache_fs_error("opendir measured tree", display_root))?;
+    let _ = entries
+        .position()
+        .map_err(cache_fs_error("position measured tree", display_root))?;
+    Ok((
+        TreeStats {
+            allocated_bytes: metadata.allocated,
+            newest_modified_ns: metadata.modified_ns,
+        },
+        vec![TreeMeasureFrame {
+            name: None,
+            path: display_root.to_owned(),
+            directory: directory
+                .try_clone()
+                .map_err(cache_fs_error("duplicate measured tree", display_root))?,
+            entries,
+            metadata: TreeMeasureMetadata::from(&metadata),
+        }],
+    ))
+}
+
+fn restore_tree_measure_frames(
+    directory: &Directory,
+    display_root: &Path,
+    cursors: &[TreeMeasureFrameCursor],
+) -> Option<Vec<TreeMeasureFrame>> {
+    let root_metadata = directory.metadata().ok()?;
+    if !cursors[0].metadata.matches(&root_metadata) {
+        return None;
+    }
+    let mut frames = Vec::with_capacity(cursors.len());
+    let mut current = directory.try_clone().ok()?;
+    let mut path = display_root.to_owned();
+    for (index, cursor) in cursors.iter().enumerate() {
+        if index > 0 {
+            let name = decode_tree_name(cursor.name.as_deref()?)?;
+            path.push(&name);
+            current = current.open_verified_directory(&name).ok()?;
+        }
+        let metadata = current.metadata().ok()?;
+        if !cursor.metadata.matches(&metadata) {
+            return None;
+        }
+        let mut entries = current.entries().ok()?;
+        entries.seek(cursor.cookie).ok()?;
+        frames.push(TreeMeasureFrame {
+            name: cursor.name.as_deref().and_then(decode_tree_name),
+            path: path.clone(),
+            directory: current.try_clone().ok()?,
+            entries,
+            metadata: cursor.metadata,
+        });
+    }
+    let _ = display_root;
+    Some(frames)
+}
+
+fn tree_measure_cursor(
+    stats: &TreeStats,
+    frames: &mut [TreeMeasureFrame],
+) -> Result<TreeMeasureCursor, PermissionError> {
+    let mut cursors = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let cookie = frame
+            .entries
+            .position()
+            .map_err(cache_fs_error("position measured tree", &frame.path))?;
+        cursors.push(TreeMeasureFrameCursor {
+            name: frame.name.as_deref().map(encode_tree_name),
+            cookie,
+            metadata: frame.metadata,
+        });
+    }
+    Ok(TreeMeasureCursor {
+        stats: *stats,
+        frames: cursors,
+    })
+}
+
+fn encode_tree_name(name: &OsStr) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(name.as_bytes().len() * 2);
+    for byte in name.as_bytes() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_tree_name(encoded: &str) -> Option<OsString> {
+    if encoded.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        bytes.push(digit(pair[0])?.saturating_mul(16) + digit(pair[1])?);
+    }
+    Some(OsString::from_vec(bytes))
+}
+
 /// Remove marked orphan caches and retry detached remnants from earlier sweeps.
-pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, CacheGcError> {
-    gc_worktree_cargo_caches(home, &CacheGcPolicy::default()).map(|report| report.removed.len())
+pub fn prune_orphaned_worktree_cargo_caches(
+    home: &Path,
+    scan: &CacheGcScan<'_>,
+) -> Result<usize, CacheGcError> {
+    gc_worktree_cargo_caches(home, &CacheGcPolicy::default(), scan)
+        .map(|report| report.removed.len())
 }
 
 /// Remove only the cache derived from a worktree before its removal. The caller
@@ -162,16 +491,30 @@ pub(crate) fn prune_worktree_cargo_cache(
         return Ok(0);
     };
     let mut report = CacheGcReport::default();
-    prune_worktree_cache(
-        &root,
-        &cache_root,
-        name,
-        &CacheGcPolicy::default(),
-        &mut report,
-        &mut |path| Err(missing_custody(path)),
-        false,
-        &mut MeasureBudget::new(false),
-    )?;
+    let mut detail = None;
+    loop {
+        let scan = CacheGcScan {
+            start_at: None,
+            detail: detail.as_deref(),
+            keep_going: None,
+        };
+        prune_worktree_cache(
+            &root,
+            &cache_root,
+            name,
+            &CacheGcPolicy::default(),
+            &mut report,
+            &mut |path| Err(missing_custody(path)),
+            false,
+            &scan,
+            detail.as_deref(),
+        )?;
+        if report.interrupted_at.is_none() {
+            break;
+        }
+        detail = report.continuation.take();
+        report.interrupted_at = None;
+    }
     Ok(report.bytes_freed)
 }
 
@@ -205,10 +548,13 @@ pub(crate) fn preview_worktree_cargo_cache(
     if owner.path != worktree.path() || owner.identity != (identity.device, identity.inode) {
         return Err(PermissionError::AnchorMismatch);
     }
-    let (bytes, _) = measure_cache(&directory, &path, 0, &mut MeasureBudget::new(true))?;
+    let measured = measure_tree_with_progress(&directory, &path, None, &|| true)?;
+    let Some(stats) = measured.stats else {
+        return Ok(None);
+    };
     Ok(Some(CacheGcEntry {
         path,
-        bytes,
+        bytes: stats.allocated_bytes,
         reason: CacheGcReason::Orphaned,
     }))
 }
@@ -221,8 +567,14 @@ pub(crate) fn preview_worktree_cargo_cache(
 pub fn gc_worktree_cargo_caches(
     home: &Path,
     policy: &CacheGcPolicy,
+    scan: &CacheGcScan<'_>,
 ) -> Result<CacheGcReport, CacheGcError> {
-    gc_worktree_cargo_caches_with_writer_guard(home, policy, |path| Err(missing_custody(path)))
+    gc_worktree_cargo_caches_with_writer_guard(
+        home,
+        policy,
+        |path| Err(missing_custody(path)),
+        scan,
+    )
 }
 
 fn missing_custody(path: &Path) -> Occupancy {
@@ -246,8 +598,9 @@ pub fn gc_worktree_cargo_caches_with_writer_guard(
     home: &Path,
     policy: &CacheGcPolicy,
     writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, Occupancy>,
+    scan: &CacheGcScan<'_>,
 ) -> Result<CacheGcReport, CacheGcError> {
-    gc_caches_with_free_space(home, policy, writer_guard, |path| {
+    gc_caches_with_free_space(home, policy, writer_guard, scan, |path| {
         provenant_os::fs::Directory::open_anchor(path)
             .map_err(std::io::Error::other)?
             .available_bytes()
@@ -258,13 +611,13 @@ fn gc_caches_with_free_space(
     home: &Path,
     policy: &CacheGcPolicy,
     mut writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, Occupancy>,
+    scan: &CacheGcScan<'_>,
     mut free_space: impl FnMut(&Path) -> std::io::Result<u64>,
 ) -> Result<CacheGcReport, CacheGcError> {
     let mut report = CacheGcReport {
         dry_run: policy.dry_run,
         ..CacheGcReport::default()
     };
-    let mut measurement = MeasureBudget::new(policy.dry_run);
     let sweep = (|| {
         validate_absolute(home)?;
         let cache_root = home.join("Library/Caches/provenant-lane-cargo");
@@ -285,8 +638,11 @@ fn gc_caches_with_free_space(
             policy,
             &mut report,
             &mut writer_guard,
-            &mut measurement,
+            scan,
         )?;
+        if report.interrupted_at.is_some() {
+            return Ok(());
+        }
         if let Some(floor) = policy.free_floor_bytes {
             let mut available = if policy.dry_run {
                 report
@@ -303,9 +659,16 @@ fn gc_caches_with_free_space(
                 // newer than the configured idle lifetime.
                 let mut pressure = policy.clone();
                 let mut candidates = Vec::new();
-                for name in provenant_os::fs::entry_names(&root, MAX_CACHE_DIRECTORY_ENTRIES)
-                    .map_err(cache_fs_error("readdir", Path::new(".")))?
-                {
+                let mut entries = root
+                    .entries()
+                    .map_err(cache_fs_error("opendir", &cache_root))?;
+                while let Some(entry) = entries.next() {
+                    if !scan.permits() {
+                        report.interrupted_at = Some(cache_root.clone());
+                        report.bytes_estimated = true;
+                        return Ok(());
+                    }
+                    let name = entry.map_err(cache_fs_error("readdir", &cache_root))?;
                     let path = cache_root.join(&name);
                     if !name.to_str().is_some_and(is_cache_digest)
                         || report
@@ -331,21 +694,23 @@ fn gc_caches_with_free_space(
                     let Some(owner) = read_cache_owner(&cache, Path::new(&name))? else {
                         continue;
                     };
-                    if cache_gc_reason(
-                        &cache,
-                        Path::new(&name),
-                        &owner,
-                        &pressure,
-                        &mut measurement,
-                    )? == Some(CacheGcReason::Idle)
+                    if let Some((reason, stats)) =
+                        cache_gc_reason(&cache, &path, &owner, &pressure, scan, None, &mut report)?
                     {
-                        let (_, newest) =
-                            measure_cache(&cache, Path::new(&name), 0, &mut measurement)?;
-                        candidates.push((newest, name));
+                        if reason == CacheGcReason::Idle {
+                            candidates.push((stats.newest_modified_ns, name));
+                        }
+                    }
+                    if report.interrupted_at.is_some() {
+                        return Ok(());
                     }
                 }
                 candidates.sort();
                 for (newest, name) in candidates {
+                    if !scan.permits() {
+                        report.interrupted_at = Some(cache_root.join(&name));
+                        return Ok(());
+                    }
                     if available >= floor {
                         break;
                     }
@@ -367,8 +732,12 @@ fn gc_caches_with_free_space(
                         &mut report,
                         &mut writer_guard,
                         true,
-                        &mut measurement,
+                        scan,
+                        None,
                     )?;
+                    if report.interrupted_at.is_some() {
+                        return Ok(());
+                    }
                     if report.removed.len() == removed {
                         continue;
                     }
@@ -383,13 +752,16 @@ fn gc_caches_with_free_space(
                 }
             }
         }
+        if report.interrupted_at.is_some() {
+            return Ok(());
+        }
         collect_total_cap(
             &root,
             &cache_root,
             policy,
             &mut report,
             &mut writer_guard,
-            &mut measurement,
+            scan,
         )?;
         if policy.max_total_bytes.is_some() && policy.free_floor_bytes.is_some() {
             report.free_bytes_after = Some(if policy.dry_run {
@@ -404,7 +776,6 @@ fn gc_caches_with_free_space(
         }
         Ok(())
     })();
-    report.bytes_estimated = measurement.limited;
     match sweep {
         Ok(()) => Ok(report),
         Err(source) => {
@@ -441,7 +812,7 @@ fn collect_total_cap(
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
     writer_guard: &mut CacheWriterGuard<'_>,
-    measurement: &mut MeasureBudget,
+    scan: &CacheGcScan<'_>,
 ) -> Result<(), PermissionError> {
     let Some(cap) = policy.max_total_bytes else {
         return Ok(());
@@ -452,9 +823,16 @@ fn collect_total_cap(
     pressure.free_floor_bytes = None;
     let mut total = 0_u64;
     let mut candidates = Vec::new();
-    for name in provenant_os::fs::entry_names(root, MAX_CACHE_DIRECTORY_ENTRIES)
-        .map_err(cache_fs_error("readdir", Path::new(".")))?
-    {
+    let mut entries = root
+        .entries()
+        .map_err(cache_fs_error("opendir", cache_root))?;
+    while let Some(entry) = entries.next() {
+        if !scan.permits() {
+            report.interrupted_at = Some(cache_root.to_owned());
+            report.bytes_estimated = true;
+            return Ok(());
+        }
+        let name = entry.map_err(cache_fs_error("readdir", cache_root))?;
         let path = cache_root.join(&name);
         if !name
             .to_str()
@@ -472,8 +850,15 @@ fn collect_total_cap(
         let cache = root
             .open_verified_directory(&name)
             .map_err(cache_fs_error("open verified directory", Path::new(&name)))?;
-        let (bytes, newest) = measure_cache(&cache, Path::new(&name), 0, measurement)?;
-        total = total.saturating_add(bytes);
+        let progress = measure_cache(&cache, &path, None, scan)?;
+        let Some(stats) = progress.stats else {
+            report.interrupted_at = Some(path);
+            report.continuation = progress.continuation;
+            report.bytes_estimated = true;
+            return Ok(());
+        };
+        let newest = stats.newest_modified_ns;
+        total = total.saturating_add(stats.allocated_bytes);
         if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o7777 != 0o700 {
             continue;
         }
@@ -507,8 +892,12 @@ fn collect_total_cap(
             report,
             writer_guard,
             true,
-            measurement,
+            scan,
+            None,
         )?;
+        if report.interrupted_at.is_some() {
+            return Ok(());
+        }
         total = total.saturating_sub(report.bytes_freed.saturating_sub(before));
     }
     report.total_bytes_after = Some(total);
@@ -566,29 +955,143 @@ fn sweep_cache_root(
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
     writer_guard: &mut CacheWriterGuard<'_>,
-    measurement: &mut MeasureBudget,
+    scan: &CacheGcScan<'_>,
 ) -> Result<(), PermissionError> {
     let mut failures = Vec::new();
-    // Snapshot names so newly detached tombstones are retried on a later run.
-    let entries: Vec<_> = cache_gc_entries(root, Path::new("."))
-        .map_err(cache_fs_error("opendir", Path::new(".")))?
-        .take(MAX_CACHE_DIRECTORY_ENTRIES + 1)
-        .collect();
-    if entries.len() > MAX_CACHE_DIRECTORY_ENTRIES {
-        return Err(cache_fs_error("readdir", Path::new("."))(
-            FsError::EntryLimit {
-                limit: MAX_CACHE_DIRECTORY_ENTRIES,
-            },
-        ));
-    }
-    for entry in entries {
-        let name = match entry {
-            Ok(name) => name,
-            Err(error) => {
-                failures.push((None, cache_fs_error("readdir", Path::new("."))(error)));
-                continue;
+    let root_metadata = root
+        .metadata()
+        .map_err(cache_fs_error("stat cache root", cache_root))?;
+    let mut root_stamp = TreeMeasureMetadata::from(&root_metadata);
+    let mut entries = root
+        .entries()
+        .map_err(cache_fs_error("opendir", cache_root))?;
+    let cursor = scan
+        .detail
+        .filter(|detail| detail.len() <= MAX_CACHE_CURSOR_BYTES)
+        .and_then(|detail| serde_json::from_str::<CacheGcCursor>(detail).ok());
+
+    let mut current = None;
+    let mut next = None;
+    let mut measure_detail = None;
+    let mut root_cookie_valid = false;
+    match cursor {
+        Some(CacheGcCursor::Root { metadata, cookie })
+            if scan.start_at == Some(cache_root) && metadata.matches(&root_metadata) =>
+        {
+            entries
+                .seek(cookie)
+                .map_err(cache_fs_error("seek cache root", cache_root))?;
+            root_cookie_valid = true;
+        }
+        Some(CacheGcCursor::RootSearch {
+            metadata,
+            cookie,
+            target,
+        }) if metadata.matches(&root_metadata) => {
+            entries
+                .seek(cookie)
+                .map_err(cache_fs_error("seek cache root", cache_root))?;
+            if let Some(target) = decode_tree_name(&target) {
+                match find_cache_entry(root, cache_root, &mut entries, &target, scan, report)? {
+                    Some(found) => {
+                        current = Some(found);
+                        root_cookie_valid = true;
+                    }
+                    None if report.interrupted_at.is_some() => return Ok(()),
+                    None => {
+                        entries = root
+                            .entries()
+                            .map_err(cache_fs_error("opendir", cache_root))?;
+                    }
+                }
+            } else {
+                entries = root
+                    .entries()
+                    .map_err(cache_fs_error("opendir", cache_root))?;
             }
-        };
+        }
+        Some(CacheGcCursor::Candidate {
+            root_metadata: saved_root,
+            cookie,
+            current: saved_current,
+            next: saved_next,
+            measure,
+        }) if saved_root.matches(&root_metadata)
+            && scan
+                .start_at
+                .and_then(Path::file_name)
+                .is_some_and(|name| encode_tree_name(name) == saved_current) =>
+        {
+            entries
+                .seek(cookie)
+                .map_err(cache_fs_error("seek cache root", cache_root))?;
+            current = decode_tree_name(&saved_current);
+            next = saved_next.as_deref().and_then(decode_tree_name);
+            measure_detail = measure;
+            root_cookie_valid = true;
+        }
+        _ => {}
+    }
+
+    if current.is_none() && !root_cookie_valid {
+        if let Some(name) = scan.start_at.and_then(Path::file_name)
+            && scan.start_at != Some(cache_root)
+        {
+            match find_cache_entry(root, cache_root, &mut entries, name, scan, report)? {
+                Some(found) => current = Some(found),
+                None if report.interrupted_at.is_some() => return Ok(()),
+                None => {
+                    entries = root
+                        .entries()
+                        .map_err(cache_fs_error("opendir", cache_root))?;
+                }
+            }
+        }
+    }
+
+    loop {
+        if current.is_none() {
+            if !scan.permits() {
+                let cookie = entries
+                    .position()
+                    .map_err(cache_fs_error("position cache root", cache_root))?;
+                set_cache_gc_cursor(
+                    report,
+                    cache_root,
+                    CacheGcCursor::Root {
+                        metadata: root_stamp,
+                        cookie,
+                    },
+                );
+                report.bytes_estimated = true;
+                return Ok(());
+            }
+            current = match entries.next() {
+                Some(Ok(name)) => Some(name),
+                Some(Err(error)) => {
+                    failures.push((None, cache_fs_error("readdir", cache_root)(error)));
+                    continue;
+                }
+                None => break,
+            };
+        }
+
+        let name = current.take().ok_or(PermissionError::AnchorMismatch)?;
+        if next.is_none() && scan.permits() {
+            match entries.next() {
+                Some(Ok(name)) => next = Some(name),
+                Some(Err(error)) => {
+                    failures.push((Some(name), cache_fs_error("readdir", cache_root)(error)));
+                    continue;
+                }
+                None => {}
+            }
+        }
+        let cookie = entries
+            .position()
+            .map_err(cache_fs_error("position cache root", cache_root))?;
+        let before_removed = report.removed.len();
+        let before_interrupted = report.interrupted_at.is_some();
         if let Err(error) = prune_worktree_cache(
             root,
             cache_root,
@@ -597,11 +1100,60 @@ fn sweep_cache_root(
             report,
             writer_guard,
             false,
-            measurement,
+            scan,
+            measure_detail.as_deref(),
         ) {
-            failures.push((Some(name), error));
+            failures.push((Some(name.clone()), error));
         }
+        measure_detail = None;
+        if report.interrupted_at.is_some() && !before_interrupted {
+            if report.continuation.as_deref() == Some("delete") {
+                report.continuation = encode_cache_gc_cursor(CacheGcCursor::Delete);
+            } else {
+                report.continuation = encode_cache_gc_cursor(CacheGcCursor::Candidate {
+                    root_metadata: root_stamp,
+                    cookie,
+                    current: encode_tree_name(&name),
+                    next: next.as_deref().map(encode_tree_name),
+                    measure: report.continuation.take(),
+                });
+            }
+            report.bytes_estimated = true;
+            return Ok(());
+        }
+
+        let after_metadata = root
+            .metadata()
+            .map_err(cache_fs_error("stat cache root", cache_root))?;
+        let root_changed = !root_stamp.matches(&after_metadata);
+        if report.removed.len() > before_removed || root_changed {
+            let Some(next_name) = next.take() else {
+                break;
+            };
+            // Removing or detaching a cache changes the root directory, so its
+            // old cookie is no longer valid. Reopen and find the saved next
+            // entry by name before continuing this sweep.
+            entries = root
+                .entries()
+                .map_err(cache_fs_error("opendir", cache_root))?;
+            root_stamp = TreeMeasureMetadata::from(&after_metadata);
+            let Some(found) =
+                find_cache_entry(root, cache_root, &mut entries, &next_name, scan, report)?
+            else {
+                if report.interrupted_at.is_some() {
+                    return Ok(());
+                }
+                entries = root
+                    .entries()
+                    .map_err(cache_fs_error("opendir", cache_root))?;
+                continue;
+            };
+            current = Some(found);
+            continue;
+        }
+        current = next.take();
     }
+
     for (name, error) in &failures {
         let (path, operation, cause) = match error {
             PermissionError::CacheSweepFilesystem {
@@ -631,6 +1183,53 @@ fn sweep_cache_root(
         )));
     }
     Ok(())
+}
+
+fn find_cache_entry(
+    root: &Directory,
+    cache_root: &Path,
+    entries: &mut Entries,
+    target: &OsStr,
+    scan: &CacheGcScan<'_>,
+    report: &mut CacheGcReport,
+) -> Result<Option<OsString>, PermissionError> {
+    while scan.permits() {
+        let Some(entry) = entries.next() else {
+            return Ok(None);
+        };
+        let name = entry.map_err(cache_fs_error("readdir", cache_root))?;
+        if name == target {
+            return Ok(Some(name));
+        }
+    }
+    let cookie = entries
+        .position()
+        .map_err(cache_fs_error("position cache root", cache_root))?;
+    let metadata = root
+        .metadata()
+        .map_err(cache_fs_error("stat cache root", cache_root))?;
+    set_cache_gc_cursor(
+        report,
+        cache_root,
+        CacheGcCursor::RootSearch {
+            metadata: TreeMeasureMetadata::from(&metadata),
+            cookie,
+            target: encode_tree_name(target),
+        },
+    );
+    report.bytes_estimated = true;
+    Ok(None)
+}
+
+fn set_cache_gc_cursor(report: &mut CacheGcReport, path: &Path, cursor: CacheGcCursor) {
+    report.interrupted_at = Some(path.to_owned());
+    report.continuation = encode_cache_gc_cursor(cursor);
+}
+
+fn encode_cache_gc_cursor(cursor: CacheGcCursor) -> Option<String> {
+    serde_json::to_string(&cursor)
+        .ok()
+        .filter(|detail| detail.len() <= MAX_CACHE_CURSOR_BYTES)
 }
 
 #[derive(Debug)]
@@ -665,7 +1264,8 @@ fn prune_worktree_cache(
     report: &mut CacheGcReport,
     writer_guard: &mut CacheWriterGuard<'_>,
     free_floor: bool,
-    measurement: &mut MeasureBudget,
+    scan: &CacheGcScan<'_>,
+    detail: Option<&str>,
 ) -> Result<(), PermissionError> {
     let pressure_reason = |reason| match reason {
         Some(CacheGcReason::Idle) if free_floor => Some(
@@ -720,7 +1320,12 @@ fn prune_worktree_cache(
     {
         return Ok(());
     }
-    let Some(_cargo_guards) = lock_cargo_profiles(&cache) else {
+    let Some(_cargo_guards) = lock_cargo_profiles(&cache, &|| scan.permits()) else {
+        if !scan.permits() {
+            report.interrupted_at = Some(cache_root.join(name));
+            report.continuation = None;
+            return Ok(());
+        }
         report.kept.push(CacheGcEntry {
             path: cache_root.join(name),
             bytes: 0,
@@ -728,7 +1333,7 @@ fn prune_worktree_cache(
         });
         return Ok(());
     };
-    let reason = if let Some((device, inode, fingerprint)) = tombstone {
+    let (reason, measured) = if let Some((device, inode, fingerprint)) = tombstone {
         // Bind retry authority to what GC intended to rename, even if a
         // process stopped before verification or quarantine could complete.
         if opened.device != device
@@ -756,18 +1361,24 @@ fn prune_worktree_cache(
                 }
             }
         }
-        CacheGcReason::Tombstone
+        (CacheGcReason::Tombstone, None)
     } else {
         let Some(owner) = owner.as_ref() else {
             return Ok(());
         };
-        let Some(reason) = pressure_reason(cache_gc_reason(
+        let Some((reason, stats)) = cache_gc_reason(
             &cache,
-            Path::new(name),
+            &cache_root.join(name),
             owner,
             policy,
-            measurement,
-        )?) else {
+            scan,
+            detail,
+            report,
+        )?
+        else {
+            if report.interrupted_at.is_some() {
+                return Ok(());
+            }
             if let Some(state) = policy.protected_owners.get(&owner.path) {
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
@@ -781,6 +1392,7 @@ fn prune_worktree_cache(
             }
             return Ok(());
         };
+        let reason = pressure_reason(Some(reason)).unwrap_or(reason);
         if reason == CacheGcReason::Foreign {
             report.kept.push(CacheGcEntry {
                 path: cache_root.join(name),
@@ -789,9 +1401,15 @@ fn prune_worktree_cache(
             });
             return Ok(());
         }
-        reason
+        (reason, Some(stats))
     };
-    let (bytes, _) = measure_cache(&cache, Path::new(name), 0, measurement)?;
+    let bytes = measured.map_or(0, |stats| stats.allocated_bytes);
+    if !scan.permits() {
+        report.interrupted_at = Some(cache_root.join(name));
+        report.continuation = None;
+        report.bytes_estimated = true;
+        return Ok(());
+    }
     if policy.dry_run {
         if matches!(
             reason,
@@ -842,17 +1460,22 @@ fn prune_worktree_cache(
             } else {
                 None
             };
+            if !scan.permits() {
+                report.interrupted_at = Some(cache_root.join(name));
+                report.continuation = None;
+                return Ok(());
+            }
             // Measurement may take time. Recheck the marker, owner and last
             // write immediately before detaching the cache from the lane path.
             if read_cache_owner(&cache, Path::new(name))? != owner {
                 return Ok(());
             }
-            let current_reason = pressure_reason(cache_gc_reason(
-                &cache,
-                Path::new(name),
+            let newest = measured.map_or(i128::MIN, |stats| stats.newest_modified_ns);
+            let current_reason = pressure_reason(cache_gc_reason_with_newest(
+                &cache_root.join(name),
                 original_owner,
                 policy,
-                measurement,
+                || Ok(newest),
             )?);
             if current_reason == Some(CacheGcReason::Foreign) {
                 report.kept.push(CacheGcEntry {
@@ -887,13 +1510,26 @@ fn prune_worktree_cache(
                 return Err(error);
             }
         };
-        remove_cache_contents(
+        let before_remove = report.bytes_freed;
+        let complete = remove_cache_contents(
             &detached_cache,
             Path::new(removal_name),
             &mut report.bytes_freed,
+            scan,
         )?;
+        if !complete {
+            report.interrupted_at = Some(cache_root.join(removal_name));
+            report.continuation = Some("delete".into());
+            report.bytes_estimated = true;
+            return Ok(());
+        }
         // The top-level marker survives every earlier failure.
         let marker_name = OsStr::new(CARGO_CACHE_OWNER);
+        if !scan.permits() {
+            report.interrupted_at = Some(cache_root.join(removal_name));
+            report.continuation = Some("delete".into());
+            return Ok(());
+        }
         match cache_gc_operation("stat", &Path::new(removal_name).join(marker_name), || {
             detached_cache.metadata_at(marker_name)
         }) {
@@ -915,11 +1551,17 @@ fn prune_worktree_cache(
                 )(error));
             }
         }
+        if !scan.permits() {
+            report.interrupted_at = Some(cache_root.join(removal_name));
+            report.continuation = Some("delete".into());
+            return Ok(());
+        }
         cache_gc_operation("rmdir", Path::new(removal_name), || {
             root.rmdir(removal_name)
         })
         .map_err(cache_fs_error("rmdir", Path::new(removal_name)))?;
         report.bytes_freed = report.bytes_freed.saturating_add(opened.allocated);
+        let _ = before_remove;
     }
     report.removed.push(CacheGcEntry {
         path: cache_root.join(name),
@@ -931,10 +1573,24 @@ fn prune_worktree_cache(
 
 /// Hold all Cargo profile and target owner locks under one cache root. Shared
 /// project targets use the same probe as private lane caches.
-pub fn lock_cargo_profiles(cache: &Directory) -> Option<Vec<LockGuard>> {
-    fn visit(dir: &Directory, depth: usize, guards: &mut Vec<LockGuard>) -> Option<()> {
+pub fn lock_cargo_profiles(
+    cache: &Directory,
+    keep_going: &dyn Fn() -> bool,
+) -> Option<Vec<LockGuard>> {
+    fn visit(
+        dir: &Directory,
+        depth: usize,
+        guards: &mut Vec<LockGuard>,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<()> {
+        if !keep_going() {
+            return None;
+        }
         let mut profile = false;
         for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            if !keep_going() {
+                return None;
+            }
             match dir.try_flock_foreign(OsStr::new(name), LockMode::Exclusive) {
                 Ok(ForeignLock::Held) | Err(_) => return None,
                 Ok(ForeignLock::Acquired(guard)) => {
@@ -947,23 +1603,44 @@ pub fn lock_cargo_profiles(cache: &Directory) -> Option<Vec<LockGuard>> {
         if profile || depth == 2 {
             return Some(());
         }
-        for name in provenant_os::fs::entry_names(dir, 1000).ok()? {
+        let mut entries = dir.entries().ok()?;
+        let mut count = 0_usize;
+        while let Some(entry) = entries.next() {
+            if !keep_going() {
+                return None;
+            }
+            count += 1;
+            if count > 1000 {
+                return None;
+            }
+            let name = entry.ok()?;
             let meta = dir.metadata_at(&name, false).ok()?;
             if meta.kind == FileKind::Directory {
-                visit(&dir.open_verified_directory(&name).ok()?, depth + 1, guards)?;
+                visit(
+                    &dir.open_verified_directory(&name).ok()?,
+                    depth + 1,
+                    guards,
+                    keep_going,
+                )?;
             }
         }
         Some(())
     }
     let mut guards = Vec::new();
+    if !keep_going() {
+        return None;
+    }
     match cache.try_flock_foreign(OsStr::new(CARGO_CACHE_OWNER), LockMode::Exclusive) {
         Ok(ForeignLock::Held) | Err(_) => return None,
         Ok(ForeignLock::Acquired(guard)) => guards.push(guard),
         Ok(ForeignLock::Absent) => {}
     }
     for target_name in ["target", "target-lint"] {
+        if !keep_going() {
+            return None;
+        }
         match cache.open_verified_directory(OsStr::new(target_name)) {
-            Ok(target) => visit(&target, 0, &mut guards)?,
+            Ok(target) => visit(&target, 0, &mut guards, keep_going)?,
             Err(error) if error.is_not_found() => {}
             Err(_) => return None,
         }
@@ -1142,11 +1819,41 @@ fn cache_gc_reason(
     relative: &Path,
     owner: &CacheOwner,
     policy: &CacheGcPolicy,
-    measurement: &mut MeasureBudget,
-) -> Result<Option<CacheGcReason>, PermissionError> {
-    cache_gc_reason_with_newest(relative, owner, policy, || {
-        measure_cache(cache, relative, 0, measurement).map(|(_, newest)| newest)
-    })
+    scan: &CacheGcScan<'_>,
+    detail: Option<&str>,
+    report: &mut CacheGcReport,
+) -> Result<Option<(CacheGcReason, TreeStats)>, PermissionError> {
+    let mut measured = None;
+    let reason = cache_gc_reason_with_newest(relative, owner, policy, || {
+        let progress = measure_cache(cache, relative, detail, scan)?;
+        let Some(stats) = progress.stats else {
+            report.interrupted_at = Some(relative.to_owned());
+            report.continuation = progress.continuation;
+            report.bytes_estimated = true;
+            return Ok(i128::MAX);
+        };
+        measured = Some(stats);
+        Ok(stats.newest_modified_ns)
+    })?;
+    if report.interrupted_at.is_some() {
+        return Ok(None);
+    }
+    let Some(reason) = reason else {
+        return Ok(None);
+    };
+    let stats = if let Some(stats) = measured {
+        stats
+    } else {
+        let progress = measure_cache(cache, relative, detail, scan)?;
+        let Some(stats) = progress.stats else {
+            report.interrupted_at = Some(relative.to_owned());
+            report.continuation = progress.continuation;
+            report.bytes_estimated = true;
+            return Ok(None);
+        };
+        stats
+    };
+    Ok(Some((reason, stats)))
 }
 
 /// Share GC eligibility with read-only inventories supplying their own bounded
@@ -1209,61 +1916,19 @@ pub(crate) fn cache_gc_reason_with_newest(
 fn measure_cache(
     directory: &provenant_os::fs::Directory,
     relative: &Path,
-    depth: usize,
-    budget: &mut MeasureBudget,
-) -> Result<(u64, i128), PermissionError> {
-    if depth >= MAX_CACHE_SWEEP_DEPTH {
-        return Err(PermissionError::CacheSweepDepth);
-    }
-    let mut bytes = if depth == 0 {
-        directory
-            .metadata()
-            .map_err(cache_fs_error("fstat", relative))?
-            .allocated
-    } else {
-        0
-    };
-    let mut newest = directory
-        .metadata()
-        .map_err(cache_fs_error("fstat", relative))?
-        .modified_ns;
-    if budget.exhausted() {
-        return Ok((bytes, i128::MAX));
-    }
-    for entry in
-        cache_gc_entries(directory, relative).map_err(cache_fs_error("opendir", relative))?
-    {
-        if budget.exhausted() {
-            return Ok((bytes, i128::MAX));
-        }
-        budget.remaining = budget.remaining.saturating_sub(1);
-        let name = entry.map_err(cache_fs_error("readdir", relative))?;
-        let path = relative.join(&name);
-        let metadata = cache_gc_operation("stat", &relative.join(&name), || {
-            directory.metadata_at(&name, false)
-        })
-        .map_err(cache_fs_error("stat", &path))?;
-        bytes = bytes.saturating_add(metadata.allocated);
-        newest = newest.max(metadata.modified_ns);
-        if metadata.kind == FileKind::Directory {
-            let child = cache_gc_operation("open verified", &relative.join(&name), || {
-                directory.open_verified_directory(&name)
-            })
-            .map_err(cache_fs_error("open verified directory", &path))?;
-            let (child_bytes, child_newest) = measure_cache(&child, &path, depth + 1, budget)?;
-            bytes = bytes.saturating_add(child_bytes);
-            newest = newest.max(child_newest);
-        }
-    }
-    Ok((bytes, newest))
+    detail: Option<&str>,
+    scan: &CacheGcScan<'_>,
+) -> Result<TreeMeasureProgress, PermissionError> {
+    measure_tree_with_progress(directory, relative, detail, &|| scan.permits())
 }
 
 fn remove_cache_contents(
     directory: &PayloadTree,
     relative: &Path,
     bytes_freed: &mut u64,
-) -> Result<(), PermissionError> {
-    remove_cache_contents_at(directory, relative, 0, bytes_freed)
+    scan: &CacheGcScan<'_>,
+) -> Result<bool, PermissionError> {
+    remove_cache_contents_at(directory, relative, 0, bytes_freed, scan)
 }
 
 fn cache_fs_error<'a>(
@@ -1290,56 +1955,75 @@ fn remove_cache_contents_at(
     relative: &Path,
     depth: usize,
     bytes_freed: &mut u64,
-) -> Result<(), PermissionError> {
+    scan: &CacheGcScan<'_>,
+) -> Result<bool, PermissionError> {
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
+    }
+    if !scan.permits() {
+        return Ok(false);
     }
     directory
         .make_writable()
         .map_err(cache_fs_error("make cache writable", relative))?;
-    let names = cache_gc_entries(directory.directory(), relative)
-        .map_err(cache_fs_error("readdir", relative))?
-        .take(MAX_CACHE_DIRECTORY_ENTRIES + 1)
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|names| {
-            if names.len() > MAX_CACHE_DIRECTORY_ENTRIES {
-                Err(FsError::EntryLimit {
-                    limit: MAX_CACHE_DIRECTORY_ENTRIES,
-                })
-            } else {
-                Ok(names)
+    loop {
+        if !scan.permits() {
+            return Ok(false);
+        }
+        let mut names = Vec::with_capacity(CACHE_DELETE_BATCH_ENTRIES);
+        for entry in cache_gc_entries(directory.directory(), relative)
+            .map_err(cache_fs_error("readdir", relative))?
+            .take(CACHE_DELETE_BATCH_ENTRIES)
+        {
+            if !scan.permits() {
+                return Ok(false);
             }
-        })
-        .map_err(cache_fs_error("readdir", relative))?;
-    for name in names {
-        if depth == 0 && name == CARGO_CACHE_OWNER {
-            continue;
+            let name = entry.map_err(cache_fs_error("readdir", relative))?;
+            if depth == 0 && name == CARGO_CACHE_OWNER {
+                continue;
+            }
+            names.push(name);
         }
-        let path = relative.join(&name);
-        let metadata = cache_gc_operation("stat", &relative.join(&name), || {
-            directory.metadata_at(&name)
-        })
-        .map_err(cache_fs_error("stat", &path))?;
-        if metadata.kind == FileKind::Directory {
-            directory
-                .directory()
-                .make_owner_accessible_at(&name)
-                .map_err(cache_fs_error("make cache directory accessible", &path))?;
-            let child = cache_gc_operation("open verified", &relative.join(&name), || {
-                directory.child(&name)
+        if names.is_empty() {
+            return Ok(true);
+        }
+        for name in names {
+            if !scan.permits() {
+                return Ok(false);
+            }
+            let path = relative.join(&name);
+            let metadata = cache_gc_operation("stat", &relative.join(&name), || {
+                directory.metadata_at(&name)
             })
-            .map_err(cache_fs_error("open verified directory", &path))?;
-            remove_cache_contents_at(&child, &path, depth + 1, bytes_freed)?;
-            drop(child);
-            cache_gc_operation("rmdir", &relative.join(&name), || directory.rmdir(&name))
-                .map_err(cache_fs_error("rmdir", &path))?;
-        } else {
-            cache_gc_operation("unlink", &relative.join(&name), || directory.unlink(&name))
-                .map_err(cache_fs_error("unlink", &path))?;
+            .map_err(cache_fs_error("stat", &path))?;
+            if metadata.kind == FileKind::Directory {
+                directory
+                    .directory()
+                    .make_owner_accessible_at(&name)
+                    .map_err(cache_fs_error("make cache directory accessible", &path))?;
+                let child = cache_gc_operation("open verified", &relative.join(&name), || {
+                    directory.child(&name)
+                })
+                .map_err(cache_fs_error("open verified directory", &path))?;
+                if !remove_cache_contents_at(&child, &path, depth + 1, bytes_freed, scan)? {
+                    return Ok(false);
+                }
+                drop(child);
+                if !scan.permits() {
+                    return Ok(false);
+                }
+                cache_gc_operation("rmdir", &relative.join(&name), || directory.rmdir(&name))
+                    .map_err(cache_fs_error("rmdir", &path))?;
+            } else {
+                if !scan.permits() {
+                    return Ok(false);
+                }
+                cache_gc_operation("unlink", &relative.join(&name), || directory.unlink(&name))
+                    .map_err(cache_fs_error("unlink", &path))?;
+            }
+            *bytes_freed = bytes_freed.saturating_add(metadata.allocated);
         }
-        *bytes_freed = bytes_freed.saturating_add(metadata.allocated);
     }
-    Ok(())
 }
 
 pub(crate) fn verify_cache_metadata(
@@ -1361,6 +2045,89 @@ mod tests {
 
     use super::*;
     use provenant_core::CancelToken;
+
+    fn gc_worktree_cargo_caches(
+        home: &Path,
+        policy: &CacheGcPolicy,
+    ) -> Result<CacheGcReport, CacheGcError> {
+        super::gc_worktree_cargo_caches(home, policy, &CacheGcScan::default())
+    }
+
+    fn gc_worktree_cargo_caches_with_writer_guard(
+        home: &Path,
+        policy: &CacheGcPolicy,
+        writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, Occupancy>,
+    ) -> Result<CacheGcReport, CacheGcError> {
+        super::gc_worktree_cargo_caches_with_writer_guard(
+            home,
+            policy,
+            writer_guard,
+            &CacheGcScan::default(),
+        )
+    }
+
+    fn gc_caches_with_free_space(
+        home: &Path,
+        policy: &CacheGcPolicy,
+        writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, Occupancy>,
+        free_space: impl FnMut(&Path) -> std::io::Result<u64>,
+    ) -> Result<CacheGcReport, CacheGcError> {
+        super::gc_caches_with_free_space(
+            home,
+            policy,
+            writer_guard,
+            &CacheGcScan::default(),
+            free_space,
+        )
+    }
+
+    fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, CacheGcError> {
+        super::prune_orphaned_worktree_cargo_caches(home, &CacheGcScan::default())
+    }
+
+    #[test]
+    fn tree_measurement_resumes_from_a_bounded_directory_cursor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let tree = temporary.path().join("tree");
+        let nested = tree.join("nested");
+        std::fs::create_dir_all(&nested)?;
+        for index in 0..100 {
+            std::fs::write(
+                nested.join(format!("file-{index:03}")),
+                vec![index as u8; 128],
+            )?;
+        }
+        let directory = Directory::open_anchor(&tree)?;
+        let expected = measure_tree_with_progress(&directory, &tree, None, &|| true)?
+            .stats
+            .ok_or("complete baseline measurement")?;
+
+        let polls = std::cell::Cell::new(0);
+        let keep_going = || {
+            let count = polls.get();
+            polls.set(count + 1);
+            count < 20
+        };
+        let partial = measure_tree_with_progress(&directory, &tree, None, &keep_going)?;
+        assert_eq!(partial.stats, None);
+        assert_eq!(partial.interrupted_at.as_deref(), Some(tree.as_path()));
+        let mut detail = partial.continuation.ok_or("measurement cursor")?;
+
+        let resumed = measure_tree_with_progress(&directory, &tree, Some(&detail), &|| true)?;
+        if resumed.stats.is_none() {
+            detail = resumed.continuation.ok_or("resumed measurement cursor")?;
+        }
+        let completed = if let Some(stats) = resumed.stats {
+            stats
+        } else {
+            measure_tree_with_progress(&directory, &tree, Some(&detail), &|| true)?
+                .stats
+                .ok_or("complete resumed measurement")?
+        };
+        assert_eq!(completed, expected);
+        Ok(())
+    }
 
     #[test]
     fn lane_cache_gc_sweep_removes_only_marked_caches_for_missing_worktrees()
@@ -1527,7 +2294,7 @@ mod tests {
             policy: &CacheGcPolicy,
             event: Event,
         ) -> Result<CacheGcReport, CacheGcError> {
-            sweep_with_writer_guard(home, policy, event, &mut |path| Err(missing_custody(path)))
+            sweep_with_scan(home, policy, event, &CacheGcScan::default())
         }
 
         fn sweep_with_writer_guard(
@@ -1535,6 +2302,37 @@ mod tests {
             policy: &CacheGcPolicy,
             event: Event,
             writer_guard: &mut CacheWriterGuard<'_>,
+        ) -> Result<CacheGcReport, CacheGcError> {
+            sweep_with_writer_guard_and_scan(
+                home,
+                policy,
+                event,
+                writer_guard,
+                &CacheGcScan::default(),
+            )
+        }
+
+        fn sweep_with_scan(
+            home: &Path,
+            policy: &CacheGcPolicy,
+            event: Event,
+            scan: &CacheGcScan<'_>,
+        ) -> Result<CacheGcReport, CacheGcError> {
+            sweep_with_writer_guard_and_scan(
+                home,
+                policy,
+                event,
+                &mut |path| Err(missing_custody(path)),
+                scan,
+            )
+        }
+
+        fn sweep_with_writer_guard_and_scan(
+            home: &Path,
+            policy: &CacheGcPolicy,
+            event: Event,
+            writer_guard: &mut CacheWriterGuard<'_>,
+            scan: &CacheGcScan<'_>,
         ) -> Result<CacheGcReport, CacheGcError> {
             let path = home.join("Library/Caches/provenant-lane-cargo");
             let mut report = CacheGcReport {
@@ -1545,14 +2343,7 @@ mod tests {
             let result = Directory::open_anchor(&path)
                 .map_err(PermissionError::Filesystem)
                 .and_then(|root| {
-                    sweep_cache_root(
-                        &root,
-                        &path,
-                        policy,
-                        &mut report,
-                        writer_guard,
-                        &mut MeasureBudget::new(policy.dry_run),
-                    )
+                    sweep_cache_root(&root, &path, policy, &mut report, writer_guard, scan)
                 });
             result
                 .map(|()| report.clone())
@@ -1580,6 +2371,112 @@ mod tests {
         }
 
         #[test]
+        fn interrupted_root_sweep_resumes_without_restarting_completed_entries()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let mut paths = Vec::new();
+            for index in 0..12 {
+                let owner = home.join(format!("missing-owner-{index}"));
+                paths.push(cache(home, &format!("{index:064x}"), &owner)?);
+            }
+
+            let polls = std::cell::Cell::new(0);
+            let keep_going = || {
+                let count = polls.get();
+                polls.set(count + 1);
+                count < 80
+            };
+            let first_scan = CacheGcScan {
+                keep_going: Some(&keep_going),
+                ..CacheGcScan::default()
+            };
+            let first = sweep_with_scan(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|_, _| Ok(())),
+                &first_scan,
+            )?;
+            let start_at = first
+                .interrupted_at
+                .clone()
+                .ok_or("bounded root sweep interruption")?;
+            let detail = first.continuation.clone();
+
+            let resume_scan = CacheGcScan {
+                start_at: Some(&start_at),
+                detail: detail.as_deref(),
+                ..CacheGcScan::default()
+            };
+            let resumed = sweep_with_scan(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|_, _| Ok(())),
+                &resume_scan,
+            )?;
+            assert!(resumed.interrupted_at.is_none());
+            assert!(paths.iter().all(|path| !path.exists()));
+            Ok(())
+        }
+
+        #[test]
+        fn partial_delete_keeps_owner_marker_and_releases_writer_lock()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let path = cache(home, &"a".repeat(64), &home.join("missing-owner"))?;
+            let marker = path.join(CARGO_CACHE_OWNER);
+            let marker_before = std::fs::read(&marker)?;
+            let permit = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let permit_for_check = Arc::clone(&permit);
+            let keep_going = move || permit_for_check.load(std::sync::atomic::Ordering::Relaxed);
+            let scan = CacheGcScan {
+                keep_going: Some(&keep_going),
+                ..CacheGcScan::default()
+            };
+            let permit_for_event = Arc::clone(&permit);
+            let event: Event = Arc::new(move |event, path| {
+                if event == "unlink" && path.file_name() == Some(OsStr::new("artifact")) {
+                    permit_for_event.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(())
+            });
+            let first = sweep_with_scan(home, &CacheGcPolicy::default(), event, &scan)?;
+            let tombstone = first
+                .interrupted_at
+                .as_ref()
+                .ok_or("partial delete tombstone")?;
+            assert!(first.continuation.is_some());
+            assert!(!tombstone.join("artifact").exists());
+            assert_eq!(
+                std::fs::read(tombstone.join(CARGO_CACHE_OWNER))?,
+                marker_before
+            );
+
+            let detached = Directory::open_anchor(tombstone)?;
+            assert!(matches!(
+                detached.try_flock_foreign(OsStr::new(CARGO_CACHE_OWNER), LockMode::Exclusive)?,
+                ForeignLock::Acquired(_)
+            ));
+            drop(detached);
+
+            let resume_scan = CacheGcScan {
+                start_at: Some(tombstone),
+                detail: first.continuation.as_deref(),
+                ..CacheGcScan::default()
+            };
+            let resumed = sweep_with_scan(
+                home,
+                &CacheGcPolicy::default(),
+                Arc::new(|_, _| Ok(())),
+                &resume_scan,
+            )?;
+            assert!(resumed.interrupted_at.is_none());
+            assert!(!tombstone.exists());
+            Ok(())
+        }
+
+        #[test]
         fn total_cap_evicts_only_oldest_idle_cache_and_keeps_protected_and_foreign()
         -> Result<(), Box<dyn std::error::Error>> {
             for dry_run in [true, false] {
@@ -1602,13 +2499,10 @@ mod tests {
                     }
                     let directory = Directory::open_anchor(&path)?;
                     sizes.push(
-                        measure_cache(
-                            &directory,
-                            Path::new("."),
-                            0,
-                            &mut MeasureBudget::new(false),
-                        )?
-                        .0,
+                        measure_cache(&directory, Path::new("."), None, &CacheGcScan::default())?
+                            .stats
+                            .ok_or("complete cache measurement")?
+                            .allocated_bytes,
                     );
                     paths.push(path);
                     owners.push(owner);
@@ -1629,7 +2523,7 @@ mod tests {
                     dry_run,
                     ..CacheGcReport::default()
                 };
-                let mut measurement = MeasureBudget::new(dry_run);
+                let scan = CacheGcScan::default();
                 let mut writer_guard = |owner: &Path| {
                     assert_ne!(owner, owners[2]);
                     assert_ne!(owner, owners[3]);
@@ -1644,7 +2538,7 @@ mod tests {
                     &policy,
                     &mut report,
                     &mut writer_guard,
-                    &mut measurement,
+                    &scan,
                 )?;
                 assert_eq!(report.removed.len(), 1);
                 assert_eq!(report.removed[0].path, paths[1]);
@@ -1661,7 +2555,7 @@ mod tests {
                     ..policy
                 };
                 let mut report = CacheGcReport::default();
-                let mut measurement = MeasureBudget::new(false);
+                let scan = CacheGcScan::default();
                 let mut writer_guard = |owner: &Path| Err(missing_custody(owner));
                 collect_total_cap(
                     &root,
@@ -1669,7 +2563,7 @@ mod tests {
                     &policy,
                     &mut report,
                     &mut writer_guard,
-                    &mut measurement,
+                    &scan,
                 )?;
                 assert!(report.removed.is_empty());
                 assert!(report.total_bytes_after.is_some_and(|bytes| bytes > 0));
@@ -1733,13 +2627,18 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            let mut budget = MeasureBudget::new(true);
-            budget.remaining = 0;
+            let keep_going = || false;
+            let scan = CacheGcScan {
+                keep_going: Some(&keep_going),
+                ..CacheGcScan::default()
+            };
+            let mut report = CacheGcReport::default();
             assert_eq!(
-                cache_gc_reason(&directory, Path::new("."), &owner, &policy, &mut budget)?,
+                cache_gc_reason(&directory, &path, &owner, &policy, &scan, None, &mut report,)?,
                 None
             );
-            assert!(budget.limited);
+            assert_eq!(report.interrupted_at.as_deref(), Some(path.as_path()));
+            assert!(report.continuation.is_some());
             assert!(path.join("artifact").exists());
             Ok(())
         }
