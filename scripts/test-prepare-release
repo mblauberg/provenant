@@ -17,14 +17,9 @@ cat > "$tmp/bin/gh" <<'EOF'
 printf '%s\n' "$*" >> "$GH_LOG"
 if [ "$1 $2" = 'pr view' ]; then
   case "$3" in
-    101)
-      printf '%s\n' '{"closingIssuesReferences": []}'
-      ;;
-    102)
-      printf '%s\n' '{"closingIssuesReferences": []}'
-      ;;
     103)
-      printf '%s\n' '{"closingIssuesReferences": [{"number": 301}]}'
+      # Several closed issues, as gh --jq prints them: one per line.
+      printf '%s\n' 300 301
       ;;
   esac
 fi
