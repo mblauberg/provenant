@@ -125,7 +125,7 @@ There is no reader for the previous snapshot shape. A malformed final handoff
 never falls back to stale progress, including on interruption. Only an absent
 final declaration on an interrupted attempt can use its granted progress file;
 a malformed or unreadable progress file is also explicit evidence. Diagnostics,
-retained fields and forward fields are redacted before persistence or disclosure.
+retained fields and forward fields remain lossless in local persistence; disclosure uses a destination projection.
 
 One settlement classification derives the terminal outcome, sealed stop and graph outcome from terminal evidence, reason and handoff.
 A missing required writer handoff seals `handoff_missing` and goes to the chair; graph dependants cannot treat it as success.
@@ -188,11 +188,10 @@ and model identity checks.
 
 ## Retention and disclosure
 
-Known credential shapes are filtered from retained output. A result redaction failure
-withholds the result; a session redaction failure retains it. Either prevents
-delivery. Result-only orphan recovery preserves its sealed bytes and reports
-when it cannot establish redaction.
-- Why: a failed filter must not silently publish credentials.
+Local results and provider continuation state are retained without shape-based
+rewriting. Result lengths and digests describe the retained raw bytes. External
+publication applies its own projection and failure does not change the local
+execution outcome.
 
 Reconciliation never replays an uncertain launch. Cleanup does not delete under
 a reservation or follow links, and preserves lock identity.

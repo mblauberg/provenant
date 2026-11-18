@@ -2134,11 +2134,6 @@ impl RunStore {
         {
             decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
         }
-        // Provider-owned session transcripts record tool output, so a printed
-        // credential can survive there after capture and result filtering.
-        // Scrub before publication so a retry never starts from new plaintext.
-        let session_redaction_failed =
-            provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
         let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
         let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
         let (mut handoff, handoff_error) = match captured_handoff.handoff {
@@ -2894,43 +2889,13 @@ impl RunStore {
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
-        // Decoding can reveal credential markers hidden by JSON escapes in
-        // the already-filtered capture. Seal only a filtered rendering.
-        // A filter failure withholds the result instead of blocking settlement
-        // forever: the lane fails with a fixed placeholder and stays terminal.
-        let (mut result, result_redaction_failed) =
-            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
-                Ok(safe) => match String::from_utf8(safe) {
-                    Ok(text) => (text, false),
-                    Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
-                },
-                Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
-            };
+        let mut result = decoded.result.clone();
         if task.writer.is_some()
             && task.deliver.is_none()
             && task.profile.knobs.get("lanes.receipts") == Some(&serde_json::json!("none"))
         {
             decoded.complete &= result.len() + UNDELIVERED_NOTICE.len() <= RESULT_LIMIT as usize;
             result = undelivered_writer_result(&result);
-        }
-        let redaction_failed = result_redaction_failed || session_redaction_failed;
-        if redaction_failed {
-            if decoded.terminal_cause == Some(TerminalCause::TokenBudget) {
-                decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
-            }
-            // A redaction failure fails a lane that would otherwise succeed. A
-            // cancelled, timed-out or lost lane keeps its outcome, and every
-            // reason it already has survives with the redaction failure after it.
-            if matches!(
-                decoded.outcome,
-                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-            ) {
-                decoded.outcome = Outcome::Failed;
-            }
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {REDACTION_FAILED_REASON}"),
-                None => REDACTION_FAILED_REASON.into(),
-            });
         }
         // Delivery keys off the outcome before a declared stop, so partial work
         // is still delivered. The stop changes only the settled state.
@@ -3070,7 +3035,6 @@ impl RunStore {
         // External delivery runs only from the committed decision below.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         let delivery_applicable = succeeded_before_stop
-            && !redaction_failed
             && !cancelled
             && exit.stop_reason.is_none()
             && (outcome_only || !exit.unresolved_cleanup)
@@ -3159,7 +3123,7 @@ impl RunStore {
             reason: decoded_reason,
             result: &result,
             complete: decoded.complete,
-            redacted: true,
+            redacted: false,
             resolved_route: record.resolved_route.clone(),
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,
@@ -3385,8 +3349,6 @@ pub const EMPTY_WRITER_REASON: &str =
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
 /// Stored instead of the provider's answer when settlement cannot filter it.
-const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
-const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 
 /// Captured text can suggest a denial, but cannot establish its source or
 /// supply a path safe for a remote diagnostic. The operation is a closed fact;
@@ -3470,7 +3432,7 @@ fn bounded_reason(mut reason: String) -> String {
 
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
-    provenant_confinement::redact::bounded_line(note, 240)
+    provenant_core::bounded_line(note, 240)
 }
 
 #[cfg(test)]

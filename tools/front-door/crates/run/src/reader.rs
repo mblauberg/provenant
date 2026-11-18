@@ -1099,16 +1099,6 @@ impl RunStore {
                 (bytes, artifact.complete, artifact.digest)
             }
         };
-        // Scan the whole bounded artifact before paging: slicing first can
-        // expose a token fragment whose marker is on the previous page.
-        let (bytes, digest) = if matches!(part, ArtifactPart::Prompt) {
-            (bytes, digest)
-        } else {
-            let safe = provenant_confinement::redact::known_shapes(&bytes)
-                .map_err(|_| RunError::Validation("output redaction failed"))?;
-            let digest = provenant_records::CanonicalV1::file_digest(&safe);
-            (safe, digest)
-        };
         if range.offset > bytes.len() as u64 {
             return Err(RunError::Validation("offset past EOF"));
         }

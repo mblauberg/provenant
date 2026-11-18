@@ -833,8 +833,6 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
 // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
 fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done_handoff() {
-    use provenant_os::exec::CaptureFilter;
-
     let temp = tempfile::tempdir().unwrap();
     let thread = "01234567-89ab-cdef-0123-456789abcdef";
     let day = temp.path().join("candidate-0/sessions/2026/10/24");
@@ -849,13 +847,9 @@ fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done
         format!("{identity}{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{secret}\"}}}}\n"),
     )
     .unwrap();
-    assert_eq!(
-        provenant_confinement::redact::scrub_session_history(temp.path()).unwrap(),
-        1
-    );
-    let scrubbed = std::fs::read_to_string(&rollout).unwrap();
-    assert!(scrubbed.starts_with(&identity));
-    assert!(!scrubbed.contains(secret));
+    let retained = std::fs::read_to_string(&rollout).unwrap();
+    assert!(retained.starts_with(&identity));
+    assert!(retained.contains(secret));
     let route = run::RouteRecord {
         provider: Some("codex".into()),
         model: Some("codex/gpt-6.1-terra".into()),
@@ -880,17 +874,8 @@ fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done
     ]
     .join("\n") + "\n";
 
-    let mut redactor = provenant_confinement::redact::JsonlRedactor::new([]).unwrap();
-    let mut filtered = Vec::new();
-    let mut sink = |frame: &[u8]| filtered.extend_from_slice(frame);
-    for chunk in stream.as_bytes().chunks(128) {
-        redactor.filter(chunk, &mut sink).unwrap();
-    }
-    redactor.finish(&mut sink).unwrap();
-    assert!(redactor.has_redaction());
-
     let decoded = Registry::default()
-        .decode(&route, &filtered, &clean_exit(), temp.path())
+        .decode(&route, stream.as_bytes(), &clean_exit(), temp.path())
         .unwrap();
 
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);

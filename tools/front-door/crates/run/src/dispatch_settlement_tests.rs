@@ -1,12 +1,12 @@
 use super::*;
 
 #[test]
-fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
+fn holder_seals_raw_results_and_digests_the_stored_bytes() -> TestResult {
     for (answer, expected) in [
         ("plain answer", "plain answer"),
         (
             "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-            "credential [REDACTED]",
+            "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         ),
     ] {
         let temp = tempfile::tempdir()?;
@@ -41,10 +41,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
             artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
             Some(expected.as_bytes())
         );
-        assert!(
-            artifact.redacted,
-            "redacted means the filter was applied, including clean results"
-        );
+        assert!(!artifact.redacted);
         assert_eq!(
             artifact.digest,
             CanonicalV1::file_digest(expected.as_bytes())
@@ -57,7 +54,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
     Ok(())
 }
 #[test]
-fn settlement_scrubs_provider_session_history() -> TestResult {
+fn settlement_preserves_provider_session_history() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -130,11 +127,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         &opencode.join("text.log"),
     ] {
         let text = std::fs::read_to_string(path)?;
-        assert!(
-            !text.contains(token),
-            "session plaintext survived settlement in {path:?}"
-        );
-        assert!(text.contains("[REDACTED]"));
+        assert!(text.contains(token), "session changed at {path:?}");
     }
     Ok(())
 }
@@ -350,7 +343,7 @@ fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
     Ok(())
 }
 #[test]
-fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
+fn long_raw_result_settles_successfully() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -375,7 +368,7 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     let answer = format!("http://{}", "a".repeat(provenant_os::exec::FRAME_LIMIT + 1));
     let fake = Fake {
         observed: Some(route()),
-        answer: Some(answer),
+        answer: Some(answer.clone()),
         ..Fake::default()
     };
 
@@ -386,13 +379,13 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     else {
         return Err("not terminal".into());
     };
-    assert_eq!(*outcome, Outcome::Failed);
-    assert_eq!(reason.as_deref(), Some("redaction failed; result withheld"));
+    assert_eq!(*outcome, Outcome::Succeeded);
+    assert_eq!(reason.as_deref(), None);
     assert_eq!(
         artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
-        Some(b"[result withheld: redaction failed]".as_slice())
+        Some(answer.as_bytes())
     );
-    assert!(record.result.ok_or("result")?.redacted);
+    assert!(!record.result.as_ref().ok_or("result")?.redacted);
     // A repeat settlement returns the same terminal record instead of looping.
     let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
     assert_eq!(repeat.revision, record.revision);

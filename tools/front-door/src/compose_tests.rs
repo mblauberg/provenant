@@ -9,7 +9,7 @@ use std::{
 
 // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
-fn guardian_capture_masks_split_credentials_before_retention() {
+fn guardian_capture_retains_split_output_losslessly() {
     struct Capture;
     impl super::Process for Capture {
         fn supervise(
@@ -18,54 +18,20 @@ fn guardian_capture_masks_split_credentials_before_retention() {
             hooks: provenant_supervisor::GuardianHooks<'_>,
         ) -> provenant_supervisor::custody::Result<()> {
             use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
-            let unbound_stdout = hooks
-                .stdout_filter
-                .ok_or_else(|| std::io::Error::other("stdout redaction"))?;
-            let stderr = hooks
-                .stderr_filter
-                .ok_or_else(|| std::io::Error::other("stderr redaction"))?;
-            let mut unbound = StreamCapture::new(
-                StreamPolicy::Capture { limit: 1024 },
-                None,
-                Some(unbound_stdout),
-            )
-            .map_err(std::io::Error::other)?;
-            assert!(
-                unbound
-                    .push(b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end")
-                    .is_ok()
-            );
-            unbound.finish();
-            assert!(unbound.outcome().filter_failed && unbound.outcome().bytes.is_empty());
-
-            // This process seam has no reservation or holder context to admit.
-            // Model an admitted Raw stream with the same Redactor type that
-            // HostHolder selects for that contract, after guardian admission.
-            let mut admitted_stdout =
-                provenant_confinement::redact::Redactor::new([]).map_err(std::io::Error::other)?;
-            let mut stdout = StreamCapture::new(
-                StreamPolicy::Capture { limit: 1024 },
-                None,
-                Some(&mut admitted_stdout),
-            )
-            .map_err(std::io::Error::other)?;
-            let mut stderr =
-                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stderr))
-                    .map_err(std::io::Error::other)?;
-            // Interleave streams and split the token marker and body. EOF
-            // must flush safe trailing text without leaking pending bytes.
-            for bytes in [
-                b"credential gh".as_slice(),
-                b"p_abcdefghijklmnop",
-                b"qrstuvwxyz0123456789 end",
-            ] {
+            assert!(hooks.stdout_filter.is_none());
+            assert!(hooks.stderr_filter.is_none());
+            let mut stdout = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
+                .map_err(std::io::Error::other)?;
+            let mut stderr = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
+                .map_err(std::io::Error::other)?;
+            for bytes in [b"credential gh".as_slice(), b"p_abcdefghijklmnop", b"qrstuvwxyz0123456789 end"] {
                 assert!(stdout.push(bytes).is_ok());
                 assert!(stderr.push(bytes).is_ok());
             }
             stdout.finish();
             stderr.finish();
             for capture in [&stdout, &stderr] {
-                assert_eq!(capture.outcome().bytes, b"credential [REDACTED] end");
+                assert_eq!(capture.outcome().bytes, b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end");
                 assert!(!capture.outcome().filter_failed);
             }
             Ok(())

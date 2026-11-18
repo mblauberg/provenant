@@ -1277,7 +1277,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
 }
 
 #[test]
-fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
+fn streamed_result_is_verified_and_raw_across_chunks() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1299,8 +1299,7 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
         CanonicalV1::file_digest(text.as_bytes()).to_string()
     );
     assert!(!result.source_truncated);
-    assert!(!result.tail.contains(&secret));
-    assert!(result.tail.contains("[REDACTED]"));
+    assert!(result.tail.contains(&secret));
     let path = context
         .state_root
         .as_path()
@@ -1508,7 +1507,7 @@ fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult 
 }
 
 #[test]
-fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestResult {
+fn transcript_part_reads_the_raw_tail_of_the_provider_transcript() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1539,7 +1538,7 @@ fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestR
     )?;
     let text = String::from_utf8(chunk.bytes)?;
     assert!(text.contains("\"n\":1"));
-    assert!(!text.contains(&secret));
+    assert!(text.contains(&secret));
     let fact = store.attempt(id, &call)?;
     let transcript = fact.transcript.ok_or("missing transcript locator")?;
     assert_eq!(transcript.adapter, "fixture");
@@ -2253,7 +2252,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
 #[test]
 fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
     for (text, redacted) in [
-        ("clean orphan", true),
+        ("clean orphan", false),
         ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", false),
     ] {
         let temp = tempfile::tempdir()?;
@@ -2851,7 +2850,7 @@ fn a_store_failure_omits_source_text_at_every_destination() {
 }
 
 #[test]
-fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
+fn output_slices_raw_bytes_and_keeps_artifact_binding() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2874,7 +2873,7 @@ fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
         &context,
         &call,
     )?;
-    assert_eq!(output.bytes, b"prefix [REDACTED] suffix");
+    assert_eq!(output.bytes, raw.as_bytes());
     assert_eq!(output.digest, CanonicalV1::file_digest(&output.bytes));
     let fragment = store.read_output(
         id,
@@ -2886,7 +2885,7 @@ fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
         &context,
         &call,
     )?;
-    assert_eq!(fragment.bytes, b"EDAC");
+    assert_eq!(fragment.bytes, &raw.as_bytes()[9..13]);
     assert_eq!(
         store.record(id, &call)?.result.unwrap().digest,
         CanonicalV1::file_digest(raw.as_bytes())
