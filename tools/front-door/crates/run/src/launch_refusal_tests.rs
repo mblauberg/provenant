@@ -27,6 +27,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                     terminal_cause: TerminalCause::DiskFloor,
                     terminal_note: Some("99 bytes available; gc.critical_free is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
+                host_message: None,
                     skipped_routes: Vec::new(),
                     fallback_outcome: None,
                 }));

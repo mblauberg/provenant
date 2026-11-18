@@ -206,8 +206,11 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
 }
 #[test]
 fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::reporting_tests::output_retains_safe_refusal_remedies")? {
+        return Ok(());
+    }
     struct Refusing {
-        note: String,
+        note: Option<String>,
     }
     impl run::Providers for Refusing {
         fn prepare(
@@ -222,8 +225,9 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 policy_code: None,
                 resource: None,
                 terminal_cause: provenant_records::run::TerminalCause::AccessPolicyRefused,
-                terminal_note: Some(self.note.clone()),
+                terminal_note: self.note.clone(),
                 message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),
+                host_message: None,
                 skipped_routes: Vec::new(),
                 fallback_outcome: None,
             }))
@@ -256,7 +260,9 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             assert!(note.len() > 160);
             session.store.start(
                 prepared.attempt_id,
-                &Refusing { note: note.clone() },
+                &Refusing {
+                    note: Some(note.clone()),
+                },
                 &|_, _| unreachable!(),
                 &call,
             )?;
@@ -296,6 +302,24 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             assert!(default.contains(&expected), "{default}");
             assert_eq!(default.matches("END_SAFE_NOTE").count(), 1, "{default}");
             assert!(!default.contains("PROVIDER_SENTINEL"));
+            let without_note = trace_run(11, AttemptId::from_bytes([98; 16]), clock.wall_now()?)?;
+            session.store.create(&without_note, &call)?;
+            session.store.start(
+                without_note.attempt_id,
+                &Refusing { note: None },
+                &|_, _| unreachable!(),
+                &call,
+            )?;
+            let reply = output_from_session(
+                output_command(),
+                edge,
+                &session,
+                without_note.attempt_id,
+                &call,
+            );
+            assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
+            assert!(!serde_json::to_string(&reply.result.data)?.contains("PROVIDER_SENTINEL"));
+            assert!(!reply.human.contains("PROVIDER_SENTINEL"));
             Ok(())
         },
     )?

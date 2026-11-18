@@ -2435,12 +2435,15 @@ fn resolve_inner(
         }
     };
     if let Some(family) = excluded_members.required_family
-        && matches!(&primary.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+        && let RouteReadiness::Unavailable { reason, .. } = &primary.readiness
+        && reason.is_account_block()
     {
         return Err(RoutingError::NoEligiblePoolMember {
             exclusions: vec![format!(
-                "required family {family} count 1; {}/{}: {:?}",
-                primary.adapter, primary.model, primary.readiness
+                "required family {family} count 1; {}/{}: {}",
+                primary.adapter,
+                primary.model,
+                exclusion_detail(reason)
             )],
         });
     }
@@ -2791,11 +2794,12 @@ fn classify_pool(
                     effort = resolved.effort.clone();
                     ranking.effort_warning = resolved.diagnostics.effort_warning.clone();
                     if let Some(family) = excluded_members.required_family
-                        && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+                        && let RouteReadiness::Unavailable { reason, .. } = &resolved.readiness
+                        && reason.is_account_block()
                     {
                         let detail = format!(
-                            "required family {family} count 1; unavailable: {:?}",
-                            resolved.readiness
+                            "required family {family} count 1; unavailable: {}",
+                            self::exclusion_detail(reason)
                         );
                         classified
                             .exclusions
