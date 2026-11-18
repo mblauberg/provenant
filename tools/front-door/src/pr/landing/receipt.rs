@@ -9,7 +9,7 @@ pub struct ApprovalCarryReceipt {
     pub approved_head: String,
     pub current_head: String,
     pub base_head: String,
-    pub kind: String,
+    pub kind: provenant_cli::domains::ApprovalCarry,
     #[serde(default)]
     pub extra: provenant_records::ExtraFields,
 }
@@ -68,6 +68,7 @@ pub fn read_approval_carry(
     Ok(Some(receipt))
 }
 
+#[allow(clippy::print_stderr)]
 pub fn read_latest_approval_carry(
     state: &Path,
     repository: &str,
@@ -88,11 +89,25 @@ pub fn read_latest_approval_carry(
         }
         let file = match std::fs::File::open(entry.path()) {
             Ok(file) => file,
-            Err(error) => return Err(failed("read approval carry", error)),
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to open approval carry receipt {}: {error}",
+                    entry.path().display()
+                );
+                continue;
+            }
         };
         let receipt: ApprovalCarryReceipt =
-            provenant_records::decode(file, provenant_records::Limits::default())
-                .map_err(|error| failed("decode approval carry", error))?;
+            match provenant_records::decode(file, provenant_records::Limits::default()) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    eprintln!(
+                        "warning: corrupt approval carry receipt in {}: {error}",
+                        entry.path().display()
+                    );
+                    continue;
+                }
+            };
         if receipt.repository == repository && receipt.number == number {
             let modified = entry
                 .metadata()
@@ -699,6 +714,28 @@ pub(crate) mod tests {
         let decoded: PendingAttempt =
             provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())?;
         assert_eq!(serde_json::to_value(decoded)?, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_approval_carry_receipt_is_warned_and_skipped() -> Result<(), LandingError> {
+        let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
+        let valid = ApprovalCarryReceipt {
+            repository: "org/repo".into(),
+            number: 42,
+            approved_head: "aaaa".into(),
+            current_head: "bbbb".into(),
+            base_head: "cccc".into(),
+            kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
+            extra: Default::default(),
+        };
+        write_approval_carry(dir.path(), &valid)?;
+        let corrupt_path =
+            carry_dir(dir.path()).join(format!("{}-42-corrupt.json", repository_key("org/repo")));
+        std::fs::write(&corrupt_path, b"not valid json")
+            .map_err(|e| failed("write corrupt receipt", e))?;
+        let read = read_latest_approval_carry(dir.path(), "org/repo", 42)?;
+        assert_eq!(read, Some(valid));
         Ok(())
     }
 }

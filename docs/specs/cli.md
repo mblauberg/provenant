@@ -274,9 +274,9 @@ Approval sources default to Provenant review then forge and are overridable by p
 - Why: routine landing must not widen approval or delete unmerged work.
 
 `pr sync N [M ...]` merges each PR's base into its branch worktree and pushes
-the merge. A conflict is aborted, the worktree is left clean, and the output
-names conflicted paths plus a `run implement` command. `--repair` launches that
-implement lane automatically.
+the merge. A conflict is aborted, the worktree is left clean, and an `implement`
+repair lane is launched by default; `--no-lane` stops and reports the conflicted
+paths and `run implement` command instead.
 
 ### Pull request bodies come from receipts
 

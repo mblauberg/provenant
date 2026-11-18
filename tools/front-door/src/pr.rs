@@ -765,7 +765,7 @@ fn merge_with(
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
     let numbers = match command {
-        Pr::Sync { numbers, repair } => return sync::run(numbers, repair, globals),
+        Pr::Sync { numbers, no_lane } => return sync::run(numbers, no_lane, globals),
         Pr::Watch { numbers } => numbers,
         Pr::Open(command) => return open::run(*command, globals),
         Pr::Status { numbers } => return status::run(numbers, globals),
