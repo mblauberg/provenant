@@ -5189,27 +5189,21 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         "{}",
         String::from_utf8_lossy(&started.stdout.bytes)
     );
-    let status = provenant_test_support::wait_for(
-        "full-inputs graph completion",
-        std::time::Duration::from_secs(30),
-        || {
-            let status = rig.command(&["status", "full-inputs", "--json"])?;
-            assert_eq!(code(&status), 0, "{status:?}");
-            Ok(serde_json::from_slice::<Value>(&status.stdout.bytes)?)
-        },
-        |status: &Result<Value>| {
-            status.as_ref().is_ok_and(|status| {
-                status["data"]["rows"].as_array().is_some_and(|rows| {
-                    rows.iter().any(|row| {
-                        row["kind"] == "graph"
-                            && row["graph_id"] == "full-inputs"
-                            && row["state"] == "complete"
-                    })
-                })
+    let waited = rig.command(&["wait", "full-inputs", "--timeout", "30s", "--json"])?;
+    assert_eq!(code(&waited), 0, "{waited:?}");
+    let status = rig.command(&["status", "full-inputs", "--json"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert!(
+        status["data"]["rows"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["kind"] == "graph"
+                    && row["graph_id"] == "full-inputs"
+                    && row["state"] == "complete"
             })
-        },
-    )
-    .map_err(std::io::Error::other)??;
+        }),
+        "{status}"
+    );
     // Status deliberately returns unified rows. Inspect the durable checkpoint
     // to verify full input transport and its confinement boundary separately.
     let identity = rig.command(&["fabric", "identity", "--json"])?;
