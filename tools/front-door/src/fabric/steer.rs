@@ -15,6 +15,7 @@ const MAX_SUPERSEDED: usize = 32;
 pub(super) enum TargetProof {
     Verified(Box<VerifiedTarget>),
     Unavailable,
+    Settled,
     Conflict,
 }
 
@@ -38,6 +39,22 @@ struct LaunchBinding<'a> {
     launch_actor: provenant_core::ActorId,
     launch_operation: provenant_core::OperationId,
     host: provenant_core::HostId,
+}
+
+pub(super) fn selected_is_settled(
+    resolved: &provenant_cli::target::Resolved,
+    checkpoint: &GraphCheckpoint,
+) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .find(|node| resolved.node.as_deref() == Some(node.id.as_str()))
+        .and_then(|node| {
+            node.recorded_attempts().find(|attempt| {
+                resolved.number.map(|number| number.get()) == Some(attempt.key.attempt)
+            })
+        })
+        .is_some_and(|attempt| attempt.state == GraphAttemptState::Terminal)
 }
 
 /// Resolve only the selected graph/node/attempt. Temporary owner/placement
@@ -68,8 +85,10 @@ pub(super) fn verified_target(
     else {
         return TargetProof::Conflict;
     };
+    if graph_attempt.state == GraphAttemptState::Terminal {
+        return TargetProof::Settled;
+    }
     if index + 1 != attempts.len()
-        || graph_attempt.state == GraphAttemptState::Terminal
         || !graph_continuation_matches(&attempts, index)
         || resolved.number.map(|number| number.get()) != Some(graph_attempt.key.attempt)
     {
@@ -209,7 +228,7 @@ pub(super) fn dispatch_pending_steers(
         };
         let target = match verified_target(factory, &resolved, checkpoint, budget, cancel) {
             TargetProof::Unavailable => continue,
-            TargetProof::Conflict => {
+            TargetProof::Settled | TargetProof::Conflict => {
                 checkpoint
                     .pending_steers
                     .refuse(&key, PendingSteerRefusal::TargetChanged);

@@ -128,7 +128,7 @@ pub struct RouteList {
     pub valid_pairs: Vec<ValidRoutePair>,
     pub catalogue_revision: String,
     pub models: Vec<ModelEntry>,
-    pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
+    pub named_routes: std::collections::BTreeMap<String, NamedRouteView>,
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
     pub account_pacing: Vec<AccountPacingView>,
@@ -141,8 +141,15 @@ pub struct RouteList {
 }
 #[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
+    pub source: String,
     pub model: ModelId,
     pub effort: Option<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct NamedRouteView {
+    pub model: ModelId,
+    pub effort: Option<String>,
+    pub source: String,
 }
 #[derive(Debug, Serialize)]
 pub struct AccountPacingView {
@@ -156,6 +163,7 @@ pub struct AccountPacingView {
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
     pub model: ModelId,
+    pub source: String,
     pub weight: u8,
     pub effort: Option<String>,
     pub efforts: Vec<String>,
@@ -199,12 +207,18 @@ pub fn list(
             .iter()
             .filter(|member| matches(member.model.adapter()))
         {
-            if context.catalogue.model(&member.model).is_none() {
-                return Err(RoutingError::Catalogue);
-            }
             admissible(&member.model, member.effort.as_deref(), context)?;
             views.push(RoutePoolMemberView {
                 model: member.model.clone(),
+                source: if context.config.pools.contains_key(&name) {
+                    "user".into()
+                } else {
+                    context
+                        .catalogue
+                        .model(&member.model)
+                        .map_or("bundled", |entry| entry.source.as_str())
+                        .into()
+                },
                 weight: member.weight,
                 effort: member.effort.clone(),
                 efforts: member.efforts.clone(),
@@ -231,6 +245,7 @@ pub fn list(
             for effort in efforts {
                 if admissible(&entry.model, effort.as_deref(), context).is_ok() {
                     valid_pairs.push(ValidRoutePair {
+                        source: entry.source.clone(),
                         model: entry.model.clone(),
                         effort,
                     });
@@ -254,7 +269,16 @@ pub fn list(
             .routes
             .iter()
             .filter(|(_, r)| !query.valid && matches(r.model.adapter()))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    NamedRouteView {
+                        model: v.model.clone(),
+                        effort: v.effort.clone(),
+                        source: "user".into(),
+                    },
+                )
+            })
             .collect(),
         pools,
         pacing,
@@ -1161,7 +1185,9 @@ fn account_reason<'q>(
     let mut reason = availability_reason(Some(availability), context).filter(|r| {
         !matches!(
             r,
-            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+            RouteExclusionReason::StaleAvailability
+                | RouteExclusionReason::UnknownAvailability
+                | RouteExclusionReason::UnknownAccount
         )
     });
     // Missing access means preparation did not establish confinement. Only an
@@ -1186,8 +1212,8 @@ fn account_reason<'q>(
     {
         reason = Some(RouteExclusionReason::AuthRequired);
     }
-    // Explicit exact IDs use the executable/account preflight too. The provider
-    // owns model availability; named routes and pools require catalogue entries.
+    // Exact IDs, including configured routes, use the executable/account
+    // preflight. The provider owns model availability.
     let quota = latest_reading(model, availability, context, true);
     if reason.is_none()
         && let Some(q) = quota
@@ -1258,6 +1284,21 @@ fn account_reason<'q>(
             .blocks()
     {
         reason = Some(RouteExclusionReason::UnknownAvailability);
+    }
+    // Identity uncertainty is advisory by default, but must not mask an
+    // independent credential, confinement or authority refusal.
+    if reason.is_none()
+        && availability.account_key.is_none()
+        && context
+            .config
+            .launch_policy
+            .check(
+                "QUOTA_IDENTITY_UNKNOWN",
+                provenant_records::policy::Facts::violation("account identity unknown"),
+            )
+            .blocks()
+    {
+        reason = Some(RouteExclusionReason::UnknownAccount);
     }
     (reason, quota)
 }
@@ -1593,6 +1634,32 @@ fn admissible<'c>(
             support: format!("{} takes no effort control", spec.name),
         });
     }
+    if entry.is_none()
+        && let Some(effort) = effort
+    {
+        context.config.launch_policy.warn_or(
+            "ROUTING_EFFORT_UNCATALOGUED",
+            provenant_records::policy::Facts::violation(
+                "effort unverifiable for uncatalogued model; passed through",
+            ),
+            |_| {
+                let nearest = context.catalogue.nearest_models(model);
+                let support = if nearest.is_empty() {
+                    "model is not in the catalogue; no effort controls are recorded".to_owned()
+                } else {
+                    format!(
+                        "model is not in the catalogue; nearest catalogued IDs: {}",
+                        nearest.join(", ")
+                    )
+                };
+                RoutingError::UnsupportedEffort {
+                    model: model.as_str().to_owned(),
+                    effort: effort.to_owned(),
+                    support,
+                }
+            },
+        )?;
+    }
     if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
             || entry.is_some_and(|row| !row.efforts.iter().any(|v| v == e))
@@ -1842,6 +1909,7 @@ fn candidate(
                 .config
                 .model_policy
                 .effective(
+                    context.catalogue,
                     model,
                     a.account_key.as_deref().or(context.policy_account_hint),
                     context.now,
@@ -1927,6 +1995,9 @@ fn candidate(
         },
     };
     let mut diagnostics = RouteDiagnostics::default();
+    if context.catalogue.model(model).is_none() {
+        diagnostics.launch_warnings.push(format!("model {} is absent from the bundled and discovered catalogue; source=user, provider availability is unverified", model.as_str()));
+    }
     if let Some(a) = availability
         && matches!(readiness, RouteReadiness::Ready { .. })
         && let Some(reason_text) = account_probe_failure_reason(model, a, context)
@@ -2357,7 +2428,7 @@ fn resolve_inner(
                             context.config.permits_automatic_model(
                                 &route.model,
                                 AutomaticModelSource::OwnerConfiguration,
-                            ) && context.catalogue.model(&route.model).is_some()
+                            )
                         })
                         .map(|route| {
                             vec![RoutePoolMember {
@@ -2415,9 +2486,6 @@ fn resolve_inner(
                         )],
                     });
                 }
-                if context.catalogue.model(&named.model).is_none() {
-                    return Err(RoutingError::Catalogue);
-                }
                 if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
                     return Err(RoutingError::ConfidentialModel);
                 }
@@ -2450,14 +2518,17 @@ fn resolve_inner(
         }
     };
     if let Some(family) = excluded_members.required_family
-        && matches!(&primary.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+        && let RouteReadiness::Unavailable { reason, .. } = &primary.readiness
+        && reason.is_account_block()
     {
         return Err(RoutingError::NoEligiblePoolMember {
             cause: None,
             preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
             exclusions: vec![format!(
-                "required family {family} count 1; {}/{}: {:?}",
-                primary.adapter, primary.model, primary.readiness
+                "required family {family} count 1; {}/{}: {}",
+                primary.adapter,
+                primary.model,
+                exclusion_detail(reason)
             )],
         });
     }
@@ -2471,6 +2542,7 @@ fn resolve_inner(
             .config
             .model_policy
             .effective(
+                context.catalogue,
                 &primary_model,
                 primary
                     .account_key
@@ -2481,11 +2553,19 @@ fn resolve_inner(
             .policy,
         request.intent,
     )?;
-    if models.contains(&primary_model) {
-        return Err(RoutingError::Alternatives);
-    }
+    let drop_primary = if models.contains(&primary_model) {
+        context.config.launch_policy.warn_or(
+            "ROUTING_ALTERNATIVES",
+            provenant_records::policy::Facts::violation("alternative equals primary; dropped"),
+            |_| RoutingError::Alternatives,
+        )?;
+        true
+    } else {
+        false
+    };
     let alternatives = models
         .iter()
+        .filter(|model| !drop_primary || *model != &primary_model)
         .filter(|model| excluded_members.family_reason(model).is_none())
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         // Fallbacks are automatic alternatives even when attached to a model
@@ -2808,11 +2888,12 @@ fn classify_pool(
                     effort = resolved.effort.clone();
                     ranking.effort_warning = resolved.diagnostics.effort_warning.clone();
                     if let Some(family) = excluded_members.required_family
-                        && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+                        && let RouteReadiness::Unavailable { reason, .. } = &resolved.readiness
+                        && reason.is_account_block()
                     {
                         let detail = format!(
-                            "required family {family} count 1; unavailable: {:?}",
-                            resolved.readiness
+                            "required family {family} count 1; unavailable: {}",
+                            self::exclusion_detail(reason)
                         );
                         classified
                             .exclusions
@@ -2835,6 +2916,7 @@ fn classify_pool(
                         .config
                         .model_policy
                         .effective(
+                            context.catalogue,
                             &member.model,
                             resolved
                                 .account_key

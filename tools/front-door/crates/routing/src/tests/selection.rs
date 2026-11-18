@@ -287,8 +287,29 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
             .all(|a| matches!(a.readiness, RouteReadiness::Unavailable { .. }))
     );
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/primary")?])?);
+    let resolved_dup = resolve(&query, &context)?;
+    assert!(resolved_dup.alternatives.as_slice().is_empty());
+
+    let mut strict_policy = provenant_records::policy::Policy::default();
+    strict_policy.overlay(
+        &[(
+            "ROUTING_ALTERNATIVES".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]
+        .into_iter()
+        .collect(),
+        provenant_records::policy::Source::Project,
+    );
+    let strict_config = RoutingConfig {
+        launch_policy: strict_policy,
+        ..config.clone()
+    };
+    let strict_context = RoutingContext {
+        config: &strict_config,
+        ..context
+    };
     assert!(matches!(
-        resolve(&query, &context),
+        resolve(&query, &strict_context),
         Err(RoutingError::Alternatives)
     ));
     assert!(
@@ -405,6 +426,31 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
             (Ok(_), _) => panic!("unexpected successful route for {wire}"),
         }
     }
+    let mut strict_policy = provenant_records::policy::Policy::default();
+    strict_policy.overlay(
+        &[(
+            "ROUTING_EFFORT_UNCATALOGUED".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]
+        .into_iter()
+        .collect(),
+        provenant_records::policy::Source::Project,
+    );
+    let strict_config = RoutingConfig {
+        launch_policy: strict_policy,
+        ..config.clone()
+    };
+    let strict_context = RoutingContext {
+        config: &strict_config,
+        ..context
+    };
+    let uncatalogued: RouteRequest = serde_json::from_str(
+        r#"{"choice":{"kind":"model","value":"codex/unlisted"},"effort":"high"}"#,
+    )?;
+    assert!(matches!(
+        resolve(&uncatalogued, &strict_context),
+        Err(RoutingError::UnsupportedEffort { .. })
+    ));
     let context = RoutingContext {
         registry: &[],
         ..context

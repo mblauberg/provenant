@@ -99,7 +99,13 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
         ByteRange::default(),
         &call,
     )?;
-    assert!(output.bytes.is_empty());
+    let safe_reason = provenant_records::wire::lane::LaneRow::state_and_reason(&rejected.state)
+        .1
+        .ok_or("safe reason missing")?;
+    assert_eq!(
+        String::from_utf8(output.bytes)?,
+        provenant_confinement::redact::bounded_line(&safe_reason, 256)
+    );
     Ok(())
 }
 #[test]

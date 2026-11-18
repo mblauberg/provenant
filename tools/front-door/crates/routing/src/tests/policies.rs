@@ -590,7 +590,7 @@ fn explicit_unlisted_opencode_models_and_fallbacks_are_ready()
 }
 
 #[test]
-fn named_routes_reject_unlisted_models_even_when_provider_observed()
+fn named_routes_accept_unlisted_models_with_source_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig {
@@ -614,16 +614,16 @@ fn named_routes_reject_unlisted_models_even_when_provider_observed()
     context.access = &access;
     let mut query = request("codex/test")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("review")?);
+    assert!(config.validate().is_empty());
+    let route = resolve(&query, &context)?;
+    assert_eq!(format!("{}/{}", route.adapter, route.model), "codex/test");
     assert!(
-        config
-            .validate()
+        route
+            .diagnostics
+            .launch_warnings
             .iter()
-            .any(|error| { error.field == "routes.review.model" && error.code == "unknown_model" })
+            .any(|warning| warning.contains("source=user"))
     );
-    assert!(matches!(
-        resolve(&query, &context),
-        Err(RoutingError::InvalidValue)
-    ));
     Ok(())
 }
 

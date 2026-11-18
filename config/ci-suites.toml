@@ -1,0 +1,160 @@
+# CI suites: which jobs ci-status gates, when each runs, and what may skip it.
+# Read by scripts/select-ci-suites (selection), scripts/check-ci-status (gate)
+# and scripts/check-ci-suites (manifest against .github/workflows/ci.yml).
+# Spec: docs/specs/ci.md. Decision: docs/adr/0041-tiered-ci-from-green-evidence.md.
+#
+# Globs match whole repository-relative paths: `**` spans any number of
+# directories, `*` and `?` stay within one path segment. No braces.
+schema_version = 1
+
+# Jobs outside every suite. `always` jobs must succeed on every run; `ungated`
+# jobs run after ci-status and never gate it.
+[jobs]
+always = ["scope"]
+ungated = ["main-health"]
+
+[evidence]
+# Green ci-status push runs of this workflow on this branch are evidence.
+workflow = "ci.yml"
+branch = "main"
+# Newest runs searched for a green ancestor of the tested commit; none found
+# runs every suite.
+lookback = 30
+# The artifact ci-status uploads; a pull request's next run reads it.
+artifact = "ci-evidence"
+
+[request]
+# A pull request carrying this label, or a dispatch with tier=full, runs
+# every suite. Push after labelling, or dispatch, to start the full run.
+full_label = "ci:full"
+
+# A change to any of these runs every suite: the pipeline or toolchain moved.
+[full]
+paths = [
+  ".github/workflows/ci.yml",
+  ".github/actions/**",
+  "config/ci-suites.toml",
+  "scripts/select-ci-suites",
+  "scripts/check-ci-status",
+  "rust-toolchain.toml",
+  "tools/front-door/rust-toolchain.toml",
+  "tools/front-door/Cargo.lock",
+  "tools/front-door/.cargo/**",
+]
+
+# Prose and media that no build or test reads. A suite inherits this list
+# unless it sets its own `inert`; `watch` re-admits paths a suite does read.
+[defaults]
+inert = [
+  "*.md",
+  "docs/**/*.md",
+  "docs/**/*.png",
+  "docs/**/*.jpg",
+  "docs/**/*.jpeg",
+  "docs/**/*.svg",
+  "docs/**/*.gif",
+  "docs/**/*.webp",
+  "docs/**/*.pdf",
+  "skills/**/*.md",
+  "roles/**/*.md",
+  ".editorconfig",
+  ".gitattributes",
+  ".gitignore",
+  "LICENSE",
+  "NOTICE",
+]
+
+# Harness, prose, link, spelling, workflow and script checks: every change.
+[[suite]]
+name = "checks"
+tier = "pr"
+cost_minutes = 5
+jobs = ["repo-checks"]
+inert = []
+
+# Linux Rust: format, lint, dependency policy, generated reference and the
+# affected-crate test partitions.
+[[suite]]
+name = "rust"
+tier = "pr"
+cost_minutes = 12
+jobs = [
+  "generated-reference",
+  "rust-lint",
+  "rust-dependencies",
+  "rust-test-archive",
+  "quarantine-filter",
+  "quarantine-validation",
+  "rust",
+]
+# Rust tests read these prose files.
+watch = ["skills/legal-writing/references/**"]
+# Main-tier tests: a nextest filterset these Linux partitions skip on pull
+# requests and run on main and full runs. Tag a test by putting it in a module
+# named `main_tier`, or add a filterset term here. Empty runs every test.
+main_tests = "test(/(^|::)main_tier::/)"
+
+# macOS Clippy: compiles macOS-only code. Main-tier because macOS runners are
+# the scarce pool; pull requests run it when they touch the crates that hold
+# most platform-specific code. Main catches a slip elsewhere.
+[[suite]]
+name = "macos_lint"
+tier = "main"
+cost_minutes = 3
+jobs = ["rust-macos-lint"]
+watch = ["skills/legal-writing/references/**"]
+pr_paths = [
+  "tools/front-door/crates/os/**",
+  "tools/front-door/crates/confinement/**",
+  "tools/front-door/crates/supervisor/**",
+  "tools/front-door/crates/providers/**",
+  "tools/front-door/crates/cli/**",
+  "tools/front-door/crates/run/**",
+  "tools/front-door/crates/fabric-runtime/**",
+  "tools/front-door/Cargo.toml",
+  "tools/front-door/crates/*/Cargo.toml",
+]
+
+# Native macOS confinement, custody, dispatch and provider tests.
+[[suite]]
+name = "macos_native"
+tier = "main"
+cost_minutes = 16
+jobs = ["rust-macos-archive", "rust-macos-tests", "rust-macos-inventory"]
+watch = ["skills/legal-writing/references/**"]
+pr_paths = [
+  "tools/front-door/crates/os/**",
+  "tools/front-door/crates/confinement/**",
+  "tools/front-door/crates/supervisor/**",
+  "tools/front-door/crates/providers/**",
+  "tools/front-door/tests/worktree_driver.rs",
+  "tools/front-door/src/worktree_tests.rs",
+  "tools/front-door/src/worktree_tests/**",
+  "tools/front-door/tests/graph_provider.rs",
+  "tools/front-door/tests/command_adapter.rs",
+  "tools/front-door/.config/**",
+  "tools/front-door/Cargo.toml",
+  "tools/front-door/crates/*/Cargo.toml",
+  "config/native-test-inventory.json",
+  "scripts/check-native-inventory",
+  "scripts/run-native-test-group",
+  "scripts/flaky-quarantine",
+]
+
+# macOS release build, packaging, isolated install and Swift package tests.
+[[suite]]
+name = "macos_release"
+tier = "main"
+cost_minutes = 8
+jobs = ["rust-macos-release"]
+pr_paths = [
+  "tools/front-door/Cargo.toml",
+  "tools/front-door/crates/*/Cargo.toml",
+  "tools/front-door/build.rs",
+  "tools/front-door/src/bin/**",
+  "tools/front-door/src/install.rs",
+  "tools/front-door/src/release_smoke.rs",
+  "tools/front-door/src/upgrade-release.sh",
+  "tools/front-door/tests/install.rs",
+  "apps/**",
+]
