@@ -23,6 +23,7 @@ pub enum Destination {
     ArtifactExport,
     GraphPublication,
     PeerPublication,
+    CrossHostTransport,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +128,32 @@ pub fn secret_field(name: &str) -> bool {
 pub struct Projector {
     secrets: Vec<Vec<u8>>,
 }
+/// The disclosure boundary for every payload sent to another host.
+/// A failure withholds the payload; local state is never changed.
+pub struct CrossHostTransport<'a> {
+    projector: &'a Projector,
+}
+impl<'a> CrossHostTransport<'a> {
+    pub fn new(projector: &'a Projector) -> Self {
+        Self { projector }
+    }
+
+    pub fn json(&self, bytes: &[u8]) -> Result<Projection, ProjectionError> {
+        self.projector.json(Destination::CrossHostTransport, bytes)
+    }
+
+    pub fn inspect_text<'b>(&self, bytes: &'b [u8]) -> Result<&'b str, ProjectionError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
+        if text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            return Err(ProjectionError::Encoding);
+        }
+        Ok(text)
+    }
+}
+
 impl Projector {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, ProjectionError> {
         let mut secrets: Vec<_> = secrets.into_iter().collect();

@@ -342,7 +342,7 @@ pub struct GraphCancelContext {
     pub launch_actor: ActorId,
 }
 
-/// Claimed output audience. Graph execution is eligible for raw transport only
+/// Claimed output audience. Graph execution is authorised only
 /// after the receiver validates this context against the authenticated actor and
 /// the retained launch receipt and verifies that the requested attempt belongs
 /// to that launch. A claim alone never grants that authority.
@@ -920,7 +920,34 @@ pub struct SshTransport<'a> {
 }
 /// Encode and validate the request before any peer contact.
 pub fn encode_peer_request(request: &PeerRequest) -> Result<Vec<u8>, PeerError> {
-    let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
+    let projector =
+        provenant_confinement::publication::Projector::ambient().map_err(|_| PeerError::Frame)?;
+    let boundary = provenant_confinement::publication::CrossHostTransport::new(&projector);
+    let mut outbound = request.clone();
+    // Attachments are opaque to JSON projection. Inspect their decoded bytes,
+    // withholding binary or malformed data rather than exporting it unexamined.
+    if let PeerAction::SessionHandoff { input, .. } = &mut outbound.action {
+        for attachment in &mut input.attachments {
+            let bytes =
+                crate::handoff::decode_base64(&attachment.base64).ok_or(PeerError::Frame)?;
+            attachment.base64 = boundary
+                .inspect_text(&bytes)
+                .map_err(|_| PeerError::Frame)?
+                .to_owned();
+        }
+    }
+    let raw = serde_json::to_vec(&outbound).map_err(|_| PeerError::Frame)?;
+    let projection = boundary.json(&raw).map_err(|_| PeerError::Frame)?;
+    // Re-encode only after projection, so decoded attachments and all other
+    // fields share one inventory of typed and known credential values.
+    let mut projected: PeerRequest =
+        serde_json::from_slice(projection.bytes()).map_err(|_| PeerError::Frame)?;
+    if let PeerAction::SessionHandoff { input, .. } = &mut projected.action {
+        for attachment in &mut input.attachments {
+            attachment.base64 = crate::handoff::encode_base64(attachment.base64.as_bytes());
+        }
+    }
+    let mut input = serde_json::to_vec(&projected).map_err(|_| PeerError::Frame)?;
     if input.len() >= MAX_FRAME {
         return Err(PeerError::RequestTooLarge);
     }
@@ -1494,6 +1521,48 @@ mod tests {
             request.validate(local, &config, home),
             Err(PeerError::SourceHost)
         ));
+    }
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn cross_host_submit_projects_credentials_before_encoding() {
+        let local = HostId::from_bytes([1; 16]);
+        let remote = HostId::from_bytes([2; 16]);
+        let actor = crate::identity::Address::new(local, "origin")
+            .unwrap()
+            .actor;
+        let project = ProjectLocator {
+            extra: Default::default(),
+            key: project_key(Path::new("/h")),
+            common_dir: "repo/.git".into(),
+        };
+        let secret = "submit-private-value";
+        let input = serde_json::from_value(serde_json::json!({
+            "op":"submit", "operation_id":"submit-test",
+            "task":{"prompt":format!("token={secret}"), "access":"read_only",
+                "route":{"kind":"model","provider":"fixture","model":"fixture/model"}, "timeout_seconds":30}
+        })).unwrap();
+        let request = PeerRequest::new(
+            remote,
+            local,
+            "worker".into(),
+            project,
+            PeerAction::Submit {
+                extra: Default::default(),
+                graph_context: Box::new(GraphSubmitContext {
+                    launch_actor: actor,
+                    attempt: Default::default(),
+                    retry_limit: None,
+                    network: None,
+                }),
+                input: Box::new(input),
+            },
+        );
+        let encoded = encode_peer_request(&request).unwrap();
+        let wire = std::str::from_utf8(&encoded).unwrap();
+        assert!(!wire.contains(secret));
+        assert!(wire.contains("[REDACTED]"));
+        assert!(serde_json::to_string(&request).unwrap().contains(secret));
     }
 
     #[test]
@@ -2312,6 +2381,7 @@ mod tests {
         assert_eq!(plain_text("abcdef", 3), "abc");
     }
 
+    // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn session_handoff_fits_one_frame_and_keeps_its_operation_on_a_lost_reply() {
         use crate::handoff::{
@@ -2338,7 +2408,7 @@ mod tests {
             attachments: vec![Attachment {
                 extra: Default::default(),
                 name: "bundle.bin".into(),
-                base64: encode_base64(&vec![0xff; ATTACHMENT_LIMIT]),
+                base64: encode_base64(&vec![b'x'; ATTACHMENT_LIMIT]),
             }],
             launch: false,
         };
@@ -2362,6 +2432,41 @@ mod tests {
                 budget_seconds: 30,
             },
         };
+        let mut secret_request = request.clone();
+        let PeerAction::SessionHandoff {
+            input: secret_input,
+            ..
+        } = &mut secret_request.action
+        else {
+            unreachable!()
+        };
+        secret_input.attachments[0].base64 = encode_base64(b"token=attachment-private-value");
+        secret_input.prompt = format!("{PROMPT_HEADER} attachment-private-value");
+        let wire = encode_peer_request(&secret_request).unwrap();
+        let decoded = decode_request(&wire).unwrap();
+        let PeerAction::SessionHandoff {
+            input: projected, ..
+        } = decoded.action
+        else {
+            unreachable!()
+        };
+        assert!(!projected.prompt.contains("attachment-private-value"));
+        let content = crate::handoff::decode_base64(&projected.attachments[0].base64).unwrap();
+        assert!(
+            !String::from_utf8(content.clone())
+                .unwrap()
+                .contains("attachment-private-value")
+        );
+        assert!(String::from_utf8(content).unwrap().contains("[REDACTED]"));
+        let PeerAction::SessionHandoff {
+            input: binary_input,
+            ..
+        } = &mut secret_request.action
+        else {
+            unreachable!()
+        };
+        binary_input.attachments[0].base64 = encode_base64(&[0xff]);
+        assert!(encode_peer_request(&secret_request).is_err());
         let frame = serde_json::to_vec(&request).unwrap();
         assert!(frame.len() < MAX_FRAME, "{} bytes", frame.len());
         let mut without_budget = serde_json::to_value(&request).unwrap();

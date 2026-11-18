@@ -55,8 +55,9 @@ Local execution data, provider histories and graph text remain lossless in
 host-owned private state. File modes are defence in depth, not isolation from
 same-user processes; lanes receive only authorised state. Publication projections
 protect known credential values and typed secret fields at their destination,
-without mutating unrelated task text. Authorised execution transport is distinct
-from exporting diagnostics and artefacts. Raw and exported representations have
+without mutating unrelated task text. Authenticated execution transport across
+hosts is projected just like exported diagnostics and artefacts. Same-host
+execution remains raw. Raw and exported representations have
 separate accurate lengths and digests. Projection failure withholds the affected
 publication without changing the local execution outcome.
 

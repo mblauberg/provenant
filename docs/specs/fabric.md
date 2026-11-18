@@ -412,10 +412,14 @@ the affected publication and never substitutes raw bytes.
 
 `PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
 not authorisation: the receiver must bind the authenticated actor, retained
-launch receipt, origin work key and requested attempt before allowing raw graph
+launch receipt, origin work key and requested attempt before allowing graph
 transport. The sender derives the claim from the retained upstream attempt and
 the receiver checks its actor namespace, launch receipt, origin and target.
-External peer output projects the complete verified text and envelope before
+All cross-host payloads, including authenticated execution submissions and
+results, pass through `CrossHostTransport`; authentication never exempts
+disclosure. Same-host execution stays raw. Encoded hand-off attachments are
+decoded and projected as text, or withheld when they cannot be inspected. Peer
+output projects the complete verified text and envelope before
 paging, with published lengths and digests. Binary output, over-bound projections
 and event pages that cannot be fully projected are withheld on projection failure.
 
@@ -436,7 +440,7 @@ fragments, retries, template substitutions and expansions retain the same
 property. Schema, cycle, conflict and journal-integrity checks remain mandatory.
 Content-addressed storage externalises bytes without rewriting them, and digest
 checks verify the stored bytes. Publication requires a destination-aware disclosure
-projection; authorised execution transport retains the original context. Resume
+projection; cross-host execution transport is projected as well. Resume
 never fills templates or rewrites a
 sealed submission. A resume path or document hash selects the retained graph
 identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without

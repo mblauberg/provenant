@@ -3265,7 +3265,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn submission_normalises_free_form_fields_once() {
-    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let secret = "token=local-private-value";
     let doc = format!("template documentation {secret}");
     let parameter_doc = format!("parameter documentation {secret}");
     let prompt = format!("new submission {secret}");
@@ -3308,16 +3308,17 @@ fn submission_normalises_free_form_fields_once() {
     );
     assert!(document.nodes[0].prompt.contains(secret));
     let mut journal = MemoryJournal::default();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("submission-once".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
     let (_, calls) = prompt_text::trace(|| {
-        let mut owner = FakeOwner {
-            observations: [AttemptObservation::Pending {
-                attempt_ref: Some("submission-once".into()),
-            }]
-            .into(),
-            ..Default::default()
-        };
         advance(&document, &mut owner, &mut journal).unwrap();
     });
+    assert!(owner.prompts.iter().any(|submitted| submitted.contains(secret)));
     assert!(
         calls.is_empty(),
         "initial patch admission rewrote stored text: {calls:?}"
