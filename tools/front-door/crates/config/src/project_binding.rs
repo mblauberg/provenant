@@ -1,8 +1,11 @@
 //! Host-local project identity indexed by the canonical Git common directory.
 use crate::ConfigError;
 use provenant_core::{Clock, ProjectId, Roots, WaitBudget};
-use provenant_os::fs::{Directory, FileKind, LockMode, Metadata, PublishMode, effective_uid};
+use provenant_os::fs::{
+    Directory, DirectoryPosition, FileKind, LockMode, Metadata, PublishMode, effective_uid,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +15,10 @@ const RECORD: &str = "project.json";
 const STAGE_PREFIX: &str = ".project-stage-";
 const RECORD_LIMIT: u64 = 20 * 1024;
 const MAX_PROJECTS: usize = 16_384;
+const GC_SELECTION_SNAPSHOT_PREFIX: &str = "gc-project-selection-";
+const GC_SELECTION_SNAPSHOT_VERSION: u64 = 2;
+const GC_SELECTION_SNAPSHOT_LIMIT: u64 = 64 * 1024 * 1024;
+const MAX_GC_SELECTION_SNAPSHOTS: usize = 64;
 /// Reads of one name that may each meet a concurrent atomic replacement.
 const REPLACEMENT_READS: usize = 16;
 
@@ -194,22 +201,487 @@ pub struct GcProjectSelection {
     pub projects: Vec<ProjectBinding>,
     /// Canonical common directories, preserving the registry's location.
     pub skipped_transient: Vec<PathBuf>,
+    pub interrupted_at: Option<PathBuf>,
+    pub continuation: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 pub fn registered_gc_project_selection(roots: &Roots) -> Result<GcProjectSelection, ConfigError> {
-    let mut selection = GcProjectSelection::default();
-    for binding in registered_projects(roots)? {
-        if transient_location(roots, binding.common_dir()) {
-            selection
-                .skipped_transient
-                .push(binding.common_dir().to_owned());
-        } else if git_location(binding.common_dir()) {
-            selection.projects.push(binding);
+    let mut keep_going = || true;
+    registered_gc_project_selection_with_progress(
+        roots,
+        None,
+        "0000000000000000",
+        false,
+        &mut keep_going,
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+struct GcSelectionSnapshot {
+    version: u64,
+    epoch: String,
+    root_device: u64,
+    root_inode: u64,
+    root_modified_ns: i128,
+    offset: DirectoryPosition,
+    next_key: Option<String>,
+    scanned: usize,
+    bindings: Vec<GcBindingSnapshot>,
+    skipped_transient: Vec<GcTransientSnapshot>,
+    seen_keys: BTreeSet<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GcBindingSnapshot {
+    project: ProjectId,
+    common_dir: String,
+    primary_checkout_hint: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GcTransientSnapshot {
+    project: ProjectId,
+    common_dir: String,
+}
+
+impl From<&ProjectBinding> for GcBindingSnapshot {
+    fn from(binding: &ProjectBinding) -> Self {
+        Self {
+            project: binding.project,
+            common_dir: encode_location(binding.common_dir()),
+            primary_checkout_hint: binding.primary_checkout_hint().map(encode_location),
         }
     }
-    selection
-        .projects
-        .sort_by(|left, right| left.common_dir().cmp(right.common_dir()));
+}
+
+impl GcBindingSnapshot {
+    fn into_binding(self) -> Result<ProjectBinding, ConfigError> {
+        Ok(ProjectBinding {
+            project: self.project,
+            canonical_common_dir: decode_location(&self.common_dir)?,
+            canonical_primary_checkout_hint: self
+                .primary_checkout_hint
+                .as_deref()
+                .map(decode_location)
+                .transpose()?,
+        })
+    }
+}
+
+fn gc_selection_snapshot_name(epoch: &str) -> Option<String> {
+    (epoch.len() == 16
+        && epoch
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| format!("{GC_SELECTION_SNAPSHOT_PREFIX}{epoch}.json"))
+}
+
+fn gc_selection_snapshot_epoch(name: &str) -> Option<&str> {
+    let epoch = name
+        .strip_prefix(GC_SELECTION_SNAPSHOT_PREFIX)?
+        .strip_suffix(".json")?;
+    gc_selection_snapshot_name(epoch).map(|_| epoch)
+}
+
+fn gc_selection_tick(state_path: &Path, create: bool) -> Result<Option<Directory>, ConfigError> {
+    let state = match Directory::open_anchor(state_path) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() && !create => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&state, state_path)?;
+    let name = OsStr::new("tick");
+    let tick = match state.open_verified_directory(name) {
+        Ok(tick) => tick,
+        Err(error) if error.is_not_found() && !create => return Ok(None),
+        Err(error) if error.is_not_found() => {
+            match state.mkdir(name, 0o700) {
+                Ok(()) => state.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            state.open_verified_directory(name)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&tick, &state_path.join("tick"))?;
+    Ok(Some(tick))
+}
+
+fn prune_gc_selection_snapshots(tick: &Directory, active_detail: Option<&str>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let entries = match tick.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            warnings.push(format!("project selection sidecar scan: {error}"));
+            return warnings;
+        }
+    };
+    for entry in entries.take(MAX_GC_SELECTION_SNAPSHOTS) {
+        let name = match entry {
+            Ok(name) => name,
+            Err(error) => {
+                warnings.push(format!("project selection sidecar entry: {error}"));
+                continue;
+            }
+        };
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
+        if gc_selection_snapshot_epoch(name_text).is_none() || active_detail == Some(name_text) {
+            continue;
+        }
+        match tick.metadata_at(&name, false) {
+            Ok(metadata)
+                if metadata.kind == FileKind::Regular && metadata.uid == effective_uid() =>
+            {
+                if let Err(error) = tick.unlink(&name) {
+                    warnings.push(format!("project selection sidecar cleanup: {error}"));
+                }
+            }
+            Ok(_) => warnings.push(format!("project selection sidecar retained: {name_text}")),
+            Err(error) => warnings.push(format!("project selection sidecar stat: {error}")),
+        }
+    }
+    warnings
+}
+
+fn save_gc_selection_snapshot(
+    tick: &Directory,
+    snapshot: &mut GcSelectionSnapshot,
+    epoch: &str,
+) -> Result<String, ConfigError> {
+    let name = gc_selection_snapshot_name(epoch).ok_or(ConfigError::InvalidProjectBinding)?;
+    snapshot.version = GC_SELECTION_SNAPSHOT_VERSION;
+    snapshot.epoch = epoch.into();
+    let bytes = serde_json::to_vec(snapshot).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    if bytes.len() as u64 > GC_SELECTION_SNAPSHOT_LIMIT {
+        return Err(ConfigError::TooLarge {
+            path: tick.current_path()?.join(&name),
+            limit: GC_SELECTION_SNAPSHOT_LIMIT,
+        });
+    }
+    tick.atomic_write(
+        OsStr::new(&name),
+        ".gc-project-selection-",
+        &bytes,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    Ok(name)
+}
+
+/// Enumerate the host project registry in resumable batches. The selector only
+/// returns a complete project set; a partial scan is persisted before the
+/// caller checkpoints its cursor and never grants a mutation scope.
+pub fn registered_gc_project_selection_with_progress(
+    roots: &Roots,
+    resume_detail: Option<&str>,
+    epoch: &str,
+    persist: bool,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<GcProjectSelection, ConfigError> {
+    let mut selection = GcProjectSelection::default();
+    let Some(registry) = existing_projects(roots)? else {
+        return Ok(selection);
+    };
+    let registry_path = roots.state.as_path().join(PROJECTS_DIR);
+    let root_metadata = registry.metadata()?;
+    let mut snapshot = GcSelectionSnapshot {
+        version: GC_SELECTION_SNAPSHOT_VERSION,
+        epoch: epoch.into(),
+        root_device: root_metadata.device,
+        root_inode: root_metadata.inode,
+        root_modified_ns: root_metadata.modified_ns,
+        offset: DirectoryPosition::default(),
+        next_key: None,
+        scanned: 0,
+        bindings: Vec::new(),
+        skipped_transient: Vec::new(),
+        seen_keys: BTreeSet::new(),
+    };
+    let mut tick = if persist {
+        gc_selection_tick(roots.state.as_path(), true)?
+    } else {
+        None
+    };
+    if let (Some(tick), Some(detail)) = (tick.as_ref(), resume_detail) {
+        if let Some(token_epoch) = gc_selection_snapshot_epoch(detail) {
+            match tick.read_stable(OsStr::new(detail), GC_SELECTION_SNAPSHOT_LIMIT) {
+                Ok(bytes) => match serde_json::from_slice::<GcSelectionSnapshot>(&bytes) {
+                    Ok(saved)
+                        if saved.version == GC_SELECTION_SNAPSHOT_VERSION
+                            && saved.epoch == token_epoch =>
+                    {
+                        snapshot = saved;
+                        if snapshot.root_device != root_metadata.device
+                            || snapshot.root_inode != root_metadata.inode
+                            || snapshot.root_modified_ns != root_metadata.modified_ns
+                        {
+                            selection.warnings.push(
+                                "project registry changed; resuming after a bounded rescan".into(),
+                            );
+                            snapshot.offset = DirectoryPosition::default();
+                            snapshot.next_key = None;
+                            snapshot.scanned = 0;
+                            snapshot.seen_keys.clear();
+                            snapshot.root_device = root_metadata.device;
+                            snapshot.root_inode = root_metadata.inode;
+                            snapshot.root_modified_ns = root_metadata.modified_ns;
+                        }
+                    }
+                    Ok(_) => selection
+                        .warnings
+                        .push("project selection sidecar identity changed; restarting scan".into()),
+                    Err(error) => selection
+                        .warnings
+                        .push(format!("project selection sidecar ignored: {error}")),
+                },
+                Err(error) => selection
+                    .warnings
+                    .push(format!("project selection sidecar unavailable: {error}")),
+            }
+        } else {
+            selection
+                .warnings
+                .push("invalid project selection cursor; restarting registry scan".into());
+        }
+    }
+    if let Some(tick) = tick.as_ref() {
+        selection
+            .warnings
+            .extend(prune_gc_selection_snapshots(tick, resume_detail));
+    }
+    registered_gc_project_selection_from_registry(
+        roots,
+        &registry,
+        registry_path,
+        root_metadata,
+        epoch,
+        persist,
+        keep_going,
+        selection,
+        snapshot,
+        tick.as_mut(),
+    )
+}
+
+fn checkpoint_gc_selection(
+    selection: &mut GcProjectSelection,
+    snapshot: &mut GcSelectionSnapshot,
+    tick: Option<&mut Directory>,
+    persist: bool,
+    epoch: &str,
+    candidate: PathBuf,
+) {
+    selection.interrupted_at = Some(candidate);
+    if !persist {
+        return;
+    }
+    let Some(tick) = tick else { return };
+    match save_gc_selection_snapshot(tick, snapshot, epoch) {
+        Ok(name) => {
+            selection.continuation = Some(name.clone());
+            selection
+                .warnings
+                .extend(prune_gc_selection_snapshots(tick, Some(&name)));
+        }
+        Err(error) => selection
+            .warnings
+            .push(format!("project selection cursor was not saved: {error}")),
+    }
+}
+
+fn registered_gc_project_selection_from_registry(
+    roots: &Roots,
+    registry: &Directory,
+    registry_path: PathBuf,
+    root_metadata: Metadata,
+    epoch: &str,
+    persist: bool,
+    keep_going: &mut dyn FnMut() -> bool,
+    mut selection: GcProjectSelection,
+    mut snapshot: GcSelectionSnapshot,
+    mut tick: Option<&mut Directory>,
+) -> Result<GcProjectSelection, ConfigError> {
+    let mut entries = registry.entries()?;
+    let mut pending = None;
+    if let Some(next_key) = snapshot.next_key.as_deref() {
+        if entries.seek(snapshot.offset).is_ok() {
+            let offset = entries.position()?;
+            match entries.next() {
+                Some(entry) => {
+                    let name = entry?;
+                    if provenant_core::hex(name.as_bytes()) == next_key {
+                        pending = Some((name, offset));
+                    } else {
+                        selection.warnings.push(
+                            "project registry cursor changed; rescanning without discarding observed bindings".into(),
+                        );
+                        snapshot.offset = DirectoryPosition::default();
+                        snapshot.next_key = None;
+                        snapshot.scanned = 0;
+                        snapshot.seen_keys.clear();
+                        entries = registry.entries()?;
+                    }
+                }
+                None => {
+                    selection.warnings.push(
+                        "project registry cursor changed; rescanning without discarding observed bindings".into(),
+                    );
+                    snapshot.offset = DirectoryPosition::default();
+                    snapshot.next_key = None;
+                    snapshot.scanned = 0;
+                    snapshot.seen_keys.clear();
+                    entries = registry.entries()?;
+                }
+            }
+        } else {
+            selection.warnings.push(
+                "project registry cursor expired; rescanning without discarding observed bindings"
+                    .into(),
+            );
+            snapshot.offset = DirectoryPosition::default();
+            snapshot.next_key = None;
+            snapshot.scanned = 0;
+            snapshot.seen_keys.clear();
+            entries = registry.entries()?;
+        }
+    } else if snapshot.offset != DirectoryPosition::default() {
+        selection.warnings.push(
+            "project registry cursor was incomplete; rescanning without discarding observed bindings".into(),
+        );
+        snapshot.offset = DirectoryPosition::default();
+        snapshot.scanned = 0;
+        snapshot.seen_keys.clear();
+        entries = registry.entries()?;
+    }
+
+    loop {
+        let (entry, entry_offset) = match pending.take() {
+            Some(pending) => pending,
+            None => {
+                let entry_offset = entries.position()?;
+                let Some(entry) = entries.next() else { break };
+                (entry?, entry_offset)
+            }
+        };
+        if !keep_going() {
+            snapshot.offset = entry_offset;
+            snapshot.next_key = Some(provenant_core::hex(entry.as_bytes()));
+            checkpoint_gc_selection(
+                &mut selection,
+                &mut snapshot,
+                tick.as_deref_mut(),
+                persist,
+                epoch,
+                registry_path.join(&entry),
+            );
+            break;
+        }
+
+        snapshot.offset = entries.position()?;
+        snapshot.next_key = None;
+        let Some(name) = entry.to_str() else {
+            return Err(ConfigError::InvalidProjectBinding);
+        };
+        if let Some(id) = name.strip_prefix(STAGE_PREFIX)
+            && id
+                .parse::<ProjectId>()
+                .is_ok_and(|project| format!("{STAGE_PREFIX}{project}") == name)
+        {
+            continue;
+        }
+        snapshot.scanned += 1;
+        if snapshot.scanned > MAX_PROJECTS {
+            return Err(ConfigError::InvalidProjectBinding);
+        }
+        let project = name
+            .parse::<ProjectId>()
+            .map_err(|_| ConfigError::InvalidProjectBinding)?;
+        let key = project.to_string();
+        snapshot.seen_keys.insert(key);
+        snapshot
+            .bindings
+            .retain(|binding| binding.project != project);
+        snapshot
+            .skipped_transient
+            .retain(|transient| transient.project != project);
+        let directory = registry.open_verified_directory(&entry)?;
+        verify_directory(&directory, &registry_path.join(name))?;
+        let Some(bytes) = read_record(&directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
+        else {
+            continue;
+        };
+        let record = decode_binding_record(&bytes)?;
+        if record.schema_version != 1 || record.project != project {
+            return Err(ConfigError::InvalidProjectBinding);
+        }
+        let binding = binding_from_record(record)?;
+        if transient_location(roots, binding.common_dir()) {
+            snapshot.skipped_transient.push(GcTransientSnapshot {
+                project,
+                common_dir: encode_location(binding.common_dir()),
+            });
+        } else if git_location(binding.common_dir()) {
+            snapshot.bindings.push(GcBindingSnapshot::from(&binding));
+        }
+    }
+
+    let final_metadata = registry.metadata()?;
+    if selection.interrupted_at.is_none()
+        && (final_metadata.device != root_metadata.device
+            || final_metadata.inode != root_metadata.inode
+            || final_metadata.modified_ns != root_metadata.modified_ns)
+    {
+        selection.warnings.push(
+            "project registry changed during discovery; preserving observed bindings for the next pass".into(),
+        );
+        snapshot.root_device = final_metadata.device;
+        snapshot.root_inode = final_metadata.inode;
+        snapshot.root_modified_ns = final_metadata.modified_ns;
+        snapshot.offset = DirectoryPosition::default();
+        snapshot.next_key = None;
+        snapshot.scanned = 0;
+        snapshot.seen_keys.clear();
+        checkpoint_gc_selection(
+            &mut selection,
+            &mut snapshot,
+            tick.as_deref_mut(),
+            persist,
+            epoch,
+            registry_path.clone(),
+        );
+    }
+
+    if selection.interrupted_at.is_none() {
+        let seen_keys = &snapshot.seen_keys;
+        snapshot
+            .bindings
+            .retain(|binding| seen_keys.contains(&binding.project.to_string()));
+        snapshot
+            .skipped_transient
+            .retain(|transient| seen_keys.contains(&transient.project.to_string()));
+    }
+    for binding in snapshot.bindings {
+        selection.projects.push(binding.into_binding()?);
+    }
+    for path in snapshot.skipped_transient {
+        selection
+            .skipped_transient
+            .push(decode_location(&path.common_dir)?);
+    }
+    if selection.interrupted_at.is_none() {
+        selection
+            .projects
+            .sort_by(|left, right| left.common_dir().cmp(right.common_dir()));
+        if let Some(tick) = tick.as_deref_mut() {
+            selection
+                .warnings
+                .extend(prune_gc_selection_snapshots(tick, None));
+        }
+    }
     Ok(selection)
 }
 
@@ -789,6 +1261,86 @@ mod tests {
         selection.skipped_transient.sort();
         excluded.sort();
         assert_eq!(selection.skipped_transient, excluded);
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn scheduled_registry_scan_checkpoints_and_resumes_without_losing_observed_bindings() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        for index in 0..40 {
+            let common = base.join(format!("repository-{index:02}/.git"));
+            fs::create_dir_all(common.join("objects")).unwrap();
+            fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+            bind_project(&roots, ProjectLocation::new(&common).unwrap()).unwrap();
+        }
+
+        let mut visited = 0;
+        let partial = registered_gc_project_selection_with_progress(
+            &roots,
+            None,
+            "0000000000000001",
+            true,
+            &mut || {
+                visited += 1;
+                visited <= 8
+            },
+        )
+        .unwrap();
+        assert!(partial.interrupted_at.is_some());
+        let resume = partial
+            .continuation
+            .as_deref()
+            .expect("bounded scan saves an epoch sidecar");
+        let old_observed = partial.projects.len();
+
+        let new_common = base.join("repository-new/.git");
+        fs::create_dir_all(new_common.join("objects")).unwrap();
+        fs::write(new_common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        bind_project(&roots, ProjectLocation::new(&new_common).unwrap()).unwrap();
+
+        let resumed = registered_gc_project_selection_with_progress(
+            &roots,
+            Some(resume),
+            "0000000000000002",
+            true,
+            &mut || true,
+        )
+        .unwrap();
+        assert!(resumed.interrupted_at.is_none());
+        assert_eq!(resumed.projects.len(), 41);
+        assert!(resumed.projects.len() >= old_observed);
+        assert!(
+            resumed
+                .projects
+                .iter()
+                .any(|binding| binding.common_dir() == new_common)
+        );
+        assert!(!roots.state.as_path().join("tick").join(resume).exists());
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn preview_registry_scan_does_not_publish_a_resume_sidecar() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let common = canonical_base(&temp).join("repository/.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        bind_project(&roots, ProjectLocation::new(&common).unwrap()).unwrap();
+
+        let partial = registered_gc_project_selection_with_progress(
+            &roots,
+            None,
+            "0000000000000003",
+            false,
+            &mut || false,
+        )
+        .unwrap();
+        assert!(partial.interrupted_at.is_some());
+        assert!(partial.continuation.is_none());
+        assert!(!roots.state.as_path().join("tick").exists());
     }
 
     // Competing no-replace publishers converge by validating the winning record.

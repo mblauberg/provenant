@@ -1753,6 +1753,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         });
     }
     let clock = SystemClock::new();
+    let deadline = crate::gc_sweep::Deadline::start(sweep_budget);
     let mut lease = if command.dry_run {
         None
     } else {
@@ -1773,7 +1774,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
         }
     };
-    let deadline = crate::gc_sweep::Deadline::start(sweep_budget);
     if let Some(lease) = &mut lease {
         lease
             .watch_fence(deadline.cancel().clone())
@@ -1823,6 +1823,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     }
     let initial_cursor = lease.as_ref().and_then(|lease| lease.cursor().cloned());
     let takeover_warning = lease.as_ref().and_then(|lease| lease.warning.clone());
+    let mut sweep_warning = takeover_warning.clone();
     if initial_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.class == "complete")
@@ -1876,7 +1877,59 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        let selection = provenant_config::registered_gc_project_selection(&roots)?;
+        let selection_detail = initial_cursor
+            .as_ref()
+            .filter(|cursor| cursor.class == "project_registry")
+            .and_then(|cursor| cursor.detail.as_deref());
+        let selection_epoch = lease.as_ref().map_or_else(
+            || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64
+            },
+            crate::gc_sweep::Lease::epoch,
+        );
+        let selection_epoch = format!("{selection_epoch:016x}");
+        let mut selection = {
+            let active_lease = lease.as_ref();
+            let mut keep_going = || sweep_should_continue(&deadline, active_lease);
+            provenant_config::registered_gc_project_selection_with_progress(
+                &roots,
+                selection_detail,
+                &selection_epoch,
+                active_lease.is_some(),
+                &mut keep_going,
+            )?
+        };
+        for warning in selection.warnings.drain(..) {
+            append_sweep_warning(&mut sweep_warning, warning);
+        }
+        if let Some(candidate) = selection.interrupted_at.take() {
+            let cursor = crate::gc_sweep::Cursor {
+                class: "project_registry".into(),
+                project: None,
+                candidate: Some(candidate),
+                detail: selection.continuation.take(),
+            };
+            if let Some(lease) = &mut lease {
+                lease
+                    .checkpoint(cursor.clone())
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
+            return Ok(GcData {
+                sweep_budget_seconds,
+                sweep_budget_source,
+                sweep_cursor: Some(cursor),
+                sweep_warning,
+                sweep_stopped: true,
+                skipped_transient: selection.skipped_transient,
+                notice: Some(
+                    "sweep stopped at gc.sweep_budget during project registry discovery; next run resumes at the saved registry cursor".into(),
+                ),
+                ..Default::default()
+            });
+        }
         skipped_transient = selection.skipped_transient;
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
         let runtime = UtilityRuntime::read_only(&git, roots.state.as_path())?.with_lane_roots(
@@ -1897,11 +1950,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 .unwrap_or(selection.projects.len())
         });
         for binding in selection.projects.into_iter().skip(project_start) {
-            let common = binding.common_dir();
+            let common = binding.common_dir().to_owned();
             if !sweep_should_continue(&deadline, lease.as_ref()) {
                 let cursor = crate::gc_sweep::Cursor {
                     class: "project_selection".into(),
-                    project: Some(common.to_owned()),
+                    project: Some(common.clone()),
                     candidate: None,
                     detail: None,
                 };
@@ -1914,7 +1967,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     sweep_budget_seconds,
                     sweep_budget_source,
                     sweep_cursor: Some(cursor),
-                    sweep_warning: takeover_warning,
+                    sweep_warning: sweep_warning.clone(),
                     sweep_stopped: true,
                     unobserved_projects,
                     skipped_transient,
@@ -1932,7 +1985,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     if !sweep_should_continue(&deadline, lease.as_ref()) {
                         let cursor = crate::gc_sweep::Cursor {
                             class: "project_selection".into(),
-                            project: Some(common.to_owned()),
+                            project: Some(common.clone()),
                             candidate: None,
                             detail: None,
                         };
@@ -1945,7 +1998,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                                 sweep_budget_seconds,
                                 sweep_budget_source,
                                 sweep_cursor: Some(cursor),
-                                sweep_warning: takeover_warning,
+                                sweep_warning: sweep_warning.clone(),
                                 sweep_stopped: true,
                                 unobserved_projects,
                                 skipped_transient,
@@ -1953,7 +2006,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                                 ..Default::default()
                             });
                     }
-                    unobserved_projects.push(common.to_owned());
+                    unobserved_projects.push(common.clone());
                     continue;
                 }
             };
@@ -1993,7 +2046,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         sweep_budget_seconds,
                         sweep_budget_source,
                         sweep_cursor: Some(cursor),
-                        sweep_warning: takeover_warning,
+                        sweep_warning: sweep_warning.clone(),
                         sweep_stopped: true,
                         unobserved_projects,
                         skipped_transient,
@@ -2110,7 +2163,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::Budget)?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(idle_seconds) * 1_000_000_000),
-        free_floor_bytes: Some(free_floor),
+        // The profile-level Cargo target sweep owns global disk pressure and
+        // reclaims both lane and shared targets under one budget.
+        free_floor_bytes: None,
         // The lane and shared Cargo targets have one profile-level budget in
         // build_directories. This pass remains responsible for idle whole-cache
         // reclamation and the free-space floor.
@@ -2150,7 +2205,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         cache_error: None,
         lease: lease.take(),
         deadline: &deadline,
-        resume_cursor: initial_cursor.filter(|cursor| cursor.class != "project_selection"),
+        resume_cursor: initial_cursor.filter(|cursor| {
+            cursor.class != "project_selection" && cursor.class != "project_registry"
+        }),
         active_class: String::new(),
         project_start: None,
         candidate_start: None,
@@ -2159,7 +2216,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             idle_seconds,
             sweep_budget_seconds,
             sweep_budget_source: sweep_budget_source.clone(),
-            sweep_warning: takeover_warning,
+            sweep_warning,
             unobserved_projects,
             skipped_transient,
             ..Default::default()
@@ -2449,6 +2506,19 @@ fn sweep_should_continue(
     okay
 }
 
+fn append_sweep_warning(target: &mut Option<String>, warning: String) {
+    if warning.is_empty() {
+        return;
+    }
+    match target {
+        Some(current) => {
+            current.push_str("; ");
+            current.push_str(&warning);
+        }
+        None => *target = Some(warning),
+    }
+}
+
 impl provenant_config::RetentionCollector for GcAdapters<'_> {
     type Error = Error;
     fn lane_cargo_caches(&mut self) -> Result<(), Error> {
@@ -2457,32 +2527,55 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         }
         let home = self.home;
 
-        let result = provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
-            home,
-            &self.policy,
-            |path| {
-                for project in &self.projects {
-                    if project.lanes.iter().any(|lane| lane.path == path) {
-                        return if self.policy.dry_run {
-                            worktrees::cache_writer_probe(&project.state, path)
-                        } else {
-                            worktrees::cache_writer_guard(&project.state, path).map(Some)
-                        };
-                    }
-                }
-                Err(worktrees::Occupancy::custody_unknown(
-                    path.to_path_buf(),
-                    "writer registration was not observed",
-                ))
-            },
-        );
+        let start_at = self.resume_candidate().map(Path::to_path_buf);
+        let detail = self.resume_detail().map(str::to_owned);
+        let result = {
+            let policy = &self.policy;
+            let projects = &self.projects;
+            let deadline = self.deadline;
+            let lease = self.lease.as_ref();
+            let mut keep_going = || sweep_should_continue(deadline, lease);
+            let scan = provenant_confinement::cache::CacheGcScan {
+                start_at: start_at.as_deref(),
+                detail: detail.as_deref(),
+                keep_going: Some(&keep_going),
+            };
 
-        match result {
-            Ok(report) => self.data.report = report,
+            provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+                home,
+                policy,
+                |path| {
+                    for project in projects {
+                        if project.lanes.iter().any(|lane| lane.path == path) {
+                            return if policy.dry_run {
+                                worktrees::cache_writer_probe(&project.state, path)
+                            } else {
+                                worktrees::cache_writer_guard(&project.state, path).map(Some)
+                            };
+                        }
+                    }
+                    Err(worktrees::Occupancy::custody_unknown(
+                        path.to_path_buf(),
+                        "writer registration was not observed",
+                    ))
+                },
+                &scan,
+            )
+        };
+
+        let report = match result {
+            Ok(report) => report,
             Err(error) => {
-                self.data.report = (*error.report).clone();
+                let report = (*error.report).clone();
                 self.cache_error = Some(error);
+                report
             }
+        };
+        let interrupted_at = report.interrupted_at.clone();
+        let continuation = report.continuation.clone();
+        self.data.report = report;
+        if let Some(candidate) = interrupted_at {
+            self.stop_at(None, Some(candidate), continuation)?;
         }
 
         Ok(())
@@ -2494,15 +2587,13 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let command = self.command;
         let roots = self.roots;
         let home = self.home;
-        let assets = self.assets;
         let config = self.config;
         let workers = self.workers;
         let facts = self.facts;
         let output_idle_seconds = self.output_idle_seconds;
         let cancel = self.deadline.cancel().clone();
         let sweep_deadline = self.deadline;
-        let sweep_lease = self.lease.as_ref();
-        let project_start = self.project_start;
+        let project_start = self.project_start.clone();
         let candidate_start = self.resume_candidate().map(Path::to_path_buf);
         let resume_detail = self.resume_detail().map(str::to_owned);
         let project_start_index = project_start
@@ -2580,7 +2671,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     // receipt that is not final. Collect them through the same
                     // owner-bound proof before the path-based pass below. The
                     // subpass requires an exact integration ref for reportable removal.
-                    let mut should_continue = || sweep_should_continue(sweep_deadline, sweep_lease);
+                    let mut should_continue =
+                        || sweep_should_continue(sweep_deadline, self.lease.as_ref());
                     let unsettled = if command.apply && !command.dry_run {
                         crate::fabric::gc_cleanup::collect_unsettled(
                             roots,
@@ -2843,6 +2935,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let now_ns = self.now_ns;
         let project_start = self.project_start.clone();
         let candidate_start = self.resume_candidate().map(Path::to_path_buf);
+        let resume_detail = self.resume_detail().map(str::to_owned);
         let cancel = self.deadline.cancel().clone();
         let sweep_deadline = self.deadline;
         let project_start_index = project_start
@@ -2859,6 +2952,9 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             let candidate_path = (project_start.as_ref() == Some(&project_path))
                 .then(|| candidate_start.clone())
                 .flatten();
+            let candidate_detail = (project_start.as_ref() == Some(&project_path))
+                .then(|| resume_detail.clone())
+                .flatten();
             if self.stop_requested() || cancel.is_cancelled() {
                 self.stop_at(Some(project_path), candidate_path, None)?;
                 break;
@@ -2869,7 +2965,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         class: self.active_class.clone(),
                         project: Some(project_path.clone()),
                         candidate: candidate_path.clone(),
-                        detail: None,
+                        detail: candidate_detail.clone(),
                     })
                     .map_err(|error| Error::RetentionCollection(error.to_string()))?;
             }
@@ -2894,6 +2990,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         command.dry_run,
                         cancel,
                         candidate_path.as_deref(),
+                        candidate_detail.as_deref(),
                         &mut should_continue,
                     ))
                 },
@@ -2907,6 +3004,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 ..Default::default()
             });
             let stopped_candidate = archived.interrupted_at.take();
+            let stopped_detail = archived.continuation.take();
             self.data.discard_archives.bytes = self
                 .data
                 .discard_archives
@@ -2926,11 +3024,11 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 .errors
                 .append(&mut archived.errors);
             if let Some(candidate) = stopped_candidate {
-                self.stop_at(Some(project_path), Some(candidate), None)?;
+                self.stop_at(Some(project_path), Some(candidate), stopped_detail)?;
                 break;
             }
             if self.stop_requested() || cancel.is_cancelled() {
-                self.stop_at(Some(project_path), candidate_path, None)?;
+                self.stop_at(Some(project_path), candidate_path, candidate_detail)?;
                 break;
             }
         }
@@ -2954,11 +3052,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             command.dry_run,
             &cancel,
             self.resume_candidate(),
+            self.resume_detail(),
             &mut should_continue,
         )?;
         self.data.staging_busy = report.busy;
         if let Some(candidate) = report.interrupted_at {
-            self.stop_at(None, Some(candidate), None)?;
+            self.stop_at(None, Some(candidate), report.continuation)?;
         }
 
         Ok(())
@@ -3020,7 +3119,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let budget = provenant_config::cargo_cache_budget(&profile, &cache_root)
             .map_err(Error::DiskSpace)?;
         let mut protection = provenant_run::build_dir_gc::TargetProtection::default();
-        for project in self.projects {
+        for project in &self.projects {
             let live = project
                 .lanes
                 .iter()

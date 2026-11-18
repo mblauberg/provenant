@@ -14,6 +14,7 @@ mod github_policy;
 mod history;
 mod install_artifacts;
 mod schema;
+pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub use gc::{
     ByteObservation, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits,
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
@@ -26,7 +27,6 @@ pub use gc::{
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
-pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub fn cargo_cache_budget(
     profile: &provenant_records::run::HarnessProfile,
     cache_path: &std::path::Path,
@@ -103,7 +103,8 @@ pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
     lookup_project, lookup_project_at_state, registered_gc_project_selection,
-    registered_gc_projects, registered_projects, transient_location,
+    registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
+    transient_location,
 };
 pub use provenant_records::Finding;
 pub use schema::{

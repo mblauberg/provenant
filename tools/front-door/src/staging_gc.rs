@@ -1,6 +1,8 @@
 //! Reclaim abandoned state-root publication scratch under its owner locks.
 use provenant_core::CancelToken;
-use provenant_os::fs::{Directory, FileKind, FsError, LockMode, PayloadTree};
+use provenant_os::fs::{
+    Directory, DirectoryPosition, Entries, FileKind, FsError, LockMode, PayloadTree,
+};
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -10,6 +12,20 @@ use std::{
 pub(crate) struct Report {
     pub(crate) busy: Vec<PathBuf>,
     pub(crate) interrupted_at: Option<PathBuf>,
+    pub(crate) continuation: Option<String>,
+}
+
+fn root_cursor(position: DirectoryPosition) -> String {
+    format!("staging-root-v1:{}:{}", position.block, position.offset)
+}
+
+fn root_cursor_position(detail: Option<&str>) -> Option<DirectoryPosition> {
+    let mut components = detail?.strip_prefix("staging-root-v1:")?.split(':');
+    let position = DirectoryPosition {
+        block: components.next()?.parse().ok()?,
+        offset: components.next()?.parse().ok()?,
+    };
+    components.next().is_none().then_some(position)
 }
 
 fn clear(
@@ -46,6 +62,7 @@ pub(crate) fn collect(
     dry_run: bool,
     cancel: &CancelToken,
     start_at: Option<&Path>,
+    detail: Option<&str>,
     should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<Report, FsError> {
     let root = Directory::open_anchor(state)?;
@@ -66,41 +83,66 @@ pub(crate) fn collect(
         install_lock.is_some(),
         cancel,
         start_at,
+        detail,
         should_stop,
     )
 }
 
 fn collect_entries(
     root: &Directory,
-    entries: impl IntoIterator<Item = Result<OsString, FsError>>,
+    entries: Entries,
     before: i128,
     dry_run: bool,
     ingest_locked: bool,
     install_locked: bool,
     cancel: &CancelToken,
     start_at: Option<&Path>,
+    detail: Option<&str>,
     should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<Report, FsError> {
     let mut report = Report::default();
-    let mut entries = entries.into_iter().collect::<Result<Vec<_>, _>>()?;
-    entries.sort();
-    for name in entries {
+    let mut entries = entries;
+    let mut pending = None;
+    if let (Some(start), Some(position)) = (start_at, root_cursor_position(detail)) {
+        if entries.seek(position).is_ok() {
+            let entry_offset = entries.position()?;
+            if let Some(entry) = entries.next() {
+                let name = entry?;
+                if root.current_path()?.join(&name) == start {
+                    pending = Some((name, entry_offset));
+                } else {
+                    entries = root.entries()?;
+                }
+            } else {
+                entries = root.entries()?;
+            }
+        }
+    }
+    loop {
+        let (name, entry_offset) = match pending.take() {
+            Some(pending) => pending,
+            None => {
+                let entry_offset = entries.position()?;
+                let Some(name) = entries.next() else {
+                    break;
+                };
+                (name?, entry_offset)
+            }
+        };
+        let path = root.current_path()?.join(&name);
+        if cancel.is_cancelled() || should_stop() {
+            report.interrupted_at = Some(path);
+            report.continuation = Some(root_cursor(entry_offset));
+            break;
+        }
         let Some(text) = name.to_str() else { continue };
         let is_ingest = text.starts_with(".ingest-") && ingest_locked;
         let is_staging = text.starts_with(".provenant-staging.") && install_locked;
         if !is_ingest && !is_staging {
             if text.starts_with(".ingest-") || text.starts_with(".provenant-staging.") {
-                report.busy.push(PathBuf::from(name));
+                report.busy.push(path);
             }
             continue;
-        }
-        let path = root.current_path()?.join(&name);
-        if start_at.is_some_and(|start| path.as_path() < start) {
-            continue;
-        }
-        if cancel.is_cancelled() || should_stop() {
-            report.interrupted_at = Some(path);
-            break;
         }
         let metadata = match root.metadata_at(&name, false) {
             Ok(metadata) => metadata,
@@ -114,6 +156,7 @@ fn collect_entries(
             if !dry_run {
                 if cancel.is_cancelled() || should_stop() {
                     report.interrupted_at = Some(path);
+                    report.continuation = Some(root_cursor(entry_offset));
                     break;
                 }
                 root.unlink(&name)?;
@@ -123,10 +166,12 @@ fn collect_entries(
             if !dry_run {
                 if !clear(&tree, 0, cancel, should_stop)? {
                     report.interrupted_at = Some(path);
+                    report.continuation = Some(root_cursor(entry_offset));
                     break;
                 }
                 if cancel.is_cancelled() || should_stop() {
                     report.interrupted_at = Some(path);
+                    report.continuation = Some(root_cursor(entry_offset));
                     break;
                 }
                 root.rmdir(&name)?;
@@ -144,36 +189,31 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = Directory::open_anchor(temp.path()).unwrap();
         std::fs::write(temp.path().join(".ingest-survivor"), b"data").unwrap();
-        // Invalid components would fail metadata lookup, proving they are filtered first.
-        let names = [
-            "unrelated/invalid",
-            ".provenant-staging.invalid/name",
-            ".ingest-vanished",
-            ".ingest-survivor",
-        ];
+        std::fs::write(temp.path().join("unrelated"), b"data").unwrap();
         collect_entries(
             &root,
-            names.into_iter().map(|name| Ok(name.into())),
+            root.entries().unwrap(),
             i128::MAX,
             false,
             true,
             false,
             &CancelToken::new(),
             None,
+            None,
             &mut || false,
         )
         .unwrap();
         assert!(!temp.path().join(".ingest-survivor").exists());
 
-        let names = [".ingest-invalid/name", ".provenant-staging.invalid/name"];
         collect_entries(
             &root,
-            names.into_iter().map(|name| Ok(name.into())),
+            root.entries().unwrap(),
             i128::MAX,
             false,
             false,
             false,
             &CancelToken::new(),
+            None,
             None,
             &mut || false,
         )
@@ -207,6 +247,7 @@ mod tests {
             true,
             &CancelToken::new(),
             None,
+            None,
             &mut || false,
         )
         .unwrap();
@@ -216,6 +257,7 @@ mod tests {
             i128::MAX,
             false,
             &CancelToken::new(),
+            None,
             None,
             &mut || false,
         )
@@ -229,6 +271,7 @@ mod tests {
             false,
             &CancelToken::new(),
             None,
+            None,
             &mut || false,
         )
         .unwrap();
@@ -238,6 +281,7 @@ mod tests {
             i128::MAX,
             false,
             &CancelToken::new(),
+            None,
             None,
             &mut || false,
         )
@@ -272,6 +316,7 @@ mod tests {
             false,
             &CancelToken::new(),
             None,
+            None,
             &mut || {
                 checked += 1;
                 checked <= 12
@@ -288,10 +333,71 @@ mod tests {
             false,
             &CancelToken::new(),
             partial.interrupted_at.as_deref(),
+            partial.continuation.as_deref(),
             &mut || true,
         )
         .unwrap();
         assert!(resumed.interrupted_at.is_none());
         assert!(!stage.exists());
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn interrupted_staging_root_listing_resumes_from_its_directory_cookie() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("ingest.lock"), b"").unwrap();
+        for index in 0..64 {
+            std::fs::write(temp.path().join(format!(".ingest-{index:03}")), b"data").unwrap();
+        }
+
+        let mut checked = 0;
+        let partial = collect(
+            temp.path(),
+            i128::MAX,
+            false,
+            &CancelToken::new(),
+            None,
+            None,
+            &mut || {
+                checked += 1;
+                checked <= 12
+            },
+        )
+        .unwrap();
+        let candidate = partial
+            .interrupted_at
+            .clone()
+            .expect("root scan interrupted");
+        let detail = partial
+            .continuation
+            .clone()
+            .expect("root scan saved its entry cookie");
+        let remaining = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".ingest-"))
+            .count();
+        assert!(remaining > 0 && remaining < 64);
+
+        let resumed = collect(
+            temp.path(),
+            i128::MAX,
+            false,
+            &CancelToken::new(),
+            Some(&candidate),
+            Some(&detail),
+            &mut || true,
+        )
+        .unwrap();
+        assert!(resumed.interrupted_at.is_none());
+        assert_eq!(
+            std::fs::read_dir(temp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".ingest-"))
+                .count(),
+            0
+        );
     }
 }

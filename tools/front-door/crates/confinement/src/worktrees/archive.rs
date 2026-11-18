@@ -1,7 +1,9 @@
 //! Recoverable explicit discard and its retention owner. No link is followed.
 use super::*;
 use provenant_config::RetentionIssue;
-use provenant_os::fs::{FileHandle, FileKind, PayloadTree, PublishMode, temporary_name};
+use provenant_os::fs::{
+    DirectoryPosition, FileHandle, FileKind, PayloadTree, PublishMode, temporary_name,
+};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
@@ -29,6 +31,21 @@ pub struct ArchiveReport {
     pub errors: Vec<RetentionIssue>,
     #[serde(skip)]
     pub interrupted_at: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+}
+
+fn archive_root_cursor(position: DirectoryPosition) -> String {
+    format!("archive-root-v1:{}:{}", position.block, position.offset)
+}
+
+fn archive_root_cursor_position(detail: Option<&str>) -> Option<DirectoryPosition> {
+    let mut components = detail?.strip_prefix("archive-root-v1:")?.split(':');
+    let position = DirectoryPosition {
+        block: components.next()?.parse().ok()?,
+        offset: components.next()?.parse().ok()?,
+    };
+    components.next().is_none().then_some(position)
 }
 
 fn failure(operation: &'static str, path: &Path, cause: impl std::fmt::Display) -> ArchiveError {
@@ -354,6 +371,7 @@ pub fn collect_archives(
     dry_run: bool,
     cancel: &CancelToken,
     start_at: Option<&Path>,
+    detail: Option<&str>,
     should_stop: &mut dyn FnMut() -> bool,
 ) -> ArchiveReport {
     let project_state = context.project_state;
@@ -383,9 +401,40 @@ pub fn collect_archives(
         }
     };
     let collect = (|| -> Result<(), FsError> {
-        let mut entries = root.entries()?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort();
-        for name in entries {
+        let mut entries = root.entries()?;
+        let mut pending = None;
+        if let (Some(start), Some(position)) = (start_at, archive_root_cursor_position(detail)) {
+            if entries.seek(position).is_ok() {
+                let entry_offset = entries.position()?;
+                if let Some(entry) = entries.next() {
+                    let name = entry?;
+                    if root.current_path()?.join(&name) == start {
+                        pending = Some((name, entry_offset));
+                    } else {
+                        entries = root.entries()?;
+                    }
+                } else {
+                    entries = root.entries()?;
+                }
+            }
+        }
+        loop {
+            let (name, entry_offset) = match pending.take() {
+                Some(pending) => pending,
+                None => {
+                    let entry_offset = entries.position()?;
+                    let Some(name) = entries.next() else {
+                        break;
+                    };
+                    (name?, entry_offset)
+                }
+            };
+            let path = root.current_path()?.join(&name);
+            if cancel.is_cancelled() || should_stop() {
+                report.interrupted_at = Some(path);
+                report.continuation = Some(archive_root_cursor(entry_offset));
+                break;
+            }
             if !name.as_bytes().starts_with(b"archive-") && !name.as_bytes().starts_with(b".stage-")
             {
                 continue;
@@ -394,16 +443,8 @@ pub fn collect_archives(
             if metadata.kind != FileKind::Directory {
                 continue;
             }
-            let path = root.current_path()?.join(&name);
-            if start_at.is_some_and(|start| path.as_path() < start) {
-                continue;
-            }
             if metadata.modified_ns >= before_ns && start_at != Some(path.as_path()) {
                 continue;
-            }
-            if cancel.is_cancelled() || should_stop() {
-                report.interrupted_at = Some(path);
-                break;
             }
             let tree = PayloadTree::claim(&root, &name, &metadata)?;
             let _lease = match tree.directory().try_lock_existing(
@@ -448,6 +489,7 @@ pub fn collect_archives(
                     };
                     if cancel.is_cancelled() || should_stop() {
                         report.interrupted_at = Some(path);
+                        report.continuation = Some(archive_root_cursor(entry_offset));
                         break;
                     }
                     match super::ref_tip(context, &reference, cancel) {
@@ -455,6 +497,7 @@ pub fn collect_archives(
                         Ok(Some(actual)) if actual == tip => {
                             if cancel.is_cancelled() || should_stop() {
                                 report.interrupted_at = Some(path);
+                                report.continuation = Some(archive_root_cursor(entry_offset));
                                 break;
                             }
                             if let Err(error) = execute_mutation(
@@ -525,11 +568,13 @@ pub fn collect_archives(
             }
             let Some(visited_bytes) = visit(&tree, dry_run, cancel, should_stop)? else {
                 report.interrupted_at = Some(path);
+                report.continuation = Some(archive_root_cursor(entry_offset));
                 break;
             };
             let bytes = metadata.allocated.saturating_add(visited_bytes);
             if cancel.is_cancelled() || should_stop() {
                 report.interrupted_at = Some(path);
+                report.continuation = Some(archive_root_cursor(entry_offset));
                 break;
             }
             if !dry_run {
