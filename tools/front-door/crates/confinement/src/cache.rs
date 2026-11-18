@@ -1357,6 +1357,7 @@ fn prune_worktree_cache(
         && policy.idle_before_ns.is_some()
         && let Some(owner) = owner.as_ref()
         && policy.project_owners.contains(&owner.path)
+        && !policy.protected_owners.contains_key(&owner.path)
         && owner_path_matches_identity(owner)?
     {
         match writer_guard(&owner.path)
