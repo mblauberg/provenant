@@ -41,7 +41,6 @@ struct RootStamp {
     device: u64,
     inode: u64,
     modified_ns: i128,
-    changed_ns: i128,
 }
 
 impl From<Metadata> for RootStamp {
@@ -50,7 +49,6 @@ impl From<Metadata> for RootStamp {
             device: metadata.device,
             inode: metadata.inode,
             modified_ns: metadata.modified_ns,
-            changed_ns: metadata.changed_ns,
         }
     }
 }
@@ -89,20 +87,19 @@ fn archive_root_cursor(
     };
     let root = RootStamp::from(root.metadata()?);
     Ok(Some(format!(
-        "archive-root-v2:{}:{}:{}:{}:{}:{}:{}:{}",
+        "archive-root-v3:{}:{}:{}:{}:{}:{}:{}",
         position.block,
         position.offset,
         root.device,
         root.inode,
         root.modified_ns,
-        root.changed_ns,
         candidate.device,
         candidate.inode
     )))
 }
 
 fn archive_root_cursor_position(detail: Option<&str>) -> Option<RootCursor> {
-    let mut components = detail?.strip_prefix("archive-root-v2:")?.split(':');
+    let mut components = detail?.strip_prefix("archive-root-v3:")?.split(':');
     let cursor = RootCursor {
         position: DirectoryPosition {
             block: components.next()?.parse().ok()?,
@@ -112,7 +109,6 @@ fn archive_root_cursor_position(detail: Option<&str>) -> Option<RootCursor> {
             device: components.next()?.parse().ok()?,
             inode: components.next()?.parse().ok()?,
             modified_ns: components.next()?.parse().ok()?,
-            changed_ns: components.next()?.parse().ok()?,
         },
         candidate: CandidateIdentity {
             device: components.next()?.parse().ok()?,
@@ -477,8 +473,10 @@ pub fn collect_archives(
     let collect = (|| -> Result<(), FsError> {
         let mut entries = root.entries()?;
         let mut pending = None;
-        let mut resumed_cursor = None;
-        if let (Some(start), Some(cursor)) = (start_at, archive_root_cursor_position(detail)) {
+        let resume_cursor = archive_root_cursor_position(detail).filter(|_| {
+            start_at.is_some_and(|start| start.parent() == root.current_path().ok().as_deref())
+        });
+        if let (Some(start), Some(cursor)) = (start_at, resume_cursor) {
             if RootStamp::from(root.metadata()?) == cursor.root
                 && entries.seek(cursor.position).is_ok()
             {
@@ -492,15 +490,14 @@ pub fn collect_archives(
                         })
                     {
                         pending = Some((name, entry_offset));
-                        resumed_cursor = Some(cursor);
                     }
                 }
             }
-            if resumed_cursor.is_none() {
+            if pending.is_none() {
                 entries = root.entries()?;
             }
         }
-        let resume_path = resumed_cursor.and(start_at);
+        let resume_path = resume_cursor.and(start_at);
         loop {
             let (name, entry_offset) = match pending.take() {
                 Some(pending) => pending,
@@ -527,7 +524,7 @@ pub fn collect_archives(
                 continue;
             }
             let is_resumed_candidate = resume_path == Some(path.as_path())
-                && resumed_cursor
+                && resume_cursor
                     .is_some_and(|cursor| CandidateIdentity::from(metadata) == cursor.candidate);
             if metadata.modified_ns >= before_ns && !is_resumed_candidate {
                 continue;

@@ -1,5 +1,53 @@
 use super::*;
 
+// Spec: docs/specs/disk.md#bounded-sweeps
+#[test]
+fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let root = test.project_state.current_path()?.join("discard-archives");
+    fs::create_dir(&root)?;
+    let archive = root.join("archive-old");
+    fs::create_dir(&archive)?;
+    for index in 0..128 {
+        fs::write(archive.join(format!("payload-{index:03}")), b"data")?;
+    }
+    fs::File::open(&archive)?.set_modified(std::time::UNIX_EPOCH)?;
+    let before = 1_000_000_000_000_i128;
+    let mut checked = 0;
+    let partial = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        None,
+        None,
+        &mut || {
+            checked += 1;
+            checked <= 12
+        },
+    );
+    assert_eq!(partial.interrupted_at.as_deref(), Some(archive.as_path()));
+    assert!(partial.continuation.is_some());
+    let remaining = fs::read_dir(&archive)?.count();
+    assert!(remaining > 0 && remaining < 128);
+
+    fs::write(root.join("root-noise"), b"changed parent stamp")?;
+    let resumed = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        partial.interrupted_at.as_deref(),
+        partial.continuation.as_deref(),
+        &mut || true,
+    );
+    assert!(resumed.interrupted_at.is_none());
+    assert_eq!(resumed.removed, vec![archive]);
+    Ok(())
+}
+
 #[test]
 fn gc_preview_keeps_custody_unknown_when_census_times_out() -> Result<(), Box<dyn Error>> {
     struct TimedOut;

@@ -932,16 +932,15 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                 config.domains.fabric.lanes.cargo_seed.enabled,
                 &request,
                 || {
-                    let selection =
-                        provenant_config::registered_gc_project_selection(&resolved.roots)
-                            .map_err(|error| error.to_string())?;
+                    let projects = provenant_config::registered_gc_projects(&resolved.roots)
+                        .map_err(|error| error.to_string())?;
                     let git = provenant_os::git::git_executable()
                         .ok_or_else(|| "Git executable unavailable".to_owned())?;
                     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
                     let utility = provenant_confinement::UtilityRuntime::read_only(&git, state)
                         .map_err(|error| error.to_string())?;
                     Ok(registered_seed_projects(
-                        &selection.projects,
+                        &projects,
                         request.project_keys(),
                         &executor,
                         &utility,

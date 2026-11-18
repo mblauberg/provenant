@@ -1926,19 +1926,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 sweep_cursor: Some(cursor),
                 sweep_warning,
                 sweep_stopped: true,
-                skipped_transient: selection.skipped_transient,
+                skipped_transient,
                 notice: Some(
                     "sweep stopped at gc.sweep_budget during project registry discovery; next run resumes at the saved registry cursor".into(),
                 ),
                 ..Default::default()
             });
         }
-        skipped_transient = selection.skipped_transient;
-        scheduled_project_ids = selection
-            .projects
-            .iter()
-            .map(provenant_config::ProjectBinding::project_id)
-            .collect();
+        scheduled_project_ids = selection.project_ids.clone();
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
         let runtime = UtilityRuntime::read_only(&git, roots.state.as_path())?.with_lane_roots(
             provenant_confinement::utility::lane_state_roots(roots.state.as_path()),
@@ -1948,20 +1943,26 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         let project_resume = initial_cursor
             .as_ref()
             .filter(|cursor| cursor.class == "project_selection")
-            .and_then(|cursor| cursor.project.as_deref());
-        let project_start = project_resume.map_or(0, |path| {
+            .and_then(|cursor| cursor.project.as_ref())
+            .and_then(|project| {
+                let project = project.to_string_lossy();
+                provenant_core::ProjectId::parse(project.as_ref())
+                    .ok()
+                    .map(|project| project.to_string())
+            });
+        let project_start = project_resume.as_ref().map_or(0, |resume| {
             selection
-                .projects
+                .project_ids
                 .iter()
-                .position(|binding| binding.common_dir() >= path)
-                .unwrap_or(selection.projects.len())
+                .position(|project| project.to_string().as_str() >= resume.as_str())
+                .unwrap_or(selection.project_ids.len())
         });
-        for binding in selection.projects.into_iter().skip(project_start) {
-            let common = binding.common_dir().to_owned();
+        for project_id in selection.project_ids.into_iter().skip(project_start) {
+            let project_key = project_id.to_string();
             if !sweep_should_continue(&deadline, lease.as_ref()) {
                 let cursor = crate::gc_sweep::Cursor {
                     class: "project_selection".into(),
-                    project: Some(common.clone()),
+                    project: Some(PathBuf::from(&project_key)),
                     candidate: None,
                     detail: None,
                 };
@@ -1982,6 +1983,24 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     ..Default::default()
                 });
             }
+            let binding = match provenant_config::lookup_gc_project(&roots, project_id) {
+                Ok(provenant_config::GcProjectStatus::Git(binding)) => binding,
+                Ok(provenant_config::GcProjectStatus::Transient(path)) => {
+                    skipped_transient.push(path);
+                    continue;
+                }
+                Ok(provenant_config::GcProjectStatus::Excluded) => continue,
+                Err(error) => {
+                    unobserved_projects
+                        .push(roots.state.as_path().join("projects").join(&project_key));
+                    append_sweep_warning(
+                        &mut sweep_warning,
+                        format!("project {project_key} lookup failed: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let common = binding.common_dir().to_owned();
             // The utility owns bound layout resolution, including trusted
             // local bare provenance for a checkout-less common directory.
             let budget = sweep_utility_budget(&deadline)?;
@@ -1993,7 +2012,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     if !sweep_should_continue(&deadline, lease.as_ref()) {
                         let cursor = crate::gc_sweep::Cursor {
                             class: "project_selection".into(),
-                            project: Some(common.clone()),
+                            project: Some(PathBuf::from(&project_key)),
                             candidate: None,
                             detail: None,
                         };
@@ -2041,7 +2060,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 Err(_) if !sweep_should_continue(&deadline, lease.as_ref()) => {
                     let cursor = crate::gc_sweep::Cursor {
                         class: "project_selection".into(),
-                        project: Some(common.to_owned()),
+                        project: Some(PathBuf::from(&project_key)),
                         candidate: None,
                         detail: None,
                     };

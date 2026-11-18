@@ -16,12 +16,8 @@ const STAGE_PREFIX: &str = ".project-stage-";
 const RECORD_LIMIT: u64 = 20 * 1024;
 const MAX_PROJECTS: usize = 16_384;
 const GC_SELECTION_SNAPSHOT_PREFIX: &str = "gc-project-selection-";
-const GC_SELECTION_PAGE_PREFIX: &str = "gc-project-selection-page-";
-const GC_SELECTION_SNAPSHOT_VERSION: u64 = 3;
-const GC_SELECTION_SNAPSHOT_LIMIT: u64 = 2 * 1024 * 1024;
-const GC_SELECTION_PAGE_VERSION: u64 = 1;
-const GC_SELECTION_PAGE_LIMIT: usize = 1024 * 1024;
-const GC_SELECTION_PAGE_RECORDS: usize = 128;
+const GC_SELECTION_SNAPSHOT_VERSION: u64 = 4;
+const GC_SELECTION_SNAPSHOT_LIMIT: u64 = 1024 * 1024;
 const MAX_GC_SELECTION_SNAPSHOTS: usize = 64;
 /// Reads of one name that may each meet a concurrent atomic replacement.
 const REPLACEMENT_READS: usize = 16;
@@ -196,15 +192,61 @@ pub fn registered_projects(roots: &Roots) -> Result<Vec<ProjectBinding>, ConfigE
 /// GC has no authority over non-Git workspaces or transient roots. Keep old
 /// identity records for indexed runs, but never enumerate them as GC projects.
 pub fn registered_gc_projects(roots: &Roots) -> Result<Vec<ProjectBinding>, ConfigError> {
-    Ok(registered_gc_project_selection(roots)?.projects)
+    let selection = registered_gc_project_selection(roots)?;
+    let mut projects = Vec::new();
+    for project in selection.project_ids {
+        if let GcProjectStatus::Git(binding) = lookup_gc_project(roots, project)? {
+            projects.push(binding);
+        }
+    }
+    Ok(projects)
+}
+
+#[derive(Debug)]
+pub enum GcProjectStatus {
+    Git(ProjectBinding),
+    Transient(PathBuf),
+    Excluded,
+}
+
+/// Resolve one selected ID against its current private record. Selection
+/// snapshots carry IDs only; callers obtain paths fresh immediately before use.
+pub fn lookup_gc_project(
+    roots: &Roots,
+    project: ProjectId,
+) -> Result<GcProjectStatus, ConfigError> {
+    let Some(registry) = existing_projects(roots)? else {
+        return Ok(GcProjectStatus::Excluded);
+    };
+    let registry_path = roots.state.as_path().join(PROJECTS_DIR);
+    let name = OsString::from(project.to_string());
+    let directory = match registry.open_verified_directory(&name) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(GcProjectStatus::Excluded),
+        Err(error) => return Err(error.into()),
+    };
+    verify_directory(&directory, &registry_path.join(&name))?;
+    let Some(bytes) = read_record(&directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)? else {
+        return Ok(GcProjectStatus::Excluded);
+    };
+    let record = decode_binding_record(&bytes)?;
+    if record.schema_version != 1 || record.project != project {
+        return Err(ConfigError::InvalidProjectBinding);
+    }
+    let binding = binding_from_record(record)?;
+    if transient_location(roots, binding.common_dir()) {
+        Ok(GcProjectStatus::Transient(binding.common_dir().to_owned()))
+    } else if git_location(binding.common_dir()) {
+        Ok(GcProjectStatus::Git(binding))
+    } else {
+        Ok(GcProjectStatus::Excluded)
+    }
 }
 
 /// Scheduled projects and transient registrations excluded from collection.
 #[derive(Debug, Default)]
 pub struct GcProjectSelection {
-    pub projects: Vec<ProjectBinding>,
-    /// Canonical common directories, preserving the registry's location.
-    pub skipped_transient: Vec<PathBuf>,
+    pub project_ids: Vec<ProjectId>,
     pub interrupted_at: Option<PathBuf>,
     pub continuation: Option<String>,
     pub warnings: Vec<String>,
@@ -228,79 +270,10 @@ struct GcSelectionSnapshot {
     root_device: u64,
     root_inode: u64,
     root_modified_ns: i128,
-    root_changed_ns: i128,
     offset: DirectoryPosition,
     next_key: Option<String>,
     scanned: usize,
-    pages: Vec<String>,
-    records: Vec<GcSelectionRecord>,
-    record_bytes: usize,
-    page_sequence: usize,
-    scan_complete: bool,
-    materialize_after: Option<usize>,
-    seen_keys: BTreeSet<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct GcBindingSnapshot {
-    project: ProjectId,
-    common_dir: String,
-    primary_checkout_hint: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct GcTransientSnapshot {
-    project: ProjectId,
-    common_dir: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "record")]
-enum GcSelectionRecord {
-    Binding(GcBindingSnapshot),
-    Transient(GcTransientSnapshot),
-    Excluded(ProjectId),
-}
-
-impl GcSelectionRecord {
-    fn project(&self) -> ProjectId {
-        match self {
-            Self::Binding(binding) => binding.project,
-            Self::Transient(transient) => transient.project,
-            Self::Excluded(project) => *project,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct GcSelectionPage {
-    version: u64,
-    epoch: String,
-    records: Vec<GcSelectionRecord>,
-}
-
-impl From<&ProjectBinding> for GcBindingSnapshot {
-    fn from(binding: &ProjectBinding) -> Self {
-        Self {
-            project: binding.project,
-            common_dir: encode_location(binding.common_dir()),
-            primary_checkout_hint: binding.primary_checkout_hint().map(encode_location),
-        }
-    }
-}
-
-impl GcBindingSnapshot {
-    fn into_binding(self) -> Result<ProjectBinding, ConfigError> {
-        Ok(ProjectBinding {
-            project: self.project,
-            canonical_common_dir: decode_location(&self.common_dir)?,
-            canonical_primary_checkout_hint: self
-                .primary_checkout_hint
-                .as_deref()
-                .map(decode_location)
-                .transpose()?,
-        })
-    }
+    project_ids: BTreeSet<ProjectId>,
 }
 
 fn gc_selection_snapshot_name(epoch: &str) -> Option<String> {
@@ -315,21 +288,6 @@ fn gc_selection_snapshot_epoch(name: &str) -> Option<&str> {
     let epoch = name
         .strip_prefix(GC_SELECTION_SNAPSHOT_PREFIX)?
         .strip_suffix(".json")?;
-    gc_selection_snapshot_name(epoch).map(|_| epoch)
-}
-
-fn gc_selection_page_name(epoch: &str, sequence: usize) -> Option<String> {
-    gc_selection_snapshot_name(epoch)
-        .map(|_| format!("{GC_SELECTION_PAGE_PREFIX}{epoch}-{sequence:04}.json"))
-}
-
-fn gc_selection_page_epoch(name: &str) -> Option<&str> {
-    let rest = name.strip_prefix(GC_SELECTION_PAGE_PREFIX)?;
-    let (epoch, sequence) = rest.split_once('-')?;
-    let sequence = sequence.strip_suffix(".json")?;
-    if sequence.len() != 4 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
     gc_selection_snapshot_name(epoch).map(|_| epoch)
 }
 
@@ -360,14 +318,6 @@ fn gc_selection_tick(state_path: &Path, create: bool) -> Result<Option<Directory
 
 fn prune_gc_selection_snapshots(tick: &Directory, active_detail: Option<&str>) -> Vec<String> {
     let mut warnings = Vec::new();
-    let active_pages = active_detail
-        .and_then(|detail| {
-            tick.read_stable(OsStr::new(detail), GC_SELECTION_SNAPSHOT_LIMIT)
-                .ok()
-        })
-        .and_then(|bytes| serde_json::from_slice::<GcSelectionSnapshot>(&bytes).ok())
-        .map(|snapshot| snapshot.pages.into_iter().collect::<BTreeSet<_>>())
-        .unwrap_or_default();
     let entries = match tick.entries() {
         Ok(entries) => entries,
         Err(error) => {
@@ -387,9 +337,8 @@ fn prune_gc_selection_snapshots(tick: &Directory, active_detail: Option<&str>) -
             continue;
         };
         if (gc_selection_snapshot_epoch(name_text).is_none()
-            && gc_selection_page_epoch(name_text).is_none())
+            && !name_text.starts_with("gc-project-selection-page-"))
             || active_detail == Some(name_text)
-            || active_pages.contains(name_text)
         {
             continue;
         }
@@ -433,133 +382,34 @@ fn save_gc_selection_snapshot(
     Ok(name)
 }
 
-fn flush_gc_selection_page(
-    tick: &Directory,
+fn checkpoint_gc_selection(
+    selection: &mut GcProjectSelection,
     snapshot: &mut GcSelectionSnapshot,
-    epoch: &str,
-) -> Result<(), ConfigError> {
-    if snapshot.records.is_empty() {
-        return Ok(());
-    }
-    let name = gc_selection_page_name(epoch, snapshot.page_sequence)
-        .ok_or(ConfigError::InvalidProjectBinding)?;
-    let page = GcSelectionPage {
-        version: GC_SELECTION_PAGE_VERSION,
-        epoch: epoch.into(),
-        records: snapshot.records.clone(),
-    };
-    let bytes = serde_json::to_vec(&page).map_err(|_| ConfigError::InvalidProjectBinding)?;
-    if bytes.len() > GC_SELECTION_PAGE_LIMIT {
-        return Err(ConfigError::TooLarge {
-            path: tick.current_path()?.join(&name),
-            limit: GC_SELECTION_PAGE_LIMIT as u64,
-        });
-    }
-    tick.atomic_write(
-        OsStr::new(&name),
-        ".gc-project-selection-page-",
-        &bytes,
-        PublishMode::NoReplace,
-    )?
-    .require_durable()?;
-    snapshot.pages.push(name);
-    snapshot.page_sequence += 1;
-    snapshot.records.clear();
-    snapshot.record_bytes = 0;
-    Ok(())
-}
-
-fn append_gc_selection_record(
-    snapshot: &mut GcSelectionSnapshot,
-    record: GcSelectionRecord,
     tick: Option<&Directory>,
     persist: bool,
     epoch: &str,
-) -> Result<(), ConfigError> {
-    let bytes = serde_json::to_vec(&record).map_err(|_| ConfigError::InvalidProjectBinding)?;
-    if bytes.len().saturating_add(256) > GC_SELECTION_PAGE_LIMIT {
-        return Err(ConfigError::TooLarge {
-            path: PathBuf::from("project selection record"),
-            limit: GC_SELECTION_PAGE_LIMIT as u64,
-        });
+    candidate: PathBuf,
+) {
+    selection.interrupted_at = Some(candidate);
+    if !persist {
+        return;
     }
-    if persist
-        && (!snapshot.records.is_empty()
-            && (snapshot.records.len() >= GC_SELECTION_PAGE_RECORDS
-                || snapshot
-                    .record_bytes
-                    .saturating_add(bytes.len())
-                    .saturating_add(256)
-                    > GC_SELECTION_PAGE_LIMIT))
-    {
-        let Some(tick) = tick else {
-            return Err(ConfigError::InvalidProjectBinding);
-        };
-        flush_gc_selection_page(tick, snapshot, epoch)?;
+    let Some(tick) = tick else { return };
+    match save_gc_selection_snapshot(tick, snapshot, epoch) {
+        Ok(name) => {
+            selection.continuation = Some(name.clone());
+            selection
+                .warnings
+                .extend(prune_gc_selection_snapshots(tick, Some(&name)));
+        }
+        Err(error) => selection
+            .warnings
+            .push(format!("project selection cursor was not saved: {error}")),
     }
-    snapshot.record_bytes = snapshot.record_bytes.saturating_add(bytes.len() + 3);
-    snapshot.records.push(record);
-    Ok(())
 }
 
-fn materialize_gc_selection(
-    snapshot: &GcSelectionSnapshot,
-    tick: Option<&Directory>,
-    selection: &mut GcProjectSelection,
-    keep_going: &mut dyn FnMut() -> bool,
-) -> Result<Option<usize>, ConfigError> {
-    let mut latest = std::collections::BTreeMap::new();
-    let resume_after = snapshot.materialize_after.unwrap_or(0);
-    for (index, name) in snapshot.pages.iter().enumerate() {
-        if index >= resume_after && !keep_going() {
-            return Ok(Some(index));
-        }
-        let epoch = gc_selection_page_epoch(name).ok_or(ConfigError::InvalidProjectBinding)?;
-        let tick = tick.ok_or(ConfigError::InvalidProjectBinding)?;
-        let bytes = tick.read_stable(OsStr::new(name), GC_SELECTION_PAGE_LIMIT as u64)?;
-        let page: GcSelectionPage =
-            serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
-        if page.version != GC_SELECTION_PAGE_VERSION
-            || page.epoch != epoch
-            || page.records.len() > GC_SELECTION_PAGE_RECORDS
-        {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        for record in page.records {
-            latest.insert(record.project(), record);
-        }
-    }
-    if !keep_going() {
-        return Ok(Some(snapshot.pages.len()));
-    }
-    for record in &snapshot.records {
-        latest.insert(record.project(), record.clone());
-    }
-    for (project, record) in latest {
-        if !snapshot.seen_keys.contains(&project.to_string()) {
-            continue;
-        }
-        match record {
-            GcSelectionRecord::Binding(binding) => {
-                selection.projects.push(binding.into_binding()?);
-            }
-            GcSelectionRecord::Transient(transient) => {
-                selection
-                    .skipped_transient
-                    .push(decode_location(&transient.common_dir)?);
-            }
-            GcSelectionRecord::Excluded(_) => {}
-        }
-    }
-    selection
-        .projects
-        .sort_by(|left, right| left.common_dir().cmp(right.common_dir()));
-    Ok(None)
-}
-
-/// Enumerate the host project registry in resumable batches. The selector only
-/// returns a complete project set; a partial scan is persisted before the
-/// caller checkpoints its cursor and never grants a mutation scope.
+/// Enumerate registered project IDs in resumable batches. Paths are resolved
+/// from their current records by callers immediately before use.
 pub fn registered_gc_project_selection_with_progress(
     roots: &Roots,
     resume_detail: Option<&str>,
@@ -579,19 +429,12 @@ pub fn registered_gc_project_selection_with_progress(
         root_device: root_metadata.device,
         root_inode: root_metadata.inode,
         root_modified_ns: root_metadata.modified_ns,
-        root_changed_ns: root_metadata.changed_ns,
         offset: DirectoryPosition::default(),
         next_key: None,
         scanned: 0,
-        pages: Vec::new(),
-        records: Vec::new(),
-        record_bytes: 0,
-        page_sequence: 0,
-        scan_complete: false,
-        materialize_after: None,
-        seen_keys: BTreeSet::new(),
+        project_ids: BTreeSet::new(),
     };
-    let mut tick = if persist {
+    let tick = if persist {
         gc_selection_tick(roots.state.as_path(), true)?
     } else {
         None
@@ -608,7 +451,6 @@ pub fn registered_gc_project_selection_with_progress(
                         if snapshot.root_device != root_metadata.device
                             || snapshot.root_inode != root_metadata.inode
                             || snapshot.root_modified_ns != root_metadata.modified_ns
-                            || snapshot.root_changed_ns != root_metadata.changed_ns
                         {
                             selection.warnings.push(
                                 "project registry changed; resuming after a bounded rescan".into(),
@@ -616,13 +458,9 @@ pub fn registered_gc_project_selection_with_progress(
                             snapshot.offset = DirectoryPosition::default();
                             snapshot.next_key = None;
                             snapshot.scanned = 0;
-                            snapshot.scan_complete = false;
-                            snapshot.materialize_after = None;
-                            snapshot.seen_keys.clear();
                             snapshot.root_device = root_metadata.device;
                             snapshot.root_inode = root_metadata.inode;
                             snapshot.root_modified_ns = root_metadata.modified_ns;
-                            snapshot.root_changed_ns = root_metadata.changed_ns;
                         }
                     }
                     Ok(_) => selection
@@ -647,250 +485,131 @@ pub fn registered_gc_project_selection_with_progress(
             .warnings
             .extend(prune_gc_selection_snapshots(tick, resume_detail));
     }
-    if snapshot.epoch != epoch {
-        snapshot.epoch = epoch.into();
-        snapshot.page_sequence = 0;
-    }
-    registered_gc_project_selection_from_registry(
-        roots,
-        &registry,
-        registry_path,
-        root_metadata,
-        epoch,
-        persist,
-        keep_going,
-        selection,
-        snapshot,
-        tick.as_mut(),
-    )
-}
-
-fn checkpoint_gc_selection(
-    selection: &mut GcProjectSelection,
-    snapshot: &mut GcSelectionSnapshot,
-    tick: Option<&mut Directory>,
-    persist: bool,
-    epoch: &str,
-    candidate: PathBuf,
-) {
-    selection.interrupted_at = Some(candidate);
-    if !persist {
-        return;
-    }
-    let Some(tick) = tick else { return };
-    if let Err(error) = flush_gc_selection_page(tick, snapshot, epoch) {
-        selection
-            .warnings
-            .push(format!("project selection page was not saved: {error}"));
-        return;
-    }
-    match save_gc_selection_snapshot(tick, snapshot, epoch) {
-        Ok(name) => {
-            selection.continuation = Some(name.clone());
-            selection
-                .warnings
-                .extend(prune_gc_selection_snapshots(tick, Some(&name)));
-        }
-        Err(error) => selection
-            .warnings
-            .push(format!("project selection cursor was not saved: {error}")),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn registered_gc_project_selection_from_registry(
-    roots: &Roots,
-    registry: &Directory,
-    registry_path: PathBuf,
-    root_metadata: Metadata,
-    epoch: &str,
-    persist: bool,
-    keep_going: &mut dyn FnMut() -> bool,
-    mut selection: GcProjectSelection,
-    mut snapshot: GcSelectionSnapshot,
-    mut tick: Option<&mut Directory>,
-) -> Result<GcProjectSelection, ConfigError> {
-    if !snapshot.scan_complete {
-        let mut entries = registry.entries()?;
-        let mut pending = None;
-        if let Some(next_key) = snapshot.next_key.as_deref() {
-            if entries.seek(snapshot.offset).is_ok() {
-                let offset = entries.position()?;
-                match entries.next() {
-                    Some(entry) => {
-                        let name = entry?;
-                        if provenant_core::hex(name.as_bytes()) == next_key {
-                            pending = Some((name, offset));
-                        } else {
-                            selection.warnings.push(
-                                "project registry cursor changed; rescanning without discarding observed bindings".into(),
-                            );
-                            snapshot.offset = DirectoryPosition::default();
-                            snapshot.next_key = None;
-                            snapshot.scanned = 0;
-                            snapshot.seen_keys.clear();
-                            entries = registry.entries()?;
-                        }
-                    }
-                    None => {
+    snapshot.epoch = epoch.into();
+    let mut entries = registry.entries()?;
+    let mut pending = None;
+    if let Some(next_key) = snapshot.next_key.as_deref() {
+        if entries.seek(snapshot.offset).is_ok() {
+            let offset = entries.position()?;
+            match entries.next() {
+                Some(entry) => {
+                    let name = entry?;
+                    if provenant_core::hex(name.as_bytes()) == next_key {
+                        pending = Some((name, offset));
+                    } else {
                         selection.warnings.push(
-                            "project registry cursor changed; rescanning without discarding observed bindings".into(),
+                            "project registry cursor changed; rescanning without discarding selected IDs".into(),
                         );
                         snapshot.offset = DirectoryPosition::default();
                         snapshot.next_key = None;
                         snapshot.scanned = 0;
-                        snapshot.seen_keys.clear();
                         entries = registry.entries()?;
                     }
                 }
-            } else {
-                selection.warnings.push(
-                    "project registry cursor expired; rescanning without discarding observed bindings"
-                        .into(),
-                );
-                snapshot.offset = DirectoryPosition::default();
-                snapshot.next_key = None;
-                snapshot.scanned = 0;
-                snapshot.seen_keys.clear();
-                entries = registry.entries()?;
+                None => {
+                    selection.warnings.push(
+                        "project registry cursor changed; rescanning without discarding selected IDs".into(),
+                    );
+                    snapshot.offset = DirectoryPosition::default();
+                    snapshot.next_key = None;
+                    snapshot.scanned = 0;
+                    entries = registry.entries()?;
+                }
             }
-        } else if snapshot.offset != DirectoryPosition::default() {
+        } else {
             selection.warnings.push(
-                "project registry cursor was incomplete; rescanning without discarding observed bindings".into(),
+                "project registry cursor expired; rescanning without discarding selected IDs"
+                    .into(),
             );
             snapshot.offset = DirectoryPosition::default();
+            snapshot.next_key = None;
             snapshot.scanned = 0;
-            snapshot.seen_keys.clear();
             entries = registry.entries()?;
         }
+    }
 
-        loop {
-            let (entry, entry_offset) = match pending.take() {
-                Some(pending) => pending,
-                None => {
-                    let entry_offset = entries.position()?;
-                    let Some(entry) = entries.next() else { break };
-                    (entry?, entry_offset)
-                }
-            };
-            if !keep_going() {
-                snapshot.offset = entry_offset;
-                snapshot.next_key = Some(provenant_core::hex(entry.as_bytes()));
-                checkpoint_gc_selection(
-                    &mut selection,
-                    &mut snapshot,
-                    tick.as_mut().map(|tick| &mut **tick),
-                    persist,
-                    epoch,
-                    registry_path.join(&entry),
-                );
-                break;
+    loop {
+        let (entry, entry_offset) = match pending.take() {
+            Some(pending) => pending,
+            None => {
+                let entry_offset = entries.position()?;
+                let Some(entry) = entries.next() else { break };
+                (entry?, entry_offset)
             }
-
-            snapshot.offset = entries.position()?;
-            snapshot.next_key = None;
-            let Some(name) = entry.to_str() else {
-                return Err(ConfigError::InvalidProjectBinding);
-            };
-            if let Some(id) = name.strip_prefix(STAGE_PREFIX)
-                && id
-                    .parse::<ProjectId>()
-                    .is_ok_and(|project| format!("{STAGE_PREFIX}{project}") == name)
-            {
-                continue;
-            }
-            snapshot.scanned += 1;
-            if snapshot.scanned > MAX_PROJECTS {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-            let project = name
-                .parse::<ProjectId>()
-                .map_err(|_| ConfigError::InvalidProjectBinding)?;
-            let key = project.to_string();
-            if !snapshot.seen_keys.insert(key) {
-                continue;
-            }
-            let directory = registry.open_verified_directory(&entry)?;
-            verify_directory(&directory, &registry_path.join(name))?;
-            let record = match read_record(&directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
-            {
-                Some(bytes) => {
-                    let record = decode_binding_record(&bytes)?;
-                    if record.schema_version != 1 || record.project != project {
-                        return Err(ConfigError::InvalidProjectBinding);
-                    }
-                    let binding = binding_from_record(record)?;
-                    if transient_location(roots, binding.common_dir()) {
-                        GcSelectionRecord::Transient(GcTransientSnapshot {
-                            project,
-                            common_dir: encode_location(binding.common_dir()),
-                        })
-                    } else if git_location(binding.common_dir()) {
-                        GcSelectionRecord::Binding(GcBindingSnapshot::from(&binding))
-                    } else {
-                        GcSelectionRecord::Excluded(project)
-                    }
-                }
-                None => GcSelectionRecord::Excluded(project),
-            };
-            append_gc_selection_record(&mut snapshot, record, tick.as_deref(), persist, epoch)?;
-        }
-
-        let final_metadata = registry.metadata()?;
-        if selection.interrupted_at.is_none()
-            && (final_metadata.device != root_metadata.device
-                || final_metadata.inode != root_metadata.inode
-                || final_metadata.modified_ns != root_metadata.modified_ns
-                || final_metadata.changed_ns != root_metadata.changed_ns)
-        {
-            selection.warnings.push(
-                "project registry changed during discovery; preserving observed bindings for the next pass".into(),
-            );
-            snapshot.root_device = final_metadata.device;
-            snapshot.root_inode = final_metadata.inode;
-            snapshot.root_modified_ns = final_metadata.modified_ns;
-            snapshot.root_changed_ns = final_metadata.changed_ns;
-            snapshot.offset = DirectoryPosition::default();
-            snapshot.next_key = None;
-            snapshot.scanned = 0;
-            snapshot.scan_complete = false;
-            snapshot.materialize_after = None;
-            snapshot.seen_keys.clear();
+        };
+        if !keep_going() {
+            snapshot.offset = entry_offset;
+            snapshot.next_key = Some(provenant_core::hex(entry.as_bytes()));
             checkpoint_gc_selection(
                 &mut selection,
                 &mut snapshot,
-                tick.as_mut().map(|tick| &mut **tick),
+                tick.as_deref(),
                 persist,
                 epoch,
-                registry_path,
+                registry_path.join(&entry),
             );
             return Ok(selection);
         }
-        if selection.interrupted_at.is_none() {
-            snapshot.scan_complete = true;
-            snapshot.materialize_after = Some(0);
+        snapshot.offset = entries.position()?;
+        snapshot.next_key = None;
+        let Some(name) = entry.to_str() else {
+            return Err(ConfigError::InvalidProjectBinding);
+        };
+        if let Some(id) = name.strip_prefix(STAGE_PREFIX)
+            && id
+                .parse::<ProjectId>()
+                .is_ok_and(|project| format!("{STAGE_PREFIX}{project}") == name)
+        {
+            continue;
         }
+        snapshot.scanned += 1;
+        if snapshot.scanned > MAX_PROJECTS {
+            return Err(ConfigError::InvalidProjectBinding);
+        }
+        let project = name
+            .parse::<ProjectId>()
+            .map_err(|_| ConfigError::InvalidProjectBinding)?;
+        snapshot.project_ids.insert(project);
     }
 
-    if selection.interrupted_at.is_some() {
-        return Ok(selection);
-    }
-    if let Some(next_page) =
-        materialize_gc_selection(&snapshot, tick.as_deref(), &mut selection, keep_going)?
+    let final_metadata = registry.metadata()?;
+    if final_metadata.device != root_metadata.device
+        || final_metadata.inode != root_metadata.inode
+        || final_metadata.modified_ns != root_metadata.modified_ns
     {
-        snapshot.materialize_after = Some(next_page);
+        selection.warnings.push(
+            "project registry changed during discovery; preserving selected IDs for the next pass"
+                .into(),
+        );
+        snapshot.root_device = final_metadata.device;
+        snapshot.root_inode = final_metadata.inode;
+        snapshot.root_modified_ns = final_metadata.modified_ns;
+        snapshot.offset = DirectoryPosition::default();
+        snapshot.next_key = None;
+        snapshot.scanned = 0;
         checkpoint_gc_selection(
             &mut selection,
             &mut snapshot,
-            tick.as_mut().map(|tick| &mut **tick),
+            tick.as_deref(),
             persist,
             epoch,
             registry_path,
         );
         return Ok(selection);
     }
-    snapshot.materialize_after = None;
-    if let Some(tick) = tick.as_mut().map(|tick| &mut **tick) {
+    selection.project_ids = snapshot.project_ids.into_iter().collect();
+    if let Some(tick) = tick.as_ref() {
+        if let Some(detail) = resume_detail
+            && gc_selection_snapshot_epoch(detail).is_some()
+        {
+            match tick.unlink(OsStr::new(detail)) {
+                Ok(()) => {}
+                Err(error) if error.is_not_found() => {}
+                Err(error) => selection
+                    .warnings
+                    .push(format!("project selection sidecar cleanup: {error}")),
+            }
+        }
         selection
             .warnings
             .extend(prune_gc_selection_snapshots(tick, None));
@@ -1226,6 +945,15 @@ fn read_record(
     limit: u64,
     accept: impl Fn(&Metadata) -> bool,
 ) -> Result<Option<Vec<u8>>, ConfigError> {
+    Ok(read_record_with_metadata(directory, name, limit, accept)?.map(|(bytes, _)| bytes))
+}
+
+fn read_record_with_metadata(
+    directory: &Directory,
+    name: &OsStr,
+    limit: u64,
+    accept: impl Fn(&Metadata) -> bool,
+) -> Result<Option<(Vec<u8>, Metadata)>, ConfigError> {
     for _ in 0..REPLACEMENT_READS {
         let entry = match directory.metadata_at(name, false) {
             Ok(entry) => entry,
@@ -1256,7 +984,7 @@ fn read_record(
             Err(other) => return Err(other.into()),
         };
         match directory.metadata_at(name, false) {
-            Ok(after) if entry.unchanged(&after) => return Ok(Some(bytes)),
+            Ok(after) if entry.unchanged(&after) => return Ok(Some((bytes, after))),
             Ok(_) => continue,
             Err(error) if error.is_not_found() => continue,
             Err(error) => return Err(error.into()),
@@ -1469,16 +1197,25 @@ mod tests {
         // Existing identity records are preserved for indexed run evidence.
         assert_eq!(registered_projects(&roots).unwrap().len(), 4);
         assert_eq!(registered_gc_projects(&roots).unwrap(), vec![good.clone()]);
-        let mut selection = registered_gc_project_selection(&roots).unwrap();
-        assert_eq!(selection.projects, vec![good]);
-        selection.skipped_transient.sort();
+        let selection = registered_gc_project_selection(&roots).unwrap();
+        let mut selected = Vec::new();
+        let mut skipped_transient = Vec::new();
+        for project in selection.project_ids {
+            match lookup_gc_project(&roots, project).unwrap() {
+                GcProjectStatus::Git(binding) => selected.push(binding),
+                GcProjectStatus::Transient(path) => skipped_transient.push(path),
+                GcProjectStatus::Excluded => {}
+            }
+        }
+        assert_eq!(selected, vec![good]);
+        skipped_transient.sort();
         excluded.sort();
-        assert_eq!(selection.skipped_transient, excluded);
+        assert_eq!(skipped_transient, excluded);
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps
     #[test]
-    fn scheduled_registry_scan_pages_resume_after_root_change_without_stale_bindings() {
+    fn scheduled_registry_scan_ids_resume_after_root_change_without_stale_bindings() {
         let temp = tempdir();
         let roots = roots(&temp);
         let base = canonical_base(&temp);
@@ -1502,18 +1239,13 @@ mod tests {
         )
         .unwrap();
         assert!(partial.interrupted_at.is_some());
-        assert!(partial.projects.is_empty());
+        assert!(partial.project_ids.is_empty());
         let resume = partial
             .continuation
             .as_deref()
             .expect("bounded scan saves an epoch sidecar");
         let tick_path = roots.state.as_path().join("tick");
-        assert!(
-            fs::read_dir(&tick_path)
-                .unwrap()
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_name().to_string_lossy().contains("-page-"))
-        );
+        assert!(tick_path.join(resume).exists());
 
         let replaced_common = base.join("repository-00/.git");
         let replacement = base.join("repository-replaced/.git");
@@ -1558,22 +1290,29 @@ mod tests {
         )
         .unwrap();
         assert!(resumed.interrupted_at.is_none());
-        assert_eq!(resumed.projects.len(), 141);
+        assert_eq!(resumed.project_ids.len(), 141);
+        let bindings = resumed
+            .project_ids
+            .iter()
+            .filter_map(
+                |project| match lookup_gc_project(&roots, *project).unwrap() {
+                    GcProjectStatus::Git(binding) => Some(binding),
+                    GcProjectStatus::Transient(_) | GcProjectStatus::Excluded => None,
+                },
+            )
+            .collect::<Vec<_>>();
         assert!(
-            !resumed
-                .projects
+            !bindings
                 .iter()
                 .any(|binding| binding.common_dir() == replaced_common)
         );
         assert!(
-            resumed
-                .projects
+            bindings
                 .iter()
                 .any(|binding| binding.common_dir() == new_common)
         );
         assert!(
-            resumed
-                .projects
+            bindings
                 .iter()
                 .any(|binding| binding.common_dir() == replacement)
         );
@@ -1591,7 +1330,7 @@ mod tests {
 
     // Spec: docs/specs/disk.md#bounded-sweeps
     #[test]
-    fn registry_page_materialization_resumes_without_rescanning() {
+    fn registry_id_scan_resumes_from_saved_directory_cookie() {
         let temp = tempdir();
         let roots = roots(&temp);
         let base = canonical_base(&temp);
@@ -1610,12 +1349,12 @@ mod tests {
             true,
             &mut || {
                 checks += 1;
-                checks <= 140
+                checks <= 70
             },
         )
         .unwrap();
         assert!(partial.interrupted_at.is_some());
-        assert!(partial.projects.is_empty());
+        assert!(partial.project_ids.is_empty());
         let resume = partial.continuation.as_deref().unwrap();
 
         let mut resumed_checks = 0;
@@ -1631,8 +1370,92 @@ mod tests {
         )
         .unwrap();
         assert!(resumed.interrupted_at.is_none());
-        assert_eq!(resumed.projects.len(), 140);
-        assert!(resumed_checks < 140);
+        assert_eq!(resumed.project_ids.len(), 140);
+        assert!(resumed_checks < 75);
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn resumed_project_ids_resolve_child_records_fresh() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+        let original = base.join("repository-original/.git");
+        let other = base.join("repository-other/.git");
+        for common in [&original, &other] {
+            fs::create_dir_all(common.join("objects")).unwrap();
+            fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        }
+        bind_project(&roots, ProjectLocation::new(&original).unwrap()).unwrap();
+        bind_project(&roots, ProjectLocation::new(&other).unwrap()).unwrap();
+        let registry = existing_projects(&roots).unwrap().unwrap();
+        let root_stamp = registry.metadata().unwrap();
+
+        let mut checks = 0;
+        let partial = registered_gc_project_selection_with_progress(
+            &roots,
+            None,
+            "0000000000000021",
+            true,
+            &mut || {
+                checks += 1;
+                checks <= 1
+            },
+        )
+        .unwrap();
+        assert!(partial.interrupted_at.is_some());
+        let resume = partial.continuation.as_deref().unwrap();
+        let saved: GcSelectionSnapshot = serde_json::from_slice(
+            &fs::read(roots.state.as_path().join("tick").join(resume)).unwrap(),
+        )
+        .unwrap();
+        let changed_id = *saved.project_ids.iter().next().unwrap();
+        assert_eq!(saved.project_ids.len(), 1);
+
+        let replacement = base.join("repository-replacement/.git");
+        fs::create_dir_all(replacement.join("objects")).unwrap();
+        fs::write(replacement.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let project_directory = registry
+            .open_verified_directory(OsStr::new(&changed_id.to_string()))
+            .unwrap();
+        let replacement_record = ProjectBindingRecord {
+            schema_version: 1,
+            project: changed_id,
+            canonical_common_dir: encode_location(&replacement),
+            canonical_primary_checkout_hint: None,
+            extra: Default::default(),
+        };
+        let bytes = provenant_records::encode(&replacement_record).unwrap();
+        project_directory
+            .atomic_write_with_permissions(
+                OsStr::new(RECORD),
+                ".project-",
+                &bytes,
+                0o600,
+                PublishMode::Replace,
+            )
+            .unwrap()
+            .require_durable()
+            .unwrap();
+        let unchanged_root = registry.metadata().unwrap();
+        assert_eq!(root_stamp.device, unchanged_root.device);
+        assert_eq!(root_stamp.inode, unchanged_root.inode);
+        assert_eq!(root_stamp.modified_ns, unchanged_root.modified_ns);
+
+        let resumed = registered_gc_project_selection_with_progress(
+            &roots,
+            Some(resume),
+            "0000000000000022",
+            true,
+            &mut || true,
+        )
+        .unwrap();
+        assert_eq!(resumed.project_ids.len(), 2);
+        let GcProjectStatus::Git(binding) = lookup_gc_project(&roots, changed_id).unwrap() else {
+            panic!("current child record is a Git project")
+        };
+        assert_eq!(binding.common_dir(), replacement);
+        assert_ne!(binding.common_dir(), original);
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps

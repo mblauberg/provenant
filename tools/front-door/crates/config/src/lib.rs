@@ -101,10 +101,10 @@ pub use loader::{
 };
 pub use presets::Profile;
 pub use project_binding::{
-    GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
-    lookup_project, lookup_project_at_state, registered_gc_project_selection,
-    registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
-    transient_location,
+    GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, bind_host, bind_project,
+    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state,
+    registered_gc_project_selection, registered_gc_project_selection_with_progress,
+    registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
 pub use schema::{
