@@ -77,7 +77,10 @@ Owner: repository CI.
 A main-tier suite is deferred on a pull request unless the delta touches its
 declared pull-request paths or a full run is requested. The run summary names
 every suite that did not run, whether it was covered or deferred, its evidence
-commit and the reason.
+commit and the reason. Within a suite that runs, tests matching the suite's
+declared main-tier test filter are deferred on a pull request the same way,
+including when the suite is covered by an earlier run of the same pull
+request, and the summary names the filter.
 
 Why: speed on pull requests must never read as coverage that did not happen;
 `main` runs deferred suites after merge.

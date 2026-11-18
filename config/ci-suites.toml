@@ -89,14 +89,31 @@ jobs = [
 ]
 # Rust tests read these prose files.
 watch = ["skills/legal-writing/references/**"]
+# Main-tier tests: a nextest filterset these Linux partitions skip on pull
+# requests and run on main and full runs. Tag a test by putting it in a module
+# named `main_tier`, or add a filterset term here. Empty runs every test.
+main_tests = "test(/(^|::)main_tier::/)"
 
-# macOS Clippy: compiles macOS-only code on every Rust change.
+# macOS Clippy: compiles macOS-only code. Main-tier because macOS runners are
+# the scarce pool; pull requests run it when they touch the crates that hold
+# most platform-specific code. Main catches a slip elsewhere.
 [[suite]]
 name = "macos_lint"
-tier = "pr"
+tier = "main"
 cost_minutes = 3
 jobs = ["rust-macos-lint"]
 watch = ["skills/legal-writing/references/**"]
+pr_paths = [
+  "tools/front-door/crates/os/**",
+  "tools/front-door/crates/confinement/**",
+  "tools/front-door/crates/supervisor/**",
+  "tools/front-door/crates/providers/**",
+  "tools/front-door/crates/cli/**",
+  "tools/front-door/crates/run/**",
+  "tools/front-door/crates/fabric-runtime/**",
+  "tools/front-door/Cargo.toml",
+  "tools/front-door/crates/*/Cargo.toml",
+]
 
 # Native macOS confinement, custody, dispatch and provider tests.
 [[suite]]

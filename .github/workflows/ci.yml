@@ -48,6 +48,7 @@ jobs:
       suites: ${{ steps.select.outputs.suites }}
       selection: ${{ steps.select.outputs.selection }}
       rust_base: ${{ steps.select.outputs.rust_base }}
+      deferred_tests: ${{ steps.select.outputs.deferred_tests }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -452,8 +453,13 @@ jobs:
         env:
           NEXTTEST_FILTER: ${{ needs.rust-test-archive.outputs.nextest_filter }}
           QUARANTINE_FILTER: ${{ needs.quarantine-filter.outputs.filter }}
+          # Main-tier tests (config/ci-suites.toml `main_tests`), named in the scope summary.
+          DEFERRED_TESTS: ${{ fromJSON(needs.scope.outputs.deferred_tests).rust }}
         run: |
           filter="$NEXTTEST_FILTER"
+          if [ -n "$DEFERRED_TESTS" ]; then
+            filter="${filter:+($filter) & }not ($DEFERRED_TESTS)"
+          fi
           if [ -n "$QUARANTINE_FILTER" ]; then
             if [ -n "$filter" ]; then
               filter="($filter) & not ($QUARANTINE_FILTER)"
