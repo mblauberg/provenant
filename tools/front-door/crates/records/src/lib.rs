@@ -88,6 +88,7 @@ pub use resolved_route::{
     RouteSelectionReceipt, RouteSelectionRedraw, SkippedAccount, TooManyAlternatives,
 };
 
+pub mod lane_contract;
 pub mod result_capture;
 pub mod run;
 
