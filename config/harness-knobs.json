@@ -88,6 +88,12 @@
       "min_monthly_allowance_usd": {"type": "int", "allowed": "0 or more; 0 disables the floor", "default": "60", "effect": "Lowest documented monthly allowance an OpenCode Go model needs to be routed or selected; a model with an unknown allowance is refused while the floor is on"}
     }
   },
+  "host_codex_settings": {
+    "path": "providers.codex",
+    "settings": {
+      "clean_config": {"type": "bool", "default": false, "effect": "Suppress inherited Codex configuration for writers. Read-only execution always uses clean configuration."}
+    }
+  },
   "provider_updates": {
     "path": "providers.<id>",
     "provider_ids": ["claude", "codex", "cursor", "agy", "opencode"],
