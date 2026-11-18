@@ -529,6 +529,24 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     {
         return FacadeError::WriterBusy { holder: *holder };
     }
+    if let provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld {
+            holder,
+            branch,
+            worktree,
+            age,
+            live,
+        },
+    ) = &error
+    {
+        return FacadeError::WriterLeaseHeld {
+            holder: Some(*holder),
+            branch: Some(branch.clone()),
+            worktree: Some(worktree.to_string_lossy().into_owned()),
+            age: Some(age.clone()),
+            live: *live,
+        };
+    }
     fail_error(error.into())
 }
 pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
@@ -608,9 +626,15 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         cause: None,
                     };
                 }
-                return FacadeError::ConfinementRefused {
-                    resource: Some(*fact),
-                };
+                // Only a real confinement boundary keeps the umbrella code.
+                // Resource facts attached to other kinds (disk floor, memory
+                // pressure, lane cap, ...) fall through to their own code and
+                // retain the projected fact detail.
+                if fail.kind == provenant_run::ErrorKind::Confinement {
+                    return FacadeError::ConfinementRefused {
+                        resource: Some(*fact),
+                    };
+                }
             }
             None => {}
         }
@@ -650,10 +674,8 @@ fn with_run_detail(
         return error;
     };
     match error {
-        FacadeError::RunKind {
-            code, next, ..
-        } => FacadeError::RunKind {
-            code,
+        FacadeError::RunKind { run_code, next, .. } => FacadeError::RunKind {
+            run_code,
             next,
             detail: Some(detail),
         },
@@ -709,36 +731,63 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
 fn run_kind_next(kind: provenant_run::ErrorKind) -> &'static str {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput => "remove the secret from the input or pass it through a credential root, then retry",
+        E::SecretInput => {
+            "remove the secret from the input or pass it through a credential root, then retry"
+        }
         E::Refused => "read the named refusal cause, change the request or policy, then retry",
         E::Unsupported => "use a route and adapter that support this launch",
-        E::WriterScope => "inspect the managed worktree layout and writer custody, then retry with --branch or an existing --worktree",
+        E::WriterScope => {
+            "inspect the managed worktree layout and writer custody, then retry with --branch or an existing --worktree"
+        }
         E::Confinement => "narrow the requested access to the confinement policy and retry",
-        E::DiskFloor => "run `provenant gc --apply` to free space above the configured floor, then retry",
-        E::MemoryPressure => "wait for host memory pressure to ease or reduce concurrent lanes, then retry",
+        E::DiskFloor => {
+            "run `provenant gc --apply` to free space above the configured floor, then retry"
+        }
+        E::MemoryPressure => {
+            "wait for host memory pressure to ease or reduce concurrent lanes, then retry"
+        }
         E::LaneCap => "wait for a lane slot or raise the configured lane cap, then retry",
         E::BuildSettings => "fix the named host lane build settings and retry",
         E::GuardianIdentity => "inspect guardian process identity and boot state, then retry",
-        E::LaneContext | E::ParentAttempt | E::WorktreeRequired | E::SharedSettingsNeverSynced
-        | E::UnknownAccount | E::DuplicatePacingProfile => {
+        E::LaneContext
+        | E::ParentAttempt
+        | E::WorktreeRequired
+        | E::SharedSettingsNeverSynced
+        | E::UnknownAccount
+        | E::DuplicatePacingProfile => {
             "supply the missing lane, parent or account context and retry"
         }
         E::Contention | E::Processes | E::MemoryFloor | E::StaleReadiness | E::HostClock => {
             "wait for the named host resource observation to settle, then retry"
         }
-        E::Identity | E::Config | E::Limit | E::Prices | E::Fabric | E::Peer
-        | E::PeerUnavailable | E::OwnerUnavailable | E::Internal | E::Git | E::Time
+        E::Identity
+        | E::Config
+        | E::Limit
+        | E::Prices
+        | E::Fabric
+        | E::Peer
+        | E::PeerUnavailable
+        | E::OwnerUnavailable
+        | E::Internal
+        | E::Git
+        | E::Time
         | E::Entropy => "inspect the named host or peer failure and retry after repair",
-        E::AmbiguousTarget | E::AbandonBlocked | E::WriterProjectMismatch
-        | E::RetainedWriterImport | E::ObjectImportLimit | E::LaneTipUnrooted
+        E::AmbiguousTarget
+        | E::AbandonBlocked
+        | E::WriterProjectMismatch
+        | E::RetainedWriterImport
+        | E::ObjectImportLimit
+        | E::LaneTipUnrooted
         | E::UpgradeRequired => "resolve the named state or target condition before retrying",
-        E::LaunchUnknown => "reconcile the run and inspect its receipt before reusing the operation ID",
+        E::LaunchUnknown => {
+            "reconcile the run and inspect its receipt before reusing the operation ID"
+        }
         _ => "inspect the typed cause and repair it before retrying",
     }
 }
 fn run_kind_facade(kind: provenant_run::ErrorKind) -> FacadeError {
     FacadeError::RunKind {
-        code: kind.code().into(),
+        run_code: kind.code().into(),
         next: run_kind_next(kind).into(),
         detail: None,
     }
@@ -751,6 +800,13 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
     use provenant_run::ErrorKind as E;
     match kind {
         E::WriterBusy => FacadeError::WriterBusy { holder: None },
+        E::WriterLeaseHeld => FacadeError::WriterLeaseHeld {
+            holder: None,
+            branch: None,
+            worktree: None,
+            age: None,
+            live: None,
+        },
         E::WriterLockBusy => FacadeError::WriterLockBusy,
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
@@ -2509,5 +2565,125 @@ mod graph_control_tests {
         assert!(require_graph_context(Some(&context)).is_err());
         context.node_id = Some("task".into());
         assert!(require_graph_context(Some(&context)).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "included command-edge targets compile tests without the test harness"
+)]
+mod facade_kind_tests {
+    use super::*;
+    use provenant_run::ErrorKind as E;
+
+    #[test]
+    // Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
+    fn every_run_error_kind_has_a_distinct_facade_code_and_next_step() {
+        let mut seen = std::collections::BTreeMap::new();
+        for kind in E::ALL {
+            let error = super::facade_error_for_kind(*kind);
+            let code = error.code().to_owned();
+            let diagnostic = error.diagnostic();
+            assert_eq!(diagnostic.code, code, "{kind:?} lost its code at the edge");
+            assert!(
+                diagnostic.next.is_some(),
+                "{kind:?} has no repair action at the edge"
+            );
+            if let Some(previous) = seen.insert(code.clone(), *kind) {
+                panic!("{code} is shared by {previous:?} and {kind:?}");
+            }
+        }
+        assert_eq!(seen.len(), E::ALL.len());
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
+    fn formerly_collapsed_kinds_have_typed_codes_and_actions() {
+        for (kind, code, action) in [
+            (E::SecretInput, "SECRET_INPUT", "credential root"),
+            (E::Refused, "REFUSED", "named refusal cause"),
+            (E::Unsupported, "UNSUPPORTED", "route and adapter"),
+            (E::WriterScope, "WRITER_SCOPE", "managed worktree layout"),
+            (E::Confinement, "CONFINEMENT", "confinement policy"),
+            (E::DiskFloor, "DISK_FLOOR", "provenant gc --apply"),
+            (E::MemoryPressure, "MEMORY_PRESSURE", "memory pressure"),
+            (E::LaneCap, "LANE_CAP", "lane cap"),
+            (E::BuildSettings, "BUILD_SETTINGS", "build settings"),
+            (E::GuardianIdentity, "GUARDIAN_IDENTITY", "guardian process"),
+            (
+                E::WriterLeaseHeld,
+                "writer_lease_held",
+                "reconcile the holding attempt",
+            ),
+        ] {
+            let error = super::facade_error_for_kind(kind);
+            assert_eq!(error.code(), code, "{kind:?}");
+            let diagnostic = error.diagnostic();
+            assert!(
+                diagnostic.next.unwrap().contains(action),
+                "{kind:?} next step did not name {action}"
+            );
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/run-launch.md#writer-binding
+    fn writer_lease_holder_facts_reach_the_facade() {
+        let holder = provenant_core::AttemptId::from_bytes([53; 16]);
+        let error = super::run_error(provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld {
+                holder,
+                branch: "refs/heads/holder-branch".into(),
+                worktree: "/private/holder-worktree".into(),
+                age: "4d 1h".into(),
+                live: Some(false),
+            },
+        ));
+        assert_eq!(error.code(), "writer_lease_held");
+        // Holder paths are local-only: the peer wire carries the typed code.
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["code"], "writer_lease_held");
+        assert!(!wire.to_string().contains("/private/holder-worktree"));
+        let FacadeError::WriterLeaseHeld {
+            holder: seen_holder,
+            branch,
+            worktree,
+            age,
+            live,
+        } = error
+        else {
+            panic!("writer lease refusal lost its typed holder facts");
+        };
+        assert_eq!(seen_holder, Some(holder));
+        assert_eq!(branch.as_deref(), Some("refs/heads/holder-branch"));
+        assert_eq!(worktree.as_deref(), Some("/private/holder-worktree"));
+        assert_eq!(age.as_deref(), Some("4d 1h"));
+        assert_eq!(live, Some(false));
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
+    fn local_projection_detail_survives_a_kind_only_failure() {
+        let projection = provenant_records::diagnostic::Diagnostic::new(E::WriterScope.code())
+            .detail("candidate worktree path refused");
+        let fail = provenant_cli::run::Fail::new(
+            provenant_records::Outcome::Refused,
+            E::WriterScope,
+            "writer scope refused",
+        );
+        let fail = provenant_cli::run::Fail {
+            projection: Some(Box::new(projection)),
+            ..fail
+        };
+        let error = super::fail_error(fail);
+        assert_eq!(error.code(), "WRITER_SCOPE");
+        assert!(
+            error
+                .diagnostic()
+                .detail
+                .unwrap()
+                .contains("candidate worktree path refused")
+        );
     }
 }

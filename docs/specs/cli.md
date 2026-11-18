@@ -75,6 +75,21 @@ or passing `--project PATH` as the repair.
 
 - Why: consumers can act on a refusal without depending on prose.
 
+### Run refusals keep their own code at the facade
+
+When a run refusal reaches the CLI or Fabric facade without a richer typed
+projection, the facade reuses the run's own stable code from `help --all` and
+pairs it with a repair action in `next`. `SECRET_INPUT`, `REFUSED`,
+`UNSUPPORTED`, `WRITER_SCOPE`, `CONFINEMENT`, `DISK_FLOOR`, `MEMORY_PRESSURE`,
+`LANE_CAP`, `BUILD_SETTINGS` and `GUARDIAN_IDENTITY` no longer collapse into
+`confinement_refused`; that code is reserved for a real confinement boundary
+with a named resource. `writer_lease_held` is its own typed code: locally it
+names the holding attempt or graph, branch, worktree, reservation age and
+liveness, while peer projection keeps only the typed code and repair action.
+A kind-only failure never loses its local diagnostic detail.
+- Why: the operator can see and fix the cause instead of chasing an opaque
+  confinement refusal.
+
 ### Template name errors
 
 An unknown template or flavour names the supplied template and lists known
