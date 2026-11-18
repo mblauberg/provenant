@@ -487,7 +487,10 @@ enum Outcome {
     Removed,
     Busy,
     Recent,
-    Interrupted(Option<MeasureProgress>),
+    Interrupted {
+        rechecking: Option<MeasureProgress>,
+        detached: bool,
+    },
 }
 
 /// What a walk of the lane caches found, before anything is removed.
@@ -1782,10 +1785,13 @@ fn prune_with_progress(
                 }
                 report.recent.push(candidate.display)
             }
-            Ok(Outcome::Interrupted(rechecking)) => {
+            Ok(Outcome::Interrupted {
+                rechecking,
+                detached,
+            }) => {
                 if let Some(snapshot) = snapshot.as_deref_mut() {
-                    if rechecking.is_none() {
-                        // A target may now live under its deletion tombstone.
+                    if detached {
+                        // A target now lives under its deletion tombstone.
                         // Revisit the root before trusting the saved inventory.
                         snapshot.root_cursor = None;
                     }
@@ -2029,7 +2035,10 @@ fn remove(
     };
     let Some(_guards) = guards else {
         return Ok(if interrupted.get() {
-            Outcome::Interrupted(None)
+            Outcome::Interrupted {
+                rechecking: None,
+                detached: false,
+            }
         } else {
             Outcome::Busy
         });
@@ -2048,7 +2057,10 @@ fn remove(
     if is_gc_tombstone(&candidate.target) {
         let mut remaining = MAX_ENTRIES;
         if !remove_contents_until(&target, 0, &mut remaining, should_stop)? {
-            return Ok(Outcome::Interrupted(None));
+            return Ok(Outcome::Interrupted {
+                rechecking: None,
+                detached: true,
+            });
         }
         drop(target);
         cache.rmdir(name).map_err(io::Error::other)?;
@@ -2058,14 +2070,22 @@ fn remove(
     let newest = match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)?
     {
         MeasureOutcome::Complete { newest, .. } => newest,
-        MeasureOutcome::Interrupted(state) => return Ok(Outcome::Interrupted(Some(state))),
+        MeasureOutcome::Interrupted(state) => {
+            return Ok(Outcome::Interrupted {
+                rechecking: Some(state),
+                detached: false,
+            });
+        }
         MeasureOutcome::Changed => return Ok(Outcome::Recent),
     };
     if newest != candidate.newest || within_grace(newest, now_ns, grace) {
         return Ok(Outcome::Recent);
     }
     if should_stop() {
-        return Ok(Outcome::Interrupted(None));
+        return Ok(Outcome::Interrupted {
+            rechecking: None,
+            detached: false,
+        });
     }
     drop(target);
     let tombstone = gc_tombstone_for(&candidate.target)
@@ -2084,7 +2104,10 @@ fn remove(
         .map_err(io::Error::other)?;
     let mut remaining = MAX_ENTRIES;
     if !remove_contents_until(&tombstone, 0, &mut remaining, should_stop)? {
-        return Ok(Outcome::Interrupted(None));
+        return Ok(Outcome::Interrupted {
+            rechecking: None,
+            detached: true,
+        });
     }
     drop(tombstone);
     let tombstone_name = gc_tombstone_for(&candidate.target)
