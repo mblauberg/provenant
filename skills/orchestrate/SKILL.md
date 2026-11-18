@@ -5,7 +5,7 @@ description: "Use to delegate or parallelise work: lanes, graphs, templates, rev
 
 # Orchestrate
 
-Use `provenant templates NAME --json` to inspect bundled, user, repository
+Use `provenant templates show NAME --json` to inspect bundled, user, repository
 and inline templates. Dotted names select flavours such as `review.security`.
 
 ## Commands

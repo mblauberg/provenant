@@ -54,7 +54,7 @@ again as required by the repository's workflow.
 
 ## Templates
 
-Run `provenant templates` to discover templates and `provenant templates NAME`
+Run `provenant templates` to discover templates and `provenant templates show NAME`
 to inspect one. Register a writer worktree or provide a branch and base, then
 preview the submission with `provenant run --file delivery.toml --explain`.
 Check its scope, authority and gates before submitting without `--explain`.

@@ -2446,7 +2446,7 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         .iter()
         .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
         .then(|| "provenant quota tick".to_owned());
-    crate::Summary::complete(
+    crate::Summary::new(
         format!(
             "quota {}/{} current{}{}",
             report.coverage.known,
@@ -2934,7 +2934,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_summary_shows_every_configured_account() {
+    fn quota_summary_bounds_rows_and_counts_omitted_accounts() {
         let row = |status| AccountRow {
             account: AccountScope {
                 extra: Default::default(),
@@ -2999,17 +2999,11 @@ mod tests {
         for _ in 0..14 {
             report.accounts.push(row(QuotaStatus::Stale));
         }
+        report.coverage.total = report.accounts.len().try_into().unwrap();
         let summary = quota_summary(&report);
-        assert_eq!(summary.lines.len(), 19); // more than the shared summary row limit
-        assert!(
-            summary
-                .lines
-                .iter()
-                .filter(|line| line.contains("[test]:"))
-                .count()
-                == 17
-        );
-        assert_eq!(summary.omitted, 0);
+        assert_eq!(summary.lines.len(), 1 + crate::limits::SUMMARY_ROWS);
+        assert_eq!(summary.omitted, 18 - crate::limits::SUMMARY_ROWS);
+        assert!(summary.lines[0].contains("quota 3/17"));
         assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
     }
 

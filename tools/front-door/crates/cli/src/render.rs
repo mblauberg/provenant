@@ -34,20 +34,6 @@ impl Summary {
             omitted,
         }
     }
-    /// Keep every record visible when omission would hide configured capacity.
-    pub fn complete(headline: impl Into<String>, rows: Vec<String>, next: Option<String>) -> Self {
-        let lines = std::iter::once(headline.into())
-            .chain(
-                rows.iter()
-                    .map(|row| bounded_text(row, limits::SUMMARY_ROW_BYTES)),
-            )
-            .collect();
-        Self {
-            lines,
-            next,
-            omitted: 0,
-        }
-    }
     /// Text the owner has already bounded; shown as it is.
     pub fn verbatim(text: &str, next: Option<String>) -> Self {
         Self {
@@ -168,7 +154,12 @@ fn fallback_text(command: &str, text: &str) -> String {
     if lines.is_empty() {
         return format!("{command}: done\n");
     }
-    if text.len() <= limits::FALLBACK_BYTES {
+    if text.len() <= limits::FALLBACK_BYTES
+        && lines.len() <= limits::FALLBACK_LINES
+        && lines
+            .iter()
+            .all(|line| line.len() <= limits::FALLBACK_ROW_BYTES)
+    {
         let mut whole = text.to_owned();
         if !whole.ends_with('\n') {
             whole.push('\n');
@@ -573,6 +564,17 @@ mod tests {
             "body\nnext: provenant output aaaa\n"
         );
         Ok(())
+    }
+    #[test]
+    // Spec: docs/specs/cli.md#results
+    fn fallback_bounds_a_single_long_line() {
+        let text = "x".repeat(500);
+        let compact = fallback_text("config show", &text);
+        assert!(compact.len() < text.len());
+        assert!(compact.contains("--full"));
+        let rows = "item\n".repeat(limits::FALLBACK_LINES + 1);
+        let compact = fallback_text("status", &rows);
+        assert!(compact.contains("1 lines omitted"), "{compact}");
     }
     #[test]
     fn terse_is_one_line_per_record() {

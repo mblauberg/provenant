@@ -44,6 +44,10 @@ returns the refusal without preparing again; a failure to store it is not
 acknowledged as success.
 - Why: a lost response must not turn a refusal into another launch.
 
+A pre-launch routing refusal retains a bounded host-authored explanation in
+its result alongside the safe cause and remedy. Provider-originated diagnostics
+never supply that public explanation.
+
 Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.
 - Why: continuation must preserve both history and exclusive custody.

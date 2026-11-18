@@ -37,7 +37,7 @@ reads! {
     "run admission" => ["policy"],
     "status" => ["fabric"], "wait" => ["wait", "fabric"],
     "land" => ["pr", "routing", "fabric", "run"],
-    "land policy" => ["pr", "run"], "output" => ["fabric"],
+    "land policy" => ["pr", "run"], "output" => ["fabric"], "result" => ["fabric"],
     "trace" => ["fabric"], "stop" => ["fabric", "wait"],
     "retry" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],
     "steer" => ["fabric"], "edit" => ["fabric", "routing"],
