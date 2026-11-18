@@ -28,13 +28,12 @@ fn include_local_login(
         return true;
     }
 
-    // Keep a declared local identity selectable beside registered accounts,
-    // but do not add it to ordinary routing where unobserved HOME credentials
-    // could outrank an available registered account.
+    // A registered-account adapter's local identity participates in the same
+    // per-account observation and quota scheduling as its other accounts.
     if !spec.is_unregistered_local(spec.local_account.1) {
         return false;
     }
-    selected.is_some_and(|selector| {
+    selected.is_none_or(|selector| {
         selector == spec.local_account.1
             || (selector == spec.local_account.0
                 && !entries.iter().any(|entry| {
@@ -2828,9 +2827,10 @@ pub(super) fn prepare_candidates(
             selection_adapter,
             retained_identity,
         ) && locate(adapter).is_ok()
-            && !entries
-                .iter()
-                .any(|entry| entry.adapter == adapter && entry.key == spec.local_account.1)
+            && !entries.iter().any(|entry| {
+                entry.adapter == adapter
+                    && (entry.key == spec.local_account.1 || entry.directory == home)
+            })
         {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
@@ -5574,13 +5574,12 @@ mod route_launch_boundary_regressions {
 
     // Spec: docs/specs/routing.md#accounts-and-credentials
     #[test]
-    fn agy_local_login_is_explicit_beside_registered_accounts_and_not_a_root() -> Result<(), String>
-    {
+    fn agy_local_login_routes_beside_registered_accounts_and_is_not_a_root() -> Result<(), String> {
         let spec = AdapterSpec::get("agy").ok_or("agy adapter missing")?;
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let home = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
         let registered = agy_entry("work", "agy-registered", &home.join(".agy-work"));
-        assert!(!include_local_login(
+        assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
             None,
@@ -5659,7 +5658,8 @@ mod route_launch_boundary_regressions {
         settings.entries.insert("work".into(), registered.clone());
         let roots = credential_roots(&Registry::default(), &home, &settings)?;
         assert!(roots.entries().iter().any(|root| {
-            root.source == "account registry: agy/work" && root.path == registered.directory
+            root.source == "account registry: agy/work"
+                && root.path == registered.directory.join(".gemini")
         }));
         assert!(
             !roots

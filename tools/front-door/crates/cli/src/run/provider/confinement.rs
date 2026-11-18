@@ -717,12 +717,14 @@ pub(super) fn credential_roots(
     let mut roots = CredentialRoots::for_home(home);
     for entry in settings.entries.values() {
         let source = format!("account registry: {}/{}", entry.adapter, entry.label);
-        for path in crate::accounts::credential_directories(entry) {
+        for path in crate::accounts::credential_directories(entry).flat_map(|directory| {
+            provenant_providers::identity::account_state_paths(&entry.adapter, directory)
+        }) {
             roots.add(
-                path.to_path_buf(),
+                path.clone(),
                 CredentialScope::Subtree,
                 source.clone(),
-                kind(entry.adapter.as_str(), path),
+                kind(entry.adapter.as_str(), &path),
             );
         }
     }
