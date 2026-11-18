@@ -1,0 +1,7 @@
+doc = "Exercise the main lane paths with small, disposable work."
+nodes = [
+  { id = "read", use = "task", tier = "junior", prompt = "Read the supplied fixture and report its single stated fact." },
+  { id = "review", use = "review", tier = "junior", over = ["correctness", "tests"], min_ok = 2, after = ["read"], prompt = "Review this trivial fixture: the only expected fact is that smoke checks work." },
+  { id = "write", use = "implement", tier = "junior", after = ["review"], prompt = "In the supplied scratch worktree, create exactly one file named smoke.txt containing 'smoke ok', then commit it." },
+  { id = "retry-fixture", use = "task", tier = "junior", after = ["write"], prompt = "Retry the deliberately failed smoke node and report whether the fixture is now available." },
+]

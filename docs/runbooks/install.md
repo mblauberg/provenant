@@ -70,6 +70,12 @@ host and never prompts while capturing installer output. Keep the fleet
 quiescent for the whole operation; preflight cannot make a multi-host install
 atomic.
 
+To exercise the bundled smoke graph after upgrading, run
+`provenant upgrade --verify`. `--host PEER` places the graph on a Fabric peer;
+`--route` and repeatable `--set NAME=VALUE` override its node routes and
+parameters. Preview the nodes without upgrading or launching them with
+`provenant upgrade --verify --dry-run`.
+
 ### Test a candidate binary
 
 CI's macOS release smoke retains a checked package in the

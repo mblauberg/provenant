@@ -1878,6 +1878,140 @@ fn verify_release(
     Ok(())
 }
 
+fn verify_graph_name() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "smoke-verify-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+struct SmokeProject(PathBuf);
+
+impl Drop for SmokeProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn runner_for_verify(targets: &provenant_config::Targets) -> Result<UpgradeRunner, String> {
+    Ok(UpgradeRunner {
+        executor: provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?,
+        environment: std::env::vars_os().collect(),
+        cwd: targets.home.clone(),
+    })
+}
+
+fn verify_smoke(
+    targets: &provenant_config::Targets,
+    args: &cli::Upgrade,
+) -> Result<String, String> {
+    let runner = runner_for_verify(targets)?;
+    let project =
+        SmokeProject(std::env::temp_dir().join(format!("{}-project", verify_graph_name())));
+    std::fs::create_dir(&project.0).map_err(|error| error.to_string())?;
+    std::fs::write(project.0.join("fixture.txt"), "smoke fixture\n")
+        .map_err(|error| error.to_string())?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "fixture.txt"],
+        vec![
+            "-c",
+            "user.name=Provenant Smoke",
+            "-c",
+            "user.email=smoke@localhost",
+            "commit",
+            "-qm",
+            "smoke fixture",
+        ],
+    ] {
+        let mut argv = vec![
+            provenant_os::git::git_executable()
+                .ok_or("Git unavailable")?
+                .into_os_string(),
+        ];
+        argv.extend(args.iter().map(std::ffi::OsString::from));
+        runner.execute_at(&argv, &project.0, None, 65_536, 30)?;
+    }
+    let program = targets.bin_dir.join("provenant").into_os_string();
+    let graph = verify_graph_name();
+    let branch = format!("smoke/{}", graph.trim_start_matches("smoke-verify-"));
+    let mut run = vec![
+        program.clone(),
+        "--project".into(),
+        project.0.as_os_str().to_owned(),
+        "--state-dir".into(),
+        targets.roots.state.as_path().as_os_str().to_owned(),
+        "--json".into(),
+        "run".into(),
+        "smoke".into(),
+        "--name".into(),
+        graph.clone().into(),
+        "--branch".into(),
+        branch.into(),
+        "--base".into(),
+        "HEAD".into(),
+    ];
+    if let Some(host) = &args.host {
+        run.extend(["--host".into(), host.into()]);
+    }
+    if let Some(route) = &args.route {
+        run.extend(["--route".into(), route.into()]);
+    }
+    for setting in &args.set {
+        run.extend(["--set".into(), setting.into()]);
+    }
+    let launched = runner.execute(&run, None, 1_048_576, 3600)?;
+    let wait = runner.execute(
+        &[
+            program.clone(),
+            "--state-dir".into(),
+            targets.roots.state.as_path().as_os_str().to_owned(),
+            "--json".into(),
+            "wait".into(),
+            graph.clone().into(),
+            "--timeout".into(),
+            "3600".into(),
+        ],
+        None,
+        1_048_576,
+        3700,
+    );
+    let status = runner.execute(
+        &[
+            program,
+            "--state-dir".into(),
+            targets.roots.state.as_path().as_os_str().to_owned(),
+            "--json".into(),
+            "status".into(),
+            graph.into(),
+        ],
+        None,
+        1_048_576,
+        60,
+    );
+    match (wait, status) {
+        (Ok(wait), Ok(status)) => Ok(format!(
+            "{}{}{}",
+            String::from_utf8_lossy(&launched),
+            String::from_utf8_lossy(&wait),
+            String::from_utf8_lossy(&status)
+        )),
+        (Err(error), status) => Err(format!(
+            "{}\nsmoke node report: {}",
+            error,
+            status
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|err| err)
+        )),
+        (Ok(_), Err(error)) => Err(format!(
+            "{error}\nsmoke launch: {}",
+            String::from_utf8_lossy(&launched)
+        )),
+    }
+}
+
 impl UpgradeRunner {
     fn execute(
         &self,
@@ -1886,9 +2020,19 @@ impl UpgradeRunner {
         limit: usize,
         seconds: u64,
     ) -> Result<Vec<u8>, String> {
+        self.execute_at(argv, &self.cwd, input, limit, seconds)
+    }
+
+    fn execute_at(
+        &self,
+        argv: &[std::ffi::OsString],
+        cwd: &Path,
+        input: Option<&[u8]>,
+        limit: usize,
+        seconds: u64,
+    ) -> Result<Vec<u8>, String> {
         use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-        let mut options =
-            ExecOptions::new(argv, &self.cwd, std::time::Duration::from_secs(seconds));
+        let mut options = ExecOptions::new(argv, cwd, std::time::Duration::from_secs(seconds));
         options.env = Some(&self.environment);
         options.stdin = input;
         options.stdout = StreamPolicy::Capture { limit };
@@ -1930,6 +2074,49 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         Ok(value) => value,
         Err(error) => return edge_error("upgrade", error, globals),
     };
+    if args.dry_run {
+        let runner = match runner_for_verify(&targets) {
+            Ok(runner) => runner,
+            Err(error) => {
+                return super::fail("upgrade", Outcome::Error, "UPGRADE_VERIFY", &error, globals);
+            }
+        };
+        let output = runner.execute(
+            &[
+                std::env::current_exe()
+                    .unwrap_or_else(|_| PathBuf::from("provenant"))
+                    .into_os_string(),
+                "--state-dir".into(),
+                targets.roots.state.as_path().as_os_str().to_owned(),
+                "--json".into(),
+                "run".into(),
+                "smoke".into(),
+                "--explain".into(),
+            ],
+            None,
+            1_048_576,
+            60,
+        );
+        return match output {
+            Ok(bytes) => {
+                let human = format!(
+                    "Smoke graph nodes (not launched):\n{}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                super::emit(
+                    &CommandResult::new(
+                        "upgrade",
+                        Outcome::Ok,
+                        serde_json::json!({"verify": "dry_run", "preview": String::from_utf8_lossy(&bytes)}),
+                    ),
+                    globals,
+                    &human,
+                    false,
+                )
+            }
+            Err(error) => super::fail("upgrade", Outcome::Error, "UPGRADE_VERIFY", &error, globals),
+        };
+    }
     match read_install_receipt(&targets) {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -2140,7 +2327,21 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             &message,
             globals,
         ),
-        Ok(hosts) => {
+        Ok(mut hosts) => {
+            if args.verify && hosts.iter().all(|host| host.success) {
+                match verify_smoke(&targets, &args) {
+                    Ok(output) => hosts.push(HostUpgrade {
+                        host: "smoke".into(),
+                        success: true,
+                        output,
+                    }),
+                    Err(output) => hosts.push(HostUpgrade {
+                        host: "smoke".into(),
+                        success: false,
+                        output,
+                    }),
+                }
+            }
             let success = hosts.iter().all(|host| host.success);
             let human = hosts
                 .iter()
@@ -2222,6 +2423,32 @@ mod tests {
         let error = result.error.unwrap();
         assert_eq!(error.code, "HOME");
         assert!(error.repair.unwrap().contains("provenant install"));
+    }
+
+    #[test]
+    fn failed_smoke_launcher_reports_the_failed_node() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let launcher = tmp.path().join("provenant");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\nprintf '%s\\n' '{\"node\":\"write\",\"state\":\"failed\"}'\nexit 1\n",
+        )?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            cwd: tmp.path().to_owned(),
+        };
+        let error = match runner.execute(&[launcher.into_os_string()], None, 65_536, 30) {
+            Err(error) => error,
+            Ok(_) => return Err(std::io::Error::other("fake launcher unexpectedly succeeded").into()),
+        };
+        assert!(error.contains("\"node\":\"write\""));
+        assert!(error.contains("failed"));
+        Ok(())
     }
 
     #[test]
