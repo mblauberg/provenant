@@ -3,11 +3,10 @@ Owner: repository maintainers
 Anchor: scripts/verify-tier
 
 The tiers describe what each place runs; they are not a checklist for a lane.
-Where the repository has CI, a lane runs one cheap compile check (`cargo check`
-on the package it changed), pushes, and leaves T0 to T3 to CI. Set
-`lanes.local_cargo = "check"` (or `none`) under `[knobs]` for the host,
-`--set 'attempt.local_cargo="check"'` for a run, or `attempt.local_cargo` on a
-graph node, and the lane's `cargo` shim refuses anything heavier.
+Lanes may run targeted tests cautiously using shared warm caches; full suites
+belong to CI and integration branches. The host or brief can narrow a lane's
+verification scope. `lanes.local_cargo`, `attempt.local_cargo` and the lane Cargo
+shim enforce the configured command limit.
 
 `scripts/verify-tier` runs the built-in `0` tier (format, check and unit tests
 for touched crates), `1` adds mapped integration binaries, `2` runs the

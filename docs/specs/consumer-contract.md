@@ -15,9 +15,9 @@ Every consumer item carries one tier, declared on its entry. `evolving` is the
 default: the item may change in any minor release, and the release notes name
 the change. `stable` is kept small: an item is stable only when a consuming
 repository relies on it today, and it changes or goes only in a major release,
-with a release note. The stable items are `PROVENANT_SANDBOX`,
-`PROVENANT_PROCESS_TREE`, `PROVENANT_LANE_CARGO_LINT_TARGET`, `provenant
-process-tree --json` and the exit codes it is read through. `internal` is
+with a release note. Stable items include `PROVENANT_SANDBOX`,
+`PROVENANT_PROCESS_TREE`, `PROVENANT_LANE_CARGO_LINT_TARGET`, process-tree
+output and exit codes. `internal` is
 Provenant's own wiring and may change in any release. A `PROVENANT_*` name the
 environment table does not declare is internal, and every `PROVENANT_TEST_*`
 name is internal by rule and never declared. Promoting an item is a one-entry
@@ -42,10 +42,8 @@ port table or settings, never a name compiled into a reader.
 
 ## Commands
 
-A command is stable only when a stable entry on this page names it: today
-`provenant process-tree --json`. Every other command, and the JSON envelope of
-commands other than `process-tree`, is evolving. Human output, including printed
-next-step command lines, is evolving: scripts read `--json`. A removed command or option exits 2 with one line naming its replacement and is never an alias. The complete migration list follows.
+Command names may change freely. JSON envelopes other than `process-tree`
+are evolving. Human output, including printed next-step command lines, is evolving: scripts read `--json`. A removed command or option exits 2 with one line naming its replacement and is never an alias. The complete migration list follows.
 
 ### Removed commands
 
@@ -205,8 +203,7 @@ All are optional; a repository with none gets compiled and host defaults.
 
 ## Exit codes
 
-Every command exits with the code of its envelope `status`. This tier is stable,
-because `provenant process-tree --json` is read through it.
+Every command exits with the code of its envelope `status`. This tier is stable.
 
 | Status | Code |
 |---|---|
@@ -231,7 +228,7 @@ Inside a lane where `PROVENANT_PROCESS_TREE` is set, `provenant process-tree
 `unavailable` when no fresh, complete sample exists. Consumers may rely on
 these fields; new fields may be added. With no `--root`, the command returns the
 supervised command's complete sampled subtree. `--root PID` selects a subtree
-within that sample. This tier is stable.
+within that sample. The output tier is stable.
 
 | Object | Field |
 |---|---|

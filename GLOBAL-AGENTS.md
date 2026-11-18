@@ -54,10 +54,9 @@ SKILL.md.
   branches and worktrees, unmerged ones included, once their work has landed or
   been superseded or abandoned; record each removed tip and never remove one a
   live writer holds or one with uncommitted edits. Rewriting, deleting or pushing to a shared branch
-  needs the user's authority. A change that only repairs CI or restores a red
-  default branch merges once required checks pass, without waiting for review,
-  because a broken pipeline stalls all other work; weakening a check or changing
-  a real boundary does not qualify.
+  needs the user's authority. CI and test-speed fixes, and changes that restore
+  a red default branch, merge on green without review; weakening a check or changing a real boundary
+  does not qualify.
 - **Checks.** Locally, run only fast targeted checks: lint, types and
   touched tests. Full suites run in CI, which gates the merge, with the lens
   review the risk requires (`code-review`). No author certifies its own work; lens
