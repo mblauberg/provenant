@@ -740,10 +740,6 @@ pub fn collect_with_protection(
 
 /// Like `collect_with_protection`, but refresh live custody after acquiring
 /// lane admission and immediately before the pruning boundary.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the cache budget and custody refresh are explicit at admission"
-)]
 pub fn collect_with_protection_refresh(
     host: &Path,
     home: &Path,
@@ -1958,6 +1954,7 @@ fn prune(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prune_with_progress(
     survey: Survey,
     limits: Limits,
@@ -2351,6 +2348,7 @@ fn measure(
 
 /// Re-check target identity and recency, then remove the whole target only if
 /// custody and every Cargo profile lock under the cache are free.
+#[allow(clippy::too_many_arguments)]
 fn remove(
     root: &Directory,
     candidate: &Candidate,
@@ -2507,7 +2505,7 @@ fn remove_contents_until(
     }
     directory.make_writable().map_err(io::Error::other)?;
     let mut entries = directory.directory().entries().map_err(io::Error::other)?;
-    while let Some(entry) = entries.next() {
+    for entry in entries {
         if should_stop() {
             return Ok(false);
         }

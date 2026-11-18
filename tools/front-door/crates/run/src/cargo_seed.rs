@@ -269,6 +269,7 @@ impl Outcome {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn seed_target_with_reservation(
     state: &Path,
     cache: &Path,
