@@ -732,6 +732,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     }
                     config::KnobEdit::Profile(_) => serde_json::json!({"key": "profile",
                         "previous": previous, "effective": edited.config.profile,
+                        "source": if matches!(edited.config.origins.get("profile"), Some(config::Origin::User { .. })) { "user" } else { "default" },
                         "revision": edited.after_revision}),
                 }
             }
@@ -787,9 +788,13 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 }
             } else if command == "config set" || command == "config unset" {
                 format!(
-                    "{}: {} (previous: {})\n",
+                    "{}: {}{} (previous: {})\n",
                     value["key"].as_str().unwrap_or("profile"),
                     value["effective"],
+                    value["source"]
+                        .as_str()
+                        .map(|source| format!(" (source: {source})"))
+                        .unwrap_or_default(),
                     value["previous"]
                 )
             } else {

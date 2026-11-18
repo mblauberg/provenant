@@ -269,6 +269,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             "attempt_number",
             "work_key",
             "branch",
+            "head",
             "pr",
             "ci",
             "result_path",
@@ -306,6 +307,16 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     .or_else(|| node
                         .and_then(|node| node.land.as_ref())
                         .map(|land| &land.branch))
+            );
+            row["head"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|out| out.commit.as_ref())
+                    .or_else(|| node
+                        .and_then(|node| node.land.as_ref())
+                        .map(|land| &land.head))
+                    .or_else(|| node
+                        .and_then(|node| node.writer_binding.as_ref())
+                        .map(|binding| &binding.head))
             );
             row["pr"] = node
                 .and_then(|node| node.land.as_ref())
@@ -775,9 +786,13 @@ pub(crate) fn enrich_status_rows_within(
         let graph_state = row["state"].clone();
         let attempt_number = row["attempt_number"].clone();
         let result_path = row["result_path"].clone();
+        let retained_head = row["head"].clone();
         row.as_object_mut()
             .ok_or(FacadeError::StateCorrupt)?
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
+        if row["head"].is_null() {
+            row["head"] = retained_head;
+        }
         row["attempt_id"] = reference;
         row["attempt_number"] = attempt_number;
         if row["result_path"].is_null() {
@@ -2101,6 +2116,53 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
         .cloned()
         .collect();
     let mut human = String::new();
+    let mut compact_rows = Vec::new();
+    for row in &selected {
+        if row["kind"] == "attempt"
+            && selected
+                .iter()
+                .any(|other| other["kind"] == "node" && other["node_id"] == row["node_id"])
+        {
+            continue;
+        }
+        let attempt = selected
+            .iter()
+            .find(|other| other["kind"] == "attempt" && other["node_id"] == row["node_id"]);
+        let field = |name: &str| {
+            row[name]
+                .as_str()
+                .or_else(|| attempt.and_then(|a| a[name].as_str()))
+                .unwrap_or("unknown")
+        };
+        let handoff = row["handoff"]
+            .get("Ok")
+            .filter(|h| !h.is_null())
+            .unwrap_or_else(|| {
+                attempt
+                    .map(|a| a["handoff"].get("Ok").unwrap_or(&a["handoff"]))
+                    .unwrap_or(&row["handoff"])
+            });
+        let checks = handoff["verify"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| provenant_fabric_runtime::hosts::plain_text(s, 100))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none recorded".into());
+        compact_rows.push(format!(
+            "{}: {} | branch: {} | head: {} | verify: {}",
+            provenant_cli::bounded_text(field("id"), 24),
+            provenant_cli::bounded_text(field("state"), 12),
+            provenant_cli::bounded_text(field("branch"), 24),
+            provenant_cli::bounded_text(field("head"), 64),
+            provenant_cli::bounded_text(&checks, 40)
+        ));
+    }
     for row in &selected {
         let id = row["id"].as_str().unwrap_or("unknown");
         let state = row["state"].as_str().unwrap_or("unknown");
@@ -2155,28 +2217,13 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
             json!({"rows": selected}),
         ),
         human,
-        summary: None,
+        summary: Some(provenant_cli::Summary::new(
+            "lane results",
+            compact_rows,
+            None,
+        )),
         read_only: true,
     }
-}
-
-#[cfg(test)]
-#[test]
-// Spec: docs/specs/cli.md#output-references-and-bounded-tails
-fn result_reports_latest_handoff_branch_head_and_checks() -> Result<(), Box<dyn std::error::Error>>
-{
-    let target = "work/task".parse()?;
-    let rows = vec![
-        json!({"kind":"node", "id":"work/task", "state":"succeeded", "branch":"feat/work"}),
-        json!({"kind":"attempt", "id":"work/task#1", "node_id":"task", "attempt_number":1, "state":"failed"}),
-        json!({"kind":"attempt", "id":"work/task#2", "node_id":"task", "attempt_number":2, "state":"succeeded", "head":"abc123", "handoff":{"Ok":{"status":"done", "note":"finished", "verify":["focused tests passed"]}}}),
-    ];
-    let reply = result_reply(&target, &rows);
-    for text in ["feat/work", "abc123", "finished", "focused tests passed"] {
-        assert!(reply.human.contains(text), "{}", reply.human);
-    }
-    assert!(!reply.human.contains("work/task#1"));
-    Ok(())
 }
 
 /// Read one attempt's output. Inside a lane the host reads it, so no journal
@@ -3438,6 +3485,60 @@ mod tests {
         assert_eq!(line.lines().count(), 1);
         assert!(line.trim_end().len() <= provenant_cli::limits::SUMMARY_ROW_BYTES);
         assert!(line.contains("cause=budget_exhausted"), "{line}");
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    fn result_renders_retained_head_and_checks_after_collection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(checkpoint("g"))?;
+        let node = &mut value["nodes"][0];
+        node["state"] = json!("succeeded");
+        node["outputs"] = json!({"schema_version":1,"result":{"digest":"sha256:test","excerpt":"result excerpt","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"findings_available":null,"branch":"feat/work","commit":"abc123","warnings":[]});
+        node["handoff"] = json!({"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":["choice"],"verify":["first check","second check"]});
+        let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+        let graph = GraphTarget {
+            graph: "g".into(),
+            node: Some("parent".into()),
+            attempt: None,
+        };
+        let target = "g/parent".parse()?;
+        let rows = status_rows(&graph_snapshot(checkpoint), &graph);
+        for collected in [false, true] {
+            let mut projected = rows.clone();
+            if !collected {
+                let attempt = projected
+                    .iter_mut()
+                    .find(|row| row["kind"] == "attempt")
+                    .unwrap();
+                attempt["head"] = json!("abc123");
+            }
+            let reply = result_reply(&target, &projected);
+            let mut output = Vec::new();
+            provenant_cli::render(
+                &reply.result,
+                provenant_cli::Globals::default().render_mode(
+                    &reply.human,
+                    reply.read_only,
+                    reply.summary.as_ref(),
+                ),
+                &mut output,
+            )?;
+            let output = String::from_utf8(output)?;
+            for expected in [
+                "succeeded",
+                "feat/work",
+                "abc123",
+                "first check",
+                "second check",
+            ] {
+                assert!(output.contains(expected), "{output}");
+            }
+            assert_eq!(output.matches("g/parent:").count(), 1, "{output}");
+            assert_eq!(reply.result.data["rows"][0]["head"], "abc123");
+            assert!(reply.human.contains("head: abc123"));
+        }
+        Ok(())
     }
 
     #[test]

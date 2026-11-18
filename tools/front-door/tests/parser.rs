@@ -514,6 +514,25 @@ fn config_set_reports_only_the_changed_effective_setting() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/cli.md#results
+fn config_set_profile_reports_effective_source() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let human = rig.command(&["config", "set", "profile", "economy"])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8_lossy(&human.stdout.bytes);
+    for expected in ["economy", "source: user", "previous", "balanced"] {
+        assert!(text.contains(expected), "{text}");
+    }
+    let output = rig.command(&["config", "set", "profile", "balanced", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["previous"], "economy");
+    assert_eq!(result["data"]["effective"], "balanced");
+    assert_eq!(result["data"]["source"], "user");
+    Ok(())
+}
+
+#[test]
 fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let rig = TestRig::new()?;
     std::fs::write(
