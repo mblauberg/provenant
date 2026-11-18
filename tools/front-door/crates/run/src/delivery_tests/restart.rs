@@ -852,9 +852,12 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     .unwrap(),
                 cargo_target_seed: false,
                 state_root: self.state.clone(),
+                // The test's fake handoff never starts a provider. Keep the
+                // writer revalidation path independent of native backend
+                // availability on hosts without macOS sandbox support.
                 sandbox: provenant_confinement::run_config::SandboxMode::required(
-                    true,
-                    true,
+                    false,
+                    false,
                     provenant_confinement::run_config::SandboxSource::Knob,
                     None,
                 ),
