@@ -18,7 +18,7 @@ macro_rules! reads {
     };
 }
 reads! {
-    "help" => [], "root" => [], "process-tree" => [],
+    "help" => [], "root" => [], "process-tree" => [], "ci" => [],
     "ask" => ["fabric", "accounts"], "inbox" => ["fabric", "accounts"],
     "answer" => ["fabric", "accounts"], "accounts" => ["accounts"],
     "adopt" => ["fabric"], "release" => ["fabric"],

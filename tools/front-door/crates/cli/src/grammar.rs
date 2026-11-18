@@ -196,6 +196,9 @@ pub enum Command {
     /// Watch pull request CI and merge a verified head
     #[command(subcommand)]
     Pr(Pr),
+    /// Read CI evidence for pull requests and Actions runs
+    #[command(subcommand)]
+    Ci(Ci),
     /// Collect lane caches, ignored output, merged worktrees and expired captures
     Gc(Gc),
     /// Advance due graphs and run scheduled host tasks
@@ -1064,6 +1067,7 @@ pub enum Rules {
     Legal,
 }
 pub use crate::check::Check;
+pub use crate::ci::Ci;
 #[derive(Debug, Subcommand)]
 pub enum Hook {
     /// Handle git hook events

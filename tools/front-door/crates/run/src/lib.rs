@@ -6,7 +6,7 @@ mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with_policy,
+    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
     sanitise_handoff, sanitise_handoff_result,
 };
 mod verification;

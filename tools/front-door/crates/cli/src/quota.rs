@@ -3278,7 +3278,12 @@ mod tests {
             ("codex", &["auth.json", "config.toml"]),
             (
                 "cursor",
-                &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
+                &[
+                    "state.vscdb",
+                    "state.vscdb-wal",
+                    "state.vscdb-shm",
+                    "cli-config.json",
+                ],
             ),
             (
                 "agy",

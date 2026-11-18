@@ -1135,6 +1135,7 @@ pub(super) fn fixture_access_plan(
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let reader = read_only_plan("/fixture", authentication);
     let mut permissions = reader.permissions().clone();
+    permissions.credential_roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
     permissions.include_continuation = include_continuation;
     if access == Access::WorktreeWrite {
         let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({

@@ -317,6 +317,9 @@ pub enum ForgeOperation {
         arguments: Vec<OsString>,
         etag: Option<String>,
     },
+    Graphql {
+        query: String,
+    },
     Cli {
         arguments: Vec<OsString>,
         input: Option<Vec<u8>>,
@@ -781,6 +784,27 @@ impl Invocation {
                 ));
                 (args, None, "request", path.clone(), true, true)
             }
+            ForgeOperation::Graphql { query } => {
+                let mut args = strings(&[
+                    "api",
+                    "--include",
+                    "-H",
+                    "Accept:application/vnd.github+json",
+                    "-H",
+                    REST_API_VERSION_HEADER,
+                    "graphql",
+                ]);
+                args.extend(["-f".into(), format!("query={query}").into()]);
+                env.push((
+                    provenant_core::consumer_env::PORT_REQUEST_PATH.into(),
+                    "graphql".into(),
+                ));
+                env.push((
+                    provenant_core::consumer_env::PORT_IF_NONE_MATCH.into(),
+                    String::new().into(),
+                ));
+                (args, None, "request", graphql_key(query), true, true)
+            }
             ForgeOperation::Cli { arguments, input } => (
                 arguments.clone(),
                 input.clone(),
@@ -847,6 +871,14 @@ fn strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// A bounded receipt key for a query whose text varies with the read.
+fn graphql_key(query: &str) -> String {
+    format!(
+        "graphql:{}",
+        provenant_records::CanonicalV1::file_digest(query.as_bytes())
+    )
+}
+
 fn operation_name(operation: &ForgeOperation) -> &'static str {
     match operation {
         ForgeOperation::Repository => "repository",
@@ -860,6 +892,7 @@ fn operation_name(operation: &ForgeOperation) -> &'static str {
         ForgeOperation::RevertAdoption { .. } => "revert_adoption",
         ForgeOperation::Issue { .. } => "issue",
         ForgeOperation::Api { .. } => "api",
+        ForgeOperation::Graphql { .. } => "graphql",
         ForgeOperation::Cli { .. } => "cli",
     }
 }
@@ -1004,7 +1037,7 @@ mod tests {
     const BUILTIN_FAKE: &str = r##"#!/bin/sh
 case "$PROVENANT_PORT_OPERATION" in
   issue) printf '{"body":"body","state":"OPEN","issueType":{"name":"Bug"}}' ;;
-  api) printf '{"ok":true}' ;;
+  api|graphql) printf '{"ok":true}' ;;
   pull) printf 'HTTP/2 200\r\nETag: fake-tag\r\n\r\n{"ok":true}' ;;
   *) printf '{"ok":true}' ;;
 esac
@@ -1012,7 +1045,7 @@ esac
     const COMMAND_FAKE: &str = r##"#!/bin/sh
 case "$PROVENANT_PORT_OPERATION" in
   issue) printf '{"body":"body","state":"OPEN","kind":"Bug"}' ;;
-  api|revert_adoption) printf '{"status":200,"body":"{\\"ok\\":true}"}' ;;
+  api|revert_adoption|graphql) printf '{"status":200,"body":"{\\"ok\\":true}"}' ;;
   pull) printf '{"status":200,"headers":{"etag":"fake-tag"},"body":"{\\"ok\\":true}"}' ;;
   *) printf '{"ok":true}' ;;
 esac
@@ -1068,6 +1101,9 @@ esac
                 path: "repos/owner/repo/branches/main".into(),
                 arguments: Vec::new(),
                 etag: Some("old-tag".into()),
+            },
+            ForgeOperation::Graphql {
+                query: "query{viewer{login}}".into(),
             },
             ForgeOperation::Cli {
                 arguments: vec!["pr".into(), "view".into(), "7".into()],
