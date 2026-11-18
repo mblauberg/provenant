@@ -492,14 +492,7 @@ impl RunStore {
                     ))
                 );
                 if let Some(tip) = effective_base.recovered {
-                    let warning = crate::service::ErrorKind::SharedViewReseeded.diagnostic();
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: {}: shared tip {tip} preserved at {} refs/provenant/recovery/{tip}; {}",
-                        warning.code,
-                        shared_root.join("git-common").display(),
-                        warning.next.as_deref().unwrap_or_default()
-                    );
+                    crate::objects::warn_shared_tip_retained(&shared_root.join("git-common"), tip);
                 }
                 // Custody retains the host CAS base; attribution starts at the
                 // effective shared base without moving the host branch.

@@ -23,8 +23,9 @@ use view::object_binding;
 #[cfg(any(test, feature = "fixture"))]
 pub(crate) use view::prepare_bound;
 pub(crate) use view::{
-    ObjectSource, SharedViewLaunch, bound_source, copy_index, merge_head, merge_objects,
-    prepare_read_only, prepare_shared_bound, private_tip, restore_index, update_private_tip,
+    ObjectSource, SharedBudgetAdvance, SharedViewLaunch, advance_shared_budget_base, bound_source,
+    copy_index, is_shared_binding, merge_head, merge_objects, prepare_read_only,
+    prepare_shared_bound, private_tip, restore_index, update_private_tip, warn_shared_tip_retained,
 };
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};

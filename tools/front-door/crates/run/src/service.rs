@@ -766,7 +766,7 @@ error_kinds! {
     RetainedWriterImport => "WRITER_IMPORT_RETAINED", "A predecessor writer import remains unresolved.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
     LaneTipUnrooted => "LANE_TIP_UNROOTED", "A lane tip descends from no branch the host knows, so it cannot be published.";
-    SharedViewReseeded => "SHARED_VIEW_RESEEDED", "The inactive shared worktree view was reseeded; its displaced tip was retained for recovery.";
+    SharedViewTipRetained => "SHARED_VIEW_TIP_RETAINED", "A prior shared worktree tip was retained for recovery.";
     SharedViewBaseMismatch => "SHARED_VIEW_BASE_MISMATCH", "The shared worktree view has diverged from the launch base while live siblings exist.";
 }
 impl ErrorKind {
@@ -789,7 +789,7 @@ impl ErrorKind {
             Self::DuplicatePacingProfile => {
                 diagnostic.next("remove duplicate pacing profiles for the same account")
             }
-            Self::SharedViewReseeded => diagnostic.next("inspect the retained recovery ref in the shared worktree Git directory if the prior lane work is still needed"),
+            Self::SharedViewTipRetained => diagnostic.next("inspect the retained recovery ref in the shared worktree Git directory if the prior lane work is still needed"),
             Self::SharedViewBaseMismatch => diagnostic.next(
                 "wait for live sibling lanes to finish, or run the lane in an independent worktree",
             ),
@@ -800,7 +800,7 @@ impl ErrorKind {
     /// Stable category shared by the output adapters.
     pub const fn category(self) -> &'static str {
         match self {
-            Self::MemoryFloor | Self::StaleReadiness | Self::SharedViewReseeded => "warning",
+            Self::MemoryFloor | Self::StaleReadiness | Self::SharedViewTipRetained => "warning",
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound

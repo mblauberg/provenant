@@ -27,19 +27,22 @@ checkout. Direct host requests retain authority to select existing checkouts.
 Optional `write_scope` paths are advisory claims: overlaps in one worktree warn
 the owning lane in its admission receipt and checkpoint and refuse nothing.
 Writers use pathspec commits (`git commit -- <owned paths>`) to avoid committing
-a sibling's staged paths.
+a sibling's staged paths. Shared budget commits use the immutable minimal
+shared Git context, letting Git retain its index lock through the branch CAS.
 - Why: sharing follows the owner's decision while unrelated lanes stay isolated.
 
 Authorised writers share incarnation- and branch-bound private Git data,
 including HEAD, index, refs and objects. Per-attempt configuration and credentials
 remain separate; private data outlives an individual attempt's scratch.
-Under the shared view's existing initialisation gate, launch reconciles its tip
-with the host base. An ancestor tip advances by compare-and-swap and the shared
-index resets to the host base. A durable pending reset makes an interrupted
-ref/index transition retryable; a later sibling tip supersedes that reset.
-An equal-tip launch without a pending reset preserves staged edits.
-A launch behind a live sibling adopts the shared
-tip as its work base, while custody retains the host base for publication's
+Launch and budget recovery use the same shared-tip policy under the shared
+view's existing initialisation gate. An ancestor tip advances by compare-and-swap;
+launch resets its index to the host base, while budget recovery carries staged
+paths with a two-tree merge. Durable index-transition intent distinguishes a
+reset from a staged-index merge after a native host advance. Retries retain the
+old base needed for that merge; a later tip supersedes a pending reset. Both
+modes resolve HEAD while Git holds its index lock. An equal-tip launch without
+pending intent preserves staged edits. A launch behind a live sibling adopts
+the shared tip as its work base, while custody retains the host base for publication's
 compare-and-swap. Scope reporting starts at the adopted base so a child's work
 does not include its parent's commits. With no other live holders, a differing
 tip is retained at `refs/provenant/recovery/<tip>` in the shared Git directory

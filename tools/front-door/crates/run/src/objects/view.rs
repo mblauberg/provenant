@@ -358,6 +358,146 @@ pub(crate) fn update_private_tip(
     Ok(())
 }
 
+pub(crate) struct SharedBudgetAdvance<'a> {
+    pub branch: &'a str,
+    pub base: GitOid,
+    pub custody_slot: Option<&'a Directory>,
+    pub current_attempt: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedTipAction {
+    Keep,
+    Advance,
+    Adopt,
+    Recover,
+    Refuse,
+}
+
+struct SharedTipContext<'a> {
+    git: &'a Path,
+    source: &'a ObjectSource,
+    repo: &'a VerifiedRepo,
+    custody_slot: Option<&'a Directory>,
+    current_attempt: Option<&'a str>,
+}
+
+fn shared_tip_action(
+    context: SharedTipContext<'_>,
+    current: GitOid,
+    base: GitOid,
+) -> Result<SharedTipAction> {
+    if current == base {
+        return Ok(SharedTipAction::Keep);
+    }
+    if shared_is_ancestor(context.git, context.source, context.repo, current, base)? {
+        return Ok(SharedTipAction::Advance);
+    }
+    let live = context
+        .custody_slot
+        .map(|slot| {
+            provenant_supervisor::custody::other_holders_live(slot, context.current_attempt)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if live {
+        if shared_is_ancestor(context.git, context.source, context.repo, base, current)? {
+            return Ok(SharedTipAction::Adopt);
+        }
+        return Ok(SharedTipAction::Refuse);
+    }
+    Ok(SharedTipAction::Recover)
+}
+
+/// Carry staged shared-index changes across a native host branch advance.
+/// A two-tree merge preserves unrelated staged paths and lets Git reject an
+/// actual overlapping index conflict without overwriting that index.
+pub(crate) fn advance_shared_budget_base(
+    git: &Path,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    attempt: &Directory,
+    advance: SharedBudgetAdvance<'_>,
+) -> Result<GitOid> {
+    repo.revalidate().map_err(|_| invalid())?;
+    let binding = object_binding(attempt)?.ok_or_else(invalid)?;
+    let shared = binding.shared.ok_or_else(invalid)?;
+    let receipt = shared.receipt;
+    let subject =
+        provenant_confinement::worktrees::worktree_subject(repo).map_err(|_| invalid())?;
+    if receipt.subject != subject
+        || !subject
+            .worktree_identity()
+            .is_some_and(|identity| Path::new(&identity.path) == repo.root_path())
+        || receipt.branch != advance.branch
+        || receipt.object_format != object_format(advance.base)
+        || receipt.alternate_objects != repo.common_git_dir().join("objects")
+    {
+        return Err(invalid());
+    }
+    let (root, refs, objects) = verify_shared_view(&receipt)?;
+    if refs.current_path()? != source.refs.current_path()?
+        || objects.current_path()? != source.objects.current_path()?
+    {
+        return Err(invalid());
+    }
+    let source = ObjectSource { objects, refs };
+    let _initialise = shared_view_init_lock(&root)?;
+
+    loop {
+        let current = private_tip(&source, advance.branch)?;
+        if let Some(tip) = resume_shared_reset(git, &root, &source, repo, current)? {
+            warn_shared_tip_retained(&source.refs.current_path()?, tip);
+        }
+        let current = private_tip(&source, advance.branch)?;
+        let context = SharedTipContext {
+            git,
+            source: &source,
+            repo,
+            custody_slot: advance.custody_slot,
+            current_attempt: advance.current_attempt,
+        };
+        match shared_tip_action(context, current, advance.base)? {
+            SharedTipAction::Keep | SharedTipAction::Adopt => return Ok(current),
+            SharedTipAction::Refuse => return Err(RunError::SharedViewBaseMismatch),
+            SharedTipAction::Advance => {
+                reconcile_shared_tip(
+                    git,
+                    &root,
+                    &source,
+                    repo,
+                    advance.branch,
+                    SharedIndexReset {
+                        schema_version: 1,
+                        target: advance.base,
+                        recovered: None,
+                        merge_from: Some(current),
+                    },
+                    current,
+                )?;
+            }
+            SharedTipAction::Recover => {
+                save_recovery_ref(git, &source, repo, current)?;
+                warn_shared_tip_retained(&source.refs.current_path()?, current);
+                reconcile_shared_tip(
+                    git,
+                    &root,
+                    &source,
+                    repo,
+                    advance.branch,
+                    SharedIndexReset {
+                        schema_version: 1,
+                        target: advance.base,
+                        recovered: Some(current),
+                        merge_from: Some(current),
+                    },
+                    current,
+                )?;
+            }
+        }
+    }
+}
+
 fn shared_is_ancestor(
     git: &Path,
     source: &ObjectSource,
@@ -399,11 +539,15 @@ struct SharedIndexReset {
     schema_version: u64,
     target: GitOid,
     recovered: Option<GitOid>,
+    #[serde(default)]
+    merge_from: Option<GitOid>,
 }
 
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_SHARED_INDEX_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static BEFORE_SHARED_INDEX_RESET: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static BEFORE_SHARED_TIP_CAS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn finish_shared_reset(root: &Directory) -> Result<()> {
@@ -428,10 +572,25 @@ fn resume_shared_reset(
     if pending.schema_version != 1 {
         return Err(invalid());
     }
-    // A later sibling ref update supersedes this reset. Never put its index
-    // back at the older target, even if that target is still an ancestor.
-    if current == pending.target {
-        reset_shared_index(git, source, repo, pending.target)?;
+    match pending.merge_from {
+        Some(old) => {
+            // A failed budget commit may already have moved the branch before
+            // its index merge failed. Resume only if that target still lies in
+            // the published history; a cancelled CAS leaves the index alone.
+            if current == pending.target
+                || shared_is_ancestor(git, source, repo, pending.target, current)?
+            {
+                merge_shared_index(git, source, repo, old)?;
+            }
+        }
+        None => {
+            // A later sibling ref update supersedes a launch reset. Never put
+            // its index back at the older target, even if that target remains
+            // an ancestor.
+            if current == pending.target {
+                reset_shared_index(git, source, repo)?;
+            }
+        }
     }
     finish_shared_reset(root)?;
     Ok(pending.recovered)
@@ -453,40 +612,109 @@ fn reconcile_shared_tip(
         PublishMode::NoReplace,
     )?
     .require_durable()?;
-    update_private_tip(git, source, repo, branch, change.target, old)?;
-    reset_shared_index(git, source, repo, change.target)?;
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_SHARED_TIP_CAS.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    if let Err(error) = update_private_tip(git, source, repo, branch, change.target, old) {
+        if private_tip(source, branch)? == old {
+            return Err(error);
+        }
+        // Another holder moved the ref. Let the caller re-read and apply the
+        // table; a matching or newer tip is progress, not a launch refusal.
+        return Ok(());
+    }
+    if let Some(merge_from) = change.merge_from {
+        merge_shared_index(git, source, repo, merge_from)?;
+    } else {
+        reset_shared_index(git, source, repo)?;
+    }
     finish_shared_reset(root)
 }
 
-fn reset_shared_index(
-    git: &Path,
-    source: &ObjectSource,
-    repo: &VerifiedRepo,
-    base: GitOid,
-) -> Result<()> {
+pub(crate) fn warn_shared_tip_retained(refs_path: &Path, tip: GitOid) {
+    use std::io::Write;
+
+    let warning = crate::service::ErrorKind::SharedViewTipRetained.diagnostic();
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: {}: shared tip {tip} retained at {}/refs/provenant/recovery/{tip}; {}",
+        warning.code,
+        refs_path.display(),
+        warning.next.as_deref().unwrap_or_default()
+    );
+}
+
+fn reset_shared_index(git: &Path, source: &ObjectSource, repo: &VerifiedRepo) -> Result<()> {
     #[cfg(test)]
     if FAIL_SHARED_INDEX_RESET.with(|fault| fault.replace(false)) {
         return Err(RunError::Validation("injected shared index reset failure"));
+    }
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_SHARED_INDEX_RESET.with(|hook| hook.borrow_mut().take()) {
+        hook();
     }
     let refs_path = source.refs.current_path()?;
     let objects_path = source.objects.current_path()?;
     let alternate = repo.common_git_dir().join("objects");
     let index_path = refs_path.join("index");
+    // Git read-tree takes index.lock before resolving HEAD. Using HEAD instead
+    // of an earlier OID preserves a sibling commit that wins the index first.
+    // Native shared commits likewise retain index.lock through their branch CAS.
+    // Git's ordering: github.com/git/git/blob/v2.53.0/builtin/read-tree.c#L181-L205
     execute_bounded(
         git,
         &refs_path,
         repo.root_path(),
-        &args(&["read-tree", &base.to_string()]),
+        &args(&["read-tree", "HEAD"]),
         None,
         Execution {
             object_directory: Some(&objects_path),
             alternate_directory: Some(&alternate),
             common_directory: Some(&refs_path),
             index_file: Some(&index_path),
+            timeout: Duration::from_secs(5),
             ..Execution::default()
         },
-    )
-    .map_err(|_| RunError::Validation("shared view index reset failed"))?;
+    )?;
+    Ok(())
+}
+
+fn merge_shared_index(
+    git: &Path,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    merge_from: GitOid,
+) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_SHARED_INDEX_RESET.with(|fault| fault.replace(false)) {
+        return Err(RunError::Validation("injected shared index reset failure"));
+    }
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_SHARED_INDEX_RESET.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let refs_path = source.refs.current_path()?;
+    let objects_path = source.objects.current_path()?;
+    let alternate = repo.common_git_dir().join("objects");
+    let index_path = refs_path.join("index");
+    // Preserve staged paths while merging the launch index base into HEAD.
+    // read-tree retains index.lock until it has resolved HEAD.
+    execute_bounded(
+        git,
+        &refs_path,
+        repo.root_path(),
+        &args(&["read-tree", "-m", &merge_from.to_string(), "HEAD"]),
+        None,
+        Execution {
+            object_directory: Some(&objects_path),
+            alternate_directory: Some(&alternate),
+            common_directory: Some(&refs_path),
+            index_file: Some(&index_path),
+            timeout: Duration::from_secs(5),
+            ..Execution::default()
+        },
+    )?;
     Ok(())
 }
 
@@ -761,6 +989,18 @@ impl SharedViewIdentities {
 const SHARED_VIEW_RECEIPT: &str = "owner.json";
 const SHARED_VIEW_INIT_LOCK: &str = "init.lock";
 
+fn shared_view_init_lock(root: &Directory) -> Result<provenant_os::fs::LockGuard> {
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5).map_err(|_| invalid())?;
+    Ok(root.lock(
+        OsStr::new(SHARED_VIEW_INIT_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    )?)
+}
+
 fn object_format(base: GitOid) -> &'static str {
     if base.to_string().len() == 64 {
         "sha256"
@@ -904,15 +1144,7 @@ fn open_or_create_shared_view(
     {
         return Err(invalid());
     }
-    let clock = provenant_os::clock::SystemClock::new();
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5).map_err(|_| invalid())?;
-    let _initialise = root.lock(
-        OsStr::new(SHARED_VIEW_INIT_LOCK),
-        provenant_os::fs::LockMode::Exclusive,
-        budget,
-        &CancelToken::new(),
-        &clock,
-    )?;
+    let _initialise = shared_view_init_lock(&root)?;
     let subject =
         provenant_confinement::worktrees::worktree_subject(repo).map_err(|_| invalid())?;
     let format = object_format(base);
@@ -942,72 +1174,76 @@ fn open_or_create_shared_view(
             }
             let (_, refs, objects) = verify_shared_view(&receipt)?;
             let source = ObjectSource { objects, refs };
-            let current_tip = private_tip(&source, branch)?;
-            let recovered = resume_shared_reset(git, &root, &source, repo, current_tip)?;
-            if current_tip == base {
-                return Ok((
-                    SharedViewBinding { receipt },
-                    SharedPreparation { base, recovered },
-                ));
-            }
-            if shared_is_ancestor(git, &source, repo, current_tip, base)? {
-                reconcile_shared_tip(
+            let mut recovered = None;
+            loop {
+                let current_tip = private_tip(&source, branch)?;
+                recovered =
+                    resume_shared_reset(git, &root, &source, repo, current_tip)?.or(recovered);
+                // Reset recovery resolves HEAD under Git's index lock. Apply
+                // the table to a fresh tip if a sibling won the index first.
+                let current_tip = private_tip(&source, branch)?;
+                let context = SharedTipContext {
                     git,
-                    &root,
-                    &source,
+                    source: &source,
                     repo,
-                    branch,
-                    SharedIndexReset {
-                        schema_version: 1,
-                        target: base,
-                        recovered,
-                    },
-                    current_tip,
-                )?;
-                return Ok((
-                    SharedViewBinding { receipt },
-                    SharedPreparation { base, recovered },
-                ));
-            }
-            let live = custody_slot
-                .map(|slot| {
-                    provenant_supervisor::custody::other_holders_live(slot, current_attempt)
-                })
-                .transpose()?
-                .unwrap_or(false);
-            if live {
-                if shared_is_ancestor(git, &source, repo, base, current_tip)? {
-                    return Ok((
-                        SharedViewBinding { receipt },
-                        SharedPreparation {
-                            base: current_tip,
-                            recovered,
-                        },
-                    ));
+                    custody_slot,
+                    current_attempt,
+                };
+                match shared_tip_action(context, current_tip, base)? {
+                    SharedTipAction::Keep => {
+                        return Ok((
+                            SharedViewBinding { receipt },
+                            SharedPreparation { base, recovered },
+                        ));
+                    }
+                    SharedTipAction::Advance => {
+                        reconcile_shared_tip(
+                            git,
+                            &root,
+                            &source,
+                            repo,
+                            branch,
+                            SharedIndexReset {
+                                schema_version: 1,
+                                target: base,
+                                recovered,
+                                merge_from: None,
+                            },
+                            current_tip,
+                        )?;
+                    }
+                    SharedTipAction::Adopt => {
+                        return Ok((
+                            SharedViewBinding { receipt },
+                            SharedPreparation {
+                                base: current_tip,
+                                recovered,
+                            },
+                        ));
+                    }
+                    SharedTipAction::Refuse => {
+                        return Err(RunError::SharedViewBaseMismatch);
+                    }
+                    SharedTipAction::Recover => {
+                        save_recovery_ref(git, &source, repo, current_tip)?;
+                        recovered = Some(current_tip);
+                        reconcile_shared_tip(
+                            git,
+                            &root,
+                            &source,
+                            repo,
+                            branch,
+                            SharedIndexReset {
+                                schema_version: 1,
+                                target: base,
+                                recovered: Some(current_tip),
+                                merge_from: None,
+                            },
+                            current_tip,
+                        )?;
+                    }
                 }
-                return Err(RunError::SharedViewBaseMismatch);
             }
-            save_recovery_ref(git, &source, repo, current_tip)?;
-            reconcile_shared_tip(
-                git,
-                &root,
-                &source,
-                repo,
-                branch,
-                SharedIndexReset {
-                    schema_version: 1,
-                    target: base,
-                    recovered: Some(current_tip),
-                },
-                current_tip,
-            )?;
-            return Ok((
-                SharedViewBinding { receipt },
-                SharedPreparation {
-                    base,
-                    recovered: Some(current_tip),
-                },
-            ));
         }
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
@@ -1197,6 +1433,10 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
         return Err(invalid());
     }
     Ok(Some(binding))
+}
+
+pub(crate) fn is_shared_binding(attempt: &Directory) -> Result<bool> {
+    Ok(object_binding(attempt)?.is_some_and(|binding| binding.shared.is_some()))
 }
 
 pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> {

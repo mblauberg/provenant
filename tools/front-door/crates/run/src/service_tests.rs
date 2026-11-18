@@ -1163,7 +1163,7 @@ fn shared_view_refusal_and_reseed_warning_have_actionable_diagnostics() {
         error.boundary_class(),
         provenant_records::diagnostic::BoundaryClass::LaneGit
     );
-    let warning = ErrorKind::SharedViewReseeded.diagnostic();
+    let warning = ErrorKind::SharedViewTipRetained.diagnostic();
     assert_eq!(warning.category.as_deref(), Some("warning"));
     assert!(warning.next.is_some());
 }

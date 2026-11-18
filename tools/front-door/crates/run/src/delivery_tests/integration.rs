@@ -260,17 +260,28 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
             &executable,
             &["rev-parse", "HEAD"],
         )?)?;
+        let layout =
+            runtime.project_layout_for_common(&executor, repo.common_git_dir(), budget, &cancel)?;
 
         // A live parent's holder lets the child adopt its shared commit.
-        let slot = Directory::open_anchor(&state)?;
-        std::fs::create_dir_all(state.join("parent-holder"))?;
+        let slot_path = fixture.root.join("shared-custody-slot");
+        std::fs::create_dir_all(&slot_path)?;
+        let slot = Directory::open_anchor(&slot_path)?;
+        for name in ["parent-holder", "attempt"] {
+            std::fs::create_dir_all(slot_path.join(name))?;
+        }
         let parent_holder_dir =
             slot.open_verified_directory(std::ffi::OsStr::new("parent-holder"))?;
-        let _parent_holder = parent_holder_dir.try_lock(
+        let parent_holder = parent_holder_dir.try_lock(
             std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
             LockMode::Exclusive,
         )?;
-        let current_attempt = scope.attempt.to_string();
+        let current_holder_dir = slot.open_verified_directory(std::ffi::OsStr::new("attempt"))?;
+        let _current_holder = current_holder_dir.try_lock(
+            std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+            LockMode::Exclusive,
+        )?;
+        let current_attempt = "attempt".to_owned();
 
         let child_preparation = crate::objects::prepare_shared_bound(
             &executable,
@@ -287,8 +298,35 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
         )?;
         assert_eq!(child_preparation.base, parent_tip);
 
+        let writer = crate::writer::WriterLaunch {
+            worktree,
+            branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
+            layout,
+            executor_root: repo.root_path().to_path_buf(),
+            executor_root_identity: repo.root_identity(),
+            base: host_base,
+            custody: Some((
+                slot,
+                provenant_supervisor::custody::WriterBinding::read_only(),
+            )),
+            facts: Default::default(),
+        };
+        writer.snapshot_shared(
+            &state,
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+            Some(child_preparation.base),
+        )?;
+
+        std::fs::write(fixture.writer.worktree.join("parent.txt"), "child edit\n")?;
         std::fs::write(fixture.writer.worktree.join("child.txt"), "child edit\n")?;
-        private_git(&fixture, &shared_root, &executable, &["add", "child.txt"])?;
+        private_git(
+            &fixture,
+            &shared_root,
+            &executable,
+            &["add", "parent.txt", "child.txt"],
+        )?;
         private_git(
             &fixture,
             &shared_root,
@@ -309,7 +347,30 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
             &executable,
             &["diff", "--name-only", &parent_tip_text, &tip_text],
         )?;
-        assert_eq!(changed_paths, "child.txt");
+        assert_eq!(
+            changed_paths.lines().collect::<Vec<_>>(),
+            ["child.txt", "parent.txt"]
+        );
+
+        let note = writer.unpublish(&attempt);
+        assert!(note.contains("shared worktree left intact"), "{note}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,
+            "child edit\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.writer.worktree.join("child.txt"))?,
+            "child edit\n"
+        );
+        drop(parent_holder);
+        let note = writer.unpublish(&attempt);
+        assert!(note.contains("worktree restored"), "{note}");
+        assert!(note.contains(&parent_tip.to_string()), "{note}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,
+            "parent edit\n"
+        );
+        assert!(!fixture.writer.worktree.join("child.txt").exists());
         *child_head.borrow_mut() = Some(tip);
         *shared_base.borrow_mut() = Some(child_preparation.base);
         Ok(child_preparation.base)
@@ -335,7 +396,7 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
     assert_eq!(fixture.prepare()?.head(&fixture.writer)?, child_head);
     assert_eq!(
         std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,
-        "parent edit\n"
+        "child edit\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.writer.worktree.join("child.txt"))?,
