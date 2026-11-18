@@ -857,6 +857,7 @@ fn typed_composite_constructor_matches_decoded_graph_node() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             nodes: Vec::new(),
             exports: vec![GraphInput {
                 extra: Default::default(),
@@ -1100,4 +1101,242 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
             .checkpoint,
         run.checkpoint
     );
+}
+
+#[test]
+fn batch_concurrency_cap_pins_max_running_and_sets_cap_wait_reason() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "batch-cap-test",
+        "nodes": [{
+            "id": "slices",
+            "kind": "composite",
+            "access": "read_only",
+            "max_parallel": 2,
+            "composite": {
+                "max_parallel": 2,
+                "nodes": [
+                    {"id": "s1", "access": "read_only", "prompt": "slice 1", "route": {"alias": "junior"}, "max_parallel": 2},
+                    {"id": "s2", "access": "read_only", "prompt": "slice 2", "route": {"alias": "junior"}, "max_parallel": 2},
+                    {"id": "s3", "access": "read_only", "prompt": "slice 3", "route": {"alias": "junior"}, "max_parallel": 2}
+                ],
+                "exports": []
+            }
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Pending { attempt_ref: None },
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let node = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == format!("slices--{id}"))
+            .unwrap()
+    };
+    assert_eq!(node("s1").state, NodeState::Running);
+    assert_eq!(node("s1").wait_reason, None);
+    assert_eq!(node("s2").state, NodeState::Running);
+    assert_eq!(node("s2").wait_reason, None);
+
+    // s3 is capped: exactly 2 are running, s3 is pending with wait_reason = "cap"
+    assert_eq!(node("s3").state, NodeState::Pending);
+    assert_eq!(node("s3").wait_reason.as_deref(), Some("cap"));
+
+    let running_count = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|n| n.id.starts_with("slices--s") && n.state == NodeState::Running)
+        .count();
+    assert_eq!(running_count, 2);
+
+    // When s1 settles as succeeded, next advance admits s3
+    let mut owner2 = FakeOwner {
+        observations: [
+            terminal(AttemptOutcome::Succeeded),
+            AttemptObservation::Pending { attempt_ref: None },
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run2 = advance(&document, &mut owner2, &mut journal).unwrap();
+    let node2 = |id: &str| {
+        run2.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == format!("slices--{id}"))
+            .unwrap()
+    };
+    assert_eq!(node2("s1").state, NodeState::Succeeded);
+    assert_eq!(node2("s3").state, NodeState::Running);
+    assert_eq!(node2("s3").wait_reason, None);
+}
+
+#[test]
+fn batch_cap_counts_nested_slice_attempts() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "nested-cap-test", "nodes": [{
+            "id": "slices", "kind": "composite", "access": "read_only",
+            "max_parallel": 1, "composite": {"max_parallel": 1, "nodes": [
+                {"id": "first", "kind": "composite", "access": "read_only", "composite": {
+                    "nodes": [{"id": "plan", "access": "read_only", "prompt": "first", "route": {"alias": "junior"}}], "exports": []}},
+                {"id": "second", "kind": "composite", "access": "read_only", "composite": {
+                    "nodes": [{"id": "plan", "access": "read_only", "prompt": "second", "route": {"alias": "junior"}}], "exports": []}}
+            ], "exports": []}
+        }]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let first = run.checkpoint.nodes.iter().find(|n| n.id == "slices--first--plan").unwrap();
+    let second = run.checkpoint.nodes.iter().find(|n| n.id == "slices--second--plan").unwrap();
+    assert_eq!(first.state, NodeState::Running);
+    assert_eq!(second.state, NodeState::Pending);
+    assert_eq!(second.wait_reason.as_deref(), Some("cap"));
+    assert_eq!(journal.load("nested-cap-test").unwrap().unwrap().nodes.iter().find(|n| n.id == second.id).unwrap().wait_reason.as_deref(), Some("cap"));
+}
+
+#[test]
+fn batch_after_ordering_sets_after_wait_reason_until_satisfied() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "batch-after-test",
+        "nodes": [{
+            "id": "slices",
+            "kind": "composite",
+            "access": "read_only",
+            "composite": {
+                "nodes": [
+                    {"id": "first", "access": "read_only", "prompt": "first", "route": {"alias": "junior"}},
+                    {"id": "second", "access": "read_only", "prompt": "second", "route": {"alias": "junior"}, "depends_on": ["first"]}
+                ],
+                "exports": []
+            }
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let node = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == format!("slices--{id}"))
+            .unwrap()
+    };
+    assert_eq!(node("first").state, NodeState::Running);
+    assert_eq!(node("first").wait_reason, None);
+
+    // second waits on first
+    assert_eq!(node("second").state, NodeState::Pending);
+    assert_eq!(node("second").wait_reason.as_deref(), Some("after"));
+
+    // When first settles as Succeeded, second becomes Running
+    let mut owner2 = FakeOwner {
+        observations: [
+            terminal(AttemptOutcome::Succeeded),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run2 = advance(&document, &mut owner2, &mut journal).unwrap();
+    let node2 = |id: &str| {
+        run2.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == format!("slices--{id}"))
+            .unwrap()
+    };
+    assert_eq!(node2("first").state, NodeState::Succeeded);
+    assert_eq!(node2("second").state, NodeState::Running);
+    assert_eq!(node2("second").wait_reason, None);
+}
+
+#[test]
+fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "batch-conflict-test",
+        "nodes": [{
+            "id": "slices",
+            "kind": "composite",
+            "access": "read_only",
+            "composite": {
+                "min_successful": 1,
+                "nodes": [
+                    {"id": "s1", "access": "read_only", "prompt": "s1", "route": {"alias": "junior"}},
+                    {"id": "s2", "access": "read_only", "prompt": "s2", "route": {"alias": "junior"}}
+                ],
+                "exports": []
+            }
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Pending { attempt_ref: None },
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let _run = advance(&document, &mut owner, &mut journal).unwrap();
+
+    // Now s1 settles with integration conflict warning, s2 remains pending/running
+    let conflict_warning = "host writer delivery failed at Integrate (integration_conflict): merge conflict with child commit abc1234; conflicting files: src/main.rs, Cargo.toml".to_owned();
+    let mut owner2 = FakeOwner {
+        observations: [
+            AttemptObservation::Terminal {
+                attempt_ref: None,
+                outcome: AttemptOutcome::OtherFailure,
+                launched: true,
+                result: None,
+                result_warning: Some(conflict_warning),
+                result_path: None,
+                branch: None,
+                commit: None,
+                stop: Some(provenant_records::StopCause::Blocked),
+                settlement_reason: None,
+            },
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run2 = advance(&document, &mut owner2, &mut journal).unwrap();
+    let node = |id: &str| {
+        run2.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == format!("slices--{id}"))
+            .unwrap()
+    };
+    // s1 is Blocked with advance_error_code = "merge_conflict" and advance_error naming the files
+    assert_eq!(node("s1").state, NodeState::Blocked);
+    assert_eq!(node("s1").advance_error_code.as_deref(), Some("merge_conflict"));
+    let err = node("s1").advance_error.as_deref().unwrap();
+    assert!(err.contains("src/main.rs") && err.contains("Cargo.toml"), "{err}");
+
+    // s2 is still running! The graph is not paused!
+    assert_eq!(node("s2").state, NodeState::Running);
+    assert!(run2.checkpoint.pause.is_none());
 }

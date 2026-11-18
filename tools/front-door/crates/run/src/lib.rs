@@ -430,6 +430,14 @@ pub enum HelperSafety {
     Unavailable,
 }
 
+fn format_conflicts(files: &[String]) -> String {
+    if files.is_empty() {
+        ": merge preparation failed; inspect Git failures or resolve the target's conflict with retained child commit in a separate checkout, then retry delivery".to_owned()
+    } else {
+        format!("; conflicting files: {}", files.join(", "))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("abandonment refused: {0}")]
@@ -457,9 +465,15 @@ pub enum RunError {
     )]
     IntegrationParentBusy { child_head: provenant_core::GitOid },
     #[error(
-        "host writer delivery failed at Integrate (integration_conflict): merge preparation failed; inspect Git failures or resolve the target's conflict with retained child commit {child_head} in a separate checkout, then retry delivery"
+        "host writer delivery failed at Integrate (integration_conflict): merge conflict with child commit {child_head}{}",
+        format_conflicts(.conflicting_files)
     )]
-    IntegrationConflict { child_head: provenant_core::GitOid },
+    IntegrationConflict {
+        child_head: provenant_core::GitOid,
+        conflicting_files: Vec<String>,
+    },
+    #[error("merge conflict in git merge-tree; conflicting files: {}", .conflicting_files.join(", "))]
+    MergeConflict { conflicting_files: Vec<String> },
     #[error(
         "host writer delivery failed at Prepare (origin refresh): default branch collides with another branch name"
     )]

@@ -46,6 +46,9 @@ store_busy_timeout_ms = 30000 # wait for a contended store before reporting cont
 plan = false
 warn_unbounded_junior = true
 
+[batch]
+max_parallel = 4 # cap on concurrent slices running at once, 1-64
+
 [plan]
 mode = "auto" # auto, on or off; --plan overrides it
 route = "principal" # route alias the planner node runs on

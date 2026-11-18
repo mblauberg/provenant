@@ -859,6 +859,8 @@ struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     composite: Option<CompositeSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_parallel: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distinct_from: Option<DistinctFrom>,

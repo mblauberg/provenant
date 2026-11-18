@@ -2,7 +2,8 @@
 use super::*;
 use provenant_cli::target::{ResolveError, Resolved, Want};
 use provenant_fabric_runtime::graph::{
-    AttemptState, FileJournal, GraphJournal, GraphRun, JournalError, PendingSteerQueueError,
+    AttemptState, FileJournal, GraphJournal, GraphRun, JournalError, NodeState,
+    PendingSteerQueueError,
 };
 use serde_json::{Value, json};
 
@@ -225,17 +226,34 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             continue;
         }
         if target.attempt.is_none() {
-            rows.push(row(
+            let (state, reason, waiting_for) = if node.state == NodeState::Pending
+                && let Some(wait_reason) = &node.wait_reason
+            {
+                (
+                    json!("waiting"),
+                    Some(wait_reason.as_str()),
+                    json!(wait_reason),
+                )
+            } else {
+                (
+                    json!(node.state),
+                    node.advance_error
+                        .as_deref()
+                        .or(node.skip_reason.as_deref()),
+                    Value::Null,
+                )
+            };
+            let mut node_row = row(
                 format!("{}/{}", target.graph, node.id),
                 "node",
                 target,
                 Some(&node.id),
                 None,
-                json!(node.state),
-                node.advance_error
-                    .as_deref()
-                    .or(node.skip_reason.as_deref()),
-            ));
+                state,
+                reason,
+            );
+            node_row["waiting_for"] = waiting_for;
+            rows.push(node_row);
         }
         for attempt in node.recorded_attempts() {
             let number = attempt.key.attempt;
@@ -555,7 +573,9 @@ fn row_model(row: &Value) -> String {
 /// its note when there is one. At most `SUMMARY_ROW_BYTES`.
 pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> String {
     let mut line = format!("{name} {}", plain(&row["state"]));
-    if let Some(model) = model {
+    if let Some(model) = model
+        && (model != "-" || row["state"] != "waiting")
+    {
         line.push(' ');
         line.push_str(model);
     }
