@@ -439,20 +439,8 @@ fn release_checks_legal_private_symlink_and_bounded_evidence() -> Result {
     let rig = check_rig()?;
     legal(&rig)?;
     commit(&rig, "base")?;
-    let artifact = rig.command(&["check", "release", "--json"])?;
-    let artifact_result = json(&artifact)?;
-    let artifact_findings = artifact_result["data"]["findings"]
-        .as_array()
-        .ok_or("release findings")?;
-    assert!(
-        artifact_findings
-            .iter()
-            .all(|finding| { finding["path"]["path"] == "@artifact/provenant" })
-    );
-    assert_eq!(
-        code(&artifact),
-        if artifact_findings.is_empty() { 0 } else { 1 }
-    );
+    // The clean release and artifact-only findings are covered by
+    // release_reads_packed_objects_native_alternates_and_linked_worktrees.
     fs::remove_file(rig.project.join("LICENSE"))?;
     let missing = rig.command(&["check", "release", "--json"])?;
     assert_eq!(code(&missing), 1);
@@ -631,7 +619,15 @@ fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Resu
     let rig = check_rig()?;
     legal(&rig)?;
     commit(&rig, "legal baseline")?;
-    git(&rig, &["gc", "--quiet"])?;
+    // Only pack objects; full GC also performs unrelated housekeeping.
+    git(&rig, &["repack", "-a", "-d", "-q"])?;
+    let packs = std::fs::read_dir(rig.project.join(".git/objects/pack"))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert!(
+        packs
+            .iter()
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+    );
     let alternate = rig.root.join("shared");
     git(
         &rig,

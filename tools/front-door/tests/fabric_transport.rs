@@ -1167,6 +1167,12 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
+    // Exercise a real due retry without paying the production five-second
+    // backoff in this receipt-recovery fixture.
+    let config = rig.state.join("config.toml");
+    let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
+    settings["knobs"]["lanes.launch_retry_first_seconds"] = toml_edit::value(1);
+    std::fs::write(config, settings.to_string())?;
     let ssh = rig.root.join("ssh");
     let real = rig.root.join("ssh-real");
     std::fs::rename(&ssh, &real)?;

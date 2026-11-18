@@ -2,51 +2,9 @@
 # Expiry is limited to 30 days from the day the CI check runs.
 
 [[test]]
-package = "provenant"
-name = "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "fabric::result_tests::remote_upstream_is_materialised_and_unreachable_peer_is_named"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr::landing::adapters::tests::captured_async_stack_responses_drive_real_forge"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
 package = "provenant-cli"
 name = "run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory"
 issue = "#3300"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "release_checks_legal_private_symlink_and_bounded_evidence"
-issue = "#3304"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "release_reads_packed_objects_native_alternates_and_linked_worktrees"
-issue = "#3304"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "malformed_operations_and_waits_fail_before_state_creation"
-issue = "#3304"
 owner = "chair"
 expires = 2026-12-14
 
@@ -109,13 +67,6 @@ expires = 2026-12-14
 [[test]]
 package = "provenant"
 name = "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "session_save_warns_once_only_when_disk_is_low"
 issue = "#3305"
 owner = "chair"
 expires = 2026-12-14
