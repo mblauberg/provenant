@@ -24,6 +24,7 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 /// Cargo's per-profile lock files. `.cargo-lock` marks a profile directory;
@@ -40,6 +41,8 @@ const GC_TOMBSTONES: [(&str, &str); 2] = [
 const MAX_DEPTH: usize = 64;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_CACHE_ROOT_ENTRIES: usize = 20_000;
+const MAX_PROTECTION_PROJECTS: usize = 10_000;
+const PROTECTION_SCAN_BUDGET: Duration = Duration::from_secs(5);
 const PREVIEW_ENTRIES: usize = 4096;
 const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
@@ -220,6 +223,18 @@ pub fn target_protection_for_launch(
     current_worktree: Option<&Path>,
     current_common_dir: Option<&Path>,
 ) -> TargetProtection {
+    target_protection_for_launch_while(roots, current_worktree, current_common_dir, &mut || false)
+}
+
+/// Snapshot every registered Git project's writer slots and process occupancy.
+/// The caller's stop signal and a fixed wall-clock ceiling bound discovery;
+/// incomplete evidence protects all cache targets.
+pub fn target_protection_for_launch_while(
+    roots: &provenant_core::Roots,
+    current_worktree: Option<&Path>,
+    current_common_dir: Option<&Path>,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> TargetProtection {
     let mut protection = TargetProtection::default();
     if let Some(worktree) = current_worktree {
         protection.worktrees.insert(worktree.to_owned());
@@ -230,17 +245,41 @@ pub fn target_protection_for_launch(
             .insert(crate::target_seed::project_key(common_dir));
     }
 
-    let projects = match provenant_config::registered_projects(roots) {
+    let projects = match provenant_config::registered_gc_projects(roots) {
         Ok(projects) => projects,
         Err(_) => {
             protection.unobserved = true;
             return protection;
         }
     };
-    if projects.len() > 10_000 {
+    if projects.len() > MAX_PROTECTION_PROJECTS {
         protection.unobserved = true;
         return protection;
     }
+    let started = Instant::now();
+    let mut keep_going = || !should_stop() && started.elapsed() < PROTECTION_SCAN_BUDGET;
+    let git = match provenant_os::git::git_executable() {
+        Some(git) => git,
+        None => {
+            protection.unobserved = true;
+            return protection;
+        }
+    };
+    let utility =
+        match provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path()) {
+            Ok(utility) => utility,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+    let executor = match provenant_os::exec::SystemExecutor::new(1) {
+        Ok(executor) => executor,
+        Err(_) => {
+            protection.unobserved = true;
+            return protection;
+        }
+    };
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let request = crate::Request {
@@ -249,6 +288,100 @@ pub fn target_protection_for_launch(
     };
     let mut records_observed = 0_usize;
     for binding in projects {
+        if !keep_going() {
+            protection.unobserved = true;
+            return protection;
+        }
+        let checkout = binding
+            .primary_checkout_hint()
+            .map(Path::to_path_buf)
+            .or_else(|| binding.common_dir().parent().map(Path::to_path_buf));
+        let Some(checkout) = checkout else {
+            protection.unobserved = true;
+            return protection;
+        };
+        let remaining = PROTECTION_SCAN_BUDGET.saturating_sub(started.elapsed());
+        let budget = match provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
+            .and_then(|budget| budget.with_timeout_cap(remaining))
+        {
+            Ok(budget) => budget,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+        let repo = match utility.open_repo(&executor, &checkout, budget, &cancel) {
+            Ok(repo) if repo.common_git_dir() == binding.common_dir() => repo,
+            _ => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+        let common = match Directory::open_anchor(binding.common_dir()) {
+            Ok(common) => common,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+        if !common
+            .metadata()
+            .is_ok_and(|metadata| metadata.same_identity(&repo.common_identity()))
+        {
+            protection.unobserved = true;
+            return protection;
+        }
+        let project_state_path = roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(binding.project_id().to_string());
+        let project_state = match Directory::open_anchor(&project_state_path) {
+            Ok(directory) => Some(directory),
+            Err(error) if error.is_not_found() => None,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+        let registration = project_state.as_ref().map_or(
+            provenant_confinement::disk::WriterRegistration::Empty,
+            provenant_confinement::disk::WriterRegistration::Directory,
+        );
+        let remaining = PROTECTION_SCAN_BUDGET.saturating_sub(started.elapsed());
+        let budget = match provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
+            .and_then(|budget| budget.with_timeout_cap(remaining))
+        {
+            Ok(budget) => budget,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+        let occupancy = match provenant_confinement::disk::writer_occupancy(
+            &repo,
+            &utility,
+            &executor,
+            budget,
+            &cancel,
+            registration,
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+            &keep_going,
+        ) {
+            Ok(occupancy) => occupancy,
+            Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
+        let project_key = crate::target_seed::project_key(binding.common_dir());
+        for (path, state) in occupancy {
+            if !state.is_available() {
+                protection.worktrees.insert(path);
+                protection.shared_projects.insert(project_key.clone());
+            }
+        }
+
         let context = crate::ExecutionContext {
             state_root: roots.state.clone(),
             project_id: binding.project_id(),
@@ -267,6 +400,10 @@ pub fn target_protection_for_launch(
         let store = store.with_writer_registry(roots.state.as_path());
         let mut after = 0;
         loop {
+            if !keep_going() {
+                protection.unobserved = true;
+                return protection;
+            }
             let page = match store.lanes(
                 &crate::LaneQuery {
                     targets: Vec::new(),
@@ -2360,6 +2497,130 @@ mod tests {
         assert!(report.busy.iter().any(|path| path == &target));
         assert!(target.join("deps/payload").is_file());
         assert!(!state.path().join("tick").exists());
+    }
+
+    #[test]
+    fn registered_writer_without_run_store_protects_its_shared_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{CancelToken, GitOid, WaitBudget};
+        use provenant_os::exec::SystemExecutor;
+        use provenant_os::fs::{Directory, LockMode};
+        use std::process::Command;
+
+        let fixture = Fixture::new();
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let project = root.join("project");
+        let home = root.join("home");
+        let state_path = root.join("state");
+        fs::create_dir(&project)?;
+        fs::create_dir(&home)?;
+        fs::create_dir(&state_path)?;
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
+        let git = provenant_os::git::git_executable().ok_or("git executable unavailable")?;
+        let run_git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = Command::new(&git)
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        run_git(&["init", "-q", "-b", "main"])?;
+        run_git(&["config", "user.name", "fixture"])?;
+        run_git(&["config", "user.email", "fixture@example.invalid"])?;
+        run_git(&["commit", "--allow-empty", "-qm", "initial"])?;
+        let common_dir = project.join(".git");
+        let mut root_inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        root_inputs.state_dir = Some(state_path.clone());
+        let roots = root_inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                common_dir.clone(),
+                project.clone(),
+            )?,
+        )?;
+
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+        let executor = SystemExecutor::new(1)?;
+        let cancel = CancelToken::new();
+        let utility_budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let repo = runtime.open_repo(&executor, &project, utility_budget, &cancel)?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &project)?;
+        let inventory = provenant_confinement::worktrees::RepoFacts::default().writer_inventory(
+            &repo,
+            &executor,
+            &runtime,
+            utility_budget,
+            &cancel,
+        )?;
+        let projects_state = roots.state.as_path().join("worktrees");
+        fs::create_dir_all(&projects_state)?;
+        let project_state_path = projects_state.join(binding.project_id().to_string());
+        fs::create_dir_all(&project_state_path)?;
+        let project_state = Directory::open_anchor(&project_state_path)?;
+        let base = GitOid::parse(&run_git(&["rev-parse", "HEAD"])?)?;
+        let (slot, _) = provenant_confinement::worktrees::writer_custody(
+            &project_state,
+            &worktree,
+            &project,
+            &provenant_confinement::repo::GitRefName::branch("main")?,
+            base,
+            || Ok(inventory.clone()),
+        )?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let _writer = slot.lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+
+        // No RunStore or attempt record is created: the writer-slot lock is the
+        // only durable live-owner evidence for this registered project.
+        let key = crate::target_seed::project_key(&common_dir);
+        let target = shared_cache_root(fixture.home.path())
+            .join(&key)
+            .join("target");
+        fs::create_dir_all(target.join("deps"))?;
+        fs::write(target.join(CARGO_LOCK), b"")?;
+        fs::write(target.join("deps/payload"), vec![7_u8; 8192])?;
+
+        let protection = target_protection_for_launch(&roots, None, None);
+        assert!(
+            !protection.unobserved,
+            "all registered writer custody was observed"
+        );
+        assert!(protection.shared_projects.contains(&key));
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let report = collect_with_protection(
+            roots.state.as_path(),
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &protection,
+        )?;
+        assert!(report.removed.is_empty());
+        assert!(report.busy.iter().any(|path| path == &target));
+        assert!(target.join("deps/payload").is_file());
+        Ok(())
     }
 
     #[test]

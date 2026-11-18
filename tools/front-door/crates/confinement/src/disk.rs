@@ -304,6 +304,70 @@ pub fn worktrees(
     Ok(inventory)
 }
 
+/// Evidence available for a project's writer custody during a read-only
+/// occupancy scan. `Empty` is only for an anchored NotFound of the complete
+/// project-state directory; `Unavailable` preserves the conservative unknown
+/// state used by the general disk inventory.
+pub enum WriterRegistration<'a> {
+    Directory(&'a Directory),
+    Empty,
+    Unavailable,
+}
+
+/// Observe writer-slot and process occupancy without collecting worktree disk
+/// metrics or running merge checks. Callers may stop between projects and the
+/// native process census polls the same callback while reading process data.
+pub fn writer_occupancy(
+    repo: &VerifiedRepo,
+    utility: &UtilityRuntime,
+    executor: &dyn Executor,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    registration: WriterRegistration<'_>,
+    workers: &dyn WorkerObserver,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<Vec<(PathBuf, crate::worktrees::Occupancy)>, WorktreeError> {
+    if !keep_going() {
+        return Err(WorktreeError::Cancelled);
+    }
+    let bytes = crate::worktrees::RepoFacts::default()
+        .writer_inventory(repo, executor, utility, budget, cancel)?;
+    if !keep_going() {
+        return Err(WorktreeError::Cancelled);
+    }
+    let listed = parse_worktree_list(&bytes)?;
+    let roots: Vec<_> = listed
+        .iter()
+        .filter(|entry| !entry.bare)
+        .map(|entry| entry.path.clone())
+        .collect();
+    let observations = workers
+        .observe_roots_while(&roots, keep_going)
+        .ok_or(WorktreeError::Cancelled)?;
+    let mut inventory = Vec::with_capacity(roots.len());
+    for path in roots {
+        if !keep_going() {
+            return Err(WorktreeError::Cancelled);
+        }
+        let registered = match registration {
+            WriterRegistration::Directory(directory) => disk_writer_state(directory, &path),
+            WriterRegistration::Empty => crate::worktrees::Occupancy::Available,
+            WriterRegistration::Unavailable => crate::worktrees::Occupancy::custody_unknown(
+                path.clone(),
+                "writer registration is unavailable",
+            ),
+        };
+        let observed = observations.0.get(&path).cloned().unwrap_or_else(|| {
+            crate::worktrees::Occupancy::census_unknown(
+                path.clone(),
+                "process census did not return the requested root",
+            )
+        });
+        inventory.push((path.clone(), combine_occupancy(&path, registered, observed)));
+    }
+    Ok(inventory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
