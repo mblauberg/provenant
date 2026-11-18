@@ -20,6 +20,9 @@ const REASON_BYTES: usize = 512;
 #[serde(deny_unknown_fields)]
 pub struct Patch {
     pub schema_version: u64,
+    /// Safe ingress diagnostics retained with captured fragments and replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_warnings: Vec<String>,
     /// The graph revision the author saw; a different revision is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
@@ -261,13 +264,15 @@ pub struct PatchContext<'a> {
 
 /// The confinement secret scan, as submission applies it.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
-    // Scan the original bytes so redaction markers retain their token boundaries.
-    let filtered = provenant_confinement::redact::known_shapes(text.as_bytes())
-        .map_err(|_| "patch secret scan failed".to_owned())?;
-    if filtered == text.as_bytes() {
-        Ok(())
+    let spans = provenant_confinement::redact::prose_spans(text.as_bytes(), &[])
+        .map_err(|_| "invalid input field `graph`: credential masking failed".to_owned())?;
+    if let Some(span) = spans.first() {
+        Err(format!(
+            "invalid input field `graph`: unmasked credential token at bytes {}..{}; pass the value by reference",
+            span.start, span.end
+        ))
     } else {
-        Err("patch matches a secret pattern; remove the secret and retry".to_owned())
+        Ok(())
     }
 }
 
@@ -347,7 +352,7 @@ fn admit_patch_for_retry(
                 "initial submission must precede launch",
             ));
         }
-        let compiled = compile_submission(
+        let compiled = compile_submission_normalised(
             &graph.document.graph_id,
             patch,
             context,
@@ -531,10 +536,9 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
-    let normalised_brief = brief
-        .map(prompt_text::normalise_prompt_text)
-        .transpose()
-        .map_err(PatchError::invalid)?;
+    let (normalised_brief, mut brief_warnings) =
+        prompt_text::input(&brief.map(str::to_owned), prompt_text::Context::Content)
+            .map_err(PatchError::invalid)?;
     let brief = normalised_brief.as_deref();
     if let Some(brief) = brief {
         (context.scan)(brief).map_err(|reason| PatchError::new("secret", reason))?;
@@ -753,9 +757,9 @@ fn retry_node_scope(
     }
     if let Some(routes) = replacement_routes {
         node.route = None;
-        let routes: Vec<GraphRoute> =
-            prompt_text::normalise(&routes.to_vec(), prompt_text::Context::Route)
-                .map_err(PatchError::invalid)?;
+        let (routes, warnings) = prompt_text::input(&routes.to_vec(), prompt_text::Context::Route)
+            .map_err(PatchError::invalid)?;
+        brief_warnings.extend(warnings);
         let text =
             serde_json::to_string(&routes).map_err(|e| PatchError::invalid(e.to_string()))?;
         (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
@@ -807,6 +811,7 @@ fn retry_node_scope(
                 .map(|(reason, _)| (*reason).to_owned())
                 .unwrap_or_else(|| format!("retry node {id}")),
         ),
+        input_warnings: brief_warnings,
         replace: vec![serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?],
         ..Default::default()
     };
@@ -936,8 +941,10 @@ pub fn submission(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
-    *document = prompt_text::normalise(document, prompt_text::Context::Document)
+    let (safe, warnings) = prompt_text::input(document, prompt_text::Context::Document)
         .map_err(PatchError::invalid)?;
+    *document = safe;
+    prompt_text::retain_warnings(&mut document.extra, warnings);
     for node in &mut document.nodes {
         node.template.get_or_insert_with(|| "raw".into());
     }
@@ -1011,7 +1018,7 @@ pub fn submission(
         worktree_layout,
     };
     scan(&patch, &context)?;
-    let compiled = compile_submission(
+    let compiled = compile_submission_normalised(
         &document.graph_id,
         &patch,
         &context,
@@ -1034,8 +1041,6 @@ pub fn submit(
     integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
     let document = compile_submission(graph_id, patch, context, integration_branch)?;
-    let document: GraphDocument = prompt_text::normalise(&document, prompt_text::Context::Document)
-        .map_err(PatchError::invalid)?;
     let text = serde_json::to_string(&document).map_err(|e| PatchError::invalid(e.to_string()))?;
     (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
     admit_submission(&document, context)?;
@@ -1046,6 +1051,23 @@ pub fn submit(
 /// not admitted text: the host must call `submission` after binding, which
 /// normalises, scans and admits the complete document exactly once.
 pub fn compile_submission(
+    graph_id: &str,
+    patch: &Patch,
+    context: &PatchContext<'_>,
+    integration_branch: Option<&str>,
+) -> Result<GraphDocument, PatchError> {
+    let (mut patch, warnings) =
+        prompt_text::input(patch, prompt_text::Context::Patch).map_err(PatchError::invalid)?;
+    patch.input_warnings.extend(warnings);
+    let document = compile_submission_normalised(graph_id, &patch, context, integration_branch)?;
+    let (mut document, warnings) = prompt_text::compiled(&document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
+    prompt_text::retain_warnings(&mut document.extra, patch.input_warnings);
+    prompt_text::retain_warnings(&mut document.extra, warnings);
+    Ok(document)
+}
+
+fn compile_submission_normalised(
     graph_id: &str,
     patch: &Patch,
     context: &PatchContext<'_>,
@@ -1197,10 +1219,10 @@ pub(super) fn prepare(
     // the steer boundary. Captured fragments were normalised before storage.
     // Only a live patch still carries unprocessed ingress text.
     let normalised = if matches!(mode, Preparation::Live { retry: None }) {
-        Some(
-            prompt_text::normalise(patch, prompt_text::Context::Patch)
-                .map_err(PatchError::invalid)?,
-        )
+        let (mut patch, warnings) =
+            prompt_text::input(patch, prompt_text::Context::Patch).map_err(PatchError::invalid)?;
+        patch.input_warnings.extend(warnings);
+        Some(patch)
     } else {
         None
     };
@@ -1334,7 +1356,7 @@ pub(super) fn prepare(
         }
         local.push(node);
     }
-    let mut warnings = Vec::new();
+    let mut warnings = patch.input_warnings.clone();
     if let Some((planner, spec)) = planner {
         plans::add_floor_uses(
             planner,
@@ -1512,14 +1534,18 @@ pub(super) fn prepare(
     if matches!(mode, Preparation::FinalFragment) {
         expansion.final_fragment = true;
     }
-    // Compilation, item expansion and namespacing can join separately safe
-    // fragments. Scan only this admission's final product, never the stored
-    // document or prior expansions, and never rewrite their digested bytes.
+    // Only this admission's newly compiled product can acquire new credential
+    // spans through interpolation. Stored nodes and earlier digests are immutable.
     if retry.is_none() {
+        let (safe, found) = prompt_text::compiled(&expansion, prompt_text::Context::Document)
+            .map_err(PatchError::invalid)?;
+        expansion = safe;
+        warnings.extend(found);
         let text = serde_json::to_string(&expansion)
             .map_err(|error| PatchError::invalid(error.to_string()))?;
         (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
     }
+    expansion.floor_warnings.extend(warnings.clone());
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);
     let mut loop_writers = BTreeMap::new();

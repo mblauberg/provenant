@@ -961,8 +961,13 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        let request =
-            provenant_fabric_runtime::graph::relay::RelayOp::Add(self.child_request(input)?);
+        let child = self.child_request(input)?;
+        let input_warnings = child
+            .launch
+            .as_ref()
+            .map(|launch| launch.input_warnings.clone())
+            .unwrap_or_default();
+        let request = provenant_fabric_runtime::graph::relay::RelayOp::Add(child);
         if input["explain"] == true {
             return encode(request);
         }
@@ -997,8 +1002,14 @@ impl Factory {
         let within =
             std::time::Duration::from_micros(launch.remaining(self.clock.mono_now()).as_micros())
                 .saturating_add(std::time::Duration::from_secs(1));
-        let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
+        let mut receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
             .map_err(relay_error)?;
+        if !input_warnings.is_empty() {
+            receipt
+                .as_object_mut()
+                .ok_or(FacadeError::StateCorrupt)?
+                .insert("input_warnings".into(), encode(&input_warnings)?);
+        }
         if let (Some(settlement), Some(cadence)) = (settlement, cadence) {
             let remaining = settlement.remaining(self.clock.mono_now()).as_micros();
             if remaining == 0 {
@@ -1190,6 +1201,33 @@ impl Factory {
             &self.context.port_table,
         )?;
         node["id"] = json!(key);
+        // Preserve declared credential fields until the entire authored launch
+        // has been masked. Lowering can otherwise interpolate a typed secret
+        // into prompt prose and discard the field that identified it.
+        let mut graph_input = json!({
+            "nodes": [node.clone()],
+            "template_library": inline.clone(),
+        });
+        if let Some(brief) = input.get("brief").filter(|value| !value.is_null()) {
+            graph_input["brief"] = brief.clone();
+        }
+        if let Some(prompt) = input.get("prompt").filter(|value| !value.is_null()) {
+            graph_input["prompt"] = prompt.clone();
+        }
+        let (graph_input, mut input_warnings) =
+            provenant_fabric_runtime::graph::normalise_graph_input(&graph_input)
+                .map_err(graph_input_reason)?;
+        node = graph_input["nodes"][0].clone();
+        inline = graph_input["template_library"].clone();
+        let prompt = graph_input
+            .get("prompt")
+            .or_else(|| graph_input.get("brief"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        // Compile the masked template copy so the returned launch and library
+        // cannot retain a credential that was present in a default or field.
+        let library = self.template_library(Some(&inline))?;
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), None)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
@@ -1233,6 +1271,15 @@ impl Factory {
             }
         }
         bind_directory(&mut compiled, &self.cwd);
+        // Interpolation can assemble a credential shape from individually
+        // harmless parameter fragments. Re-scan the compiled node before it
+        // crosses the child relay boundary.
+        let compiled_input = json!({"nodes":[compiled.clone()]});
+        let (compiled_input, compiled_warnings) =
+            provenant_fabric_runtime::graph::normalise_graph_input(&compiled_input)
+                .map_err(graph_input_reason)?;
+        compiled = compiled_input["nodes"][0].clone();
+        input_warnings.extend(compiled_warnings);
         // Child launches compile on the calling host; surface the same advisory
         // before handing the node to the graph relay.
         fn collect_nodes(
@@ -1274,12 +1321,7 @@ impl Factory {
         Ok(ChildRequest {
             id: key.clone(),
             template: node["use"].as_str().unwrap_or("task").into(),
-            prompt: input
-                .get("prompt")
-                .or_else(|| input.get("brief"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .into(),
+            prompt,
             tier: match &route {
                 Some(RouteChoice::Alias(alias)) => Some(alias.clone()),
                 _ => None,
@@ -1293,6 +1335,7 @@ impl Factory {
             launch: Some(ChildLaunch {
                 node: compiled,
                 templates: serde_json::from_value(inline).map_err(|_| invalid())?,
+                input_warnings,
             }),
         })
     }
@@ -1974,8 +2017,7 @@ impl Factory {
         // preview or publication can expose or persist it.
         let bound_document =
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        patch::scan_for_secrets(&bound_document)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        patch::scan_for_secrets(&bound_document).map_err(graph_input_reason)?;
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {
@@ -3425,8 +3467,18 @@ mod tests {
 
     fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        // A test launched inside a lane must respect lookup-only project
+        // authority. Register this disposable repository before opening it.
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+        )?;
+        let mut context = Context::open(roots, &rig.home, &rig.project)?;
+        // This fixture models a chair. Child request tests call child_request
+        // explicitly instead of inheriting the test runner's lane routing.
+        context.in_lane = false;
         Ok(Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
+            context,
             project_attribution: false,
             clock: SystemClock,
             backoff: ThreadPause,

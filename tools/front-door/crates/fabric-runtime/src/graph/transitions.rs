@@ -828,7 +828,12 @@ pub(super) fn initial_checkpoint(
 ) -> GraphCheckpoint {
     GraphCheckpoint {
         bases,
-        extra: Default::default(),
+        extra: document
+            .extra
+            .iter()
+            .filter(|(key, _)| key.as_str() == "input_warnings")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
         pending_steers: Default::default(),

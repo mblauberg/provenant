@@ -1260,6 +1260,51 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     Ok(safe)
 }
 
+/// Whether a structured field or environment variable declares a credential.
+/// This classification is never applied to words inside prose.
+pub fn credential_field(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ASSIGNMENT_KEYS.iter().any(|(key, _)| {
+        name.as_bytes().strip_suffix(*key).is_some_and(|prefix| {
+            prefix.is_empty() || prefix.last().is_some_and(|b| !b.is_ascii_alphanumeric())
+        })
+    })
+}
+
+/// Credential tokens and known values in prose, without assignment heuristics.
+/// Spans are half-open byte offsets in the original UTF-8 field. The caller
+/// owns field context and decides whether to mask content or refuse an identity.
+pub fn prose_spans(
+    bytes: &[u8],
+    secrets: &[Vec<u8>],
+) -> Result<Vec<std::ops::Range<usize>>, FilterError> {
+    // Keep the same bounds as the streaming filter for caller-supplied values.
+    let _ = Redactor::new(secrets.iter().cloned()).map_err(|_| FilterError)?;
+    let mut tokens = TokenScanner::default();
+    let mut literals = LiteralAutomaton::new(secrets);
+    let mut token_bytes = Vec::new();
+    let mut literal_bytes = Vec::new();
+    for chunk in bytes.chunks(8192) {
+        tokens.filter(chunk, &mut token_bytes)?;
+        literals.filter(chunk, &mut literal_bytes);
+    }
+    tokens.finish(&mut token_bytes)?;
+    literals.finish(&mut literal_bytes);
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    for (offset, (token, literal)) in token_bytes.iter().zip(&literal_bytes).enumerate() {
+        if token.1 || literal.1 {
+            if let Some(previous) = spans.last_mut()
+                && previous.end == offset
+            {
+                previous.end += 1;
+            } else {
+                spans.push(offset..offset + 1);
+            }
+        }
+    }
+    Ok(spans)
+}
+
 const SESSION_CHUNK: usize = 32 * 1024;
 const SESSION_DEPTH: u8 = 8;
 const SESSION_ENTRIES: usize = 100_000;
@@ -1657,6 +1702,39 @@ impl CaptureFilter for Redactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn prose_spans_use_tokens_and_declared_values_without_assignment_heuristics() {
+        for text in [
+            "pass:",
+            "pass: run",
+            "password: run",
+            "token=abc",
+            r#"{"password":"xyz"}"#,
+        ] {
+            assert!(prose_spans(text.as_bytes(), &[]).unwrap().is_empty());
+        }
+        let text = "é opaque-value then AKIAIOSFODNN7EXAMPLE";
+        let spans = prose_spans(text.as_bytes(), &[b"opaque-value".to_vec()]).unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&text[spans[0].clone()], "opaque-value");
+        assert_eq!(&text[spans[1].clone()], "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(spans[0].start, "é ".len());
+        for name in [
+            "GH_TOKEN",
+            "OPENAI_API_KEY",
+            "db-password",
+            "client_secret",
+            "Authorization",
+        ] {
+            assert!(credential_field(name), "{name}");
+        }
+        for name in ["PATH", "COMPASS", "TOKEN_COUNT", "AUTHORS", "PASSWORD_FILE"] {
+            assert!(!credential_field(name), "{name}");
+        }
+    }
+
     use std::os::unix::fs::MetadataExt;
 
     fn joined(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {

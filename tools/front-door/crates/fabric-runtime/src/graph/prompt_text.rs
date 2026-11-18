@@ -3,7 +3,8 @@
 //! Storage only moves these bytes; it must never rewrite digested content.
 use super::*;
 
-/// Redact known credential shapes before graph text is planned or persisted.
+/// Conservative normalisation for captured output text. Fresh authored graph
+/// input uses the schema-aware ingress below instead.
 pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
     #[cfg(test)]
     NORMALISATION_TRACE.with_borrow_mut(|trace| {
@@ -14,6 +15,266 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
     let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
         .map_err(|_| "graph text redaction failed")?;
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
+}
+
+/// Mask a newly supplied brief while retaining user-visible field/span warnings.
+pub fn normalise_brief(text: &str) -> Result<(String, Vec<String>), String> {
+    mask_text(text, "brief", false, &ambient_credentials())
+}
+
+/// Normalise a fresh graph-shaped launch before template compilation can erase
+/// parameter declarations. Transport owners retain the returned warnings.
+pub fn normalise_graph_input(
+    value: &serde_json::Value,
+) -> Result<(serde_json::Value, Vec<String>), String> {
+    input(value, Context::Document)
+}
+
+fn ambient_credentials() -> Vec<Vec<u8>> {
+    std::env::vars_os()
+        .filter(|(key, _)| provenant_confinement::redact::credential_field(&key.to_string_lossy()))
+        .filter_map(|(_, value)| value.into_string().ok())
+        .filter(|value| !value.is_empty() && value != "[REDACTED]")
+        .map(String::into_bytes)
+        .collect()
+}
+
+fn mask_text(
+    text: &str,
+    field: &str,
+    credential: bool,
+    secrets: &[Vec<u8>],
+) -> Result<(String, Vec<String>), String> {
+    let spans = if credential && !text.is_empty() && text != "[REDACTED]" {
+        vec![0..text.len()]
+    } else {
+        provenant_confinement::redact::prose_spans(text.as_bytes(), secrets)
+            .map_err(|_| format!("invalid input field `{field}`: credential masking failed"))?
+    };
+    const MAX_SPAN_WARNINGS: usize = 32;
+    let mut safe = String::new();
+    let mut warnings = Vec::new();
+    let mut end = 0;
+    let count = spans.len();
+    for (index, span) in spans.into_iter().enumerate() {
+        safe.push_str(&text[end..span.start]);
+        safe.push_str("[REDACTED]");
+        if index < MAX_SPAN_WARNINGS {
+            warnings.push(format!(
+                "credential_masked: field `{field}` bytes {}..{}",
+                span.start, span.end
+            ));
+        } else if index == MAX_SPAN_WARNINGS {
+            warnings.push(format!(
+                "credential_masked: field `{field}` bytes {}..{}; {} additional spans masked (warnings bounded)",
+                span.start, span.end, count - MAX_SPAN_WARNINGS
+            ));
+        }
+        end = span.end;
+    }
+    safe.push_str(&text[end..]);
+    Ok((safe, warnings))
+}
+
+/// Schema-aware ingress. Prose assignments carry no credential authority;
+/// structured credential fields and ambient values do. Diagnostics contain
+/// paths and source byte spans, never the matching bytes.
+pub(super) fn input<T: Serialize + serde::de::DeserializeOwned>(
+    input: &T,
+    context: Context,
+) -> Result<(T, Vec<String>), String> {
+    input_with_secrets(input, context, ambient_credentials(), true)
+}
+
+/// Check freshly compiled text without re-entering captured input bookkeeping.
+pub(super) fn compiled<T: Serialize + serde::de::DeserializeOwned>(
+    value: &T,
+    context: Context,
+) -> Result<(T, Vec<String>), String> {
+    input_with_secrets(value, context, ambient_credentials(), false)
+}
+
+fn input_with_secrets<T: Serialize + serde::de::DeserializeOwned>(
+    input: &T,
+    context: Context,
+    mut secrets: Vec<Vec<u8>>,
+    trace: bool,
+) -> Result<(T, Vec<String>), String> {
+    fn collect(
+        value: &serde_json::Value,
+        context: Context,
+        credential: bool,
+        secrets: &mut Vec<Vec<u8>>,
+    ) {
+        let credential = credential || matches!(context, Context::CredentialContent);
+        match value {
+            serde_json::Value::String(text)
+                if credential && !text.is_empty() && text != "[REDACTED]" =>
+            {
+                secrets.push(text.as_bytes().to_vec());
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    collect(
+                        value,
+                        context.child(key),
+                        context.credential_child(key, credential),
+                        secrets,
+                    );
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect(value, context, credential, secrets);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn visit(
+        value: &mut serde_json::Value,
+        context: Context,
+        path: &str,
+        credential: bool,
+        secrets: &[Vec<u8>],
+        warnings: &mut Vec<String>,
+        trace: bool,
+    ) -> Result<(), String> {
+        let credential = credential || matches!(context, Context::CredentialContent);
+        match value {
+            serde_json::Value::String(text) => {
+                #[cfg(test)]
+                let trace_enabled = trace;
+                #[cfg(test)]
+                NORMALISATION_TRACE.with_borrow_mut(|trace| {
+                    if trace_enabled && let Some(trace) = trace {
+                        trace.push(text.clone());
+                    }
+                });
+                let (safe, found) = mask_text(text, path, credential, secrets)?;
+                if safe != *text && matches!(context, Context::Identity | Context::CiTarget) {
+                    let span = provenant_confinement::redact::prose_spans(text.as_bytes(), secrets)
+                        .map_err(|_| {
+                            format!("invalid input field `{path}`: credential masking failed")
+                        })?
+                        .into_iter()
+                        .next()
+                        .unwrap_or(0..text.len());
+                    return Err(format!(
+                        "invalid input field `{path}`: credential in immutable identity or object key at bytes {}..{}; pass the value by reference",
+                        span.start, span.end
+                    ));
+                }
+                *text = safe;
+                warnings.extend(found);
+            }
+            serde_json::Value::Array(values) => {
+                let child = if matches!(context, Context::Findings) {
+                    Context::Finding
+                } else {
+                    context
+                };
+                for (index, value) in values.iter_mut().enumerate() {
+                    visit(
+                        value,
+                        child,
+                        &format!("{path}.{index}"),
+                        credential,
+                        secrets,
+                        warnings,
+                        trace,
+                    )?;
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (index, (key, value)) in values.iter_mut().enumerate() {
+                    let key_path = format!("{path}.key.{index}");
+                    if let Some(span) =
+                        provenant_confinement::redact::prose_spans(key.as_bytes(), secrets)
+                            .map_err(|_| {
+                                format!(
+                                    "invalid input field `{key_path}`: credential masking failed"
+                                )
+                            })?
+                            .into_iter()
+                            .next()
+                    {
+                        return Err(format!(
+                            "invalid input field `{key_path}`: credential in immutable identity or object key at bytes {}..{}; pass the value by reference",
+                            span.start, span.end
+                        ));
+                    }
+                    let segment = if key.len() <= 64
+                        && key
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    {
+                        key.clone()
+                    } else {
+                        format!("key_{index}")
+                    };
+                    let child_path = if path.len() + segment.len() < 240 {
+                        format!("{path}.{segment}")
+                    } else {
+                        "graph.nested".into()
+                    };
+                    visit(
+                        value,
+                        context.child(key),
+                        &child_path,
+                        context.credential_child(key, credential),
+                        secrets,
+                        warnings,
+                        trace,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut value = serde_json::to_value(input)
+        .map_err(|_| "invalid input field `graph`: cannot encode input".to_owned())?;
+    collect(&value, context, false, &mut secrets);
+    secrets.sort();
+    secrets.dedup();
+    let mut warnings = Vec::new();
+    let path = if value.is_string() && matches!(context, Context::Content) {
+        "brief"
+    } else {
+        "graph"
+    };
+    visit(
+        &mut value,
+        context,
+        path,
+        false,
+        &secrets,
+        &mut warnings,
+        trace,
+    )?;
+    let safe = serde_json::from_value(value)
+        .map_err(|_| "invalid input field `graph`: cannot decode masked input".to_owned())?;
+    Ok((safe, warnings))
+}
+
+pub(super) fn retain_warnings(extra: &mut provenant_records::ExtraFields, warnings: Vec<String>) {
+    if !warnings.is_empty() {
+        let values = extra
+            .entry("input_warnings".into())
+            .or_insert_with(|| serde_json::json!([]));
+        if !values.is_array() {
+            *values = serde_json::json!([]);
+        }
+        if let Some(values) = values.as_array_mut() {
+            for warning in warnings {
+                let warning = serde_json::Value::String(warning);
+                if !values.contains(&warning) {
+                    values.push(warning);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -65,6 +326,9 @@ pub(super) enum Context {
     Source,
     TemplateMap,
     Template,
+    ParameterMap,
+    Parameter { credential: bool },
+    CredentialContent,
     Plan,
     Composite,
     Loop,
@@ -81,6 +345,13 @@ pub(super) enum Context {
 }
 
 impl Context {
+    fn credential_child(self, key: &str, inherited: bool) -> bool {
+        // Parameter names declare schema, not credential data. Only defaults
+        // and allowed values of credential parameters carry that declaration.
+        !matches!(self, Context::ParameterMap)
+            && (inherited || provenant_confinement::redact::credential_field(key))
+    }
+
     fn child(self, key: &str) -> Self {
         use Context::*;
         match (self, key) {
@@ -97,6 +368,12 @@ impl Context {
             (Document, "submission_patch") => Patch,
             (Document, "template_library") | (Patch, "templates") => TemplateMap,
             (TemplateMap, _) => Template,
+            (Template, "parameters") => ParameterMap,
+            (ParameterMap, name) => Parameter {
+                credential: provenant_confinement::redact::credential_field(name),
+            },
+            (Parameter { credential: true }, "default" | "allowed") => CredentialContent,
+            (Parameter { .. }, "type") => Identity,
             (Template, "name" | "tier") => Identity,
             (Template, "exports")
             | (Node, "inputs")
@@ -247,6 +524,108 @@ pub(super) fn captured_outputs(mut outputs: NodeOutputs) -> Result<NodeOutputs, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn brief_input_preserves_prose_and_masks_declared_credentials_with_spans() {
+        let prose = [
+            "the tests pass:",
+            "pass: run",
+            "password: run",
+            "confirm the delivery tests pass: run cargo fmt",
+            "review token=abc, password=xyz and secret: ordinary examples",
+            r#"describe the JSON example {"password":"abc"}"#,
+        ]
+        .join("\n");
+        let value = serde_json::json!({"nodes":[{"id":"work", "prompt":prose}]});
+        let (safe, warnings) =
+            input_with_secrets(&value, Context::Document, vec![], false).unwrap();
+        assert_eq!(safe, value);
+        assert!(warnings.is_empty());
+
+        let secret = "opaque-fixture-value";
+        let prompt = format!("é {secret} then token=abc");
+        let value = serde_json::json!({"nodes":[{"id":"work", "prompt":prompt,
+            "extension":{"api_key":{"value":secret}}}]});
+        // Typed values are also masked wherever interpolation/prose repeats them.
+        for supplied in [vec![], vec![secret.as_bytes().to_vec()]] {
+            let (safe, warnings) =
+                input_with_secrets(&value, Context::Document, supplied, false).unwrap();
+            assert_eq!(safe["nodes"][0]["prompt"], "é [REDACTED] then token=abc");
+            assert_eq!(
+                safe["nodes"][0]["extension"]["api_key"]["value"],
+                "[REDACTED]"
+            );
+            assert!(warnings.iter().any(|w| w
+                == &format!(
+                    "credential_masked: field `graph.nodes.0.prompt` bytes 3..{}",
+                    3 + secret.len()
+                )));
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains("graph.nodes.0.extension.api_key.value")
+                        && w.ends_with(&format!("0..{}", secret.len())))
+            );
+            assert!(
+                !serde_json::to_string(&(safe.clone(), warnings))
+                    .unwrap()
+                    .contains(secret)
+            );
+            let (again, warnings) =
+                input_with_secrets(&safe, Context::Document, vec![], false).unwrap();
+            assert_eq!(again, safe);
+            assert!(warnings.is_empty());
+        }
+        let definition = serde_json::json!({"templates":{"task":{"parameters":{
+            "api_key":{"type":"string", "doc":"token=abc is an example", "default":secret}
+        }}}});
+        let (safe, _) = input_with_secrets(&definition, Context::Patch, vec![], false).unwrap();
+        assert_eq!(
+            safe["templates"]["task"]["parameters"]["api_key"]["type"],
+            "string"
+        );
+        assert_eq!(
+            safe["templates"]["task"]["parameters"]["api_key"]["doc"],
+            "token=abc is an example"
+        );
+        assert_eq!(
+            safe["templates"]["task"]["parameters"]["api_key"]["default"],
+            "[REDACTED]"
+        );
+        let many = "x ".repeat(1000);
+        let (safe, warnings) = mask_text(&many, "brief", false, &[b"x".to_vec()]).unwrap();
+        assert!(!safe.contains('x'));
+        assert!(warnings.len() <= 33);
+        assert!(warnings.last().unwrap().contains("additional spans masked"));
+        // Ambient values need no token shape and no typed field in the document.
+        let (safe, warnings) = input_with_secrets(
+            &serde_json::json!({"prompt":prompt}),
+            Context::Content,
+            vec![secret.as_bytes().to_vec()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(safe["prompt"], "é [REDACTED] then token=abc");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn graph_input_identity_refusal_names_field_span_and_reason_without_value() {
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        for value in [
+            serde_json::json!({"nodes":[{"id":secret, "prompt":"work"}]}),
+            serde_json::json!({secret:"extension"}),
+        ] {
+            let error = input_with_secrets(&value, Context::Document, vec![], false).unwrap_err();
+            assert!(error.starts_with("invalid input field `graph."));
+            assert!(
+                error.contains("credential in immutable identity or object key at bytes 0..20")
+            );
+            assert!(!error.contains(secret));
+        }
+    }
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]

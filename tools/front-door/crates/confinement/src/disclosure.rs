@@ -2,11 +2,8 @@
 //!
 //! Callers use this before sealing a prompt. A match refuses without naming
 //! the matching text.
-use crate::redact::{Redactor, RedactorError};
-use provenant_os::exec::CaptureFilter;
+use crate::redact::{Redactor, RedactorError, prose_spans};
 use thiserror::Error;
-
-const BUFFER_SIZE: usize = 16 * 1024;
 
 #[derive(Debug, Error)]
 pub enum DisclosureError {
@@ -17,25 +14,16 @@ pub enum DisclosureError {
 }
 
 /// Scan one exact in-memory snapshot, such as a prompt about to be sealed,
-/// with the same secret patterns. A match refuses without naming the text.
+/// for credential tokens and declared secret values. Assignment-like prose is
+/// not a credential declaration. A match refuses without naming the text.
 pub fn scan_snapshot(bytes: &[u8], known_secrets: &[Vec<u8>]) -> Result<(), DisclosureError> {
-    let mut redactor =
-        Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
-    for chunk in bytes.chunks(BUFFER_SIZE) {
-        redactor
-            .filter(chunk, &mut |_| {})
-            .map_err(|_| DisclosureError::SecretMatch)?;
-        if redactor.has_redaction() {
-            return Err(DisclosureError::SecretMatch);
-        }
+    Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
+    let spans = prose_spans(bytes, known_secrets).map_err(|_| DisclosureError::SecretMatch)?;
+    if spans.is_empty() {
+        Ok(())
+    } else {
+        Err(DisclosureError::SecretMatch)
     }
-    redactor
-        .finish(&mut |_| {})
-        .map_err(|_| DisclosureError::SecretMatch)?;
-    if redactor.has_redaction() {
-        return Err(DisclosureError::SecretMatch);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -46,6 +34,15 @@ mod tests {
     fn snapshot_refuses_known_secrets_without_returning_content() {
         let result = scan_snapshot(b"private token-abc-123", &[b"token-abc-123".to_vec()]);
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn prompt_sealing_preserves_prose_but_still_refuses_credential_tokens() {
+        for text in ["the tests pass:", "pass: run", "password: run", "token=abc"] {
+            assert!(scan_snapshot(text.as_bytes(), &[]).is_ok());
+        }
+        assert!(scan_snapshot(b"AKIAIOSFODNN7EXAMPLE", &[]).is_err());
     }
 
     #[test]

@@ -10,6 +10,73 @@ use std::{
 };
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn brief_input_masks_real_credentials_and_preserves_review_examples() -> Result {
+    fn has_prompt(value: &Value, prose: &str) -> bool {
+        match value {
+            Value::Object(fields) => {
+                fields
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.contains(prose))
+                    || fields.values().any(|value| has_prompt(value, prose))
+            }
+            Value::Array(values) => values.iter().any(|value| has_prompt(value, prose)),
+            _ => false,
+        }
+    }
+    let rig = GraphProject::new()?;
+    let examples = "confirm the delivery tests pass: run cargo fmt\npass: run\npassword: run\nthe tests pass:\nreview token=abc and secret: ordinary placeholders";
+    let path = rig.project.join("brief.md");
+    for template in ["task", "implement"] {
+        std::fs::write(&path, examples)?;
+        let mut command = rig.command();
+        command
+            .args(["run", template, "--brief-file"])
+            .arg(&path)
+            .arg("--explain");
+        if template == "implement" {
+            command.arg("--worktree").arg(&rig.project);
+        }
+        let output = command.output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{template}: {value}");
+        let document = &value["data"]["document"];
+        assert!(has_prompt(&document["nodes"], examples), "{value}");
+        assert!(document.get("input_warnings").is_none(), "{value}");
+
+        let secret = "opaque-ambient-fixture-value";
+        let brief = format!("{examples}\n{secret}");
+        std::fs::write(&path, &brief)?;
+        let mut command = rig.command();
+        command
+            .env("BRIEF_FIXTURE_TOKEN", secret)
+            .args(["run", template, "--brief-file"])
+            .arg(&path)
+            .arg("--explain");
+        if template == "implement" {
+            command.arg("--worktree").arg(&rig.project);
+        }
+        let output = command.output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{template}: {value}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+        let warnings = value["data"]["document"]["input_warnings"]
+            .as_array()
+            .ok_or("missing masking warnings")?;
+        assert!(
+            warnings
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|warning| warning.contains("field `graph.nodes.0.")
+                    && warning.contains(&format!("bytes {}..{}", examples.len() + 1, brief.len()))),
+            "{value}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     use std::io::Write;
@@ -1320,6 +1387,7 @@ fn assert_compile_refusal_matches(
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let rig = GraphProject::new()?;
@@ -1337,7 +1405,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
         "swarm",
         &document,
         "schema_version = 1\n",
-        "graph input could not be processed",
+        "invalid input field `over`: requires 1..=256 items",
     )?;
 
     // A graph that compiles to more nodes than the state admits: the template

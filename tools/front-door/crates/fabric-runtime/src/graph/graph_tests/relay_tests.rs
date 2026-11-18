@@ -181,8 +181,13 @@ fn rich_child_attempt_controls_define_replay_identity_and_reach_the_launch() {
             "prompt":"Inspect launch policy", "route":{"alias":"senior"},
             "attempt":spec
         }),
+        input_warnings: vec!["credential_masked: field `graph.nodes.0.prompt` bytes 2..22".into()],
     });
     let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    assert!(checkpoint.expansions[0].floor_warnings.iter().any(|warning|
+        warning == "credential_masked: field `graph.nodes.0.prompt` bytes 2..22"));
+
     // The durable request identity must survive a checkpoint reload.
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
@@ -339,6 +344,7 @@ fn child_decision_inherits_the_graph_chair_session() {
                 {"id":"hold", "label":"Hold"}
             ]}
         }),
+        input_warnings: Vec::new(),
     });
     let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
     let mut owner = FakeOwner {
@@ -394,9 +400,7 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         ("a", child("child", "depth-limit"), "child_depth"),
         (
             "a",
-            {
-                child("AKIAIOSFODNN7EXAMPLE", "secret-child")
-            },
+            { child("AKIAIOSFODNN7EXAMPLE", "secret-child") },
             "invalid",
         ),
     ] {
@@ -1874,6 +1878,7 @@ fn rich_detached_children_keep_their_subtree_after_parent_and_graph_cancellation
         node: json!({"id":"detached", "kind":"composite", "access":"read_only",
             "composite":{"nodes":[{"id":"work", "access":"read_only", "prompt":"Inspect", "route":{"alias":"senior"}}],
                 "exports":[{"node":"work", "outputs":["result"]}]}}),
+        input_warnings: Vec::new(),
     });
     add(&document, &mut checkpoint, "a", &request).unwrap();
     let stopped = cancel_subtree(&document, &mut checkpoint, "a").unwrap();

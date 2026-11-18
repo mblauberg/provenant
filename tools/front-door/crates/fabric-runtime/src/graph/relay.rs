@@ -28,6 +28,8 @@ pub struct ChildLaunch {
     pub node: Value,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub templates: std::collections::BTreeMap<String, template::Template>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_warnings: Vec<String>,
 }
 
 /// A lane's request to add one child to its graph.
@@ -609,6 +611,7 @@ fn child_patch(
             schema_version: PATCH_SCHEMA_VERSION,
             idempotency_key: Some(request.idempotency_key.clone()),
             reason: request.reason.clone(),
+            input_warnings: launch.input_warnings.clone(),
             templates: launch.templates.clone(),
             nodes: vec![compiled],
             ..Default::default()

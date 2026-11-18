@@ -420,38 +420,43 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 Admission bounds the worst-case checkpoint before saving the plan.
-Graph text is normalised exactly once, at ingress, by schema path.
-`prompt_text::Context` enumerates identity positions (finding IDs, files and
-propagation markers, repair item IDs, node references, routes, template names
-and sources). Identity fields and all object keys are scanned across the whole
-new structured capture, including fields omitted by typed projections. A
-credential-shaped identity or key refuses that capture as invalid output; it is
-never rewritten. Only declared scalar identity fields retain their bytes: a route
-or source object does not exempt its extension values. Every other string is
-content, including flattened extension maps and template or parameter
-documentation. Content descendants cannot re-enter a schema context through
-identity-like keys. Live patches, retry briefs and CI observations use this
-representation before planning or hashing. A steer normalises only its new
-brief and replacement routes, preserving the rest of its stored node.
+Graph text is normalised at ingress by schema path, before planning or hashing.
+Brief and graph input follows warn-before-refuse: credential-shaped assignments
+in prose, including `pass: run`, empty `pass:` and quoted placeholder examples,
+retain their original bytes. Only structured credential fields, exact values
+from credential-named environment variables, and recognised credential tokens
+establish a credential value. These are masked in new content, with warnings
+naming the field and half-open byte span in the original UTF-8 string, never the
+value. Typed credential values are also masked wherever repeated in new prose.
+Warnings are retained with the submission or patch and exposed in graph status.
+`prompt_text::Context` enumerates immutable identity positions (finding IDs,
+files and propagation markers, repair item IDs, node references, routes,
+template names and sources). A credential in an identity or object key refuses
+with its field, span, reason and advice to pass the value by reference, because
+rewriting that value could silently break references. Untrusted diagnostic text
+is never disclosed: the facade projects only approved field/rule diagnostics,
+or a graph-field validation reason when the underlying error is unclassified.
+Every other string is content, including flattened extension maps and template
+or parameter documentation. Content descendants cannot re-enter a schema
+context through identity-like keys. A steer processes only its new brief and
+replacement routes, preserving the rest of its stored node.
 Captured findings are parsed and normalised before merging stored upstream
 evidence; the remaining fresh capture projection (including handoff fields and
 repair item extensions) is normalised once before becoming graph outputs.
 Raw transient captures remain available to parse new patches at their own
-ingress, and never become persisted graph text. Captured fragments are parsed,
-normalised and scanned before storage; retries parse stored fragments without
-normalising them again. Template substitutions are scanned after interpolation,
-and each new admission's compiled expansion is scanned before commit, since
-separately safe fragments can assemble a credential. Scanning preserves original
-bytes and token boundaries, including beside redaction markers. Only an assignment
-value that is exactly a redaction marker is already redacted; a marker prefix
-never exempts further value bytes. This never rewrites stored
-nodes or prior expansions. Typed handoffs are normalised at capture before any
-consumer retains them. Checkpoints persist
-the normalised form. Compaction retains parsed, normalised findings as typed
+ingress, and never become persisted graph text. Captured fragments retain their
+masking warnings before storage; retries parse stored fragments unchanged.
+Template substitution does not scan prose assignments. Each newly compiled
+submission or expansion passes through field-aware masking before admission,
+since separately safe fragments can assemble a credential. This checks only the
+new product, never stored nodes or prior expansions. Token scanning preserves
+original boundaries, including beside redaction markers. Captured output retains
+its conservative redaction rules. Typed handoffs are normalised at capture before
+any consumer retains them. Checkpoints persist the normalised form. Compaction retains parsed, normalised findings as typed
 values in content-addressed storage. Resume never fills templates or rewrites a
 sealed submission. A resume path or document hash selects the retained graph
-identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
-another normalisation pass. Every strict read and every digest check verifies the
+identity and its sealed execution, just as an exact graph ID does. Journal
+binding and compilation move admitted text without another normalisation pass. Every strict read and every digest check verifies the
 stored bytes as stored and never normalises again. Normalising is idempotent.
 Content-addressed storage only externalises bytes and never rewrites digested
 content. The journal strictly validates the stored representation before

@@ -112,6 +112,35 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         .collect();
     action.sort_by_key(|(_, state, _)| rank(state));
     let mut rows: Vec<String> = Vec::new();
+    if let Some(warnings) = checkpoint
+        .get("input_warnings")
+        .and_then(serde_json::Value::as_array)
+    {
+        rows.extend(
+            warnings
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(bounded_reason),
+        );
+    }
+    if let Some(expansions) = checkpoint
+        .get("expansions")
+        .and_then(serde_json::Value::as_array)
+    {
+        for expansion in expansions {
+            if let Some(warnings) = expansion
+                .get("floor_warnings")
+                .and_then(serde_json::Value::as_array)
+            {
+                rows.extend(
+                    warnings
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(bounded_reason),
+                );
+            }
+        }
+    }
     if let Some(reason) = checkpoint
         .get("pause")
         .and_then(|pause| text(pause, "reason"))
@@ -283,6 +312,21 @@ mod test_presentation {
             .flat_map(|node| node.children.iter())
             .collect();
         let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
+        if let Some(warnings) = run
+            .checkpoint
+            .extra
+            .get("input_warnings")
+            .and_then(serde_json::Value::as_array)
+        {
+            for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
+                human.push_str(&format!("Warning: {}\n", bounded_reason(warning)));
+            }
+        }
+        for expansion in &run.checkpoint.expansions {
+            for warning in &expansion.floor_warnings {
+                human.push_str(&format!("Warning: {}\n", bounded_reason(warning)));
+            }
+        }
         if full && run.checkpoint.bases.is_some() {
             let bases = run.checkpoint.bases.unwrap_or_default();
             human.push_str(&format!(

@@ -369,10 +369,7 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::OperationFailed => Some("graph operation failed".into()),
-            Self::GraphReason(reason) => Some(
-                safe_template_name_error(reason)
-                    .unwrap_or_else(|| "graph input could not be processed".into()),
-            ),
+            Self::GraphReason(reason) => Some(safe_graph_reason_text(reason)),
             Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
@@ -402,6 +399,168 @@ impl InvalidInputDetail {
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
         }
     }
+}
+
+/// Project only explicitly recognised graph diagnostics. Arbitrary parser or
+/// validator prose may contain user input, so it receives a useful generic
+/// field and reason instead of being echoed or hidden behind an opaque error.
+fn safe_graph_reason_text(reason: &str) -> String {
+    if let Some(template) = safe_template_name_error(reason) {
+        return template;
+    }
+    if let Some(ingress) = safe_graph_ingress_error(reason) {
+        return ingress;
+    }
+    "invalid input field `graph`: validation failed; inspect graph structure and template parameters".into()
+}
+
+/// A safe wire fact is either a resolver-approved template diagnostic or an
+/// exact ingress diagnostic from the allowlist below.
+fn safe_graph_reason_fact(reason: &str) -> Option<String> {
+    safe_template_name_error(reason)
+        .or_else(|| safe_graph_ingress_field_error(reason))
+        .or_else(|| safe_graph_ingress_fixed_fact(reason))
+}
+
+/// New graph ingress errors are deliberately a small, exact allowlist. The
+/// identity diagnostic carries only a schema path and byte span, never the
+/// offending value. The remaining messages are fixed internal failures.
+fn safe_graph_ingress_error(reason: &str) -> Option<String> {
+    if let Some(field_error) = safe_graph_ingress_field_error(reason) {
+        return Some(field_error);
+    }
+    safe_graph_ingress_fixed_fact(reason)
+}
+
+fn safe_graph_ingress_field_error(reason: &str) -> Option<String> {
+    const IDENTITY_PREFIX: &str = "invalid input field `";
+    const IDENTITY_MIDDLE: &str = "`: credential in immutable identity or object key at bytes ";
+    const IDENTITY_SUFFIX: &str = "; pass the value by reference";
+
+    if let Some(rest) = reason.strip_prefix(IDENTITY_PREFIX) {
+        if let Some(path) = rest.strip_suffix("`: credential masking failed") {
+            let path = safe_graph_path(path)?;
+            return Some(format!(
+                "invalid input field `{path}`: credential masking failed"
+            ));
+        }
+        let (path, rest, rule) = if let Some((path, rest)) = rest.split_once(IDENTITY_MIDDLE) {
+            (path, rest, "credential in immutable identity or object key")
+        } else {
+            let (path, rest) = rest.split_once("`: unmasked credential token at bytes ")?;
+            (path, rest, "unmasked credential token")
+        };
+        let path = safe_graph_path(path)?;
+        let span = rest.strip_suffix(IDENTITY_SUFFIX)?;
+        let (start, end) = span.split_once("..")?;
+        if start.is_empty()
+            || end.is_empty()
+            || !start.bytes().all(|byte| byte.is_ascii_digit())
+            || !end.bytes().all(|byte| byte.is_ascii_digit())
+            || start.parse::<usize>().ok()? >= end.parse::<usize>().ok()?
+        {
+            return None;
+        }
+        return Some(format!(
+            "invalid input field `{path}`: {rule} at bytes {start}..{end}; pass the value by reference"
+        ));
+    }
+    None
+}
+
+fn safe_graph_ingress_fixed_fact(reason: &str) -> Option<String> {
+    let over = format!(
+        "requires 1..={} items",
+        crate::graph::template::MAX_OVER_ITEMS
+    );
+    let field_error = format!("invalid input field `over`: {over}");
+    if reason == format!("`over` {over}") || reason == field_error {
+        return Some(field_error);
+    }
+    let projected = safe_graph_ingress_fixed_reason(reason)
+        .map(|message| format!("invalid input field `graph`: {message}"));
+    projected.or_else(|| match reason {
+        "invalid input field `graph`: cannot encode input"
+        | "invalid input field `graph`: cannot decode masked input" => Some(reason.to_owned()),
+        _ => None,
+    })
+}
+
+fn safe_graph_ingress_fixed_reason(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "graph text redaction failed" => "credential redaction failed",
+        "graph text redaction produced invalid UTF-8" => {
+            "credential redaction produced invalid UTF-8"
+        }
+        "cannot encode graph text" => "graph text could not be encoded",
+        "cannot decode normalised graph text" => "normalised graph text could not be decoded",
+        "graph text matches a secret pattern" => {
+            "credential remained after graph text normalisation"
+        }
+        "invalid input field `brief`: credential masking failed" => "credential masking failed",
+        "invalid input field `graph`: cannot encode graph text" => {
+            "graph text could not be encoded"
+        }
+        "invalid input field `graph`: cannot decode masked graph text" => {
+            "masked graph text could not be decoded"
+        }
+        _ => return None,
+    })
+}
+
+/// A bounded schema-like path: ASCII field names, dots and indexes.
+fn safe_graph_path(path: &str) -> Option<&str> {
+    if path.is_empty() || path.len() > 256 || !path.is_ascii() {
+        return None;
+    }
+    for segment in path.split(['.', '[', ']']).filter(|part| !part.is_empty()) {
+        if !provenant_confinement::redact::prose_spans(segment.as_bytes(), &[])
+            .ok()?
+            .is_empty()
+        {
+            return None;
+        }
+    }
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    let mut needs_field = true;
+    while index < bytes.len() {
+        if needs_field {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphabetic()
+                    || bytes[index].is_ascii_digit()
+                    || bytes[index] == b'_'
+                    || bytes[index] == b'-')
+            {
+                index += 1;
+            }
+            if index == start {
+                return None;
+            }
+            needs_field = false;
+        } else {
+            match bytes[index] {
+                b'.' => {
+                    index += 1;
+                    needs_field = true;
+                }
+                b'[' => {
+                    index += 1;
+                    let start = index;
+                    while index < bytes.len() && bytes[index].is_ascii_digit() {
+                        index += 1;
+                    }
+                    if index == start || bytes.get(index) != Some(&b']') {
+                        return None;
+                    }
+                    index += 1;
+                }
+                _ => return None,
+            }
+        }
+    }
+    (!needs_field).then_some(path)
 }
 
 /// Template lookup failures are safe to disclose only in the exact form the
@@ -914,7 +1073,7 @@ impl FacadeError {
             Self::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(reason)) }
             | Self::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(reason)), .. } => {
                 let detail = safe_template_name_error(reason)
-                    .unwrap_or_else(|| "graph input could not be processed".into());
+                    .unwrap_or_else(|| safe_graph_reason_text(reason));
                 let next = if detail.starts_with("unknown template ") {
                     "use one of the listed template names and retry"
                 } else {
@@ -1312,7 +1471,7 @@ mod invalid_detail_wire {
             map.serialize_entry("detail", &text)?;
             let safe_fact = match fact {
                 InvalidInputDetail::GraphReason(reason) => InvalidInputDetail::GraphReason(
-                    super::safe_template_name_error(reason).unwrap_or_default(),
+                    super::safe_graph_reason_fact(reason).unwrap_or_default(),
                 ),
                 fact => fact.redacted(),
             };
@@ -1581,7 +1740,10 @@ mod diagnostic_tests {
             let wire = serde_json::to_value(&error)?;
             let text = wire["detail"].as_str().ok_or("detail")?;
             let fact = wire["detail_fact"]["value"].as_str().ok_or("fact")?;
-            assert_eq!(text, "graph input could not be processed");
+            assert_eq!(
+                text,
+                "invalid input field `graph`: validation failed; inspect graph structure and template parameters"
+            );
             assert!(fact.is_empty());
             assert!(!fact.chars().any(char::is_control));
             assert!(fact.chars().count() <= 4096);
@@ -1636,6 +1798,47 @@ mod diagnostic_tests {
         );
         let wire = serde_json::to_value(&projected)?;
         assert_eq!(wire["detail"], no_flavours);
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn graph_ingress_refusals_round_trip_only_safe_fields_and_spans()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            "invalid input field `nodes[0].id`: credential in immutable identity or object key at bytes 12..34; pass the value by reference",
+            "invalid input field `nodes[0].prompt`: credential masking failed",
+            "invalid input field `graph`: unmasked credential token at bytes 4..24; pass the value by reference",
+            "invalid input field `graph`: cannot encode input",
+            "invalid input field `graph`: cannot decode masked input",
+        ] {
+            let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(reason));
+            assert_eq!(error.diagnostic().detail.as_deref(), Some(reason));
+
+            let wire = serde_json::to_value(&error)?;
+            assert_eq!(wire["detail"], reason);
+            assert_eq!(wire["detail_fact"]["value"], reason);
+            let restored: FacadeError = serde_json::from_value(wire)?;
+            assert_eq!(restored.diagnostic().detail.as_deref(), Some(reason));
+        }
+
+        for path in [
+            "nodes[0].id/sk-abcdefghijklmnopqrstuvwx",
+            "graph.sk-abcdefghijklmnopqrstuvwx",
+        ] {
+            let hostile = format!(
+                "invalid input field `{path}`: credential in immutable identity or object key at bytes 12..34; pass the value by reference"
+            );
+            let refused = FacadeError::invalid(super::InvalidInputDetail::graph_reason(hostile));
+            assert_eq!(
+                refused.diagnostic().detail.as_deref(),
+                Some(
+                    "invalid input field `graph`: validation failed; inspect graph structure and template parameters"
+                )
+            );
+            assert!(!serde_json::to_string(&refused)?.contains("sk-abcdefghijklmnopqrstuvwx"));
+        }
+
         Ok(())
     }
 

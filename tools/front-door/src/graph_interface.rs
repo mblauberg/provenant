@@ -237,6 +237,27 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     ) {
         lanes += &format!("{taken} exists with different input; started {graph}\n");
     }
+    let warnings = data["checkpoint"]["input_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let expansion_warnings = data["checkpoint"]["expansions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|expansion| expansion.get("floor_warnings").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str);
+    for warning in warnings.chain(expansion_warnings).take(2) {
+        lanes += &format!(
+            "warning: {}\n",
+            provenant_confinement::redact::bounded_line(
+                warning,
+                provenant_cli::limits::SUMMARY_ROW_BYTES.saturating_sub(9),
+            )
+        );
+    }
     lanes += &refusal_lines(&data["checkpoint"]);
     if announced {
         format!("{lanes}next: {next}\n")
@@ -262,7 +283,7 @@ fn invoke(
                 message: projection
                     .detail
                     .clone()
-                    .unwrap_or_else(|| "graph input could not be processed".into()),
+                    .unwrap_or_else(|| "invalid input field `graph`: validation failed; inspect graph structure and template parameters".into()),
                 cause: None,
                 repair: projection.next,
             });
@@ -422,7 +443,7 @@ fn invoke(
                 message: projection
                     .detail
                     .clone()
-                    .unwrap_or_else(|| "graph input could not be processed".into()),
+                    .unwrap_or_else(|| "invalid input field `graph`: validation failed; inspect graph structure and template parameters".into()),
                 cause: Some(
                     facade
                         .and_then(|error| error.cause())
@@ -1160,6 +1181,23 @@ mod tests {
                 );
                 assert!(human.lines().count() <= provenant_cli::limits::SUMMARY_ROWS + 4);
             }
+        }
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn run_receipt_reports_masking_field_and_span() {
+        let warning = "credential_masked: field `graph.nodes.0.prompt` bytes 3..23";
+        let expansion_warning = "credential_masked: field `graph.nodes.1.prompt` bytes 5..25";
+        let data = json!({"status":"pending", "checkpoint":{
+            "graph_id":"g", "nodes":[], "input_warnings":[warning],
+            "expansions":[{"floor_warnings":[expansion_warning]}]
+        }});
+        for announced in [false, true] {
+            let human = run_human(&data, &json!({"op":"run"}), announced);
+            assert!(human.contains(warning));
+            assert!(human.contains(expansion_warning));
+            assert!(human.ends_with("next: provenant wait g\n"));
         }
     }
 

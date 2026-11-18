@@ -397,8 +397,8 @@ fn block<'a>(
 /// saved fragment is already admitted text and bypasses this function on replay.
 fn normalise_fragment(json: &str) -> Result<String, String> {
     let value = super::patch::Patch::from_fragment(json)?;
-    let value =
-        prompt_text::normalise(&value, prompt_text::Context::Patch).map_err(str::to_owned)?;
+    let (mut value, warnings) = prompt_text::input(&value, prompt_text::Context::Patch)?;
+    value.input_warnings.extend(warnings);
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 

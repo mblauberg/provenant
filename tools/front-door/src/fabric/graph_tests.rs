@@ -2098,7 +2098,7 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_status_full_shows_node_warnings() {
+    fn graph_status_shows_input_and_output_warnings() {
         let mut run = graph_status_fixture();
         run.checkpoint.nodes[0].outputs = Some(serde_json::from_value(serde_json::json!({
             "schema_version": 1, "result": null, "verdict": null, "findings": [],
@@ -2108,6 +2108,19 @@ mod result_tests {
             super::graph_human::graph_human_full(&run)
                 .contains("warning: equal_base_and_head: review range is empty")
         );
+        // Spec: docs/specs/fabric.md#checkpoint-envelope
+        let warning = "credential_masked: field `graph.nodes.0.prompt` bytes 3..23";
+        run.checkpoint
+            .extra
+            .insert("input_warnings".into(), serde_json::json!([warning]));
+        assert!(super::graph_human(&run).contains(warning));
+        let mut value = serde_json::to_value(&run).unwrap();
+        let expansion_warning = "credential_masked: field `graph.nodes.1.prompt` bytes 5..25";
+        value["checkpoint"]["expansions"] =
+            serde_json::json!([{"floor_warnings":[expansion_warning]}]);
+        let summary = super::graph_human::graph_summary(&value).lines.join("\n");
+        assert!(summary.contains(warning));
+        assert!(summary.contains(expansion_warning));
     }
 
     #[test]

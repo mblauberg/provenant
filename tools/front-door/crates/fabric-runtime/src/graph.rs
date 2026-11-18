@@ -60,7 +60,7 @@ pub mod when;
 #[doc(hidden)]
 pub use next_step::{DepletionFacts, DepletionRequest};
 pub use plans::prompt as rendered_prompt;
-pub use prompt_text::normalise_prompt_text;
+pub use prompt_text::{normalise_brief, normalise_graph_input, normalise_prompt_text};
 pub use validation::minimum_schema_version;
 pub use when::WhenTerm;
 #[cfg(test)]

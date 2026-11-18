@@ -2014,9 +2014,7 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(
         run.checkpoint.plan_digest,
-        plan_digest(&base)
-            .unwrap()
-            .to_string()
+        plan_digest(&base).unwrap().to_string()
     );
 }
 
@@ -3389,12 +3387,19 @@ fn live_patch_normalises_docs_and_extensions_once() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
+fn secret_scan_preserves_prose_assignments_and_detects_credential_tokens() {
     for text in [
         "token=[REDACTED]",
         "token=[REDACTED] next",
         r#"{"prompt":"token=[REDACTED] next"}"#,
         r#"{"token":"[REDACTED]"}"#,
+        "token=[REDACTED]secret",
+        "token=[REDACTED",
+        "token=PROVENANTMASK",
+        "token=secret",
+        "pass: run",
+        "password: run",
+        "the tests pass:",
     ] {
         assert!(patch::scan_for_secrets(text).is_ok());
     }
@@ -3410,15 +3415,7 @@ fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
     )
     .unwrap();
     assert_eq!(admitted.revision, 1);
-    for text in [
-        "token=[REDACTED]secret",
-        "token=[REDACTED",
-        "token=PROVENANTMASK",
-        "token=secret",
-        "AKIAIOSFODNN7EXAMPLE",
-    ] {
-        assert!(patch::scan_for_secrets(text).is_err());
-    }
+    assert!(patch::scan_for_secrets("AKIAIOSFODNN7EXAMPLE").is_err());
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
@@ -3436,7 +3433,7 @@ fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
+fn split_credentials_are_masked_after_live_and_captured_patch_compilation() {
     // Build synthetic token shapes from parts; no usable credentials in fixtures.
     let suffix = "Z".repeat(16);
     let github_suffix = "q".repeat(36);
@@ -3461,33 +3458,30 @@ fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
             "nodes": nodes});
                 assert!(!patch.to_string().contains(&secret));
                 let (document, mut checkpoint) = running_graph();
-                let before = checkpoint.clone();
-                let error = admit_with(
+                admit_with(
                     &document,
                     &mut checkpoint,
                     None,
                     patch.clone(),
                     &patch::scan_for_secrets,
                 )
-                .unwrap_err();
-                assert!(error.to_string().contains("secret pattern"), "{error}");
-                assert!(!error.to_string().contains(&secret));
-                assert_eq!(checkpoint, before, "live refusal is atomic");
+                .unwrap();
+                assert_eq!(checkpoint.expansions.len(), 1);
+                assert!(!checkpoint.expansions[0].floor_warnings.is_empty());
+                let stored = serde_json::to_string(&checkpoint).unwrap();
+                assert!(!stored.contains(&secret));
+                assert!(stored.contains("[REDACTED]"));
 
                 let document = planner(8);
                 let output = format!("```fragment\n{patch}\n```");
                 let mut journal = MemoryJournal::default();
                 let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
-                assert_eq!(run.status, GraphStatus::Paused);
-                assert!(run.checkpoint.expansions.is_empty());
+                assert!(!run.checkpoint.expansions.is_empty());
                 assert!(
-                    run.checkpoint.nodes[0]
-                        .outputs
-                        .as_ref()
-                        .unwrap()
-                        .warnings
+                    run.checkpoint
+                        .expansions
                         .iter()
-                        .any(|warning| warning.contains("secret pattern"))
+                        .any(|e| !e.floor_warnings.is_empty())
                 );
                 assert!(
                     !serde_json::to_string(&run.checkpoint)
@@ -3497,7 +3491,7 @@ fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
                 let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
                 assert_eq!(
                     replay.checkpoint, run.checkpoint,
-                    "stored refusal replays unchanged"
+                    "stored masked expansion replays unchanged"
                 );
             }
         }
