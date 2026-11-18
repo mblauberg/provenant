@@ -2964,6 +2964,7 @@ mod policy_reporting_tests {
                 .unwrap(),
                 cargo_target_seed: false,
                 state_root: "/fixture/state".into(),
+                roots: None,
                 sandbox: inherited_sandbox,
                 backend: None,
                 cargo_target: Default::default(),

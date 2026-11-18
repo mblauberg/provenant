@@ -197,7 +197,7 @@ fn sync_one(
             .ok_or("cannot resolve pull request head")?;
         if observed.trim() != pull.head.sha {
             return Err(format!(
-            "worktree branch {} is at {}, forge head is {}; synchronize the branch before retrying",
+            "worktree branch {} is at {}, forge head is {}; synchronise the branch before retrying",
             pull.head.name,
             observed.trim(),
             pull.head.sha
@@ -296,7 +296,7 @@ fn sync_one(
         }
         let current_head = git
             .full(&path, &["rev-parse", "HEAD"])?
-            .ok_or("cannot resolve synchronized head")?
+            .ok_or("cannot resolve synchronised head")?
             .trim()
             .to_owned();
         let base_head = git
@@ -313,7 +313,7 @@ fn sync_one(
             None => git.remote_of(&path, &pull.head.name)?,
         };
         if !git.run(&path, &["push", &push_remote, &remote_branch])?.0 {
-            return Err("push of synchronized pull request branch failed".into());
+            return Err("push of synchronised pull request branch failed".into());
         }
         super::landing::receipt::write_approval_carry(
             state,
@@ -509,7 +509,7 @@ fn bound_project(
         )?
         .location;
     let binding = provenant_config::lookup_project(&resolved.roots, &location)?
-        .ok_or("project is unbound; register it before synchronizing a pull request")?;
+        .ok_or("project is unbound; register it before synchronising a pull request")?;
     let layout = roots::project_layout_read_only(&resolved.roots, project)?;
     let layout_root = layout
         .project()

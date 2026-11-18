@@ -853,6 +853,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     .unwrap(),
                 cargo_target_seed: false,
                 state_root: self.state.clone(),
+                roots: None,
                 // The test's fake handoff never starts a provider. Keep the
                 // writer revalidation path independent of native backend
                 // availability on hosts without macOS sandbox support.
