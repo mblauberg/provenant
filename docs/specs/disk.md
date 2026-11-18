@@ -2,8 +2,10 @@
 
 Owner: `crates/os/src/disk.rs` (measurement), `crates/confinement/src/disk.rs`
 (lane classes), `crates/run/src/disk.rs` (run inventory), `src/disk.rs`
-(composition)
-Anchor: `crates/os/src/disk.rs`, `crates/run/src/disk.rs`
+(composition), `src/gc_sweep.rs` (sweep custody),
+`crates/run/src/build_dir_gc.rs` (Cargo targets),
+`crates/run/src/retention.rs` (scratch)
+Anchor: `crates/os/src/disk.rs`, `crates/run/src/disk.rs`, `src/gc_sweep.rs`
 
 `provenant disk report` inventories lane caches, worktrees and the host state
 root; `DiskReport` documents the fields and the [disk and GC runbook](../runbooks/gc.md)
