@@ -123,6 +123,20 @@ fn apply_provider_identity(
     decoded: &mut Decoded,
     _policy: &provenant_records::policy::Policy,
 ) {
+    let unsettle = |decoded: &mut Decoded, reason: &str| {
+        decoded.outcome = Outcome::Unsettled;
+        decoded.complete = false;
+        // Replay identified the precise defect already. Identity uncertainty
+        // must retain that safe typed location, not replace it with a generic
+        // message. Conflicting identity still takes priority below.
+        if !matches!(
+            decoded.terminal_cause,
+            Some(TerminalCause::ProviderCaptureDefect { .. })
+        ) {
+            decoded.terminal_cause = None;
+            decoded.reason = Some(reason.into());
+        }
+    };
     if exit.provider_identity_conflict {
         decoded.outcome = Outcome::Failed;
         decoded.complete = false;
@@ -142,11 +156,10 @@ fn apply_provider_identity(
         // unreadable, or capture drain timed out, the terminal owner
         // cannot prove that the provider stayed in the admitted session.
         // Do not continue on incomplete evidence.
-        decoded.outcome = Outcome::Unsettled;
-        decoded.complete = false;
-        decoded.terminal_cause = None;
-        decoded.reason =
-            Some("provider identity evidence was incomplete; continuation refused".into());
+        unsettle(
+            decoded,
+            "provider identity evidence was incomplete; continuation refused",
+        );
     } else if exit.provider_identity_eof_fragment
         && !(exit.cancel_delivered_before_exit == Some(true)
             && matches!(
@@ -158,11 +171,10 @@ fn apply_provider_identity(
         // Only a fragment from an actual EOF is eligible for the
         // intentional-stop exception. Natural completion and uncertain
         // delivery cannot use it to claim a complete provider result.
-        decoded.outcome = Outcome::Unsettled;
-        decoded.complete = false;
-        decoded.terminal_cause = None;
-        decoded.reason =
-            Some("provider ended with an incomplete final frame; continuation refused".into());
+        unsettle(
+            decoded,
+            "provider ended with an incomplete final frame; continuation refused",
+        );
     }
 }
 
@@ -2128,7 +2140,8 @@ impl RunStore {
                 baseline_unknown,
             );
         }
-        // A signal is a crash only when the host sent no stop: a deadline,
+        // Missing capture evidence keeps its precise diagnostic. Otherwise a
+        // signal is a crash only when the host sent no stop: a deadline,
         // budget or handoff kill keeps the stop's own cause (#3078).
         if !cancelled
             && decoded.outcome != Outcome::Unsettled

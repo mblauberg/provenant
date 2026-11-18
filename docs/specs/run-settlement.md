@@ -33,8 +33,8 @@ an evidence defect naming its capture and line, and leaves the outcome unsettled
 rather than reporting a generic task failure. Its typed terminal cause carries
 only the host-observed line number, so public status can name the defect without
 exposing the provider error text. Proven custody loss and effective cancellation
-retain their existing priority; a signal or budget stop alone cannot replace the
-capture diagnostic. Descendant
+retain their existing priority; a signal, budget stop or EOF fragment alone
+cannot replace a known capture diagnostic. Descendant
 cleanup cannot withhold that decision. A terminal attempt can still be
 releasing: its reservation and writer exclusion remain until cleanup proves
 quiescence and Git import, publication and release receipts have settled.

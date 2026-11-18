@@ -19,10 +19,11 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
             false,
         ),
     ] {
-        for termination in [
-            Termination::Exit(0),
-            Termination::Exit(1),
-            Termination::Signal(9),
+        for (termination, eof_fragment) in [
+            (Termination::Exit(0), false),
+            (Termination::Exit(1), false),
+            (Termination::Signal(9), false),
+            (Termination::Exit(0), true),
         ] {
             let temp = tempfile::tempdir()?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -54,6 +55,7 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
             observed.scope = RunStore::scope(&store.record(id, &call)?);
             observed.stop_reason = stop;
             observed.termination = Some(termination);
+            observed.provider_identity_eof_fragment = eof_fragment;
             seal_exit(&store, &observed)?;
             let fake = Fake {
             observed: Some(route()),
@@ -75,7 +77,7 @@ fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult
                         ..
                     }
                 ),
-                "stop={stop:?}, clean={clean}, termination={termination:?}: {:?}",
+                "stop={stop:?}, clean={clean}, termination={termination:?}, eof={eof_fragment}: {:?}",
                 record.state
             );
             assert!(!record.result.ok_or("result")?.complete);

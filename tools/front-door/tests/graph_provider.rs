@@ -5088,7 +5088,7 @@ fn raw_capture_settlement_keeps_final_answer_and_redacts_disclosure() -> Result 
         &rig,
         "printed-corrupt",
         json!({
-            "id":"provider", "prompt":"fixture printed credential corrupt", "access":"read_only",
+            "id":"provider", "prompt":"fixture printed credential corrupt", "access":"read_only", "require_findings":true,
             "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
         }),
     )?;
@@ -5103,6 +5103,21 @@ fn raw_capture_settlement_keeps_final_answer_and_redacts_disclosure() -> Result 
     assert!(
         serialized.contains("evidence defect at stdout.log line 3"),
         "{lane}"
+    );
+    let status = rig.command(&["status", "printed-corrupt", "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    let node = status["data"]["rows"]
+        .as_array()
+        .ok_or("status rows")?
+        .iter()
+        .find(|row| row["kind"] == "node" && row["node_id"] == "provider")
+        .ok_or("provider node")?;
+    assert_eq!(node["cause_code"], "provider_capture_defect", "{node}");
+    assert!(
+        node["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("stdout.log line 3")),
+        "{node}"
     );
     cleanup.disarm();
     Ok(())
