@@ -97,6 +97,11 @@ fn preflight_writer_worktrees(
         let Some(path) = node.worktree.as_deref() else {
             continue;
         };
+        // A worktree that does not exist yet holds no edits. Its absence is
+        // reported when the node starts, as before this preflight.
+        if !factory.cwd.join(path).exists() {
+            continue;
+        }
         let writer = provenant_run::resolve_writer(
             factory.context.roots.state.as_path(),
             &factory.cwd,

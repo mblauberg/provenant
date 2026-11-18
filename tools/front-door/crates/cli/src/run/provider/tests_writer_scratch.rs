@@ -684,7 +684,7 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
     assert!(
         error
             .to_string()
-            .contains("differs from pinned source commit"),
+            .contains("does not match pinned commit"),
         "{error}"
     );
     assert!(error.to_string().contains(&"a".repeat(40)), "{error}");
@@ -1239,7 +1239,7 @@ printf 'agy 1.0.0\n'
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
-    let slots = state.join("admission").join("build");
+    let slots = state.join("admission");
     assert!(
         codex
             .profile

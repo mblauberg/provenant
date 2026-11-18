@@ -78,7 +78,7 @@ pub struct ResolvedAdmissionClass {
 impl ResolvedAdmissionClass {
     /// Resolves the effective class configuration by layering:
     /// 1. Shipped defaults (`build` derives slots from cores/RAM; custom classes default to 1 slot)
-    /// 2. Host `<state>/config.toml` (under `[admission.<class>]`, or legacy `domains.fabric.lanes.max_concurrent_builds` for `build`)
+    /// 2. Host `<state>/config.toml` (under `[admission.<class>]`, or, for `build`, the `domains.fabric.lanes.max_concurrent_builds` knob, which `[admission.build].slots` overrides)
     /// 3. Project `<project>/.provenant/config.toml` (under `[admission.<class>]`)
     pub fn resolve(class: &str, state: &Path, project: Option<&Path>) -> Self {
         let is_build = class == DEFAULT_CLASS;
