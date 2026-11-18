@@ -5916,6 +5916,7 @@ impl RunStore {
                 record,
                 false,
                 &mut crate::ProviderStateGc::default(),
+                &|| true,
             );
         }
         if matches!(
@@ -6004,7 +6005,9 @@ impl RunStore {
                 Ok(false) => {}
                 Err(error) => return Err(error.into()),
             }
-            artifacts::remove_unreserved_terminal_temporary(&attempt)?;
+            artifacts::remove_unreserved_terminal_temporary(&attempt, &|| {
+                !call.cancel.is_cancelled()
+            })?;
             Ok(())
         };
         Ok(Some(match remove() {

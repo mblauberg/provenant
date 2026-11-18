@@ -737,6 +737,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         collection_time,
         false,
         &call,
+        &crate::RetentionScan::default(),
     )?;
     assert!(gc.errors.is_empty(), "{:?}", gc.errors);
     assert!(

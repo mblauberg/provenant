@@ -24,7 +24,13 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 /// The exception is rooted at the literal tmp entry, never the attempt itself.
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
+    keep_going: &dyn Fn() -> bool,
 ) -> provenant_os::fs::Result<u64> {
+    if !keep_going() {
+        return Err(provenant_os::fs::FsError::Cancelled {
+            path: attempt.anchored_path().join("tmp"),
+        });
+    }
     crate::short_temporary::remove(attempt);
     let name = OsStr::new("tmp");
     let metadata = match attempt.metadata_at(name, false) {
@@ -41,30 +47,71 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
     let bytes = metadata
         .allocated
-        .saturating_add(remove_payload_contents(&tree)?);
+        .saturating_add(remove_payload_contents(&tree, keep_going, 0)?);
     drop(tree);
+    if !attempt.metadata_at(name, false)?.same_identity(&metadata) {
+        return Err(provenant_os::fs::FsError::PayloadMismatch { name: name.into() });
+    }
     // tmp itself is not lock-named, so ordinary removal suffices.
     attempt.rmdir(name)?;
     Ok(bytes)
 }
 
-fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<u64> {
+fn remove_payload_contents(
+    directory: &PayloadTree,
+    keep_going: &dyn Fn() -> bool,
+    depth: usize,
+) -> provenant_os::fs::Result<u64> {
+    if depth > 256 {
+        return Err(provenant_os::fs::FsError::Io {
+            operation: "remove temporary payload",
+            path: directory.directory().anchored_path(),
+            source: std::io::Error::other("temporary payload depth limit"),
+        });
+    }
     let mut bytes = 0_u64;
     if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
         directory.make_writable()?;
     }
-    let entries = directory
-        .entries()?
-        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
-    for entry in entries {
-        let metadata = directory.metadata_at(&entry)?;
-        bytes = bytes.saturating_add(metadata.allocated);
-        if metadata.kind == FileKind::Directory {
-            directory.directory().make_owner_accessible_at(&entry)?;
-            bytes = bytes.saturating_add(remove_payload_contents(&directory.child(&entry)?)?);
-            directory.rmdir(&entry)?;
-        } else {
-            directory.unlink(&entry)?;
+    // Remove a bounded batch, then restart enumeration. Removed entries are
+    // durable progress, including when a later sweep retries the same tree.
+    loop {
+        if !keep_going() {
+            return Err(provenant_os::fs::FsError::Cancelled {
+                path: directory.directory().anchored_path(),
+            });
+        }
+        let mut entries = Vec::new();
+        for entry in directory.entries()?.take(64) {
+            if !keep_going() {
+                return Err(provenant_os::fs::FsError::Cancelled {
+                    path: directory.directory().anchored_path(),
+                });
+            }
+            entries.push(entry?);
+        }
+        if entries.is_empty() {
+            break;
+        }
+        for entry in entries {
+            if !keep_going() {
+                return Err(provenant_os::fs::FsError::Cancelled {
+                    path: directory.directory().anchored_path(),
+                });
+            }
+            let metadata = directory.metadata_at(&entry)?;
+            bytes = bytes.saturating_add(metadata.allocated);
+            if metadata.kind == FileKind::Directory {
+                directory.directory().make_owner_accessible_at(&entry)?;
+                bytes = bytes.saturating_add(remove_payload_contents(
+                    &directory.child(&entry)?,
+                    keep_going,
+                    depth + 1,
+                )?);
+                directory.rmdir(&entry)?;
+            } else {
+                directory.unlink(&entry)?;
+            }
         }
     }
     Ok(bytes)

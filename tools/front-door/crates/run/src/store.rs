@@ -1486,6 +1486,7 @@ impl RunStore {
             record,
             false,
             &mut ProviderStateGc::default(),
+            &|| true,
         );
         let _ = self.set_temporary_retained(record.attempt_id, true, call);
     }

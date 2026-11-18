@@ -1308,9 +1308,14 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let state = Directory::open_anchor(edge.roots.state.as_path())?;
                 let later =
                     WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
-                let collected = session
-                    .store
-                    .gc_provider_state(&state, 7, later, false, &call)?;
+                let collected = session.store.gc_provider_state(
+                    &state,
+                    7,
+                    later,
+                    false,
+                    &call,
+                    &provenant_run::RetentionScan::default(),
+                )?;
                 assert!(collected.attempt_tmp.is_empty());
                 assert!(
                     attempt_path

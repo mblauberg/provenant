@@ -1,7 +1,9 @@
 //! GC adapters for provider state, attempt scratch and payload caps.
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::{clock::SystemClock, fs::Directory};
-use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
+use provenant_run::{
+    ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RetentionScan, RunStore,
+};
 use std::path::Path;
 
 #[derive(Clone, Copy)]
@@ -11,6 +13,7 @@ enum RetentionPass {
     PayloadCap { cap_bytes: u64, measure: bool },
 }
 
+#[allow(clippy::too_many_arguments)] // Host binding, retention policy and cooperative scan are explicit.
 pub(crate) fn collect_provider_state(
     roots: &Roots,
     home: &Path,
@@ -18,6 +21,8 @@ pub(crate) fn collect_provider_state(
     days: u64,
     logs_days: u64,
     dry_run: bool,
+    cancel: &CancelToken,
+    scan: &RetentionScan<'_>,
 ) -> ProviderStateGc {
     collect_retention(
         roots,
@@ -26,9 +31,12 @@ pub(crate) fn collect_provider_state(
         RetentionPass::ProviderState { days, logs_days },
         dry_run,
         None,
+        cancel,
+        scan,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Host binding, retention policy and cooperative scan are explicit.
 pub(crate) fn collect_attempt_scratch(
     roots: &Roots,
     home: &Path,
@@ -36,6 +44,8 @@ pub(crate) fn collect_attempt_scratch(
     idle_seconds: u64,
     projects: Option<&[ProjectId]>,
     dry_run: bool,
+    cancel: &CancelToken,
+    scan: &RetentionScan<'_>,
 ) -> ProviderStateGc {
     collect_retention(
         roots,
@@ -44,9 +54,12 @@ pub(crate) fn collect_attempt_scratch(
         RetentionPass::AttemptScratch { idle_seconds },
         dry_run,
         projects,
+        cancel,
+        scan,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Host binding, retention policy and cooperative scan are explicit.
 pub(crate) fn collect_payload_cap(
     projects: Option<&[ProjectId]>,
     roots: &Roots,
@@ -55,6 +68,8 @@ pub(crate) fn collect_payload_cap(
     cap_bytes: u64,
     measure: bool,
     dry_run: bool,
+    cancel: &CancelToken,
+    scan: &RetentionScan<'_>,
 ) -> ProviderStateGc {
     collect_retention(
         roots,
@@ -63,9 +78,12 @@ pub(crate) fn collect_payload_cap(
         RetentionPass::PayloadCap { cap_bytes, measure },
         dry_run,
         projects,
+        cancel,
+        scan,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // The typed adapters share this owner boundary.
 fn collect_retention(
     roots: &Roots,
     home: &Path,
@@ -73,6 +91,8 @@ fn collect_retention(
     pass: RetentionPass,
     dry_run: bool,
     projects: Option<&[ProjectId]>,
+    cancel: &CancelToken,
+    scan: &RetentionScan<'_>,
 ) -> ProviderStateGc {
     let mut report = ProviderStateGc::default();
     collect_store(
@@ -85,6 +105,8 @@ fn collect_retention(
         projects,
         None,
         &mut report,
+        cancel,
+        scan,
     );
     report
 }
@@ -100,8 +122,20 @@ fn collect_store(
     projects: Option<&[ProjectId]>,
     expected: Option<&Directory>,
     report: &mut ProviderStateGc,
+    cancel: &CancelToken,
+    scan: &RetentionScan<'_>,
 ) {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        if !scan.permits(&Request {
+            clock: &SystemClock,
+            cancel,
+        }) {
+            report.interrupted_at = Some(scan.start_at.map_or_else(
+                || path.join("attempts"),
+                |id| path.join(format!("attempts/{id}")),
+            ));
+            return Ok(());
+        }
         let directory = match Directory::open_anchor(path) {
             Ok(directory) => directory,
             Err(error) if error.is_not_found() => return Ok(()),
@@ -122,10 +156,10 @@ fn collect_store(
             actor_id: ActorId::from_bytes([0; 16]),
             read_prompts: false,
         };
-        let (clock, cancel) = (SystemClock, CancelToken::new());
+        let clock = SystemClock;
         let call = Request {
             clock: &clock,
-            cancel: &cancel,
+            cancel,
         };
         if let Some(reader) = RunStore::open_read_only(&context, &call)? {
             // Applied cleanup needs a writable store. Previews stay read-only
@@ -141,8 +175,13 @@ fn collect_store(
             match pass {
                 RetentionPass::ProviderState { days, logs_days } => {
                     let mut collected = store.gc_provider_state_with_logs(
-                        &directory, days, logs_days, now, dry_run, &call,
+                        &directory, days, logs_days, now, dry_run, &call, scan,
                     )?;
+                    if collected.interrupted_at.is_some() {
+                        report.interrupted_at = collected.interrupted_at.take();
+                        report.continuation = collected.continuation.take();
+                    }
+                    report.tightened.append(&mut collected.tightened);
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
                     report.attempt_logs.append(&mut collected.attempt_logs);
@@ -164,7 +203,12 @@ fn collect_store(
                         owner: Some(&decide),
                     };
                     let mut collected =
-                        store.gc_temporary(&directory, &policy, now, dry_run, &call)?;
+                        store.gc_temporary(&directory, &policy, now, dry_run, &call, scan)?;
+                    if collected.interrupted_at.is_some() {
+                        report.interrupted_at = collected.interrupted_at.take();
+                        report.continuation = collected.continuation.take();
+                    }
+                    report.tightened.append(&mut collected.tightened);
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
                     report.attempt_logs.append(&mut collected.attempt_logs);
@@ -174,14 +218,25 @@ fn collect_store(
                 }
                 RetentionPass::PayloadCap { cap_bytes, measure } => {
                     report.payload.absorb(store.gc_payloads(
-                        &directory, cap_bytes, now, dry_run, measure, projects, &call,
+                        &directory, cap_bytes, now, dry_run, measure, projects, &call, scan,
                     )?);
+                    report.interrupted_at = report.payload.interrupted_at.clone();
+                    report.continuation = report.payload.interrupted_phase.map(str::to_owned);
                 }
             }
         }
         Ok(())
     })();
     if let Err(error) = result {
+        if cancel.is_cancelled() {
+            report.interrupted_at.get_or_insert_with(|| {
+                scan.start_at.map_or_else(
+                    || path.join("attempts"),
+                    |id| path.join(format!("attempts/{id}")),
+                )
+            });
+            return;
+        }
         report.errors.push(ProviderStateIssue {
             path: path.into(),
             reason: error.to_string(),
@@ -380,7 +435,14 @@ pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str)
             attempts: Some(&ids),
             owner: Some(&finished),
         };
-        let report = store.gc_temporary(&directory, &policy, clock.wall_now()?, false, &call)?;
+        let report = store.gc_temporary(
+            &directory,
+            &policy,
+            clock.wall_now()?,
+            false,
+            &call,
+            &provenant_run::RetentionScan::default(),
+        )?;
         if !report.errors.is_empty() {
             return Err(
                 "branch scratch collection incomplete; retry with provenant gc --apply".into(),
@@ -460,10 +522,28 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
     };
     store.owe_reaction(&reaction, &call)?;
     store.save_reaction(&reaction, &call)?;
-    let kept = collect_provider_state(&roots, &home, &assets, 7, 20, false);
+    let kept = collect_provider_state(
+        &roots,
+        &home,
+        &assets,
+        7,
+        20,
+        false,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
     assert!(kept.errors.is_empty(), "{:?}", kept.errors);
     assert!(store.reaction(attempt, &call)?.is_some());
-    let expired = collect_provider_state(&roots, &home, &assets, 7, 5, false);
+    let expired = collect_provider_state(
+        &roots,
+        &home,
+        &assets,
+        7,
+        5,
+        false,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
     assert!(expired.errors.is_empty(), "{:?}", expired.errors);
     assert!(store.reaction(attempt, &call)?.is_none());
     let candidate = child_path.join(format!("attempts/{attempt}/provider-state/candidate-0"));
@@ -551,9 +631,37 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
         .join("tmp");
     fs::DirBuilder::new().mode(0o700).create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
-    let preview = collect_provider_state(&roots, &home, &assets, 7, 30, true);
-    let preview_scratch = collect_attempt_scratch(&roots, &home, &assets, 7, None, true);
-    let preview_payload = collect_payload_cap(None, &roots, &home, &assets, 16 << 30, false, true);
+    let preview = collect_provider_state(
+        &roots,
+        &home,
+        &assets,
+        7,
+        30,
+        true,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
+    let preview_scratch = collect_attempt_scratch(
+        &roots,
+        &home,
+        &assets,
+        7,
+        None,
+        true,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
+    let preview_payload = collect_payload_cap(
+        None,
+        &roots,
+        &home,
+        &assets,
+        16 << 30,
+        false,
+        true,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
     assert!(preview.errors.is_empty(), "{:?}", preview.errors);
     assert!(preview.attempt_tmp.is_empty());
     assert_eq!(preview.payload.cap_bytes, 0);
@@ -579,9 +687,37 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
     );
     assert_eq!(preview_payload.payload.cap_bytes, 16 << 30);
     assert!(temporary.exists());
-    let report = collect_provider_state(&roots, &home, &assets, 7, 30, false);
-    let scratch = collect_attempt_scratch(&roots, &home, &assets, 7, None, false);
-    let payload = collect_payload_cap(None, &roots, &home, &assets, 16 << 30, true, false);
+    let report = collect_provider_state(
+        &roots,
+        &home,
+        &assets,
+        7,
+        30,
+        false,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
+    let scratch = collect_attempt_scratch(
+        &roots,
+        &home,
+        &assets,
+        7,
+        None,
+        false,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
+    let payload = collect_payload_cap(
+        None,
+        &roots,
+        &home,
+        &assets,
+        16 << 30,
+        true,
+        false,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
+    );
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(report.attempt_tmp.is_empty());
     assert_eq!(report.payload.cap_bytes, 0);
@@ -641,6 +777,8 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
         None,
         Some(&expected),
         &mut report,
+        &provenant_core::CancelToken::new(),
+        &provenant_run::RetentionScan::default(),
     );
     assert_eq!(report.errors.len(), 1);
     assert!(report.errors[0].reason.contains("identity"));

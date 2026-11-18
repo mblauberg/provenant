@@ -188,7 +188,7 @@ mod tests {
         let socket = alias.join("candidate-0/x.sock");
         assert!(socket.as_os_str().len() < 104, "{}", socket.display());
 
-        crate::artifacts::remove_unreserved_terminal_temporary(&attempt)?;
+        crate::artifacts::remove_unreserved_terminal_temporary(&attempt, &|| true)?;
         assert!(std::fs::symlink_metadata(&alias).is_err());
         assert!(!attempts.join("tmp").exists());
         Ok(())

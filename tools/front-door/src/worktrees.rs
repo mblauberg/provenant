@@ -2410,6 +2410,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             self.config.retention.provider_state_days,
             self.config.retention.logs_days,
             self.command.dry_run,
+            &provenant_core::CancelToken::new(),
+            &provenant_run::RetentionScan::default(),
         );
         Ok(())
     }
@@ -2421,6 +2423,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             self.data.idle_seconds,
             (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
             self.command.dry_run,
+            &provenant_core::CancelToken::new(),
+            &provenant_run::RetentionScan::default(),
         );
         self.data
             .provider_state
@@ -2439,6 +2443,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             self.config.retention.payload_cap_bytes,
             !self.command.pressure && !self.command.dry_run,
             self.command.dry_run,
+            &provenant_core::CancelToken::new(),
+            &provenant_run::RetentionScan::default(),
         );
         self.data.provider_state.payload = report.payload;
         self.data.provider_state.errors.append(&mut report.errors);

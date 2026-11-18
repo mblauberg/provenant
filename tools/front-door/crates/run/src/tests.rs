@@ -3472,9 +3472,25 @@ fn provider_state_collection_uses_configured_logs_age() -> TestResult {
         .execute("UPDATE reactions SET settled_at=100", [])?;
     let directory = provenant_os::fs::Directory::open_anchor(context.state_root.as_path())?;
     let now = provenant_core::WallTime::from_micros((100 + 10 * 86_400) * 1_000_000)?;
-    store.gc_provider_state_with_logs(&directory, 7, 20, now, false, &call)?;
+    store.gc_provider_state_with_logs(
+        &directory,
+        7,
+        20,
+        now,
+        false,
+        &call,
+        &crate::RetentionScan::default(),
+    )?;
     assert!(store.reaction(id, &call)?.is_some());
-    store.gc_provider_state_with_logs(&directory, 7, 5, now, false, &call)?;
+    store.gc_provider_state_with_logs(
+        &directory,
+        7,
+        5,
+        now,
+        false,
+        &call,
+        &crate::RetentionScan::default(),
+    )?;
     assert!(store.reaction(id, &call)?.is_none());
     Ok(())
 }
