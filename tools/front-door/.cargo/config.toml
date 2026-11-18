@@ -11,3 +11,11 @@
 # x86_64-unknown-linux-gnu since Rust 1.90 (no system lld install required):
 # https://blog.rust-lang.org/2025/09/18/Rust-1.90.0/
 # macOS uses the current Xcode system linker. No host-specific override here.
+
+# Debug builds give the graph executor's largest functions (advance, observe or
+# start, attempt launch) frames of 0.1-0.4 MiB each, so one graph launch needs
+# more than the 2 MiB default of a spawned test thread. Stored records no longer
+# need it (#3292); #3542 shrinks those frames and removes this override. A larger
+# stack set by the caller is not overridden.
+[env]
+RUST_MIN_STACK = "8388608"

@@ -563,9 +563,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             std::thread::scope(|scope| {
                 for _ in 0..settings.concurrency.value {
                     let queue = &queue;
-                    // Stored records deserialise on the default stack; no
-                    // worker stack override is needed.
-                    let worker = std::thread::Builder::new();
+                    // A route runs the full graph path, which the main thread
+                    // runs on its 8 MiB stack; in a debug build its executor
+                    // frames overflow a default worker stack (#3542).
+                    let worker = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
                     worker.spawn_scoped(scope, move || loop {
                         let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
                         let Some(row) = row else { break; };
