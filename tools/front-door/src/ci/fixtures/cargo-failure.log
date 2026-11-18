@@ -1,0 +1,17 @@
+running 2 tests
+test cache_reads_basic ... ok
+test cache_reads_expiry ... FAILED
+
+failures:
+
+failures:
+    cache_reads_expiry
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
+
+--- cache_reads_expiry stdout ----
+thread 'cache_reads_expiry' panicked at 'cannot lock cache after expiry', src/cache.rs:64:5
+failures:
+    cache_reads_expiry
+
+error: test failed, to rerun pass `-p provenant --lib`
