@@ -59,10 +59,10 @@ heads and review evidence. Land bottom-first with `provenant land`.
 
 Agents merge directly: once a pull request has the lens review its risk
 requires (`provenant run review`) and `ci-status`
-is green on the exact head, merge without waiting for the user. A change that
-only repairs CI or restores a red `main` merges on green `ci-status` alone; one
-that skips or weakens a check takes its normal review. Before merging a
-substantial change, confirm its receipt is current
+is green on the exact head, merge without waiting for the user. CI and test-speed
+fixes, and changes that restore a red `main`, merge on green `ci-status` alone; changes that skip or weaken a check or alter a real
+boundary take their normal review. Before merging a substantial change, confirm
+its receipt is current
 (`provenant workflow receipt show ID`).
 
 `ci-status` is the single required check: the aggregate job at the end of
@@ -125,8 +125,7 @@ approval, record it with `provenant workflow receipt save` after `ci-status`
 on `main` succeeds; never fabricate user approval. Confirm the issue closed and
 Status is `Done`. Prune the branch's artefacts per
 [`docs/worktrees.md`](../worktrees.md#ownership-and-cleanup);
-`git remote prune origin` clears the stale tracking ref. Deleting an unmerged
-branch on either side is a user gate.
+`git remote prune origin` clears the stale tracking ref.
 
 Dependabot patch and minor bumps that change only manifests and lockfiles
 auto-merge on green `ci-status`; anything else takes a `routine` reviewer.

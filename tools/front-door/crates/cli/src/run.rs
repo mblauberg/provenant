@@ -612,7 +612,6 @@ impl run::Providers for Registry<'_> {
             &policy,
             roots.state.as_path(),
             &writer.worktree,
-            &writer.project,
             home,
         )
         .map_err(disk_policy_refusal)

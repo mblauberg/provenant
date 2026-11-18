@@ -1434,7 +1434,12 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
     }
     assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
     finish_reactions(&store)?;
-    assert!(store.open_attempts(10, &call)?.is_empty());
+    // Recovery may still owe terminal effects; retained scratch alone must
+    // not cause the attempt to be queued for recovery.
+    assert_eq!(
+        store.open_attempts(10, &call)?,
+        store.pending_effect_attempts(id, &call)?
+    );
     Ok(())
 }
 

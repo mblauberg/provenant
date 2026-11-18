@@ -4366,7 +4366,11 @@ mod writer_recovery_tests {
             [id.to_string()],
             |row| row.get(0),
         )?;
-        assert!(!retained);
+        assert!(
+            retained,
+            "unfinished work retains scratch after custody release"
+        );
+        assert!(candidate.exists());
         Ok(())
     }
 

@@ -120,7 +120,7 @@ test "$(cat "$output")" = 'run_macos=true
 run_rust=true'
 grep -F 'No merge base found' "$tmp/log" >/dev/null
 
-# Release notes and skill prose skip Rust; structured assets and code retain it.
+# Release notes and skill prose skip Rust; unknown structured assets select native checks.
 git -C "$repo" checkout -q --detach "$common"
 mkdir -p "$repo/docs/release-notes/next.d"
 printf '%s\n' note > "$repo/docs/release-notes/next.d/1-x.md"
@@ -142,7 +142,7 @@ git -C "$repo" add .
 git -C "$repo" commit -qm 'structured skill asset'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
-test "$result" = 'run_macos=false
+test "$result" = 'run_macos=true
 run_rust=true'
 
 # An executable never takes the prose path, whatever its name.
@@ -153,7 +153,7 @@ git -C "$repo" add .
 git -C "$repo" commit -qm 'executable named as Markdown'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
-test "$result" = 'run_macos=false
+test "$result" = 'run_macos=true
 run_rust=true'
 
 # Both the old and new modes matter, including absent files on either side.
@@ -164,14 +164,14 @@ git -C "$repo" commit -qm 'remove executable bit'
 head=$(git -C "$repo" rev-parse HEAD)
 base=$executable_base
 result=$(run_selector)
-test "$result" = 'run_macos=false
+test "$result" = 'run_macos=true
 run_rust=true'
 git -C "$repo" checkout -q --detach "$executable_base"
 git -C "$repo" rm -q skills/run.md
 git -C "$repo" commit -qm 'delete executable Markdown'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
-test "$result" = 'run_macos=false
+test "$result" = 'run_macos=true
 run_rust=true'
 git -C "$repo" checkout -q --detach "$common"
 git -C "$repo" rm -q skills/base.md
@@ -198,6 +198,41 @@ mkdir -p "$repo/tools/front-door/src"
 printf '%s\n' 'fn main() {}' > "$repo/tools/front-door/src/main.rs"
 git -C "$repo" add .
 git -C "$repo" commit -qm 'mixed Rust and non-code assets'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+
+# A diff failure must select the full pipeline rather than produce an empty scope.
+real_git=$(command -v git)
+mkdir -p "$tmp/bin"
+# The generated wrapper expands these parameters when invoked.
+# shellcheck disable=SC2016
+printf '#!/bin/sh\n[ "$1" != diff ] || exit 1\nexec "%s" "$@"\n' "$real_git" > "$tmp/bin/git"
+chmod +x "$tmp/bin/git"
+output=$tmp/github-output
+: > "$output"
+(cd "$repo" && PATH="$tmp/bin:$PATH" BASE_SHA="$base" HEAD_SHA="$head" IS_MAIN=false GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
+test "$(cat "$output")" = 'run_macos=true
+run_rust=true'
+
+# Known Linux-only test selection retains Rust while skipping native jobs.
+git -C "$repo" checkout -q --detach "$common"
+mkdir -p "$repo/scripts"
+printf '%s\n' selector > "$repo/scripts/select-affected-crate-tests"
+chmod +x "$repo/scripts/select-affected-crate-tests"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'Linux selection change'
+head=$(git -C "$repo" rev-parse HEAD)
+base=$common
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=true'
+
+# Unknown paths select the full pipeline.
+printf '%s\n' unknown > "$repo/unclassified.dat"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'unknown path'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
 test "$result" = 'run_macos=true

@@ -40,13 +40,9 @@ describes its tested distribution, not general safety.
 A skill earns its place with the few rules a capable agent would otherwise get
 wrong; everything else is cost paid on every load. Audit read-only with
 [skill audit](references/skill-audit.md); write or revise under a grant with
-[skill author](references/skill-author.md). Run the task without the skill
-first and keep only the lines that change the result.
+[skill author](references/skill-author.md). Keep lines that change the result.
 
 ## Output
 
-Proposal-first. Apply changes under explicit authority or through `deliver`.
-Finish with a table: finding, evidence, cause, change, regression gate,
-destination, status (`promote`, `experiment`, `defer`, `reject`). File
-actionable findings through `tracker` even when no regression is attributable,
-and promote durable conclusions to their owner rather than a parallel diary.
+Apply changes under the task authority. Report evidence, change and remaining
+uncertainty; promote durable conclusions to their owner.
