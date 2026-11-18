@@ -65,8 +65,8 @@ boundary take their normal review. Before merging a substantial change, confirm
 its receipt is current
 (`provenant workflow receipt show ID`).
 
-Repository admins may bypass `Protect main` for pull-request merges only (the
-owner allowed this on 18 Nov 2026); direct pushes still need CI. Use
+Repository admins may bypass `Protect main` for pull-request merges only;
+direct pushes still need CI. Use
 `gh pr merge N --merge --admin` only when `ci-status` was green on an earlier
 head of the same pull request and `git diff --stat GREEN NEW` shows non-code
 files only (docs, skills, release notes). Never use it for a code delta, a red

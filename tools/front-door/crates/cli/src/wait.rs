@@ -19,6 +19,8 @@ pub struct Settings {
     pub pr_slow_interval_ms: u64,
     pub pr_near_end_window_ms: u64,
     pub pr_conditional_requests: bool,
+    /// Host forge event source: auto, webhook, or poll.
+    pub forge_source: String,
     pub max_targets: u64,
     pub pr_read_timeout_seconds: u64,
 }
@@ -32,6 +34,7 @@ impl Default for Settings {
             pr_slow_interval_ms: 15000,
             pr_near_end_window_ms: 30000,
             pr_conditional_requests: true,
+            forge_source: "auto".into(),
             max_targets: 64,
             pr_read_timeout_seconds: 60,
         }
@@ -218,7 +221,7 @@ impl Settings {
 }
 impl DomainConfig for Settings {
     fn validate(&self) -> Vec<SectionError> {
-        [
+        let mut errors: Vec<_> = [
             ("timeout_seconds", self.timeout_seconds, 1, u32::MAX as u64),
             (
                 "max_timeout_seconds",
@@ -251,13 +254,21 @@ impl DomainConfig for Settings {
             field: field.into(),
             code: "range",
         })
-        .collect()
+        .collect();
+        if !matches!(self.forge_source.as_str(), "auto" | "webhook" | "poll") {
+            errors.push(SectionError {
+                detail: None,
+                field: "forge_source".into(),
+                code: "choice",
+            });
+        }
+        errors
     }
 }
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "timeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
+        "timeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
     },
 )
 .with_fields(&[
@@ -268,6 +279,7 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::int("pr_slow_interval_ms", 10, 60000),
     FieldMetadata::int("pr_near_end_window_ms", 0, 60000),
     FieldMetadata::new("pr_conditional_requests", "bool"),
+    FieldMetadata::new("forge_source", "string"),
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
 ]);

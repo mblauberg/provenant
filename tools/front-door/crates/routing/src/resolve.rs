@@ -132,12 +132,20 @@ pub struct RouteList {
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
     pub account_pacing: Vec<AccountPacingView>,
+    pub monthly: crate::SourcedMonthlySettings,
+    pub monthly_allowances: Vec<MonthlyAccountView>,
     pub configured_accounts: BTreeMap<String, PacingProfile>,
     pub configured_free: BTreeMap<String, PacingProfile>,
     pub active_overrides: Vec<PacingOverride>,
     pub model_exclusions: Vec<ModelExclusion>,
     /// Rows that were repaired or ignored while reading the configuration.
     pub exclusion_notes: Vec<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct MonthlyAccountView {
+    pub model: ModelId,
+    pub account: Option<String>,
+    pub assessment: crate::MonthlyAllowanceAssessment,
 }
 #[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
@@ -254,7 +262,59 @@ pub fn list(
         }
         pools.clear();
     }
+    let monthly_allowances = context
+        .catalogue
+        .models
+        .iter()
+        .filter(|m| matches(m.model.adapter()))
+        .flat_map(|m| {
+            let accounts: BTreeSet<_> = context
+                .availability
+                .iter()
+                .filter(|a| a.adapter == m.model.adapter())
+                .filter_map(|a| a.account_key.clone())
+                .chain(
+                    context
+                        .quota
+                        .iter()
+                        .filter(|q| q.model == m.model)
+                        .map(|q| q.snapshot.account.account_key.clone()),
+                )
+                .chain(context.config.pacing.accounts.keys().filter_map(|key| {
+                    let (adapter, account) = key.split_once('/')?;
+                    (adapter == m.model.adapter()).then(|| account.to_owned())
+                }))
+                .chain(
+                    provenant_records::AdapterSpec::get(m.model.adapter())
+                        .filter(|s| s.local_login)
+                        .map(|s| s.local_account.1.to_owned()),
+                )
+                .collect();
+            accounts
+                .into_iter()
+                .filter_map(|account| {
+                    crate::monthly_allowance_assessment(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        &m.model,
+                        Some(&account),
+                        context.quota.iter().find(|q| {
+                            q.model == m.model && q.snapshot.account.account_key == account
+                        }),
+                    )
+                    .map(|assessment| MonthlyAccountView {
+                        model: m.model.clone(),
+                        account: Some(account),
+                        assessment,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
     Ok(RouteList {
+        monthly: crate::global_monthly_settings(context.config),
+        monthly_allowances,
         valid_pairs,
         catalogue_revision: context.catalogue.revision.clone(),
         models: context
@@ -346,8 +406,13 @@ pub fn list(
                     })?
                     .model
                     .clone();
-                let (policy, profile, source, expiry) =
-                    effective_profile(context, &model, Some(account));
+                let (policy, profile, source, expiry) = account_pacing(
+                    context.catalogue,
+                    context.config,
+                    context.now,
+                    &model,
+                    Some(account),
+                );
                 Some(AccountPacingView {
                     adapter: adapter.into(),
                     account: account.into(),
@@ -491,8 +556,10 @@ const PACE_MIN_BASIS_POINTS: u32 = 2_500;
 const PACE_MAX_BASIS_POINTS: u32 = 20_000;
 const NEUTRAL_FACTOR_BASIS_POINTS: u32 = 10_000;
 
-fn effective_profile<'a>(
-    context: &'a RoutingContext<'_>,
+pub fn account_pacing<'a>(
+    catalogue: &Catalogue,
+    config: &'a RoutingConfig,
+    now: provenant_core::WallTime,
     model: &ModelId,
     account: Option<&str>,
 ) -> (
@@ -502,22 +569,20 @@ fn effective_profile<'a>(
     Option<provenant_core::WallTime>,
 ) {
     let account_profile = account.and_then(|a| {
-        context
-            .config
+        config
             .pacing
             .accounts
             .get(&format!("{}/{a}", model.adapter()))
     });
-    let free_profile = context
-        .catalogue
+    let free_profile = catalogue
         .is_free_model(model)
-        .then(|| context.config.pacing.free.get(model.adapter()))
+        .then(|| config.pacing.free.get(model.adapter()))
         .flatten();
     // The account profile governs free models too; the free profile is the
     // provider-level default beneath it.
     let profile = account_profile.or(free_profile);
-    let active = context.config.pacing_overrides.iter().rev().find(|o| {
-        o.schedule.active(context.now)
+    let active = config.pacing_overrides.iter().rev().find(|o| {
+        o.schedule.active(now)
             && o.account.as_deref().is_none_or(|selector| {
                 account.is_some_and(|key| {
                     selector
@@ -540,13 +605,13 @@ fn effective_profile<'a>(
     }
     let source = if profile.is_some() {
         "account"
-    } else if context.config.pacing.contains_key(model.adapter()) {
+    } else if config.pacing.contains_key(model.adapter()) {
         "provider"
     } else {
         "bundled"
     };
     (
-        pacing_policy(context.catalogue, context.config, model),
+        pacing_policy(catalogue, config, model),
         profile,
         source,
         None,
@@ -570,11 +635,7 @@ fn window_matches(
                 || name.ends_with("seven_day")
                 || name.ends_with("weekly")
         }
-        PacingWindow::Monthly => {
-            name.ends_with("monthly")
-                || name.ends_with("thirty_day")
-                || name.ends_with("billing_cycle")
-        }
+        PacingWindow::Monthly => provenant_quota::monthly_window(window),
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
             provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
@@ -840,7 +901,13 @@ fn pacing_factor_basis_points(
     account: Option<&str>,
     context: &RoutingContext<'_>,
 ) -> (u32, String, bool) {
-    let (_, profile, source, expiry) = effective_profile(context, model, account);
+    let (_, profile, source, expiry) = account_pacing(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        account,
+    );
     let detail = format!(
         "source={source} policy={policy:?}{}",
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
@@ -892,6 +959,30 @@ fn pacing_factor_basis_points(
     if policy != PacingPolicy::Pace {
         return (NEUTRAL_FACTOR_BASIS_POINTS, detail, false);
     }
+    let monthly = crate::monthly_allowance_assessment(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        account,
+        context
+            .quota
+            .iter()
+            .filter(|q| {
+                q.model == *model
+                    && q.snapshot.account.adapter == model.adapter()
+                    && Some(q.snapshot.account.account_key.as_str()) == account
+            })
+            .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision)),
+    );
+    if let Some(assessment) = &monthly
+        && assessment.constrained
+    {
+        return (0, format!("{detail}; {}", assessment.detail), true);
+    }
+    let detail = monthly.map_or(detail.clone(), |assessment| {
+        format!("{detail}; {}", assessment.detail)
+    });
     let result = context
         .quota
         .iter()
@@ -1057,7 +1148,13 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
     accounts
         .into_iter()
         .map(|account| {
-            let (policy, _, _, _) = effective_profile(context, model, account.as_deref());
+            let (policy, _, _, _) = account_pacing(
+                context.catalogue,
+                context.config,
+                context.now,
+                model,
+                account.as_deref(),
+            );
             let (factor_basis_points, detail, _) =
                 pacing_factor_basis_points(policy, model, account.as_deref(), context);
             PacingPreview {
@@ -1232,8 +1329,26 @@ fn account_reason<'q>(
             None
         };
     }
-    let (policy, profile, _, _) =
-        effective_profile(context, model, availability.account_key.as_deref());
+    let (policy, profile, _, _) = account_pacing(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        availability.account_key.as_deref(),
+    );
+    if reason.is_none()
+        && crate::monthly_allowance_assessment(
+            context.catalogue,
+            context.config,
+            context.now,
+            model,
+            availability.account_key.as_deref(),
+            latest_reading(model, availability, context, false),
+        )
+        .is_some_and(|assessment| assessment.constrained)
+    {
+        reason = Some(RouteExclusionReason::PacingReserve);
+    }
     if reason.is_none() && policy == PacingPolicy::Off {
         reason = Some(RouteExclusionReason::Disabled);
     }
@@ -1698,7 +1813,8 @@ fn account_load(
     context: &RoutingContext<'_>,
 ) -> AccountLoad {
     let key = availability.account_key.as_deref();
-    let (policy, profile, pacing_source, _) = effective_profile(context, model, key);
+    let (policy, profile, pacing_source, _) =
+        account_pacing(context.catalogue, context.config, context.now, model, key);
     let (pacing_factor, _, _) = pacing_factor_basis_points(policy, model, key, context);
     let quota = latest_reading(model, availability, context, true);
     let limiting = quota
@@ -1915,7 +2031,13 @@ fn candidate(
         })
         .map(|a| {
             let (reason, _) = account_reason(model, a, access, context);
-            let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
+            let (policy, _, _, _) = account_pacing(
+                context.catalogue,
+                context.config,
+                context.now,
+                model,
+                a.account_key.as_deref(),
+            );
             let (_, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
             let load = account_load(model, a, context);
@@ -2026,15 +2148,26 @@ fn candidate(
         });
     }
     if let Some(availability) = availability
-        && effective_profile(context, model, availability.account_key.as_deref()).0
-            == PacingPolicy::Pace
+        && account_pacing(
+            context.catalogue,
+            context.config,
+            context.now,
+            model,
+            availability.account_key.as_deref(),
+        )
+        .0 == PacingPolicy::Pace
         && let Some(quota) = latest_reading(model, availability, context, true)
     {
         use provenant_records::diagnostic::{
             PacingReserveSetting, PacingSettingSource, ResourceFact,
         };
-        let (_, profile, _, _) =
-            effective_profile(context, model, availability.account_key.as_deref());
+        let (_, profile, _, _) = account_pacing(
+            context.catalogue,
+            context.config,
+            context.now,
+            model,
+            availability.account_key.as_deref(),
+        );
         let reserve = context
             .config
             .pacing_reserve
@@ -2088,10 +2221,22 @@ fn candidate(
             .iter()
             .filter_map(|(account, reason, _)| {
                 reason.as_ref().map(|reason| {
+                    let monthly = crate::monthly_allowance_assessment(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        model,
+                        account.account_key.as_deref(),
+                        latest_reading(model, account, context, false),
+                    )
+                    .filter(|assessment| assessment.constrained);
                     format!(
-                        "{}: {}; inspect `provenant quota --full`",
+                        "{}: {}; inspect `provenant quota --full`{}",
                         account.account_key.as_deref().unwrap_or("unknown account"),
-                        exclusion_detail(reason)
+                        exclusion_detail(reason),
+                        monthly
+                            .map(|assessment| format!("; {}", assessment.detail))
+                            .unwrap_or_default(),
                     )
                 })
             })
@@ -2926,8 +3071,13 @@ fn classify_pool(
                         classified.routes.push(None);
                         continue;
                     }
-                    let (policy, _, _, _) =
-                        effective_profile(context, &member.model, resolved.account_key.as_deref());
+                    let (policy, _, _, _) = account_pacing(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        &member.model,
+                        resolved.account_key.as_deref(),
+                    );
                     let (factor, detail, is_standby) = pacing_factor_basis_points(
                         policy,
                         &member.model,

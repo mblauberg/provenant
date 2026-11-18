@@ -27,6 +27,7 @@ fn depletion_facts_at_age(
         confinement_ref: "grant",
     }];
     let quota = [QuotaObservation {
+        allowance: Default::default(),
         model: ModelId::parse(LUNA)?,
         snapshot: provenant_quota::QuotaSnapshot {
             extra: Default::default(),

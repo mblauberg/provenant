@@ -168,6 +168,24 @@ pub(super) fn checkpoint_bound(
         DIRECTORY_BYTES,
         prompt_store::compacted_len(document),
         prompt_store::compacted_len(&skeleton),
+        // A child admission may gain its host-preparation identity before the
+        // first save. Reserve one fixed identity per patch, never a growing alias list.
+        expansions
+            .iter()
+            .filter(|expansion| {
+                expansion.patch.as_ref().is_some_and(|record| {
+                    record
+                        .child_receipt
+                        .as_ref()
+                        .is_none_or(|stored| stored.run_request.is_none())
+                })
+            })
+            .count()
+            .saturating_mul(canonical_len(
+                &serde_json::json!({"run_request": relay::RunRequestIdentity {
+                    id: "f".repeat(32), digest: format!("sha256:{}", "f".repeat(64)),
+                }}),
+            )),
         // A graph steer can be admitted while its exact owner is still appearing.
         MAX_PENDING_GRAPH_STEER_ENCODED_BYTES,
         // instance ID, ask actor, PR URL, integration pin, pause reason and plan digest

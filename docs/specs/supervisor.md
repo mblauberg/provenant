@@ -169,12 +169,12 @@ replayable authority.
 
 ### Build admission is a sourced port
 
-Sandboxed Cargo shims use `PortTable.build_admission`, independently of attempt
+Lane Cargo shims, including native launches, use `PortTable.build_admission`, independently of attempt
 admission: builtin uses host slots and the effective disk policy, command runs
 the repository wrapper around Cargo, and none omits admission. The host freezes
 the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
-`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain;
-no shim is installed for them. Local-Cargo policy still applies to every shim
+`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain
+behind the shim. Local-Cargo policy still applies to every shim
 backend. Wrapper execution streams Cargo output without a host-state receipt.
 - Why: build coordination varies by repository without changing attempt custody.
 - Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
@@ -364,8 +364,9 @@ available from `provenant config show --full`.
 
 ### Disclosure and safe Git evidence
 
-A prompt snapshot with a known secret is refused before sealing, and output is
-redacted across chunk boundaries before it reaches disk. Quoted credential values
+A prompt snapshot with a known secret is refused before sealing. Host-local
+provider captures preserve raw bytes for settlement replay; decoded results and
+artifact text are redacted at publication and disclosure boundaries. Quoted credential values
 are masked until a definite closing quote: one that every plausible escape layer,
 from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than

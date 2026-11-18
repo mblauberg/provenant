@@ -8,7 +8,7 @@ description: "Use for independent read-only review of a pinned diff or pull requ
 Review independently at a pinned head and prove coverage alongside CI.
 
 The chair or lead chooses whether to review, the reviewers and their number.
-For routine, low-risk work, use one reviewer or none. For risky changes, prefer
+A small change needs no review; for routine work, use one reviewer. For risky changes, prefer
 a strong reviewer from another model family, optionally paired with one from
 the author's family. Avoid a lightweight cross-family slot; if only the same
 family is available, warn and proceed. These are overridable preferences, not
@@ -19,7 +19,7 @@ routing requirements. Sources: [review diversity](https://arxiv.org/abs/2610.014
 For a configured panel, pin the subject and base and supply the spec:
 
 ```sh
-provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+provenant run review-panel --pr 123 --brief-file brief.md
 ```
 
 A dotted leaf such as `review.security` selects one lens. Review a changed

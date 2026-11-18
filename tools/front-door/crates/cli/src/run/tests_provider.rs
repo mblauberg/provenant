@@ -46,6 +46,46 @@ fn terminal_replay_keeps_typed_stream_identity_mismatch() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn terminal_replay_never_classifies_a_prefix_before_an_unread_final_answer()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    let temp = tempfile::tempdir()?;
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6-luna".into()),
+        ..Default::default()
+    };
+    let message = |text: &str| {
+        json!({"type":"item.completed", "item":{
+        "type":"agent_message", "text":text}})
+        .to_string()
+    };
+    let final_answer = format!(
+        "Final findings.\nVERDICT: PASS\n{}",
+        "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```"
+    );
+    // Cover damage in tool output, in the final answer itself, and at EOF.
+    for (suffix, line) in [
+        (format!("{{\"type\":\"item.completed\",\"item\":\"[REDACTED]\n{}\n{{\"type\":\"turn.completed\"}}\n", message(&final_answer)), 3),
+        ("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"[REDACTED]\n{\"type\":\"turn.completed\"}\n".into(), 3),
+        ("{\"type\":\"item.completed\",\"item\":".into(), 3),
+    ] {
+        let stream = format!("{{\"type\":\"thread.started\",\"thread_id\":\"s\"}}\n{}\n{suffix}", message("Still investigating."));
+        let decoded = Registry::default().decode_captures(
+            &route, stream.as_bytes(), &[], &clean_exit(), temp.path(), None,
+        )?;
+        assert_eq!(decoded.outcome, run::Outcome::Unsettled);
+        assert_eq!(decoded.terminal_cause,
+            Some(run::TerminalCause::ProviderCaptureDefect { line }));
+        assert!(!decoded.complete);
+        assert!(decoded.result.is_empty(), "progress is not a result");
+        let reason = decoded.reason.ok_or("evidence diagnostic")?;
+        assert!(reason.contains(&format!("evidence defect at stdout.log line {line}")), "{reason}");
+    }
+    Ok(())
+}
+
+#[test]
 fn capacity_guardian_context_records_and_reports_config_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::DirBuilderExt;
@@ -721,18 +761,21 @@ fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
     assert_eq!(decoded.usage.uncached_input, Some(10));
     assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
     assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
-    // A final frame that is genuinely malformed still settles as malformed.
+    // A malformed frame is an evidence defect, never a task failure derived
+    // from the earlier messages whose suffix has not been read.
     let decoded = decode(&format!(
         "{head}{}",
         "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"ans\n",
     ));
-    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    assert_eq!(decoded.outcome, run::Outcome::Unsettled);
     assert!(!decoded.complete);
     assert!(decoded.result.is_empty());
-    assert_eq!(
-        decoded.reason.as_deref(),
-        Some("provider protocol is malformed")
+    let reason = decoded.reason.unwrap();
+    assert!(
+        reason.contains("evidence defect at stdout.log line 5"),
+        "{reason}"
     );
+    assert!(reason.contains("replay incomplete"), "{reason}");
 }
 #[test]
 fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {

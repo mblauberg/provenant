@@ -564,7 +564,7 @@ fn fixture() -> Result {
         .map(|pair| pair[1].as_str());
     if !prompt.contains("fixture missing rollout") {
         // Real rollouts record tool output. A printed credential must be
-        // scrubbed from this transcript at settlement, not only from captures.
+        // scrubbed from this transcript at settlement, before disclosure.
         let recorded = if prompt.contains("fixture printed credential") {
             "printed ghp_abcdefghijklmnopqrstuvwxyz0123456789"
         } else {
@@ -660,12 +660,25 @@ fn fixture() -> Result {
         write!(io::stderr(), "diagnostic {token}")?;
         for frame in [
             json!({"type":"thread.started","thread_id":session}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}{DONE_FENCE}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"Review in progress."}}),
+            // Unclosed quotes inside tool output used to make streaming
+            // redaction consume JSON framing and poison settlement replay.
+            json!({"type":"item.completed","item":{"type":"command_execution",
+                "command":"rg TOKEN=\" source.rs",
+                "aggregated_output":format!("TOKEN=\"{token}\nnext line")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("Final answer: credential {token}{DONE_FENCE}")}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
+            if prompt.contains("corrupt") && frame["item"]["type"] == "command_execution" {
+                writeln!(
+                    io::stdout(),
+                    "{{\"type\":\"item.completed\",\"item\":\"[REDACTED]"
+                )?;
+                continue;
+            }
             let frame = frame.to_string();
-            // Escaping hides the marker from the byte-stream filter. The
-            // decoded answer must pass through redaction again at settlement.
+            // Both literal and JSON-escaped credential markers must be
+            // redacted in the decoded answer, while raw frames stay intact.
             let frame = if prompt.contains("escaped") {
                 frame.replace("ghp_", r"\u0067hp_")
             } else {
@@ -5012,9 +5025,9 @@ fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
         assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
         assert_eq!(
             fs::read_to_string(attempt.join("stderr.log"))?,
-            "shell stderr [REDACTED]\n"
+            "shell stderr ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
         );
-        assert_no_printed_credential(&attempt)?;
+        assert_no_printed_credential_in_derived_files(&attempt)?;
         cleanup.disarm();
     }
     Ok(())
@@ -5070,7 +5083,7 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
     Ok(())
 }
 
-fn assert_no_printed_credential(root: &std::path::Path) -> Result {
+fn assert_no_printed_credential_in_derived_files(root: &std::path::Path) -> Result {
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
         for entry in fs::read_dir(path)? {
@@ -5079,6 +5092,13 @@ fn assert_no_printed_credential(root: &std::path::Path) -> Result {
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if kind.is_file() {
+                // Host-local captures are replay evidence. All derived and
+                // published run files must still be safe to disclose.
+                if entry.path() == root.join("stdout.log")
+                    || entry.path() == root.join("stderr.log")
+                {
+                    continue;
+                }
                 let bytes = fs::read(entry.path())?;
                 assert!(
                     !bytes
@@ -5093,7 +5113,7 @@ fn assert_no_printed_credential(root: &std::path::Path) -> Result {
     Ok(())
 }
 
-fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
+fn raw_capture_settlement_keeps_final_answer_and_redacts_disclosure() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -5113,17 +5133,75 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         let attempt = rig.state.join("attempts").join(id);
         assert_eq!(
             fs::read_to_string(attempt.join("result.md"))?,
-            format!("credential [REDACTED]{DONE_FENCE}")
+            format!("Review in progress.\nFinal answer: credential [REDACTED]{DONE_FENCE}")
         );
         assert_eq!(
             fs::read(attempt.join("stderr.log"))?,
-            b"diagnostic [REDACTED]"
+            b"diagnostic ghp_abcdefghijklmnopqrstuvwxyz0123456789"
         );
         let stdout = fs::read_to_string(attempt.join("stdout.log"))?;
-        assert!(stdout.contains("[REDACTED]"), "{stdout}");
-        assert!(!stdout.contains(r"\u0067hp_"), "{stdout}");
-        assert_no_printed_credential(&attempt)?;
+        for line in stdout.lines() {
+            assert!(
+                serde_json::from_str::<Value>(line).is_ok(),
+                "raw JSONL must remain parseable"
+            );
+        }
+        assert!(stdout.contains("Final answer:"));
+        assert!(stdout.contains(if mode == "escaped" {
+            r"\u0067hp_"
+        } else {
+            "ghp_"
+        }));
+        let target = format!("printed-{mode}/provider#1");
+        for part in ["result", "stderr"] {
+            let output = rig.command(&["output", &target, "--part", part, "--json"])?;
+            assert_eq!(code(&output), 0, "{output:?}");
+            let public = String::from_utf8(output.stdout.bytes)?;
+            assert!(public.contains("[REDACTED]"), "{public}");
+            assert!(
+                !public.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                "{public}"
+            );
+        }
+        assert_no_printed_credential_in_derived_files(&attempt)?;
     }
+    // A genuinely damaged retained frame must not turn the preceding progress
+    // into a task result, even when the provider later exits with a done handoff.
+    let lane = run_graph_provider(
+        &rig,
+        "printed-corrupt",
+        json!({
+            "id":"provider", "prompt":"fixture printed credential corrupt", "access":"read_only", "require_findings":true,
+            "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
+        }),
+    )?;
+    assert_eq!(lane["state"], "unsettled", "{lane}");
+    let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+    let attempt = rig.state.join("attempts").join(id);
+    assert!(
+        fs::read(attempt.join("result.md"))?.is_empty(),
+        "progress must not be published as a result"
+    );
+    let serialized = serde_json::to_string(&lane)?;
+    assert!(
+        serialized.contains("evidence defect at stdout.log line 3"),
+        "{lane}"
+    );
+    let status = rig.command(&["status", "printed-corrupt", "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    let node = status["data"]["rows"]
+        .as_array()
+        .ok_or("status rows")?
+        .iter()
+        .find(|row| row["kind"] == "node" && row["node_id"] == "provider")
+        .ok_or("provider node")?;
+    assert_eq!(node["cause_code"], "provider_capture_defect", "{node}");
+    assert!(
+        node["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("stdout.log line 3")),
+        "{node}"
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -5695,8 +5773,8 @@ fn main() -> ExitCode {
                 pool_receipt_excludes_prompt_and_credential_from_artifacts,
             ),
             (
-                "printed_credentials_leave_no_plaintext_in_run_files",
-                printed_credentials_leave_no_plaintext_in_run_files,
+                "raw_capture_settlement_keeps_final_answer_and_redacts_disclosure",
+                raw_capture_settlement_keeps_final_answer_and_redacts_disclosure,
             ),
             (
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",

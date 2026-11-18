@@ -523,6 +523,26 @@ impl TestRig {
         self.execute_os_locked(program, args, stdin)
     }
 
+    /// Spawn a long-lived fixture process whose stdout is consumed as a stream.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "streaming integration fixtures need a live child process"
+    )]
+    pub fn spawn_stream(&self, program: &Path, args: &[OsString]) -> Result<std::process::Child> {
+        use std::process::{Command, Stdio};
+
+        self.with_process_spawn_lock(|| {
+            Ok(Command::new(program)
+                .current_dir(&self.project)
+                .env_clear()
+                .envs(self.env.iter().map(|(key, value)| (key, value)))
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()?)
+        })
+    }
+
     /// Run a child while `PROCESS_SPAWN_LOCK` is already held.
     pub fn execute_os_locked(
         &self,
