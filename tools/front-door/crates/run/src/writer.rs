@@ -2442,6 +2442,7 @@ mod cargo_setup_tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // The holder thread must keep the real flock for a real interval.
     fn writer_preparation_waits_for_the_config_lock_holder() -> FixtureResult<()> {
         // #3393: a concurrent launch queues on the repository lock rather than
         // failing, and never reads the holder's unfinished Git config.
