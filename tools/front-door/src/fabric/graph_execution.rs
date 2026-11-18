@@ -160,7 +160,7 @@ pub(crate) fn tick_graphs(
                 match std::fs::metadata(&execution.directory) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         let reason = format!(
-                            "graph {id}: worktree is missing; restore it or cancel this graph"
+                            "graph {id}: worktree is missing; restore it or run `provenant stop NAME`"
                         );
                         if FileJournal::read_advance_error(&resolved.roots.state, project, &id)?
                             .as_deref()
