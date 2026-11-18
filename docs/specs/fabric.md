@@ -398,6 +398,24 @@ Oversized findings use content-addressed graph text while the checkpoint retains
 
 - Why: dependants need evidence without copying or trusting transcripts.
 
+### Publication boundary
+
+Local execution, graph inputs and retained state are intended to remain raw and
+lossless under their existing custody and integrity controls. Disclosure masking
+belongs at an external publication destination, including graph and peer
+exports, forge content and fixture exports. `publication::Projector` protects
+known exact credential values and typed secret fields; its projection binds the
+raw and published byte lengths and digests separately. A projection error withholds
+the affected publication and never substitutes raw bytes.
+
+`PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
+not authorisation: the receiver must bind the authenticated actor, retained
+launch receipt, origin work key and requested attempt before allowing raw graph
+transport. Until that validation is wired, graph claims are refused. External
+peer output requires publication projection. The graph scanner migration is
+tracked separately; the checkpoint rules below describe the existing behaviour
+until that slice lands.
+
 ### Checkpoint before launch
 
 Transitions are pure reducers; the scheduler saves the checkpoint under a stable

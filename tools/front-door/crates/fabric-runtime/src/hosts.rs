@@ -342,6 +342,21 @@ pub struct GraphCancelContext {
     pub launch_actor: ActorId,
 }
 
+/// Claimed output audience. Graph execution is eligible for raw transport only
+/// after the receiver validates this context against the authenticated actor and
+/// the retained launch receipt and verifies that the requested attempt belongs
+/// to that launch. A claim alone never grants that authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputAudience {
+    PeerPublication,
+    GraphExecution {
+        launch_actor: ActorId,
+        launch_operation: OperationId,
+        origin_work_key: provenant_records::WorkKey,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PeerAction {
@@ -408,6 +423,7 @@ pub enum PeerAction {
     Output {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        audience: OutputAudience,
         input: crate::coordination::facade::OutputInput,
     },
     RunEvents {
@@ -463,6 +479,19 @@ pub enum PeerAction {
 }
 
 peer_feature_protocols! {
+    OUTPUT_AUDIENCE_PROTOCOL = 15 => [
+        (Output, "output", PeerAction::Output {
+            extra: Default::default(),
+            audience: OutputAudience::PeerPublication,
+            input: facade::OutputInput::Read {
+                extra: Default::default(),
+                target: facade::AttemptTarget { extra: Default::default(), attempt: provenant_core::AttemptId::from_bytes([1; 16]), host: None },
+                part: facade::OutputPart::Result,
+                offset: 0,
+                max_bytes: 1,
+            },
+        }),
+    ],
     CONSOLE_PROTOCOL = 7 => [
         (ConsoleBoard, "console_board", PeerAction::ConsoleBoard {
             extra: Default::default(), all: false, limit: 50, selected: false,
@@ -1211,6 +1240,20 @@ mod tests {
         let mut malformed = encoded;
         malformed["peer_subtree_after"] = serde_json::json!("three");
         assert!(serde_json::from_value::<PeerAction>(malformed).is_err());
+    }
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn output_audience_requires_graph_evidence_and_new_protocol() {
+        let action = declared_feature_actions().into_iter().find(|(name, _, _)| *name == "output").unwrap().2;
+        let mut wire = serde_json::to_value(&action).unwrap();
+        assert_eq!(action_fence(&action), OUTPUT_AUDIENCE_PROTOCOL);
+        assert_eq!(feature_protocol_for_wire_name("output"), OUTPUT_AUDIENCE_PROTOCOL);
+        assert!(serde_json::from_value::<PeerAction>(wire.clone()).is_ok());
+        wire.as_object_mut().unwrap().remove("audience");
+        assert!(serde_json::from_value::<PeerAction>(wire.clone()).is_err());
+        wire["audience"] = serde_json::json!({"kind":"graph_execution"});
+        assert!(serde_json::from_value::<PeerAction>(wire).is_err());
     }
 
     #[test]

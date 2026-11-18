@@ -7,81 +7,66 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub const SHELL_PROOF_COMMAND: &str = r#"test -z "${CLAUDE_CODE_OAUTH_TOKEN+x}" && test -z "${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}" && printf provenant-shell-proof"#;
 
-/// Replace session ids, local paths, emails and token-like strings.
+/// Fixture-specific pseudonyms follow the shared destination projection. An
+/// invalid projection withholds the export rather than substituting success.
 pub struct Redactor {
-    pub literals: Vec<(String, String)>,
+    literals: Vec<(String, String)>,
+    projector: provenant_confinement::publication::Projector,
 }
 impl Redactor {
-    pub fn text(&self, value: &str) -> String {
-        // Apply the capture redactor to every value, including executable paths.
-        let mut out = match provenant_confinement::redact::known_shapes(value.as_bytes()) {
-            Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| "[REDACTED]".into()),
-            Err(_) => "[REDACTED]".into(),
-        };
-        for (from, to) in &self.literals {
-            out = out.replace(from.as_str(), to);
-        }
-        out.split_inclusive(|c: char| c.is_whitespace() || "\"'(),;<>[]{}".contains(c))
-            .map(|piece| {
-                let token = piece
-                    .trim_end_matches(|c: char| c.is_whitespace() || "\"'(),;<>[]{}".contains(c));
-                let tail = &piece[token.len()..];
-                let class = if !token.contains('/')
-                    && token
-                        .split_once('@')
-                        .is_some_and(|(_, domain)| domain.contains('.'))
-                {
-                    Some("FIXTURE_EMAIL")
-                } else if (token.len() == 36 && token.chars().filter(|c| *c == '-').count() == 4)
-                    || token.split_once('_').is_some_and(|(prefix, id)| {
-                        prefix.chars().all(|c| c.is_ascii_lowercase())
-                            && id.len() >= 16
-                            && id.chars().all(|c| c.is_ascii_alphanumeric())
-                    })
-                {
-                    Some("FIXTURE_IDENTIFIER")
-                } else if token.len() >= 32
-                    && !token.starts_with(['/', '-'])
-                    && token.chars().filter(char::is_ascii_digit).count() >= 4
-                    && token
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
-                {
-                    Some("FIXTURE_TOKEN")
-                } else {
-                    None
-                };
-                match class {
-                    Some(class) => format!("{class}{tail}"),
-                    None => piece.to_owned(),
-                }
-            })
-            .collect()
+    pub fn new(literals: Vec<(String, String)>, token: Option<&crate::claude::OauthToken>) -> Result<Self> {
+        let mut secrets: Vec<_> = std::env::vars_os().filter(|(key, value)| {
+            key.to_str().is_some_and(provenant_confinement::publication::secret_field) && !value.is_empty()
+        }).map(|(_, value)| {
+            value.as_encoded_bytes().to_vec()
+        }).collect();
+        if let Some(token) = token { secrets.push(token.access.as_bytes().to_vec()); }
+        Ok(Self { literals, projector: provenant_confinement::publication::Projector::new(secrets)? })
     }
-    pub fn value(&self, value: &mut Value) {
+
+    pub fn text(&self, value: &str) -> Result<String> {
+        let projection = self.projector.project(provenant_confinement::publication::Destination::FixtureExport, value.as_bytes())?;
+        let mut out = String::from_utf8(projection.into_bytes())?;
+        for (from, to) in &self.literals { out = out.replace(from, to); }
+        Ok(out)
+    }
+
+    pub fn value(&self, value: &mut Value) -> Result<()> {
+        let bytes = serde_json::to_vec(value)?;
+        let projection = self.projector.json(provenant_confinement::publication::Destination::FixtureExport, &bytes)?;
+        let mut projected: Value = serde_json::from_slice(projection.bytes())?;
+        self.pseudonyms(&mut projected)?;
+        *value = projected;
+        Ok(())
+    }
+
+    fn pseudonyms(&self, value: &mut Value) -> Result<()> {
         match value {
-            Value::String(text) => *text = self.text(text),
-            Value::Array(items) => items.iter_mut().for_each(|item| self.value(item)),
+            Value::String(text) => {
+                for (from, to) in &self.literals { *text = text.replace(from, to); }
+            }
+            Value::Array(items) => for item in items { self.pseudonyms(item)?; },
             Value::Object(map) => {
                 let entries = std::mem::take(map);
-                for (key, mut item) in entries {
-                    self.value(&mut item);
-                    map.insert(self.text(&key), item);
+                for (mut key, mut item) in entries {
+                    for (from, to) in &self.literals { key = key.replace(from, to); }
+                    self.pseudonyms(&mut item)?;
+                    if map.insert(key, item).is_some() { return Err("fixture projection collided object keys".into()); }
                 }
             }
             _ => {}
         }
+        Ok(())
     }
+
     pub fn stream(&self, bytes: &[u8]) -> Result<String> {
+        let values: Vec<Value> = std::str::from_utf8(bytes)?.lines().filter(|line| !line.is_empty())
+            .map(serde_json::from_str).collect::<std::result::Result<_,_>>()?;
+        let mut values = Value::Array(values);
+        self.value(&mut values)?;
         let mut out = String::new();
-        for line in String::from_utf8(bytes.to_vec())?
-            .lines()
-            .filter(|line| !line.is_empty())
-        {
-            let mut value: Value = serde_json::from_str(line)?;
-            self.value(&mut value);
-            out.push_str(&serde_json::to_string(&value)?);
-            out.push('\n');
+        for value in values.as_array().ok_or("fixture projection is not an array")? {
+            out.push_str(&serde_json::to_string(value)?); out.push('\n');
         }
         Ok(out)
     }
@@ -161,9 +146,12 @@ mod tests {
 
     #[test]
     fn recording_redacts_known_tokens_in_argv_zero() {
-        let redactor = Redactor { literals: vec![] };
+        let redactor = Redactor {
+            literals: vec![],
+            projector: provenant_confinement::publication::Projector::new([b"ghp_abcdefghijklmnopqrst".to_vec()]).unwrap(),
+        };
         let argv = ["/tools/ghp_abcdefghijklmnopqrst", "--help"];
-        let recorded: Vec<_> = argv.iter().map(|arg| redactor.text(arg)).collect();
+        let recorded: Vec<_> = argv.iter().map(|arg| redactor.text(arg).unwrap()).collect();
         assert_eq!(recorded, ["/tools/[REDACTED]", "--help"]);
     }
     #[test]

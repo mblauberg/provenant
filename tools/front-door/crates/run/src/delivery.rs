@@ -589,6 +589,13 @@ impl HostDeliveryContext {
                 captured("HOME").map(|home| home.join(provenant_core::DEFAULT_STATE_SUFFIX))
             })
     }
+    fn publication_projector(&self) -> std::result::Result<provenant_confinement::publication::Projector, provenant_confinement::publication::ProjectionError> {
+        provenant_confinement::publication::Projector::from_environment(
+            self.environment.iter().map(|(key, value)| (
+                OsString::from_vec(key.clone()), OsString::from_vec(value.clone())
+            )))
+    }
+
     fn forge_command_with_input(
         &self,
         cwd: &Path,
@@ -615,6 +622,10 @@ impl HostDeliveryContext {
             std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )
         .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
+        provenant_confinement::publication::install_forge(
+            &mut forge, project.to_owned(),
+            self.publication_projector(),
+        );
         if let Some(cancel) = &self.cancellation {
             forge.set_cancel(cancel.clone());
         }
@@ -1905,10 +1916,12 @@ impl HostDeliveryContext {
             )));
         }
         if commit_log && output.stdout.truncated {
-            return Ok(format!(
-                "{}\n\n[Commit summary truncated.]",
-                String::from_utf8_lossy(&output.stdout.bytes)
-            ));
+            // Never publish a capture cut through an exact credential. A
+            // bounded local capture can still be retained privately; this
+            // outgoing summary is unavailable until a complete one is read.
+            return Err(RunError::DeliveryLimit {
+                stage, tool: "git", command: git_subcommand(args), limit,
+            });
         }
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())
@@ -2122,7 +2135,16 @@ impl HostDeliveryContext {
             ],
             Stage::Head,
         )?;
-        Ok(cap_pr_body(format!("{identity}\n\n{commits}")))
+        let body = format!("{identity}\n\n{commits}");
+        let projection = self.publication_projector()
+            .and_then(|projector| projector.project(
+                provenant_confinement::publication::Destination::PullRequest, body.as_bytes()))
+            .map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+        let body = String::from_utf8(projection.into_bytes())
+            .map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+        // Projection precedes truncation so an exact credential cannot be cut
+        // into an unrecognisable prefix and then escape the final boundary.
+        Ok(cap_pr_body(body))
     }
 
     /// Prepare objects without changing a checkout, then publish optimistically

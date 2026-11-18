@@ -1208,7 +1208,7 @@ fn main() -> Result<()> {
         "FIXTURE_ROOT".into(),
     ));
     literals.push((home.to_string_lossy().into_owned(), "FIXTURE_HOME".into()));
-    let redactor = Redactor { literals };
+    let redactor = Redactor::new(literals, token.as_ref())?;
     let access = if args.writer {
         "worktree_write"
     } else {
@@ -1229,13 +1229,12 @@ fn main() -> Result<()> {
             .argv
             .iter()
             .map(|arg| redactor.text(&arg.to_string_lossy()))
-            .collect();
+            .collect::<std::result::Result<_, _>>()?;
         let id = format!("{}-live-{access}-{session}", args.adapter);
         let file = format!("{}/live-{access}-{session}.jsonl", args.adapter);
-        let entry = json!({
+        let mut entry = json!({
             "id": id,
             "fixture": file,
-            "sha256": provenant_core::hex(&Sha256::digest(redacted.as_bytes())),
             "kind": "live_recording",
             "source": {"kind": "live_confined_run", "recorder": "crates/providers/examples/record.rs"},
             "cli_version": version,
@@ -1250,12 +1249,17 @@ fn main() -> Result<()> {
             "writer_shell_proof": writer_shell_proof,
             "subprocess_env_scrub": subprocess_env_scrub,
             "confinement": format!("sandbox-exec allow-default profile with explicit boundaries, observations in {}/confinement.json", args.adapter),
-            "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
+            "substitution_classes": ["session_identifier", "local_path", "exact_credential", "typed_credential_field"],
             "keychain_ipc_proof": false,
             // Claude's token arrives through a pipe, so a successful run with the
             // keychain denied is the evidence, not a disqualifier.
             "activation_eligible": outcome.status() == OutcomeStatus::Success,
         });
+        redactor.value(&mut entry)?;
+        // Bind the final export bytes, after all content transformations.
+        entry["sha256"] = json!(provenant_core::hex(&Sha256::digest(redacted.as_bytes())));
+        entry["raw_binding"] = json!(provenant_confinement::publication::PayloadBinding::of(&run.outcome.stdout.bytes));
+        entry["publication_binding"] = json!(provenant_confinement::publication::PayloadBinding::of(redacted.as_bytes()));
         println!("{}", serde_json::to_string_pretty(&entry)?);
         if args.write {
             let fixtures =
