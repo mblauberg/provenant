@@ -155,6 +155,7 @@ pub(crate) fn collect(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the fixture stream and sweep control explicit.
 fn collect_entries(
     root: &Directory,
     entries: Entries,

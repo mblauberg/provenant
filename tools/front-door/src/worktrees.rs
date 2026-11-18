@@ -1128,6 +1128,7 @@ fn retained_exception(reason: RetainReason) -> bool {
 
 #[derive(Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)] // Detailed output borrows the full report; summary stays compact.
 enum GcOutput<'a> {
     Detailed {
         #[serde(flatten)]
@@ -1262,6 +1263,7 @@ fn require_non_bare_gc_repository(bare: Option<bool>) -> Result<(), Error> {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Project context and sweep deadline stay explicit at this boundary.
 fn gc_project(
     roots: &provenant_core::Roots,
     home: &Path,
@@ -1884,15 +1886,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .as_ref()
             .filter(|cursor| cursor.class == "project_registry")
             .and_then(|cursor| cursor.detail.as_deref());
-        let selection_epoch = lease.as_ref().map_or_else(
-            || {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64
-            },
-            crate::gc_sweep::Lease::epoch,
-        );
+        let selection_epoch = if let Some(lease) = lease.as_ref() {
+            lease.epoch()
+        } else {
+            SystemClock.wall_now()?.as_micros() as u64
+        };
         let selection_epoch = format!("{selection_epoch:016x}");
         let mut selection = {
             let active_lease = lease.as_ref();
@@ -2383,12 +2381,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
     }
     adapters.data.sweep_stopped = stopped;
-    if !stopped {
-        if let Some(lease) = adapters.lease.take() {
-            lease
-                .complete()
-                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
-        }
+    if !stopped && let Some(lease) = adapters.lease.take() {
+        lease
+            .complete()
+            .map_err(|error| Error::RetentionCollection(error.to_string()))?;
     }
     adapters.data.observe_retention(trigger);
     adapters.data.alerts.extend(
@@ -3211,16 +3207,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         protection.unobserved = !self.data.unobserved_projects.is_empty();
         let sweep_deadline = self.deadline;
         let resume_detail = self.resume_detail().map(str::to_owned);
-        let epoch_number = self.lease.as_ref().map_or_else(
-            || {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                timestamp ^ u64::from(std::process::id()).rotate_left(32)
-            },
-            crate::gc_sweep::Lease::epoch,
-        );
+        let epoch_number = if let Some(lease) = self.lease.as_ref() {
+            lease.epoch()
+        } else {
+            let timestamp = SystemClock.wall_now()?.as_micros() as u64;
+            timestamp ^ u64::from(std::process::id()).rotate_left(32)
+        };
         let epoch = format!("{epoch_number:016x}");
         let mut warnings = if self
             .lease
@@ -3649,7 +3641,7 @@ fn with_context_mode_with_owner_cancel<T>(
             .min(Duration::from_secs(5))
             .max(Duration::from_millis(1)),
     )?;
-    let repo = runtime.open_repo(&executor, project, budget, &cancel)?;
+    let repo = runtime.open_repo(&executor, project, budget, cancel)?;
     let (binding, layout) = if let Some((binding, layout)) = owner {
         let common = Directory::open_anchor(binding.common_dir())?;
         if binding.common_dir() != repo.common_git_dir()
@@ -3674,7 +3666,7 @@ fn with_context_mode_with_owner_cancel<T>(
         } else {
             provenant_config::bind_project(roots, location)?
         };
-        let layout = runtime.project_layout_for_binding(&executor, &binding, budget, &cancel)?;
+        let layout = runtime.project_layout_for_binding(&executor, &binding, budget, cancel)?;
         (binding, layout)
     };
     let worktrees_state = if read_only {
@@ -3726,7 +3718,7 @@ fn with_context_mode_with_owner_cancel<T>(
             ),
         ),
     };
-    let result = action(&context, &cancel);
+    let result = action(&context, cancel);
     drop(utility_home);
     result
 }

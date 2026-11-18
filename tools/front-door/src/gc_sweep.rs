@@ -7,7 +7,7 @@ use provenant_os::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
-    io,
+    io::{self, Write},
     time::{Duration, Instant},
 };
 
@@ -31,13 +31,15 @@ pub(crate) struct Cursor {
 
 mod path_option {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     pub fn serialize<S>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        path.as_ref().map(encode).serialize(serializer)
+        path.as_ref()
+            .map(|path| encode(path.as_path()))
+            .serialize(serializer)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
@@ -52,7 +54,7 @@ mod path_option {
     }
 
     #[cfg(unix)]
-    fn encode(path: &PathBuf) -> String {
+    fn encode(path: &Path) -> String {
         use std::os::unix::ffi::OsStrExt;
         format!("unix:{}", provenant_core::hex(path.as_os_str().as_bytes()))
     }
@@ -104,6 +106,7 @@ struct FenceWatcher {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+#[allow(clippy::large_enum_variant)] // A held lease owns its fencing watcher and durable cursor.
 pub(crate) enum Acquire {
     Held(Lease),
     Busy(Option<String>),
@@ -120,6 +123,10 @@ pub(crate) struct Deadline {
 }
 
 impl Deadline {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Start the explicit real-time sweep deadline."
+    )]
     pub fn start(budget: Duration) -> Self {
         let cancel = CancelToken::new();
         let timer_cancel = cancel.clone();
@@ -303,7 +310,10 @@ impl Drop for Lease {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
             }
-            eprintln!("warning: could not lock GC sweep metadata to release its lease");
+            let _ = writeln!(
+                io::stderr().lock(),
+                "warning: could not lock GC sweep metadata to release its lease"
+            );
             return;
         };
         if !progress_has_epoch(&self.directory, self.progress.epoch) {
@@ -314,7 +324,10 @@ impl Drop for Lease {
         }
         self.progress.released = true;
         if let Err(error) = self.write_progress_locked() {
-            eprintln!("warning: could not persist the released GC sweep cursor: {error}");
+            let _ = writeln!(
+                io::stderr().lock(),
+                "warning: could not persist the released GC sweep cursor: {error}"
+            );
         }
     }
 }
@@ -474,14 +487,15 @@ fn elapsed_since(started: i64, now: i64) -> u64 {
 
 fn holder_over_budget(progress: &Progress, clock: &dyn Clock) -> bool {
     let now_boot = clock.boot_identity().ok();
-    if progress.boot_identity.is_some() && progress.boot_identity == now_boot {
-        if let (Some(started), Ok(now)) = (
+    if progress.boot_identity.is_some()
+        && progress.boot_identity == now_boot
+        && let (Some(started), Ok(now)) = (
             progress.started_host_monotonic_micros,
             clock.host_monotonic_micros(),
-        ) {
-            let budget_micros = progress.budget_seconds.saturating_mul(1_000_000);
-            return now.saturating_sub(started) >= budget_micros;
-        }
+        )
+    {
+        let budget_micros = progress.budget_seconds.saturating_mul(1_000_000);
+        return now.saturating_sub(started) >= budget_micros;
     }
     elapsed_since(progress.started_unix_seconds, clock.unix_seconds()) >= progress.budget_seconds
 }
