@@ -59,6 +59,31 @@ fn run_refuses_secret_non_brief_field_with_safe_cause() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn compiled_launch_refuses_credentials_from_template_files() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    for (name, secret) in [
+        ("github-secret", format!("ghp_{}", "q".repeat(36))),
+        ("aws-secret", format!("AKIA{}", "Z".repeat(16))),
+    ] {
+        std::fs::write(
+            templates.join(format!("{name}.toml")),
+            format!("brief='{secret}'\ntier='junior'\n"),
+        )?;
+        let output = rig.command().args(["run", name, "--explain"]).output()?;
+        let reply: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(!output.status.success(), "{reply}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("credential-shaped value"), "{text}");
+        assert!(!text.contains(&secret), "{text}");
+        assert!(graph_records(&rig.state())?.is_empty());
+    }
+    Ok(())
+}
+
 #[test]
 fn run_refuses_credential_shaped_template_name() -> Result {
     let rig = GraphProject::new()?;

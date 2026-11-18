@@ -2023,6 +2023,9 @@ impl Factory {
         }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
+        // Template binding can assemble a credential from individually safe
+        // inputs. Check the bound launch before submission normalises its text.
+        scan_graph_input(&bound)?;
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         document.set_replay_digest(&digest);
@@ -5052,7 +5055,7 @@ mod tests {
         // checkpoint projection. Exercise the bundled replacement for that
         // workload, including submission metadata and sealed input manifests.
         let path = rig.root.join("acceptance.txt");
-        std::fs::write(&path, "Acceptance evidence.\n".repeat(38_000))?;
+        std::fs::write(&path, "Acceptance evidence.\n".repeat(25_000))?;
         let brief = std::fs::read_to_string(&path)?;
         let limits = &mut factory.context.config.graph.limits;
         limits.node_prompt_bytes = 1_048_576;

@@ -463,8 +463,9 @@ ingress, and never become persisted graph text. Captured fragments are parsed,
 normalised and scanned before storage; retries parse stored fragments without
 normalising them again. Template substitutions are scanned after interpolation,
 and each new admission's compiled expansion is scanned before commit, since
-separately safe fragments can assemble a credential. Scanning preserves original
-bytes and token boundaries, including beside redaction markers. Only an assignment
+separately safe fragments can assemble a credential. A bound launch is scanned
+before its text is normalised and published, including after template binding.
+Scanning preserves original bytes and token boundaries, including beside redaction markers. Only an assignment
 value that is exactly a redaction marker is already redacted; a marker prefix
 never exempts further value bytes. This never rewrites stored
 nodes or prior expansions. Typed handoffs are normalised at capture before any
