@@ -1782,6 +1782,8 @@ pub(crate) struct Listing {
     pub rows: Vec<ListedGraph>,
     pub omitted: std::collections::BTreeMap<String, usize>,
     pub next: Option<u64>,
+    pub standalone_holders: Vec<provenant_os::admission::HeldInfo>,
+    pub standalone_waiters: Vec<provenant_os::admission::WaitInfo>,
 }
 
 /// Every unsettled graph, always; then settled graphs newest first, within
@@ -1850,6 +1852,8 @@ pub(crate) fn select_listing(
         rows,
         omitted,
         next,
+        standalone_holders: Vec::new(),
+        standalone_waiters: Vec::new(),
     }
 }
 
@@ -1868,6 +1872,8 @@ pub(crate) fn graph_listing(
                     rows: Vec::new(),
                     omitted: Default::default(),
                     next: None,
+                    standalone_holders: Vec::new(),
+                    standalone_waiters: Vec::new(),
                 });
             }
             Err(error) => return Err(error),
@@ -1983,11 +1989,14 @@ pub(crate) fn graph_listing(
             }
             graph.digests = super::graph_status::node_digests(&rows);
         }
-        Ok(finish_listing(
-            listing,
-            settled_count,
-            command.all || globals.full,
-        ))
+        let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
+        if root.as_path().exists() {
+            finished.standalone_holders =
+                provenant_os::admission::standalone_holders(root.as_path());
+            finished.standalone_waiters =
+                provenant_os::admission::standalone_waiters(root.as_path());
+        }
+        Ok(finished)
     })();
     match result {
         Ok(listing) => {
@@ -2044,6 +2053,44 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
+            if !listing.standalone_waiters.is_empty() || !listing.standalone_holders.is_empty() {
+                if !listing.rows.is_empty() {
+                    human.push('\n');
+                }
+                human.push_str("admission:\n");
+                let now_sec = (now.max(0) / 1_000_000) as u64;
+                for waiter in &listing.standalone_waiters {
+                    let elapsed = now_sec.saturating_sub(waiter.start_unix_seconds);
+                    let holders = listing
+                        .standalone_holders
+                        .iter()
+                        .filter(|h| h.class == waiter.class)
+                        .collect::<Vec<_>>();
+                    if holders.is_empty() {
+                        human.push_str(&format!(
+                            "  {} waiter: pid {} ({}s)\n",
+                            waiter.class, waiter.pid, elapsed
+                        ));
+                    } else {
+                        let holders_desc = holders
+                            .iter()
+                            .map(|h| format!("slot {}: pid {}", h.slot, h.pid))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        human.push_str(&format!(
+                            "  {} waiter: pid {} ({}s; held by {})\n",
+                            waiter.class, waiter.pid, elapsed, holders_desc
+                        ));
+                    }
+                }
+                for holder in &listing.standalone_holders {
+                    let elapsed = now_sec.saturating_sub(holder.start_unix_seconds);
+                    human.push_str(&format!(
+                        "  {} holder: slot {} held by pid {} ({}s)\n",
+                        holder.class, holder.slot, holder.pid, elapsed
+                    ));
+                }
+            }
             let more = if command.all || globals.full {
                 "--cursor"
             } else {
@@ -2072,11 +2119,22 @@ pub(crate) fn graph_listing(
                     })
                 })
                 .collect();
+            let mut data = json!({
+                "graphs": rows,
+                "omitted": listing.omitted,
+                "next_cursor": listing.next,
+            });
+            if !listing.standalone_holders.is_empty() || !listing.standalone_waiters.is_empty() {
+                data["admission"] = json!({
+                    "holders": listing.standalone_holders,
+                    "waiters": listing.standalone_waiters,
+                });
+            }
             crate::emit(
                 &provenant_records::CommandResult::new(
                     "status",
                     provenant_records::Outcome::Ok,
-                    json!({"graphs":rows,"omitted":listing.omitted,"next_cursor":listing.next}),
+                    data,
                 ),
                 globals,
                 &human,
@@ -3655,6 +3713,8 @@ mod tests {
                 rows: graphs.clone(),
                 omitted: Default::default(),
                 next: None,
+                standalone_holders: Vec::new(),
+                standalone_waiters: Vec::new(),
             },
             1,
             false,
@@ -3675,6 +3735,8 @@ mod tests {
                 rows: graphs,
                 omitted: Default::default(),
                 next: None,
+                standalone_holders: Vec::new(),
+                standalone_waiters: Vec::new(),
             },
             1,
             true,

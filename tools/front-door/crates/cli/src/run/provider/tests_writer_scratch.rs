@@ -57,6 +57,9 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
                 .env_remove("GIT_CONFIG_GLOBAL")
                 .env_remove("GH_CONFIG_DIR")
                 .env_remove("XDG_CONFIG_HOME")
+                .env_remove(provenant_core::consumer_env::GIT)
+                .env_remove(provenant_core::consumer_env::PRIMARY_CHECKOUT)
+                .env_remove(provenant_core::consumer_env::WORKTREE_GITDIR)
                 .output()?;
             assert!(
                 output.status.success(),
@@ -1236,7 +1239,7 @@ printf 'agy 1.0.0\n'
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
-    let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+    let slots = state.join("admission").join("build");
     assert!(
         codex
             .profile

@@ -1932,7 +1932,7 @@ pub fn trusted_lane_toolchain_diagnostic(
         .flat_map(|grant| {
             [
                 grant.path.join("bin"),
-                grant.path.join(provenant_os::build_slots::SHIM_DIRECTORY),
+                grant.path.join(provenant_os::admission::SHIM_DIRECTORY),
             ]
         })
         .collect();
@@ -2710,7 +2710,7 @@ mod cargo_setup_tests {
         std::fs::create_dir_all(home.join(".rustup")).unwrap();
         std::fs::create_dir(&worktree).unwrap();
         std::fs::create_dir_all(scratch.join("bin")).unwrap();
-        std::fs::create_dir_all(scratch.join(provenant_os::build_slots::SHIM_DIRECTORY)).unwrap();
+        std::fs::create_dir_all(scratch.join(provenant_os::admission::SHIM_DIRECTORY)).unwrap();
         std::fs::create_dir(scratch.join("other")).unwrap();
         std::fs::write(bin.join("rustup"), b"fixture").unwrap();
         std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
@@ -2735,7 +2735,7 @@ mod cargo_setup_tests {
             (
                 "scratch cargo shim",
                 vec![
-                    scratch.join(provenant_os::build_slots::SHIM_DIRECTORY),
+                    scratch.join(provenant_os::admission::SHIM_DIRECTORY),
                     bin.clone(),
                 ],
                 &grants[..],

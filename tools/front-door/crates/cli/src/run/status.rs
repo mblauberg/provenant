@@ -235,17 +235,46 @@ fn project_lane_inner(
         provenant_records::wire::LanePresence::Unknown => None,
     });
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
-    let build_wait = host_artifacts
-        && matches!(lane.state, run::AttemptState::Running { .. })
-        && lane.write_grants.iter().any(|grant| {
-            grant.source == provenant_records::run::WriteSource::Scratch
-                && grant
-                    .path
-                    .to_path_buf()
-                    .is_ok_and(|path| provenant_os::build_slots::is_waiting(&path))
-        });
-    let waiting_for = build_wait
-        .then(|| "waiting for a host build slot".to_owned())
+    let admission_wait =
+        if host_artifacts && matches!(lane.state, run::AttemptState::Running { .. }) {
+            lane.write_grants.iter().find_map(|grant| {
+                if grant.source == provenant_records::run::WriteSource::Scratch
+                    && let Ok(path) = grant.path.to_path_buf()
+                {
+                    return provenant_os::admission::is_waiting(&path);
+                }
+                None
+            })
+        } else {
+            None
+        };
+    let waiting_for = admission_wait
+        .map(|wait_info| {
+            let now_sec = now_wall.map_or_else(
+                || {
+                    use provenant_core::Clock;
+                    provenant_os::clock::SystemClock::new()
+                        .unix_seconds()
+                        .max(0) as u64
+                },
+                |w| w.unix_seconds().max(0) as u64,
+            );
+            let elapsed = now_sec.saturating_sub(wait_info.start_unix_seconds);
+            let holders = provenant_os::admission::host_holders(root, &wait_info.class);
+            if holders.is_empty() {
+                format!("waiting for a host {} slot ({}s)", wait_info.class, elapsed)
+            } else {
+                let holders_desc = holders
+                    .iter()
+                    .map(|h| format!("slot {}: pid {}", h.slot, h.pid))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "waiting for a host {} slot ({}s; held by {})",
+                    wait_info.class, elapsed, holders_desc
+                )
+            }
+        })
         .or_else(|| wait.map(|wait| wait.waiting_for.description()))
         .or_else(|| {
             lane.provider_silent_for_ms
