@@ -3436,6 +3436,7 @@ pub(super) fn prepare_candidates_inner(
             continue;
         };
         let adapter = registration.adapter;
+        let adapter_spec = AdapterSpec::get(adapter.id());
         if matches!(
             route.readiness,
             provenant_records::RouteReadiness::Unavailable {
@@ -3893,11 +3894,11 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
-        if adapter.id() == "codex" {
+        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Codex) {
             request.codex = if writer.is_none()
                 || config
                     .providers
-                    .get("codex")
+                    .get(adapter.id())
                     .is_some_and(|settings| settings.clean_config)
             {
                 provenant_confinement::CodexPolicy::Clean
@@ -4026,7 +4027,6 @@ pub(super) fn prepare_candidates_inner(
             }
         };
         let credential_roots = plan.permissions().credential_roots.clone();
-        let adapter_spec = AdapterSpec::get(adapter.id());
         let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
         let refreshed = if refresh_token && fixture_token.is_none() {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
@@ -4711,7 +4711,7 @@ pub(super) fn prepare_candidates_inner(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
-        if adapter.id() == "codex" {
+        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Codex) {
             let source = if writer.is_none() {
                 "read-only extension authority"
             } else {

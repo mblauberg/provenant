@@ -720,11 +720,14 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
             assert!(policy.mandatory().github().contains(&subtree(&gh)));
             let plan = ConfinedPlan::new(request)?;
             let mut profile = provenant_confinement::permissions::ProviderProfileSpec {
-                confinement: provenant_confinement::permissions::ResolvedConfinementPolicy::default().without_credentials(),
+                confinement:
+                    provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                        .without_credentials(),
                 ..Default::default()
             };
             assert!(!github_auth_permitted(&plan, &profile));
-            profile.confinement = provenant_confinement::permissions::ResolvedConfinementPolicy::default().offline();
+            profile.confinement =
+                provenant_confinement::permissions::ResolvedConfinementPolicy::default().offline();
             assert!(!github_auth_permitted(&plan, &profile));
         }
     }
@@ -779,11 +782,14 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
             },
         },
     ];
-    host.default_account_directories = [
-        ("codex".into(), root.join("default-codex")),
-        ("claude".into(), skills.join("default-claude")),
-    ]
-    .into();
+    host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
+    // Claude's relocated state is sealed as a credential declaration, rather
+    // than a default account directory. Use the same owner as host admission.
+    host.credential_roots.extend(
+        provenant_confinement::permissions::host_credential_declarations(|name| {
+            (name == "CLAUDE_CONFIG_DIR").then(|| skills.join("default-claude").into_os_string())
+        }),
+    );
     host.provider_path_environment = [(
         "XDG_DATA_HOME".into(),
         root.join("relocated-xdg").into_os_string(),
