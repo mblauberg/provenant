@@ -85,8 +85,7 @@ impl Journal {
         inputs.state_dir = Some(state.to_owned());
         inputs.workspaces.push(project.to_owned());
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let context =
-            provenant_cli::fabric::Context::open_inspection(roots.clone(), &home, project)?;
+        let context = provenant_cli::fabric::Context::open(roots.clone(), &home, project)?;
         Self::for_project(roots, context.identity.project)
     }
     pub(crate) fn for_project(roots: Roots, project: ProjectId) -> Result<Self> {
@@ -581,12 +580,16 @@ fn poll_repository(
                 request,
             )?;
             for suite in suites["check_suites"].as_array().into_iter().flatten() {
-                let detail = json!({"repository":repository,"number":number,"head":head,"id":suite["id"],"status":suite["status"],"conclusion":suite["conclusion"],"updated_at":suite["updated_at"],"source":"host_poller"});
+                let (kind, mut detail) =
+                    normalise_webhook(repository, json!({"check_suite":suite,"number":number}))
+                        .ok_or("invalid check suite observation")?;
+                detail["head"] = json!(head);
+                detail["source"] = json!("host_poller");
                 append(
                     roots,
                     project,
                     format!("forge-suite:{}", key(&detail)?),
-                    ObservationKind::CheckSuite,
+                    kind,
                     detail,
                 )?;
             }
@@ -610,12 +613,14 @@ fn poll_repository(
     }
     let workflows = observer.resource("actions/runs", Duration::ZERO, request)?;
     for workflow in workflows["workflow_runs"].as_array().into_iter().flatten() {
-        let detail = json!({"repository":repository,"id":workflow["id"],"head":workflow["head_sha"],"status":workflow["status"],"conclusion":workflow["conclusion"],"updated_at":workflow["updated_at"],"source":"host_poller"});
+        let (kind, mut detail) = normalise_webhook(repository, json!({"workflow_run":workflow}))
+            .ok_or("invalid workflow observation")?;
+        detail["source"] = json!("host_poller");
         append(
             roots,
             project,
             format!("forge-workflow:{}", key(&detail)?),
-            ObservationKind::WorkflowRun,
+            kind,
             detail,
         )?;
     }
@@ -984,9 +989,24 @@ fn normalise_webhook(repository: &str, payload: Value) -> Option<(ObservationKin
         ObservationKind::IssueComment => &payload["comment"],
         _ => &payload["pull_request"],
     };
+    let pull_requests: Vec<_> = entity["pull_requests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|pull| pull["number"].as_u64())
+        .collect();
+    let number = payload["number"]
+        .as_u64()
+        .or_else(|| payload["issue"]["number"].as_u64())
+        .or_else(|| entity["number"].as_u64())
+        .or_else(|| pull_requests.first().copied());
     Some((
         kind,
-        json!({"repository":repository,"action":payload["action"],"number":payload["number"].as_u64().or_else(||payload["issue"]["number"].as_u64()),"id":entity["id"],"head":entity["head_sha"].as_str().or_else(||entity["head"]["sha"].as_str()),"state":entity["state"],"status":entity["status"],"conclusion":entity["conclusion"],"updated_at":entity["updated_at"],"source":"webhook"}),
+        json!({"repository":repository,"action":payload["action"],"number":number,
+            "pull_requests":pull_requests,"id":entity["id"],"name":entity["name"],
+            "head":entity["head_sha"].as_str().or_else(||entity["head"]["sha"].as_str()),
+            "state":entity["state"],"status":entity["status"],"conclusion":entity["conclusion"],
+            "updated_at":entity["updated_at"],"source":"webhook"}),
     ))
 }
 
@@ -1052,6 +1072,29 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(roots.state.as_path()).unwrap();
         (temp, roots, ProjectId::from_bytes([34; 16]))
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn journal_subscriptions_register_projects_for_host_discovery() -> Result<()> {
+        if crate::fabric::peer_tests::host_test(
+            "event_delivery::tests::journal_subscriptions_register_projects_for_host_discovery",
+        )? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let journal = Journal::open(&rig.state, &rig.project)?;
+        journal.register_pr("owner/repo", 7, None)?;
+        let bindings = provenant_config::registered_projects(&journal.roots)?;
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].project_id(), journal.project);
+        let resumed = Journal::open(&rig.state, &rig.project)?;
+        assert_eq!(resumed.project, journal.project);
+        assert_eq!(
+            provenant_config::registered_projects(&resumed.roots)?.len(),
+            bindings.len()
+        );
+        Ok(())
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events
@@ -1348,6 +1391,16 @@ mod tests {
             assert_eq!(actual, kind);
             assert_eq!(detail["repository"], "owner/repo");
             assert!(!detail.to_string().contains("not indexed"));
+        }
+        for field in ["check_run", "check_suite", "workflow_run"] {
+            let name = (field != "check_suite").then_some("build");
+            let payload = json!({field:{"id":1,"name":name,"head_sha":"abc",
+                "pull_requests":[{"number":7},{"number":9}],"status":"completed"},"action":"completed"});
+            let (_, detail) = normalise_webhook("owner/repo", payload).unwrap();
+            assert_eq!(detail["number"], 7);
+            assert_eq!(detail["pull_requests"], json!([7, 9]));
+            assert_eq!(detail["name"], json!(name));
+            assert_eq!(detail["head"], "abc");
         }
     }
 }
