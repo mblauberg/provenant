@@ -7337,12 +7337,13 @@ mod tests {
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
-        for (conflict, incomplete, outcome, cause) in [(
-            true,
-            false,
-            Outcome::Failed,
-            Some(TerminalCause::IdentityMismatch),
-        )] {
+        {
+            let (conflict, incomplete, outcome, cause) = (
+                true,
+                false,
+                Outcome::Failed,
+                Some(TerminalCause::IdentityMismatch),
+            );
             let temp = tempfile::tempdir()?;
             let clock = crate::tests::clock();
             let cancel = provenant_core::CancelToken::new();
