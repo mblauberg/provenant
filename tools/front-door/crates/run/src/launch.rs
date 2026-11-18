@@ -535,7 +535,7 @@ fn check_launch_policy(
             let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
             Ok(())
         }
-        Effect::Refuse(_) => Err(refusal),
+        Effect::Refuse(_) | Effect::Stop(_) => Err(refusal),
     }
 }
 

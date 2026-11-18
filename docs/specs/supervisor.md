@@ -299,15 +299,11 @@ available from `provenant config show`.
 
 ### Disclosure and safe Git evidence
 
-A prompt snapshot with a known secret is refused before sealing, and output is
-redacted across chunk boundaries before it reaches disk. Quoted credential values
-are masked until a definite closing quote: one that every plausible escape layer,
-from the opener's own up to the length of the backslash run, agrees is a close.
-No fixed depth cap applies, because a value can be escaped one layer deeper than
-any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
-after a definite close or the line end. An assignment value that is exactly
-`[REDACTED]` stays unchanged across chunks and rescans; further value bytes are
-masked. Marker recognition never changes the input to token scanning.
+Disclosure is selected by destination, not transport. Authorised execution
+context remains lossless; external publication projects known credential values
+and typed secret fields, and withholds publication if projection fails. Raw and
+exported bytes have separate lengths and digests. Install publication coverage
+before removing existing local filters; the migration is sequenced by #3422.
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

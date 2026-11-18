@@ -468,7 +468,8 @@ pub(super) fn check_writer_disk_with_collection(
                     "provenant: warning: {message}; on {}; dispatching",
                     limiting.display()
                 ),
-                provenant_records::policy::Effect::Refuse(_) => {
+                provenant_records::policy::Effect::Refuse(_)
+                | provenant_records::policy::Effect::Stop(_) => {
                     return Err(DiskCheck::Low {
                         path: limiting.to_path_buf(),
                         available: minimum,

@@ -358,7 +358,7 @@ pub(super) fn check_capacity_policy(
     match policy.check(code, facts) {
         Effect::Proceed => Ok(None),
         Effect::Warn(message) => Ok(Some(message)),
-        Effect::Refuse(diagnostic) => {
+        Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
                 report_policy_message(detail);
             }

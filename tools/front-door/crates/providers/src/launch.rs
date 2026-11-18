@@ -441,7 +441,7 @@ pub(crate) fn policy_warning(
             report(&message);
             Ok(())
         }
-        Effect::Refuse(diagnostic) => {
+        Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             report(
                 diagnostic
                     .detail

@@ -271,7 +271,7 @@ impl Prompt {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
                 Ok(())
             }
-            Effect::Refuse(_) => Err(error()),
+            Effect::Refuse(_) | Effect::Stop(_) => Err(error()),
         }
     }
 }
