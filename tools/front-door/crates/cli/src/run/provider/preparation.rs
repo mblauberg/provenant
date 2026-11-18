@@ -4988,6 +4988,9 @@ mod receipt_tests {
         let error = crate::route::DispatchError::Catalogue(
             provenant_routing::RoutingError::NoEligiblePoolMember {
                 exclusions: vec![message.into()],
+                cause: None,
+                preparation_failure:
+                    provenant_records::run::PreparationFailure::AdapterUnavailable,
             },
         );
         let refusal = PrepareError::RouteResolution {

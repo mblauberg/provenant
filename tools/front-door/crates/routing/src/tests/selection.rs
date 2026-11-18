@@ -621,12 +621,21 @@ fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dy
 {
     use provenant_quota::{ReadinessRead, ReadinessReason, ReadinessState};
     let catalogue = Catalogue::bundled()?;
-    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+    let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({
         "pools": {"trial": [
             {"model":"codex/gpt-6-luna", "weight":1},
             {"model":"claude/claude-haiku-5-5", "weight":0}
         ]}
     }))?;
+    // Missing identity is advisory by default so adapters with a HOME login
+    // can route. Exercise a genuinely unresolved account with the refusing policy.
+    config.launch_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "QUOTA_IDENTITY_UNKNOWN".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
     let access = [
         AccessContext {
             adapter: "codex",
@@ -682,9 +691,10 @@ fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dy
         let receipt = selected.pool_selection.ok_or("receipt")?;
         assert!(receipt.candidates[0].exclusion.is_some());
         // No ready alternative must not resurrect a known unusable account.
-        let only_first: RoutingConfig = serde_json::from_value(serde_json::json!({
+        let mut only_first: RoutingConfig = serde_json::from_value(serde_json::json!({
             "pools": {"trial": [{"model":"codex/gpt-6-luna", "weight":1}]}
         }))?;
+        only_first.launch_policy = config.launch_policy.clone();
         ctx.config = &only_first;
         let expected = if missing_key {
             RouteExclusionReason::UnknownAccount
