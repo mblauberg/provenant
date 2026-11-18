@@ -465,11 +465,10 @@ fn project_peer_output_with(
 
 #[cfg(test)]
 mod output_projection_tests {
-    use super::*;
-
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn projects_before_paging_and_binds_published_bytes() {
+        use super::*;
         let secret = "a-long-private-value";
         let raw = format!("{}{}tail", "x".repeat(65530), secret);
         let projector =
