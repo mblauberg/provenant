@@ -90,7 +90,6 @@ impl Rig {
                 class.to_ascii_uppercase()
             ))
             .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
-            .env_remove(provenant_core::consumer_env::BUILD_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         set_builtin_admission(&mut command)?;
@@ -270,7 +269,6 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
             .env_remove("PROVENANT_ADMISSION_SLOT_build")
             .env_remove("PROVENANT_ADMISSION_SLOT_BUILD")
             .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
-            .env_remove(provenant_core::consumer_env::BUILD_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         set_builtin_admission(&mut command)?;
@@ -424,7 +422,6 @@ fn the_shims_exit_code_is_the_builds() -> Result {
     failing_command
         .args(["admit", "build", "--", "/bin/sh", "-c", "exit 7"])
         .env_remove("PROVENANT_ADMISSION_SLOT_STATE")
-        .env_remove(provenant_core::consumer_env::BUILD_SLOT)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     set_builtin_admission(&mut failing_command)?;
@@ -592,5 +589,365 @@ fn bounded_wait_warns_and_proceeds() -> Result {
         .args(["-TERM", &hold.id().to_string()])
         .status()?;
     hold.wait()?;
+    Ok(())
+}
+
+#[test]
+fn holder_death_by_sigkill_releases_slot_for_subsequent_acquirers() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+
+    // Occupy the only slot
+    let mut hold = rig.shim(1, &["check"])?;
+    assert!(provenant_test_support::wait_for(
+        "slot held",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+
+    // Verify hold is listed in host_holders
+    let holders = provenant_os::admission::host_holders(&rig.state, "build");
+    assert!(!holders.is_empty(), "holder must be registered");
+
+    // Start a second command that should wait for the slot
+    let mut second = rig.command(1, &["build"])?;
+    let mut second_child = second.spawn()?;
+
+    // Give second child a moment to start and enter wait
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Kill the holder ungracefully with SIGKILL (-KILL)
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-KILL", &hold.id().to_string()])
+            .status()?
+            .success()
+    );
+    hold.wait()?;
+
+    // Second command must acquire the released slot and complete successfully
+    assert!(finish(&mut second_child, Duration::from_secs(10))?);
+    assert!(rig.started("end"));
+
+    // Verify dead holder has been cleaned up and is no longer reported
+    let final_holders = provenant_os::admission::host_holders(&rig.state, "build");
+    assert!(
+        final_holders.is_empty(),
+        "dead holders must be purged: {final_holders:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn lane_nextest_runs_through_admission_slot() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+
+    let temp_lane = tempfile::tempdir()?;
+    let scratch = temp_lane.path().join("scratch");
+    fs::create_dir_all(&scratch)?;
+
+    let fake_nextest = temp_lane.path().join("fake-nextest");
+    let nextest_log = temp_lane.path().join("nextest-log");
+    fs::write(&nextest_log, "")?;
+    fs::write(
+        &fake_nextest,
+        format!(
+            "#!/bin/sh\necho \"nextest_start $$\" >> '{log}'; echo \"nextest_args: $@\" >> '{log}'; echo \"nextest_end $$\" >> '{log}'\n",
+            log = nextest_log.display()
+        ),
+    )?;
+    fs::set_permissions(&fake_nextest, fs::Permissions::from_mode(0o755))?;
+
+    let provenant_bin = PathBuf::from(env!("CARGO_BIN_EXE_provenant"));
+    let gate = provenant_providers::BuildSlotGate {
+        project: temp_lane.path(),
+        backend: provenant_config::PortBackend::Builtin,
+        source: provenant_config::PortSource::Builtin,
+        provenant: &provenant_bin,
+        state: &rig.state,
+        slots: 1,
+        class_config: None,
+        disk_gate: None,
+        cargo: &rig.cargo,
+        nextest: Some(&fake_nextest),
+        cargo_nextest: None,
+        local_cargo: "all",
+    };
+
+    let mut spec = provenant_providers::bare_spec("/usr/bin:/bin");
+    spec.cwd = temp_lane.path().to_path_buf();
+    assert!(matches!(
+        spec.configure_build_slots(&scratch, &gate),
+        Ok(provenant_providers::BuildSlotSetupOutcome::Configured)
+    ));
+
+    // Execute the setup steps
+    for step in &spec.setup {
+        match step {
+            provenant_providers::SetupStep::CreateDir(p) => {
+                fs::create_dir_all(p)?;
+            }
+            provenant_providers::SetupStep::WriteExecutable { path, bytes } => {
+                fs::write(path, bytes)?;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+            }
+            provenant_providers::SetupStep::CreateLock(p) => {
+                let _ = fs::File::create(p);
+            }
+            _ => {}
+        }
+    }
+
+    let shim_bin = scratch.join("cargo-bin").join("nextest");
+    assert!(shim_bin.is_file(), "nextest shim must exist");
+
+    // 1. Run nextest through the shim while slot is available:
+    let output = Command::new(&shim_bin)
+        .args(["run", "--package", "foo"])
+        .env_remove("PROVENANT_ADMISSION_SLOT_build")
+        .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let log_content = fs::read_to_string(&nextest_log)?;
+    assert!(
+        log_content.contains("nextest_start"),
+        "nextest must have run: {log_content}"
+    );
+    assert!(
+        log_content.contains("nextest_args: run --package foo"),
+        "args passed correctly: {log_content}"
+    );
+
+    // 2. Now hold the slot with another build process
+    let mut hold = rig.shim(1, &["check"])?;
+    assert!(provenant_test_support::wait_for(
+        "slot held",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+
+    // 3. Spawning nextest while slot is held must wait
+    let mut waiting_nextest = Command::new(&shim_bin)
+        .args(["run", "--package", "bar"])
+        .env_remove("PROVENANT_ADMISSION_SLOT_build")
+        .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Verify it is waiting
+    assert!(provenant_test_support::wait_for(
+        "nextest waiting",
+        Duration::from_secs(10),
+        || { provenant_os::admission::is_waiting(&scratch).is_some() },
+        |waiting| *waiting
+    )?);
+
+    // Release the hold
+    Command::new("/bin/kill")
+        .args(["-TERM", &hold.id().to_string()])
+        .status()?;
+    hold.wait()?;
+
+    // Waiting nextest completes successfully after release
+    assert!(finish(&mut waiting_nextest, Duration::from_secs(10))?);
+
+    Ok(())
+}
+
+#[test]
+fn custom_admission_class_in_confined_lane() -> Result {
+    let rig = Rig::new()?;
+    rig.provision_class("heavy", 1)?;
+    rig.provision(1)?;
+
+    let temp_lane = tempfile::tempdir()?;
+    let scratch = temp_lane.path().join("scratch");
+    fs::create_dir_all(&scratch)?;
+
+    let provenant_bin = PathBuf::from(env!("CARGO_BIN_EXE_provenant"));
+    let gate = provenant_providers::BuildSlotGate {
+        project: temp_lane.path(),
+        backend: provenant_config::PortBackend::Builtin,
+        source: provenant_config::PortSource::Builtin,
+        provenant: &provenant_bin,
+        state: &rig.state,
+        slots: 1,
+        class_config: None,
+        disk_gate: None,
+        cargo: &rig.cargo,
+        nextest: None,
+        cargo_nextest: None,
+        local_cargo: "all",
+    };
+
+    let mut spec = provenant_providers::bare_spec("/usr/bin:/bin");
+    spec.cwd = temp_lane.path().to_path_buf();
+    assert!(matches!(
+        spec.configure_build_slots(&scratch, &gate),
+        Ok(provenant_providers::BuildSlotSetupOutcome::Configured)
+    ));
+
+    // Verify the lane's confinement profile receives read access to the entire admission directory
+    let admission_root = rig.state.join("admission");
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|g| g.path == admission_root
+                && g.scope == provenant_confinement::permissions::PathScope::Subtree),
+        "lane confinement profile must grant read access to admission classes root"
+    );
+
+    // Hold class "heavy" with 1 slot
+    let mut heavy_hold = rig.shim_class("heavy", 1, &["check"])?;
+    assert!(provenant_test_support::wait_for(
+        "heavy held",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+
+    // A command requesting class "build" can still acquire and succeed concurrently
+    let mut build_cmd = rig.shim(1, &["build"])?;
+    assert!(finish(&mut build_cmd, Duration::from_secs(10))?);
+    assert!(rig.started("start"));
+
+    // A second command requesting "heavy" must wait
+    let mut second_heavy = rig.command_class("heavy", 1, &["build"])?;
+    let mut waiting_heavy = second_heavy.spawn()?;
+
+    // Wait for the waiter to be registered
+    assert!(provenant_test_support::wait_for(
+        "heavy waiter registered",
+        Duration::from_secs(10),
+        || !provenant_os::admission::host_waiters(&rig.state, "heavy").is_empty(),
+        |registered| *registered
+    )?);
+
+    // Release heavy hold
+    Command::new("/bin/kill")
+        .args(["-TERM", &heavy_hold.id().to_string()])
+        .status()?;
+    heavy_hold.wait()?;
+
+    // Waiting heavy acquires slot and completes
+    assert!(finish(&mut waiting_heavy, Duration::from_secs(10))?);
+
+    Ok(())
+}
+
+#[test]
+fn ordinary_status_shows_standalone_admission_holders_and_waiters() -> Result {
+    let rig = Rig::new()?;
+    rig.provision_class("heavy", 1)?;
+
+    // Start a hold on class "heavy"
+    let mut hold = rig.shim_class("heavy", 1, &["check"])?;
+    assert!(provenant_test_support::wait_for(
+        "slot held",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+
+    // Run a second command waiting on class "heavy"
+    let mut waiter = rig.command_class("heavy", 1, &["build"])?;
+    let mut waiting_child = waiter.spawn()?;
+
+    // Wait for the waiter to register
+    assert!(provenant_test_support::wait_for(
+        "waiter registered",
+        Duration::from_secs(10),
+        || !provenant_os::admission::host_waiters(&rig.state, "heavy").is_empty(),
+        |registered| *registered
+    )?);
+
+    let proj_dir = tempfile::tempdir()?;
+    let proj = fs::canonicalize(proj_dir.path())?;
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&proj)
+            .status()?
+            .success()
+    );
+    let state = rig.state.to_str().unwrap();
+    let proj_str = proj.to_str().unwrap();
+
+    // Call `provenant status`
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_provenant"));
+    cmd.args(["--state-dir", state, "--project", proj_str, "status"])
+        .env("PROVENANT_ROOT", env!("CARGO_MANIFEST_DIR"))
+        .env_remove(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+        .env_remove(provenant_core::RUN_STATE_DIRECTORY_ENV)
+        .env_remove(provenant_core::consumer_env::LANE_DEPTH)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = cmd.output()?;
+    assert!(
+        output.status.success(),
+        "status stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("admission:"),
+        "status should include admission section: {stdout}"
+    );
+    assert!(
+        stdout.contains("heavy waiter:"),
+        "status should show waiter: {stdout}"
+    );
+    assert!(
+        stdout.contains("heavy holder:"),
+        "status should show holder: {stdout}"
+    );
+
+    // Also verify JSON output
+    let mut json_cmd = Command::new(env!("CARGO_BIN_EXE_provenant"));
+    json_cmd
+        .args([
+            "--state-dir",
+            state,
+            "--project",
+            proj_str,
+            "status",
+            "--json",
+        ])
+        .env("PROVENANT_ROOT", env!("CARGO_MANIFEST_DIR"))
+        .env_remove(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+        .env_remove(provenant_core::RUN_STATE_DIRECTORY_ENV)
+        .env_remove(provenant_core::consumer_env::LANE_DEPTH)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let json_output = json_cmd.output()?;
+    assert!(
+        json_output.status.success(),
+        "status --json stderr: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let json_val: serde_json::Value = serde_json::from_slice(&json_output.stdout)?;
+    let admission = &json_val["data"]["admission"];
+    assert!(!admission["holders"].as_array().unwrap().is_empty());
+    assert!(!admission["waiters"].as_array().unwrap().is_empty());
+    assert_eq!(admission["holders"][0]["class"], "heavy");
+    assert_eq!(admission["waiters"][0]["class"], "heavy");
+
+    // Clean up
+    Command::new("/bin/kill")
+        .args(["-TERM", &hold.id().to_string()])
+        .status()?;
+    hold.wait()?;
+    assert!(finish(&mut waiting_child, Duration::from_secs(10))?);
     Ok(())
 }

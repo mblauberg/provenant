@@ -1849,10 +1849,10 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         && let Command::Admit { class, command } = &inv.command
     {
         let mut env: Vec<_> = std::env::vars_os().collect();
-        if !env.iter().any(|(key, _)| {
-            key == provenant_core::consumer_env::BUILD_SLOT_STATE
-                || key == provenant_core::consumer_env::ADMISSION_SLOT_STATE
-        }) {
+        if !env
+            .iter()
+            .any(|(key, _)| key == provenant_core::consumer_env::ADMISSION_SLOT_STATE)
+        {
             let resolved = roots::resolve(globals, Workspace::Checkout, Product::Optional)
                 .or_else(|_| roots::resolve(globals, Workspace::Directory, Product::Optional));
             if let Ok(resolved) = resolved {

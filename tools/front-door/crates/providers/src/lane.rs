@@ -128,7 +128,7 @@ impl crate::LaunchSpec {
                 Ok::<_, ProviderError>(format!(
                     "{name}={}\nexport {name}\n",
                     shell_quote(&json),
-                    name = consumer_env::BUILD_DISK_LIMITS,
+                    name = consumer_env::ADMISSION_DISK_LIMITS,
                 ))
             })
             .transpose()?
@@ -149,12 +149,12 @@ impl crate::LaunchSpec {
             gate.local_cargo,
             text(scratch)?,
             shell_quote(&class_config),
-            backend_env = consumer_env::BUILD_ADMISSION_BACKEND,
-            source_env = consumer_env::BUILD_ADMISSION_SOURCE,
-            state = consumer_env::BUILD_SLOT_STATE,
-            slots = consumer_env::BUILD_SLOTS,
+            backend_env = consumer_env::ADMISSION_BACKEND,
+            source_env = consumer_env::ADMISSION_SOURCE,
+            state = consumer_env::ADMISSION_SLOT_STATE,
+            slots = consumer_env::ADMISSION_SLOTS,
             local = consumer_env::LOCAL_CARGO,
-            wait_env = consumer_env::BUILD_WAIT_DIR,
+            wait_env = consumer_env::ADMISSION_WAIT_DIR,
         );
         let cargo_script = format!(
             "{env_prefix}exec {} admit build -- {} \"$@\"\n",
@@ -195,7 +195,7 @@ impl crate::LaunchSpec {
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
                 .map_err(|_| ProviderError::InvalidPath)?
         };
-        let slots = gate.state.join("admission").join("build");
+        let slots = gate.state.join("admission");
         let create = SetupStep::CreateDir(bin.clone());
         if !self.setup.contains(&create) {
             self.setup.push(create);
@@ -2470,30 +2470,7 @@ mod tests {
     }
 
     fn bare_spec(path: &str) -> crate::LaunchSpec {
-        crate::LaunchSpec {
-            argv: Vec::new(),
-            env: vec![("PATH".into(), path.into())],
-            stdin: crate::Stdin::Null,
-            secret_input: None,
-            cwd: PathBuf::from("/"),
-            setup: Vec::new(),
-            omitted_discovery: Vec::new(),
-            user_skills: Default::default(),
-            tool_requirements: Default::default(),
-            git_wrapper: Default::default(),
-            policy: Policy::default(),
-            credential_roots: provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
-            session_state: crate::SessionStateLocation::AttemptPrivate,
-            profile: provenant_confinement::permissions::ProviderProfile {
-                spec: ProviderProfileSpec::default(),
-                observations: Default::default(),
-            },
-            stream: crate::StreamState::new(
-                "claude",
-                |_| Ok(Vec::new()),
-                &provenant_records::policy::Policy::default(),
-            ),
-        }
+        crate::bare_spec(path)
     }
 
     #[test]
@@ -2541,7 +2518,7 @@ mod tests {
         // The lane gets no write to the slot directory, the state root,
         // `fabric/locks` or anything near a repository's `.git`: only a read
         // of the slot directory, which the host provisions beforehand.
-        let slots = state.join("admission").join("build");
+        let slots = state.join("admission");
         assert!(spec.profile.spec.state_writes.is_empty());
         assert!(spec.profile.spec.tool_writes.is_empty());
         assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
@@ -2566,7 +2543,7 @@ mod tests {
         // and the host's slot environment, with hostile values in the lane's.
         std::fs::write(
             &provenant,
-            "#!/bin/sh\nprintf '%s\\0' \"$@\" \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_DISK_LIMITS\"\n",
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" \"$PROVENANT_ADMISSION_SLOT_STATE\" \"$PROVENANT_ADMISSION_SLOTS\" \"$PROVENANT_ADMISSION_DISK_LIMITS\"\n",
         )
         .unwrap();
         let shim = root.join("cargo");
@@ -2576,9 +2553,9 @@ mod tests {
         }
         let output = std::process::Command::new(&shim)
             .args(["test", "--", "two words"])
-            .env("PROVENANT_BUILD_SLOT_STATE", "/lane/chosen")
-            .env("PROVENANT_BUILD_SLOTS", "64")
-            .env("PROVENANT_BUILD_DISK_LIMITS", "lane value")
+            .env("PROVENANT_ADMISSION_SLOT_STATE", "/lane/chosen")
+            .env("PROVENANT_ADMISSION_SLOTS", "64")
+            .env("PROVENANT_ADMISSION_DISK_LIMITS", "lane value")
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -2655,7 +2632,7 @@ mod tests {
         let state = base.join("state");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let slots = state.join("admission").join("build");
+        let slots = state.join("admission");
         let plan = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), true);
         let prompt = Prompt::new("fixture prompt".into());
         let mut route = crate::tests::route("codex", "fixture-model");

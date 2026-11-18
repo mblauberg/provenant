@@ -11,9 +11,7 @@
 use provenant_core::consumer_env::{
     ADMISSION_BACKEND, ADMISSION_CLASS, ADMISSION_DISK_LIMITS, ADMISSION_SLOT,
     ADMISSION_SLOT_STATE, ADMISSION_SLOTS, ADMISSION_SOURCE, ADMISSION_WAIT_DIR,
-    BUILD_ADMISSION_BACKEND, BUILD_ADMISSION_SOURCE, BUILD_DISK_LIMITS, BUILD_SLOT,
-    BUILD_SLOT_STATE, BUILD_SLOTS, BUILD_WAIT_DIR, CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE,
-    LOCAL_CARGO,
+    CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
 };
 use provenant_os::admission::{
     AdmissionSlots, HeldGuard, HostHeldGuard, mark_held, mark_host_held, mark_host_waiting,
@@ -168,7 +166,6 @@ pub fn nested_for_class(
             name == OsStr::new(&class_key_upper)
                 || name == OsStr::new(&class_key_lower)
                 || name == OsStr::new(ADMISSION_SLOT)
-                || (class == "build" && name == OsStr::new(BUILD_SLOT))
         })
         .and_then(|(_, value)| {
             let s = value.to_str()?;
@@ -252,8 +249,8 @@ fn check_disk_and_trim(
         }
     }
 
-    // Also check BUILD_DISK_LIMITS / ADMISSION_DISK_LIMITS policy gate if present
-    let gate_raw = value(ADMISSION_DISK_LIMITS).or_else(|| value(BUILD_DISK_LIMITS));
+    // Also check ADMISSION_DISK_LIMITS policy gate if present
+    let gate_raw = value(ADMISSION_DISK_LIMITS);
     if let Some(encoded_gate) = gate_raw {
         let gate: Result<provenant_config::DiskGate, _> = serde_json::from_str(encoded_gate);
         if let Ok(gate) = gate {
@@ -321,10 +318,8 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
 
     // State root
     let state_buf = get_env(ADMISSION_SLOT_STATE)
-        .or_else(|| get_env(BUILD_SLOT_STATE))
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
+        .or_else(|| std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from));
 
     // Resolve class configuration
     let resolved = get_env("PROVENANT_ADMISSION_CONFIG")
@@ -333,12 +328,16 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         })
         .filter(|config| config.name == class)
         .unwrap_or_else(|| {
-            provenant_config::ResolvedAdmissionClass::resolve(class, &state_buf, None)
+            provenant_config::ResolvedAdmissionClass::resolve(
+                class,
+                state_buf.as_deref().unwrap_or(Path::new("")),
+                None,
+            )
         });
 
     // Override slots from environment if explicitly provided by host shim
     let slots_count = (class == "build")
-        .then(|| get_env(ADMISSION_SLOTS).or_else(|| get_env(BUILD_SLOTS)))
+        .then(|| get_env(ADMISSION_SLOTS))
         .flatten()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(resolved.slots);
@@ -350,8 +349,8 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
     let wait_duration = Duration::from_secs(wait_seconds);
 
     // Admission backend and source
-    let raw_backend = get_env(ADMISSION_BACKEND).or_else(|| get_env(BUILD_ADMISSION_BACKEND));
-    let raw_source = get_env(ADMISSION_SOURCE).or_else(|| get_env(BUILD_ADMISSION_SOURCE));
+    let raw_backend = get_env(ADMISSION_BACKEND);
+    let raw_source = get_env(ADMISSION_SOURCE);
 
     let (backend, source) = match (raw_backend, raw_source) {
         (Some(b), Some(s)) => {
@@ -399,7 +398,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         );
     }
 
-    let scratch_wait_dir = get_env(ADMISSION_WAIT_DIR).or_else(|| get_env(BUILD_WAIT_DIR));
+    let scratch_wait_dir = get_env(ADMISSION_WAIT_DIR);
 
     let mut held_guard: Option<provenant_os::admission::SlotGuard> = None;
     let mut _holder_tracking: Option<HeldGuardVariant> = None;
@@ -421,11 +420,15 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
     if !is_nested && slots_count > 0 {
         match backend {
             provenant_config::PortBackend::Builtin => {
-                let slots = match AdmissionSlots::open(&state_buf, class) {
+                let Some(state_ref) = state_buf.as_ref() else {
+                    warn_slot_unavailable(&"state directory is unavailable");
+                    return execute_and_forward(program, args, &env);
+                };
+                let slots = match AdmissionSlots::open(state_ref, class) {
                     Ok(s) => s,
                     Err(_) => {
-                        let _ = AdmissionSlots::provision(&state_buf, class, slots_count);
-                        match AdmissionSlots::open(&state_buf, class) {
+                        let _ = AdmissionSlots::provision(state_ref, class, slots_count);
+                        match AdmissionSlots::open(state_ref, class) {
                             Ok(s) => s,
                             Err(e) => {
                                 warn_slot_unavailable(&e);
@@ -456,7 +459,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
                             None
                         };
                         let _host_wait_guard = if scratch_wait_dir.is_none() {
-                            mark_host_waiting(&state_buf, class, my_pid).ok()
+                            mark_host_waiting(state_ref, class, my_pid).ok()
                         } else {
                             None
                         };
@@ -504,7 +507,9 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             {
                 _holder_tracking = Some(HeldGuardVariant::Scratch(hg));
             }
-        } else if let Ok(hg) = mark_host_held(&state_buf, class, guard.index(), my_pid) {
+        } else if let Some(state_ref) = state_buf.as_ref()
+            && let Ok(hg) = mark_host_held(state_ref, class, guard.index(), my_pid)
+        {
             _holder_tracking = Some(HeldGuardVariant::Host(hg));
         }
     }
@@ -522,7 +527,6 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             k != OsStr::new(&class_key_upper)
                 && k != OsStr::new(&class_key_lower)
                 && k != OsStr::new(ADMISSION_SLOT)
-                && (class != "build" || k != OsStr::new(BUILD_SLOT))
         });
         env.push((OsString::from(&class_key_upper), OsString::from(&marker)));
         env.push((OsString::from(&class_key_lower), OsString::from(&marker)));
@@ -531,9 +535,6 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             OsString::from(format!("{class}:{marker}")),
         ));
         env.push((OsString::from(ADMISSION_CLASS), OsString::from(class)));
-        if class == "build" {
-            env.push((OsString::from(BUILD_SLOT), OsString::from(&marker)));
-        }
     }
 
     let code = match execute(Path::new(program), args, &env) {
@@ -604,7 +605,6 @@ fn execute_command_port(
         "RUSTC_WRAPPER",
         "RUSTC_WORKSPACE_WRAPPER",
         ADMISSION_SLOT,
-        BUILD_SLOT,
     ] {
         if let Some((_, value)) = env.iter().find(|(key, _)| key == OsStr::new(name)) {
             explicit.push((OsString::from(name), value.clone()));

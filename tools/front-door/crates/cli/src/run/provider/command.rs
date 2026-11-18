@@ -524,18 +524,12 @@ fn real_binary_on_path(binary: &str, path: &std::ffi::OsStr, scratch: &Path) -> 
                 .and_then(|file| file.take(8192).read_to_end(&mut prefix))
                 .is_ok()
                 && prefix.starts_with(b"#!/bin/sh\n")
-                && (prefix
+                && prefix
                     .windows(b"PROVENANT_ADMISSION_WAIT_DIR=".len())
                     .any(|part| part == b"PROVENANT_ADMISSION_WAIT_DIR=")
-                    || prefix
-                        .windows(b"PROVENANT_BUILD_WAIT_DIR=".len())
-                        .any(|part| part == b"PROVENANT_BUILD_WAIT_DIR="))
-                && (prefix
+                && prefix
                     .windows(b" admit build -- ".len())
-                    .any(|part| part == b" admit build -- ")
-                    || prefix
-                        .windows(b" internal build-slot -- ".len())
-                        .any(|part| part == b" internal build-slot -- "));
+                    .any(|part| part == b" admit build -- ");
             !shim
         })
 }
@@ -612,16 +606,20 @@ pub(super) fn configure_build_slots(
     provenant_config::dispatch_port_backend(
         &port.backend,
         || {
-            let class_config =
-                provenant_config::ResolvedAdmissionClass::resolve("build", state, Some(project));
+            let all_classes =
+                provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project));
+            let class_config = all_classes.get("build").cloned().unwrap_or_else(|| {
+                provenant_config::ResolvedAdmissionClass::resolve("build", state, Some(project))
+            });
             let slots = class_config.slots;
-            if let Err(error) =
-                provenant_os::admission::AdmissionSlots::provision(state, "build", slots)
-            {
-                eprintln!(
-                    "provenant: build slots unavailable for this lane, building without them: {error}"
-                );
-                return Ok(Vec::new());
+            for (class_name, cfg) in &all_classes {
+                if let Err(error) =
+                    provenant_os::admission::AdmissionSlots::provision(state, class_name, cfg.slots)
+                {
+                    eprintln!(
+                        "provenant: admission slots for '{class_name}' unavailable for this lane, proceeding without them: {error}"
+                    );
+                }
             }
             let disk_gate = provenant_config::GcSettings::read(state)
                 .and_then(|gc| gc.disk_limits(state))
@@ -649,16 +647,26 @@ pub(super) fn configure_build_slots(
             };
             match spec.borrow_mut().configure_build_slots(scratch, &gate) {
                 Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
-                    let directory = state.join("admission").join("build");
-                    Ok(std::iter::once(PathGrant {
-                        path: directory.clone(),
+                    let mut grants = Vec::new();
+                    let admission_root = state.join("admission");
+                    grants.push(PathGrant {
+                        path: admission_root.clone(),
                         scope: PathScope::Exact,
-                    })
-                    .chain((0..slots).map(|index| PathGrant {
-                        path: directory.join(format!("slot-{index}.lock")),
-                        scope: PathScope::Exact,
-                    }))
-                    .collect())
+                    });
+                    for (class_name, cfg) in &all_classes {
+                        let directory = admission_root.join(class_name);
+                        grants.push(PathGrant {
+                            path: directory.clone(),
+                            scope: PathScope::Exact,
+                        });
+                        for index in 0..cfg.slots {
+                            grants.push(PathGrant {
+                                path: directory.join(format!("slot-{index}.lock")),
+                                scope: PathScope::Exact,
+                            });
+                        }
+                    }
+                    Ok(grants)
                 }
                 Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => Ok(Vec::new()),
                 Err(error) => {

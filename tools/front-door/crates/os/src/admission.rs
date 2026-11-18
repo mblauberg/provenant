@@ -384,6 +384,48 @@ pub fn host_waiters(state: &Path, class: &str) -> Vec<WaitInfo> {
     waiters
 }
 
+pub fn active_classes(state: &Path) -> Vec<String> {
+    let dir = class_directory(state, "");
+    let mut classes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir())
+                && let Ok(name) = entry.file_name().into_string()
+                && !name.starts_with('.')
+                && validate_class_name(&name).is_ok()
+            {
+                classes.push(name);
+            }
+        }
+    }
+    classes.sort();
+    classes
+}
+
+pub fn standalone_holders(state: &Path) -> Vec<HeldInfo> {
+    let mut all = Vec::new();
+    for class in active_classes(state) {
+        for holder in host_holders(state, &class) {
+            if holder.attempt_id.is_none() {
+                all.push(holder);
+            }
+        }
+    }
+    all
+}
+
+pub fn standalone_waiters(state: &Path) -> Vec<WaitInfo> {
+    let mut all = Vec::new();
+    for class in active_classes(state) {
+        for waiter in host_waiters(state, &class) {
+            if waiter.attempt_id.is_none() {
+                all.push(waiter);
+            }
+        }
+    }
+    all
+}
+
 pub fn class_directory(state: &Path, class: &str) -> PathBuf {
     DIRECTORY
         .iter()
