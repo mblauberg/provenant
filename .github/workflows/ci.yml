@@ -971,7 +971,9 @@ jobs:
   main-health:
     name: Report main health
     needs: [scope, ci-status]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-status.result != 'cancelled' && needs.ci-status.result != 'skipped' }}
+    # A cancelled run (superseded or stopped by hand) still runs always() jobs, whose
+    # missing evidence reads as failure; it says nothing about main's health.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-status.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
