@@ -182,8 +182,9 @@ policy knob refuses. Readiness display distinguishes "not probed" (with a tick h
 from "probed, provider reports no figures" and "probed, failed" (both without hint).
 Unknown provider errors whose kind and status are absent or unknown settle as
 `unclassified`, not `usage_limited`: they preserve the provider message, retry once
-without marking the account exhausted, and fall back across eligible routes and
-providers at the same tier before stopping at the chair.
+on the same route without marking the account exhausted, then reroute at most
+once to another eligible route or provider at the same tier before stopping at
+the chair.
 - Why: one probe outage or model limit must not take a provider offline, and
   no stale evidence may admit a launch.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,

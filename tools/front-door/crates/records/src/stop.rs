@@ -297,7 +297,7 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(Quarantined, CHAIR, crate::run::CauseSource::Host),
         rule(HandoffMalformed, CHAIR, crate::run::CauseSource::Provider),
         pinned(Steered, crate::run::CauseSource::Host),
-        rule(Unclassified, NEW, crate::run::CauseSource::Provider),
+        once(Unclassified, NEW, crate::run::CauseSource::Provider),
     ]
 };
 
