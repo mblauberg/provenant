@@ -856,7 +856,7 @@ mod tests {
         let mut request = run_request();
         request.template = Some("review.correctness".into());
         request.pr = Some(7);
-        let input = run_input(request).unwrap();
+        let input = run_input_fixture(request).unwrap();
         assert_eq!(input["pr"], 7);
     }
 
