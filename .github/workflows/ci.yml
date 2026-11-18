@@ -47,6 +47,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
     outputs:
       run_macos: ${{ steps.paths.outputs.run_macos }}
       run_rust: ${{ steps.paths.outputs.run_rust }}
@@ -63,6 +64,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           IS_MAIN: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/land/') }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_BEFORE: ${{ github.event.before }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: scripts/select-macos-checks
 
   generated-reference:

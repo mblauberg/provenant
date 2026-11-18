@@ -203,4 +203,105 @@ result=$(run_selector)
 test "$result" = 'run_macos=true
 run_rust=true'
 
+# A previous green PR head may carry coverage only over a direct non-code tree
+# delta, including when a force-push rewrites ancestry. The fake API exercises
+# the same PR, run and ci-status evidence required by the workflow.
+# Spec: docs/specs/ci.md#carrying-tested-coverage-forward
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/gh" <<'EOF'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if os.environ.get("MOCK_API_ERROR"):
+    sys.exit(1)
+if os.environ.get("MOCK_NO_RUN"):
+    print(json.dumps({"workflow_runs": []}))
+    sys.exit(0)
+if "/jobs?" in sys.argv[2]:
+    print(json.dumps({"jobs": [{"name": "ci-status", "status": "completed", "conclusion": os.environ.get("MOCK_JOB", "success")}]}))
+else:
+    print(json.dumps({"workflow_runs": [{"id": 1, "head_sha": os.environ["PR_BEFORE"], "status": "completed", "conclusion": "success", "pull_requests": [{"number": int(os.environ.get("MOCK_PR", "7"))}]}]}))
+EOF
+chmod +x "$tmp/bin/gh"
+PATH="$tmp/bin:$PATH"
+export PATH PR_ACTION=synchronize PR_NUMBER=7 GITHUB_REPOSITORY=owner/repo
+base=$common
+PR_BEFORE=$head
+export PR_BEFORE
+printf '%s\n' more > "$repo/docs/images/extra.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'docs after tested code'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+grep -F "green PR head $PR_BEFORE" "$tmp/log" >/dev/null
+
+printf '%s\n' changed > "$repo/tools/front-door/src/main.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'code after tested head'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+
+# Failed/mismatched evidence cannot supply a green predecessor.
+git -C "$repo" checkout -q --detach "$PR_BEFORE"
+printf '%s\n' docs > "$repo/docs/images/other.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'another docs update'
+head=$(git -C "$repo" rev-parse HEAD)
+export MOCK_JOB=failure
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+unset MOCK_JOB
+export MOCK_PR=8
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+unset MOCK_PR
+export MOCK_NO_RUN=1
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+unset MOCK_NO_RUN
+export MOCK_API_ERROR=1
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+unset MOCK_API_ERROR
+
+# A misleading Markdown name cannot hide a mode change in the green delta.
+chmod +x "$repo/docs/images/other.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'make documentation executable'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+
+# Rewritten ancestry must compare the actual two trees, never their merge base.
+git -C "$repo" checkout -q --detach "$common"
+mkdir -p "$repo/tools/front-door/src" "$repo/docs/images" "$repo/roles"
+printf '%s\n' 'fn main() {}' > "$repo/tools/front-door/src/main.rs"
+printf '%s\n' image > "$repo/docs/images/pipeline.svg"
+printf '%s\n' role > "$repo/roles/reviewer.md"
+printf '%s\n' rewrite > "$repo/docs/images/rewrite.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'rewritten history same code'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+printf '%s\n' rewritten-code > "$repo/tools/front-door/src/main.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'rewritten code'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+
 echo 'macOS scope selector checks passed'

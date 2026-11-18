@@ -24,6 +24,7 @@ them as Markdown under the untracked `<repository>/docs/reference/`.
 
 ## Area specs
 
+- [Repository CI](ci.md): carrying tested coverage forward
 - [Consumer contract](consumer-contract.md): what an adopting repository may rely on, and how stably
 - [CLI](cli.md): envelope, exits, waits, hooks and checks
 - [Disk](disk.md): read-only storage inventory

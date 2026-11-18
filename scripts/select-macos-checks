@@ -33,15 +33,32 @@ if ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1; then
   exit 0
 fi
 
-changed=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
-printf 'Changed paths since merge base:\n%s\n' "$changed"
 # Non-code assets still pass harness, writing and documentation checks.
 # Executable or structured skill assets and the native inventory retain Rust
 # and native coverage. Treat renames as deletion plus addition.
 non_code='^(skills/.*\.md|roles/.*\.md|docs/.*\.(md|png|jpg|jpeg|svg|gif|webp|pdf)|[^/]+\.md|\.(editorconfig|gitattributes|gitignore)|LICENSE|NOTICE)$'
 # A Markdown name proves nothing about an executable or a symlink.
-not_plain=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA" | awk '($1 != ":100644" && $1 != ":000000") || ($2 != "100644" && $2 != "000000")')
-if [ -n "$changed" ] && [ -z "$not_plain" ] && ! printf '%s\n' "$changed" | grep -Evq "$non_code"; then
+is_non_code_delta() {
+  delta_paths=$(git diff --no-renames --name-only "$1" "$2") || return 1
+  delta_raw=$(git diff --no-renames --raw "$1" "$2") || return 1
+  not_plain=$(printf '%s\n' "$delta_raw" | awk 'NF && (($1 != ":100644" && $1 != ":000000") || ($2 != "100644" && $2 != "000000"))')
+  [ -z "$not_plain" ] && { [ -z "$delta_paths" ] || ! printf '%s\n' "$delta_paths" | grep -Evq "$non_code"; }
+}
+
+green=$("$(dirname "$0")/find-green-pr-head")
+if [ -n "$green" ] && [ "$green" != "$HEAD_SHA" ] && git cat-file -e "$green^{commit}" 2>/dev/null; then
+  if is_non_code_delta "$green" "$HEAD_SHA"; then
+    echo "Carrying Rust and macOS coverage over from green PR head $green."
+    set_output false false
+    exit 0
+  fi
+  echo "Green PR head $green has a code or mode delta; selecting from merge base."
+fi
+
+merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+changed=$(git diff --no-renames --name-only "$merge_base" "$HEAD_SHA")
+printf 'Changed paths since merge base:\n%s\n' "$changed"
+if [ -n "$changed" ] && is_non_code_delta "$merge_base" "$HEAD_SHA"; then
   set_output false false
   exit 0
 fi

@@ -14,7 +14,9 @@ behaviour may still need real host facts.
 ## Pipeline
 
 `ci-status` is the single required check (also named in `MAINTAINING.md` and
-`github-workflow.md`). PRs select from the merge-base diff. Main and `land/**`
+`github-workflow.md`). On a PR synchronize event, a verified green previous PR
+head carries Rust and macOS coverage forward only if its tree differs by plain
+non-code paths; otherwise PRs select from the merge-base diff. Main and `land/**`
 pushes always run the full pipeline; missing Git history selects conservatively.
 
 The workflow and selectors define the jobs and their scope. Pull requests select
