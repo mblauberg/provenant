@@ -1574,6 +1574,11 @@ mod tests {
     #[test]
     fn nested_graph_selectors_refuse_symlinked_scratch_directories()
     -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::graph_execution::tests::nested_graph_selectors_refuse_symlinked_scratch_directories",
+        )? {
+            return Ok(());
+        }
         for component in [
             ".provenant",
             ".provenant/scratch",
