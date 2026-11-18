@@ -65,31 +65,49 @@ pub(crate) fn refresh(
     now: i64,
     budget: Duration,
 ) -> Vec<String> {
+    refresh_resolving(roots, enabled, now, budget, crate::run::provider_executable)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the discovery executor is a real-time boundary"
+)]
+fn refresh_resolving(
+    roots: &Roots,
+    enabled: &[String],
+    now: i64,
+    budget: Duration,
+    resolve: impl Fn(&str) -> Result<std::path::PathBuf, String>,
+) -> Vec<String> {
     let Ok(cwd) = std::env::current_dir() else {
         return vec!["model discovery: working directory unavailable".into()];
     };
     let deadline = std::time::Instant::now() + budget;
+    // Reserve time for executor setup, termination and reaping before reporting.
+    let cleanup_margin = (budget / 2).min(Duration::from_millis(100));
+    let probe_deadline = deadline - cleanup_margin;
     let (tx, rx) = std::sync::mpsc::channel();
+    let mut threads = Vec::new();
     let mut pending = std::collections::BTreeSet::new();
     for (harness, args) in PROVIDERS {
         let adapter = harness.spec().name;
         if !enabled.iter().any(|id| id == adapter) {
             continue;
         }
-        let Ok(binary) = crate::run::provider_executable(harness.spec().binary) else {
+        let Ok(binary) = resolve(harness.spec().binary) else {
             continue;
         };
         pending.insert(adapter);
         let args = *args;
         let cwd = cwd.clone();
         let tx = tx.clone();
-        std::thread::spawn(move || {
+        threads.push(std::thread::spawn(move || {
             let result = (|| {
                 let executor = SystemExecutor::new(1).ok()?;
                 let argv: Vec<OsString> = std::iter::once(binary.into_os_string())
                     .chain(args.iter().map(OsString::from))
                     .collect();
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let remaining = probe_deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
                     return None;
                 }
@@ -100,6 +118,7 @@ pub(crate) fn refresh(
                 options.stderr = StreamPolicy::Discard;
                 options.process_group = true;
                 options.cleanup_process_group = true;
+                options.group_watchdog = true;
                 options.stop_on_output_limit = true;
                 executor
                     .execute(options)
@@ -112,7 +131,7 @@ pub(crate) fn refresh(
                     .map(|out| out.stdout.bytes)
             })();
             let _ = tx.send((adapter, result));
-        });
+        }));
     }
     drop(tx);
     let mut completed = std::collections::BTreeMap::new();
@@ -128,6 +147,10 @@ pub(crate) fn refresh(
             }
             Err(_) => break,
         }
+    }
+    // A timeout must not leave detached workers or provider processes behind.
+    for thread in threads {
+        let _ = thread.join();
     }
     let mut messages = Vec::new();
     for (adapter, result) in completed {
@@ -242,6 +265,116 @@ fn refresh_with(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    fn test_roots(path: &Path) -> Result<Roots, Box<dyn std::error::Error>> {
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let mut inputs = provenant_core::RootInputs::new(path.join("home"), path.join("checkout"));
+        inputs.state_dir = Some(path.join("state"));
+        Ok(inputs.resolve(&Resolver)?)
+    }
+
+    fn slow_probe(path: &Path, marker: &Path, peer: Option<&Path>) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let rendezvous = peer.map_or(String::new(), |peer| {
+            format!(
+                "while [ ! -f '{}' ]; do /bin/sleep 0.01; done\n: > '{}.ready'\n",
+                peer.display(),
+                marker.display()
+            )
+        });
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n/bin/sleep 30 &\necho $$ $! > '{}'\n{}wait\n",
+                marker.display(),
+                rendezvous
+            ),
+        )?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test process existence without signalling it"
+    )]
+    fn assert_gone(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let pids = std::fs::read_to_string(marker)?;
+        for pid in pids.split_whitespace() {
+            let status = std::process::Command::new("/bin/kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            assert!(!status.success(), "process {pid} survived refresh");
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn refresh_reaps_slow_probe_and_descendant() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = test_roots(temp.path())?;
+        let executable = temp.path().join("probe");
+        let marker = temp.path().join("pids");
+        slow_probe(&executable, &marker, None)?;
+        let messages = refresh_resolving(
+            &roots,
+            &["codex".into()],
+            1,
+            Duration::from_millis(800),
+            |_| Ok(executable.clone()),
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("retaining previous snapshot"))
+        );
+        assert_gone(&marker)?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn refresh_runs_probes_concurrently_and_reaps_both() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = test_roots(temp.path())?;
+        let first = temp.path().join("codex");
+        let second = temp.path().join("agy");
+        let first_marker = temp.path().join("first-pids");
+        let second_marker = temp.path().join("second-pids");
+        slow_probe(&first, &first_marker, Some(&second_marker))?;
+        slow_probe(&second, &second_marker, Some(&first_marker))?;
+        let messages = refresh_resolving(
+            &roots,
+            &["codex".into(), "agy".into()],
+            1,
+            Duration::from_millis(800),
+            |binary| {
+                Ok(if binary == "codex" {
+                    first.clone()
+                } else {
+                    second.clone()
+                })
+            },
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.contains("retaining previous snapshot"))
+                .count(),
+            2
+        );
+        assert!(first_marker.with_extension("ready").exists());
+        assert!(second_marker.with_extension("ready").exists());
+        assert_gone(&first_marker)?;
+        assert_gone(&second_marker)?;
+        Ok(())
+    }
 
     // Spec: docs/specs/routing.md#provider-model-discovery
     #[test]
