@@ -9,7 +9,7 @@ pub const KNOB: &str = "lanes.verification";
 
 /// The default verification paragraph. A launch that does not override it
 /// includes this text unchanged.
-pub const CHECK_PARAGRAPH: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\n";
+pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints; the CI scope line below says what CI, if any, you wait for. Check your change as cheaply as this host allows: a `cargo check` of the package you changed, or its touched tests when the build is already warm; otherwise leave it to CI. Report what you ran and what you left to CI.\n";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VerificationScope {
