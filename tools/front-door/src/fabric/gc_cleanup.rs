@@ -335,6 +335,8 @@ fn retirement_records_for_receipt(
     Ok(retirement.removals())
 }
 
+// This targeted post-settlement operation owns its real-time ceiling.
+#[allow(clippy::disallowed_methods)]
 fn release_settled_cache(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
@@ -451,6 +453,7 @@ pub(crate) fn collect_owned_worktree(
 /// attempt and leaves a receipt that is not final until it succeeds. The
 /// applied sweep records exact removal evidence in the same receipt before
 /// mutation, then lifts confirmed removals into its report.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_unsettled(
     roots: &provenant_core::Roots,
     home: &Path,

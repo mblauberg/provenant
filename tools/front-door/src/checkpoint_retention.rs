@@ -208,10 +208,10 @@ fn walk_directory(
     }
     let initial_metadata = directory.metadata().map_err(|error| error.to_string())?;
     let mut entries = directory.entries().map_err(|error| error.to_string())?;
-    if let Some(cursor) = cursor {
-        if entries.seek(cursor.cookie).is_err() {
-            return Ok(Walk::Stale);
-        }
+    if let Some(cursor) = cursor
+        && entries.seek(cursor.cookie).is_err()
+    {
+        return Ok(Walk::Stale);
     }
     let mut target = cursor.and(start_at);
     loop {

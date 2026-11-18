@@ -99,11 +99,7 @@ fn sweep(
     let projects_path = root.as_path().join("workflow/projects");
     let projects_stamp = DirectoryStamp::from(projects.metadata()?);
     let mut cursor = resume_cursor(control, &projects_path, &projects_stamp);
-    if cursor
-        .as_ref()
-        .is_some_and(|saved| saved.phase == Phase::Sessions)
-    {
-        let saved = cursor.take().expect("checked cursor");
+    if let Some(saved) = cursor.take_if(|saved| saved.phase == Phase::Sessions) {
         let Some(project_name) = saved.project.as_deref() else {
             return Ok(());
         };
