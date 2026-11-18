@@ -34,6 +34,17 @@ impl From<GraphIdentifier> for Option<String> {
         value.0
     }
 }
+impl GraphIdentifier {
+    pub fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+impl std::ops::Deref for GraphIdentifier {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0.as_deref().unwrap_or_default()
+    }
+}
 impl fmt::Display for GraphIdentifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.as_deref().unwrap_or_default())
@@ -357,7 +368,7 @@ pub struct ExtensionCause {
     pub kind: ExtensionKind,
     pub rule: ExtensionRule,
     pub limit: ExtensionLimit,
-    pub loop_id: Option<String>,
+    pub loop_id: Option<GraphIdentifier>,
 }
 impl ExtensionCause {
     pub fn host_limits(extension: &str) -> Self {
@@ -379,8 +390,7 @@ impl ExtensionCause {
                 .strip_prefix("loop.")
                 .and_then(|key| key.rsplit_once('.'))
                 .map(|(name, _)| name)
-                .filter(|name| super::valid_node_identifier(name))
-                .and_then(|name| super::normalise_prompt_text(name).ok()),
+                .and_then(|name| GraphIdentifier::try_from(name.to_owned()).ok()),
         }
     }
 
@@ -434,7 +444,6 @@ mod tests {
         }
     }
 
-    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn secret_shaped_identifiers_keep_cycle_causes_and_registered_values_are_masked() {

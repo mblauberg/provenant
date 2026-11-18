@@ -107,6 +107,10 @@ pub fn serve(
 }
 
 /// Serve reads with the binary's existing graph service after attempt-bound authorisation.
+#[allow(
+    clippy::print_stderr,
+    reason = "warn operator when policy is unavailable and defaults are used"
+)]
 pub fn serve_with_read(
     context: &Context,
     attempt: &str,
@@ -118,13 +122,20 @@ pub fn serve_with_read(
 ) -> Result<Value, ServiceError> {
     let mutating_input = matches!(arguments["op"].as_str(), Some("add" | "edit" | "run"));
     let policy = if mutating_input {
-        let config = crate::config_reads::read_for(&context.roots, "run admission")
-            .map_err(|_| journal_error(()))?;
-        config.domains.policy.resolve_with_knobs(
-            &context.identity.project.to_string(),
-            &config.knobs,
-            &Default::default(),
-        )
+        match crate::config_reads::read_for(&context.roots, "run admission") {
+            Ok(config) => config.domains.policy.resolve_with_knobs(
+                &context.identity.project.to_string(),
+                &config.knobs,
+                &Default::default(),
+            ),
+            Err(error) => {
+                let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                eprintln!(
+                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                );
+                Default::default()
+            }
+        }
     } else {
         Default::default()
     };

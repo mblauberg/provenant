@@ -40,7 +40,9 @@ A writer continuation retains predecessor work and the original review diff
 base. Budgets survive resumption; terminal receipts remain immutable. Recovery
 reopens selected consumers without restarting unrelated work.
 Graph-wide retry with no work left to resume and no extension must select a
-node or refuse with the node retry command. Pending work and budget extensions
+node or refuse with the node retry command. Lowered host structural limits
+pause an unchanged graph on resume or graph-wide retry, saving the structural
+limit pause; only a changed candidate refuses admission. Pending work and budget extensions
 remain resumable even when an advisory node failed. Prior model exclusions
 use `adapter/id`; a carried graph exclusion that no longer resolves is dropped
 with a warning. Explicit flag and standing configuration errors remain visible

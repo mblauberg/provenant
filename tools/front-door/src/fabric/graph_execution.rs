@@ -606,10 +606,6 @@ impl Factory {
                                 .map(|id| id.as_str().to_owned())
                         })
                         .unwrap_or_else(|| format!("submit:{}", document.graph_id));
-                    self.graph_input_warnings(
-                        &serde_json::to_value(&document)
-                            .map_err(|_| FacadeError::InvalidInput { detail: None })?,
-                    )?;
                     provenant_fabric_runtime::graph::patch::submission(
                         &mut document,
                         &submission_key,
@@ -1006,35 +1002,23 @@ impl Factory {
             };
             // Retry the bound execution, with the reset staged under this lock.
             let is_retry = retry.is_some();
-            let mut retry_document = bound_execution.as_ref().map(|bound| bound.document.clone());
-            if is_retry
-                && let Some(document) = retry_document.as_mut()
-                && document.submission_patch.is_none()
-            {
-                let submission_key = document
-                    .provenance
-                    .as_ref()
-                    .and_then(|provenance| {
-                        provenance
-                            .operation_id
-                            .as_ref()
-                            .map(|id| id.as_str().to_owned())
-                    })
-                    .unwrap_or_else(|| format!("submit:{}", document.graph_id));
-                provenant_fabric_runtime::graph::patch::submission(
-                    document,
-                    &submission_key,
-                    &self.context.config.graph.limits,
-                    self.context.port_table.worktree_layout.clone(),
-                )
-                .map_err(super::interface::graph_patch_error)?;
-            }
             let document = if is_retry {
-                retry_document.as_ref().ok_or(FacadeError::NotFound)?
+                bound_execution
+                    .as_ref()
+                    .map(|bound| &bound.document)
+                    .ok_or(FacadeError::NotFound)?
             } else {
                 document
             };
+            let extensions = match &input {
+                GraphInput::Resume { extend, .. } => extend.as_slice(),
+                _ => &[],
+            };
+            let mut retry_changed = false;
             if let Some((target, request)) = retry {
+                let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
+                let node_given = target.node.is_some();
+                retry_changed = brief_given || node_given || !extensions.is_empty();
                 self.prepare_retry(
                     target,
                     request,
@@ -1066,11 +1050,7 @@ impl Factory {
                 }
             }
             let requester_path = self.requester_lane_path()?;
-            let extensions = match &input {
-                GraphInput::Resume { extend, .. } => extend.as_slice(),
-                _ => &[],
-            };
-            let candidate = match checkpoint.as_ref().filter(|_| !is_retry) {
+            let candidate = match checkpoint.as_ref().filter(|_| !retry_changed) {
                 Some(checkpoint) => provenant_fabric_runtime::graph::admit_running_candidate(
                     document,
                     checkpoint,

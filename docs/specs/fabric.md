@@ -221,8 +221,10 @@ like a credential, without echoing the value. The compiled default is Warn;
 refuse, including when a retained policy requests Refuse. Warnings name their source
 and knob. Operator retry briefs refuse only exact known credential values of at
 least eight bytes, excluding `[REDACTED]`; this check never opens credential
-stores. The refusal precedes any mutation or reservation. Automatic writer
-restarts reuse accepted input without this operator admission check.
+stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables or >64 KiB total)
+are skipped with a visible warning and never refuse retry. The refusal precedes
+any mutation or reservation. Automatic writer restarts reuse accepted input
+without this operator admission check.
 Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
 kind and rule; limit causes name the host limit, never the supplied value.
 CLI stderr, diagnostic JSON and relay wire details project the same cause.

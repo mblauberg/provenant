@@ -34,7 +34,7 @@ pub enum CandidateError {
     Structural(GraphStructuralLimit),
     #[error("node {node}: {limit}")]
     NodeStructural {
-        node: String,
+        node: refusal::GraphIdentifier,
         limit: GraphStructuralLimit,
     },
     #[error("{0}")]
@@ -240,9 +240,11 @@ fn admit(
             }
             _ => false,
         });
-        if let Some(node) = node.filter(|node| valid_node_identifier(&node.id)) {
+        if let Some(node) = node.filter(|node| valid_node_identifier(&node.id))
+            && let Ok(node_id) = refusal::GraphIdentifier::try_from(node.id.clone())
+        {
             return Err(CandidateError::NodeStructural {
-                node: node.id.clone(),
+                node: node_id,
                 limit,
             });
         }

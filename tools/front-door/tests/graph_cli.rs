@@ -2296,20 +2296,22 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
         "exact-value refusal is atomic"
     );
 
-    // An invalid credential set is a check failure, not proof of a match.
+    // An out-of-bounds ambient credential variable (>16 KiB) is skipped with a visible warning and does not refuse retry.
     let output = rig
         .command()
         .env("FIXTURE_API_KEY", "x".repeat(16 * 1024 + 1))
         .args(["retry", &id, "--brief", "ordinary retry brief"])
         .output()?;
     let reply: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(!output.status.success(), "{reply}");
-    assert_eq!(reply["status"], "error", "{reply}");
     assert!(
-        !reply.to_string().contains("declared credential value rule"),
-        "a failed check must not claim a credential match: {reply}"
+        output.status.success(),
+        "out-of-bounds ambient credentials must not refuse: {reply}"
     );
-    assert_eq!(snapshot()?, after_placeholder, "check failure is atomic");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning") && stderr.contains("FIXTURE_API_KEY"),
+        "expected visible warning in stderr: {stderr}"
+    );
     Ok(())
 }
 
@@ -2517,5 +2519,113 @@ fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
         resumed.pause.is_none(),
         "graph pause must be cleared on resume"
     );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn retry_after_lowered_host_limit_preserves_structural_pause() -> Result {
+    let rig = GraphProject::new()?;
+    let id = "lowered-limit-retry";
+    let path = rig.document(
+        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+            {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+            {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]}),
+    )?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+
+    let id2 = "lowered-limit-changed";
+    let path2 = rig.document(
+        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id2,"nodes":[
+            {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+            {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]}),
+    )?;
+    let output2 = rig.command().args(["run", "--file"]).arg(path2).output()?;
+    assert!(output2.status.success(), "{output2:?}");
+
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+    for node in &mut checkpoint.nodes {
+        node.state = NodeState::Skipped;
+        node.skip_reason = Some("graph cancelled".into());
+        node.cancelled_from = Some(NodeState::Pending);
+        node.gate = None;
+        node.outputs = None;
+    }
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    // Lower the host limit in config.toml to 1 node (the graph has 2 nodes).
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+    )?;
+
+    // 1. Graph-wide retry with no brief and no extension leaves topology unchanged:
+    // must succeed and preserve/save the StructuralLimit pause rather than refuse.
+    let (output, retried) = rig.run(&["retry", id])?;
+    assert!(
+        output.status.success(),
+        "graph-wide retry with lowered limit must succeed and pause, not refuse: {retried}"
+    );
+
+    // Verify the checkpoint in journal has the StructuralLimit pause.
+    let checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert_eq!(
+        checkpoint.pause_cause(),
+        Some(provenant_records::pause::PauseCause::StructuralLimit),
+        "checkpoint must record StructuralLimit pause"
+    );
+
+    // 2. Changed retry (e.g. with --node and --brief) against lowered limit must refuse.
+    let (output, refused) = rig.run(&[
+        "retry",
+        &format!("{id2}/first"),
+        "--brief",
+        "new instruction",
+    ])?;
+    assert!(
+        !output.status.success(),
+        "changed candidate retry against lowered limit must be refused: {refused}"
+    );
+    assert_eq!(refused["status"], "error");
+    assert!(
+        refused["error"]["message"].is_string(),
+        "refusal must carry an error message: {refused}"
+    );
+
     Ok(())
 }

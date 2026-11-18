@@ -200,7 +200,7 @@ pub enum DispatchRefusalFact {
     GraphStructuralLimit(crate::graph::GraphStructuralLimit),
     GraphExtension(crate::graph::refusal::ExtensionCause),
     GraphNodeLimit {
-        node: String,
+        node: crate::graph::refusal::GraphIdentifier,
         limit: crate::graph::GraphStructuralLimit,
     },
     GraphEnvelope,
@@ -240,68 +240,70 @@ pub enum GraphRelayCause {
 }
 
 impl GraphRelayCause {
-    fn text(&self) -> String {
+    fn text(&self) -> &'static str {
         match self {
-            Self::CredentialValue => "input matches the declared credential value rule; remove credential material and retry".into(),
+            Self::CredentialValue => {
+                "input matches the declared credential value rule; remove credential material and retry"
+            }
             Self::RetryInvalidConfiguration => {
-                "the selected node cannot be retried with its current graph configuration".into()
+                "the selected node cannot be retried with its current graph configuration"
             }
-            Self::RetryUnknownNode => "the selected node does not exist in the graph".into(),
-            Self::RetryUnsettled => "the selected node or its subtree has unsettled attempts".into(),
-            Self::RetryContainerBrief => "a container retry requires per-leaf brief edits".into(),
+            Self::RetryUnknownNode => "the selected node does not exist in the graph",
+            Self::RetryUnsettled => "the selected node or its subtree has unsettled attempts",
+            Self::RetryContainerBrief => "a container retry requires per-leaf brief edits",
             Self::RetryBriefNeedsNode => {
-                "a graph with several nodes needs a NAME/NODE target to say which node's brief to replace".into()
+                "a graph with several nodes needs a NAME/NODE target to say which node's brief to replace"
             }
-            Self::ParentSettled => "the parent node has settled; launch from a running node".into(),
+            Self::ParentSettled => "the parent node has settled; launch from a running node",
             Self::ChildDepth => {
-                "the child exceeds limits.child_depth; raise the graph's child depth limit".into()
+                "the child exceeds limits.child_depth; raise the graph's child depth limit"
             }
             Self::WriterParentRequired => {
-                "the writer child needs a registered parent worktree or a graph integration branch and source commit".into()
+                "the writer child needs a registered parent worktree or a graph integration branch and source commit"
             }
             Self::WriterWorktree => {
-                "the writer needs a valid registered worktree; pass --worktree or omit it for a host-provisioned checkout".into()
+                "the writer needs a valid registered worktree; pass --worktree or omit it for a host-provisioned checkout"
             }
             Self::WriterComposite => {
-                "writer composite children require explicit per-node worktree bindings".into()
+                "writer composite children require explicit per-node worktree bindings"
             }
             Self::TargetOutsideGraph => {
-                "the target is outside the calling lane's graph or permitted subtree".into()
+                "the target is outside the calling lane's graph or permitted subtree"
             }
             Self::RelayUnavailable => {
-                "this attempt is not a running graph node; launch through a graph host relay".into()
+                "this attempt is not a running graph node; launch through a graph host relay"
             }
-            Self::InvalidFrame => "the graph relay frame does not match the operation schema".into(),
+            Self::InvalidFrame => "the graph relay frame does not match the operation schema",
             Self::InvalidChildId => {
-                "child id must be 1..=64 letters, digits, hyphens or underscores, without a double hyphen".into()
+                "child id must be 1..=64 letters, digits, hyphens or underscores, without a double hyphen"
             }
             Self::InvalidLaunch => {
-                "the child launch does not match its template or graph schema; inspect the template and launch overrides with --explain".into()
+                "the child launch does not match its template or graph schema; inspect the template and launch overrides with --explain"
             }
             Self::StartedNode => {
-                "the selected node has started; edit an unstarted node or launch a new child".into()
+                "the selected node has started; edit an unstarted node or launch a new child"
             }
             Self::JournalUnavailable => {
-                "the host could not access the graph journal; retry or ask the host operator to check graph state access".into()
+                "the host could not access the graph journal; retry or ask the host operator to check graph state access"
             }
             Self::ReadUnavailable => {
-                "the host has no graph reader; upgrade the host and relaunch the parent".into()
+                "the host has no graph reader; upgrade the host and relaunch the parent"
             }
             Self::WriterSource => {
-                "the writer source could not be resolved; check the registered checkout and requested source commit".into()
+                "the writer source could not be resolved; check the registered checkout and requested source commit"
             }
             Self::InvalidTemplate => {
-                "the child template could not be loaded or validated; inspect its template definition".into()
+                "the child template could not be loaded or validated; inspect its template definition"
             }
             Self::InvalidConfig => {
-                "the host graph configuration is invalid; correct the configuration before retrying".into()
+                "the host graph configuration is invalid; correct the configuration before retrying"
             }
             Self::InvalidReview => {
-                "the review panel could not be resolved; check the review routing configuration".into()
+                "the review panel could not be resolved; check the review routing configuration"
             }
-            Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency".into(),
+            Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency",
             Self::Conflict => {
-                "the patch conflicts with the current graph revision or started nodes; refresh status and revise the patch".into()
+                "the patch conflicts with the current graph revision or started nodes; refresh status and revise the patch"
             }
         }
     }
@@ -418,7 +420,7 @@ impl InvalidInputDetail {
                     .unwrap_or_else(|| "graph input could not be processed".into()),
             ),
             Self::Parameter(refusal) => Some(refusal.bounded().to_string()),
-            Self::GraphRelayCause(cause) => Some(cause.text()),
+            Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::RetryNode { graph, node } => {
                 if safe_retry_name(graph).is_some() && safe_retry_name(node).is_some() {
                     Some(format!("select a node to retry with `provenant retry {graph}/{node}`"))
@@ -1750,10 +1752,7 @@ mod diagnostic_tests {
                 refusal_code: "refused_child".into(),
                 detail: Some(super::InvalidInputDetail::GraphRelayCause(cause.clone())),
             };
-            assert_eq!(
-                error.diagnostic().detail.as_deref(),
-                Some(cause.text().as_str())
-            );
+            assert_eq!(error.diagnostic().detail.as_deref(), Some(cause.text()));
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored, error);
             assert_eq!(restored.diagnostic(), error.diagnostic());

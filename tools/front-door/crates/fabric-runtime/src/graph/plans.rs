@@ -1911,7 +1911,11 @@ pub(super) fn settle(
                         .map_err(|_| "patch JSON is invalid".to_owned())
                         .and_then(|value| {
                             let warnings = super::refusal::input_warnings(&value, policy);
-                            checkpoint.nodes[index].warnings.extend(warnings);
+                            for warning in warnings {
+                                if !checkpoint.nodes[index].warnings.contains(&warning) {
+                                    checkpoint.nodes[index].warnings.push(warning);
+                                }
+                            }
                             normalise_fragment(&json).inspect(|json| {
                                 checkpoint.nodes[index].fragment = Some(json.clone());
                             })

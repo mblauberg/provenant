@@ -1757,16 +1757,55 @@ pub fn launch_values(
 /// Return non-empty values of at least `MIN_EXACT_BYTES` bytes from ambient variables
 /// whose names end in one of the credential assignment keys understood by the streaming redactor,
 /// excluding placeholder values like `[REDACTED]`.
+/// Out-of-bounds variables (>16 KiB, >128 variables or >64 KiB total) are skipped with a visible
+/// warning instead of invalidating the secret set.
 /// This deliberately reads process environment only; it never opens stores.
 pub fn ambient_values() -> Result<Vec<Vec<u8>>, RedactorError> {
-    let values = std::env::vars_os()
-        .filter_map(|(name, value)| {
-            (credential_variable_name(name.as_encoded_bytes())
-                && value.len() >= MIN_EXACT_BYTES
-                && value.as_encoded_bytes() != REDACTED)
-                .then(|| value.into_encoded_bytes())
-        })
-        .collect::<Vec<_>>();
+    ambient_values_from(std::env::vars_os())
+}
+
+#[allow(
+    clippy::print_stderr,
+    reason = "warn operator of skipped out-of-bounds ambient credentials"
+)]
+fn ambient_values_from(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = vars.into_iter().collect();
+    vars.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut values = Vec::new();
+    let mut total_bytes = 0usize;
+    for (name, value) in vars {
+        if !credential_variable_name(name.as_encoded_bytes()) {
+            continue;
+        }
+        let encoded = value.into_encoded_bytes();
+        if encoded.len() < MIN_EXACT_BYTES || encoded.as_slice() == REDACTED {
+            continue;
+        }
+        let name_str = name.to_string_lossy();
+        if encoded.len() > MAX_SECRET_LENGTH {
+            eprintln!(
+                "warning: skipping ambient credential variable {name_str}: length {} exceeds limit of {MAX_SECRET_LENGTH}",
+                encoded.len()
+            );
+            continue;
+        }
+        if values.len() >= MAX_SECRETS {
+            eprintln!(
+                "warning: skipping ambient credential variable {name_str}: credential count exceeds limit of {MAX_SECRETS}"
+            );
+            continue;
+        }
+        if total_bytes.saturating_add(encoded.len()) > MAX_SECRET_BYTES {
+            eprintln!(
+                "warning: skipping ambient credential variable {name_str}: total credential bytes would exceed limit of {MAX_SECRET_BYTES}"
+            );
+            continue;
+        }
+        total_bytes += encoded.len();
+        values.push(encoded);
+    }
     validate_secrets(values)
 }
 
@@ -2041,6 +2080,24 @@ mod tests {
                 b"example=sk-example-value actual=\"[REDACTED]\""
             );
         }
+    }
+
+    #[test]
+    fn ambient_values_skips_oversize_credential_variables() {
+        use std::ffi::OsString;
+        let vars = vec![
+            (
+                OsString::from("FIXTURE_TEST_API_KEY"),
+                OsString::from("x".repeat(MAX_SECRET_LENGTH + 1)),
+            ),
+            (
+                OsString::from("VALID_TEST_API_KEY"),
+                OsString::from("valid-exact-3391"),
+            ),
+        ];
+        let values = ambient_values_from(vars)
+            .expect("oversize ambient credential variable must not fail the set");
+        assert_eq!(values, vec![b"valid-exact-3391".to_vec()]);
     }
 
     #[test]

@@ -867,14 +867,28 @@ fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
 }
 
 impl Factory {
+    #[allow(
+        clippy::print_stderr,
+        reason = "warn operator when policy is unavailable and defaults are used"
+    )]
     pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
-        let config = provenant_cli::config_reads::read_for(&self.context.roots, "run admission")
-            .map_err(|_| FacadeError::io("read graph admission policy"))?;
-        let policy = config.domains.policy.resolve_with_knobs(
-            &self.context.identity.project.to_string(),
-            &config.knobs,
-            &Default::default(),
-        );
+        let policy = match provenant_cli::config_reads::read_for(
+            &self.context.roots,
+            "run admission",
+        ) {
+            Ok(config) => config.domains.policy.resolve_with_knobs(
+                &self.context.identity.project.to_string(),
+                &config.knobs,
+                &Default::default(),
+            ),
+            Err(error) => {
+                let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                eprintln!(
+                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                );
+                provenant_records::policy::Policy::default()
+            }
+        };
         Ok(provenant_fabric_runtime::graph::refusal::input_warnings(
             value, &policy,
         ))
