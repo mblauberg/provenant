@@ -60,8 +60,10 @@ The single-flight guard is released on exit. Dead or over-budget holders are
 detected and takeover is reported as a warning.
 
 `lanes.cargo_cache_max` budgets private lane and shared Cargo targets together.
-It accepts bytes or a percentage of the cache volume, with a host-sized default
-and an effective source shown in diagnostics. Launch evicts eligible targets in
+It accepts bytes or a percentage of the cache volume, defaults to 10% of that
+volume and shows its effective source in diagnostics. For example, set
+`"lanes.cargo_cache_max" = "50G"` or `"10%"` in the host configuration
+`[knobs]` table; profile and launch overrides use the same knob. Launch evicts eligible targets in
 least-recently-used order when the cache exceeds the budget. `gc --dry-run`
 shows measured cache size against that budget; incomplete previews say so.
 Shared targets under `~/Library/Caches/provenant-shared-cargo/` participate in
