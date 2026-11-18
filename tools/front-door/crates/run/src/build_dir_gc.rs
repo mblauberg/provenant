@@ -1157,7 +1157,7 @@ fn discover_with_progress(
     };
     let (start_offset, mut seen) = match saved_cursor {
         Some(cursor) if cursor.kind == kind => (cursor.offset, cursor.scanned),
-        _ => (0, 0),
+        _ => (Default::default(), 0),
     };
     if let Err(error) = entries.seek(start_offset) {
         report
