@@ -3064,6 +3064,15 @@ impl BoundGraphOwner<'_> {
                 }
             }
             let exclude = self.route_exclusions(route, node.prior_attempts, accepted);
+            if !accepted {
+                for warning in provenant_cli::route::discarded_graph_exclusion_warnings(
+                    &exclude,
+                    &self.factory.context.roots,
+                ) {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                    self.launch_warnings.push(warning);
+                }
+            }
             let base = if accepted {
                 let operation = operation.as_ref().ok_or(FacadeError::StateCorrupt)?;
                 let admitted = store

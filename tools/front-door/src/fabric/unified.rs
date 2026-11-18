@@ -300,6 +300,9 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         let current =
             row["kind"] == "node" || attempt.zip(latest).is_some_and(|(a, b)| std::ptr::eq(a, b));
         if current {
+            if row["kind"] == "node" {
+                row["warnings"] = json!(node.map(|node| &node.warnings));
+            }
             row["branch"] = json!(
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.branch.as_ref())
@@ -487,6 +490,7 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
         {
             human.push_str(&digest.line);
             human.push('\n');
+            append_status_warnings(&mut human, node);
             continue;
         }
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
@@ -572,7 +576,19 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
     }
     let mut line = provenant_cli::bounded_text(&line, provenant_cli::limits::SUMMARY_ROW_BYTES);
     line.push('\n');
+    append_status_warnings(&mut line, row);
     line
+}
+
+fn append_status_warnings(line: &mut String, row: &Value) {
+    if let Some(warnings) = row["warnings"].as_array() {
+        for warning in warnings.iter().filter_map(Value::as_str) {
+            line.push_str(&format!(
+                "  warning: {}\n",
+                provenant_cli::bounded_text(warning, 2048)
+            ));
+        }
+    }
 }
 
 fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_records::DecodeError) {

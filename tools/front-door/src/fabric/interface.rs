@@ -2424,14 +2424,8 @@ impl Factory {
             .ok_or(FacadeError::NotFound)?;
         if target.node.is_none()
             && !brief_given
-            && (checkpoint.nodes.iter().any(|node| {
-                matches!(
-                    node.state,
-                    provenant_fabric_runtime::graph::NodeState::Failed
-                        | provenant_fabric_runtime::graph::NodeState::Blocked
-                )
-            }) || (extend.is_empty()
-                && checkpoint.nodes.iter().all(|node| node.state.settled())))
+            && extend.is_empty()
+            && checkpoint.nodes.iter().all(|node| node.state.settled())
         {
             let node = checkpoint
                 .nodes

@@ -1714,6 +1714,83 @@ fn settled_graph_retry_requires_a_node() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn graph_retry_extends_budget_after_advisory_failure() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let rig = GraphProject::new()?;
+    let id = "advisory-budget";
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+        {"id":"advisory","kind":"gate","access":"read_only","advisory":true,"condition":{"type":"budget"}},
+        {"id":"pending","kind":"gate","access":"read_only","depends_on":["advisory"],"condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-advisory-budget.json")
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.nodes[0].state = NodeState::Failed;
+    let gate = checkpoint.nodes[0].gate.as_mut().ok_or("gate result")?;
+    gate.passed = false;
+    gate.reason = Some("advisory failed".into());
+    checkpoint.nodes[0]
+        .outputs
+        .as_mut()
+        .ok_or("gate outputs")?
+        .verdict = Some("FAIL".into());
+    checkpoint.nodes[1].state = NodeState::Pending;
+    checkpoint.nodes[1].gate = None;
+    checkpoint.nodes[1].outputs = None;
+    checkpoint.pause = Some(serde_json::from_value(
+        json!({"cause":{"kind":"budget_exceeded"},"reason":"budget spent"}),
+    )?);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph.budget.per_graph]\ntokens = 10\n",
+    )?;
+
+    let (output, retried) = rig.run(&["retry", id, "--extend", "budget.per_graph.tokens=30"])?;
+    assert!(output.status.success(), "{retried}");
+    let resumed = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert!(
+        resumed
+            .extensions
+            .iter()
+            .any(|extension| extension.contains("per_graph.tokens=30")),
+        "{resumed:?}"
+    );
+    assert_ne!(resumed.nodes[1].state, NodeState::Pending, "{resumed:?}");
+    Ok(())
+}
+
 #[test]
 fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
     for qualified in [true, false] {

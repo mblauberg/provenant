@@ -369,6 +369,25 @@ pub(crate) fn exclusion_rules(
         })
         .collect()
 }
+
+/// Diagnostics for carried graph selectors that routing will discard. The graph
+/// host retains these before detached preparation, whose stderr is not inherited.
+pub fn discarded_graph_exclusion_warnings(texts: &[String], roots: &Roots) -> Vec<String> {
+    texts
+        .iter()
+        .filter(|selector| {
+            matches!(
+                exclusion_rules(
+                    std::slice::from_ref(*selector),
+                    provenant_routing::ExclusionSource::Graph,
+                    roots
+                ),
+                Err(EdgeError::Routing(RoutingError::UnknownExclusion { .. }))
+            )
+        })
+        .map(|selector| format!("dropping unrecognised carried graph exclusion {selector:?}"))
+        .collect()
+}
 /// The exclusions a task carries: the standing `routing.exclude` list from the
 /// configuration, the dispatch's `--exclude` flags and the graph's list, as a
 /// union. Each rule keeps the source it came from.

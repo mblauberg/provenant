@@ -4531,6 +4531,59 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
     run_graph_provider_with_wait(rig, graph_id, node, "5s")
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+fn detached_graph_retry_reports_discarded_exclusion() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let account =
+        provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
+            .ok_or("account key")?;
+    support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&commit), 0, "{commit:?}");
+    let document = rig.root.join("stale-exclusion.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "stale-exclusion",
+            "exclude": ["legacy-bare-model"],
+            "nodes": [{"id":"reader", "prompt":"fixture read only", "access":"read_only",
+                "route":{"adapter":"codex", "model":"gpt-6-luna"}}]
+        }))?,
+    )?;
+    let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], "30s")?;
+    assert_eq!(
+        settled.checkpoint["nodes"][0]["state"], "succeeded",
+        "{}",
+        settled.checkpoint
+    );
+    let retry = rig.command(&["retry", "stale-exclusion/reader", "--json"])?;
+    assert_eq!(code(&retry), 0, "{retry:?}");
+    let wait = rig.command(&["wait", "stale-exclusion", "--timeout", "30s", "--json"])?;
+    assert_eq!(code(&wait), 0, "{wait:?}");
+    let checkpoint = rig.checkpoint("stale-exclusion")?;
+    assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
+    assert_eq!(
+        checkpoint["nodes"][0]["attempts"][0]["launched"], true,
+        "{checkpoint}"
+    );
+    let status = rig.command(&["status", "stale-exclusion"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let text = String::from_utf8_lossy(&status.stdout.bytes);
+    assert!(
+        text.contains("dropping unrecognised carried graph exclusion")
+            && text.contains("legacy-bare-model"),
+        "{text}"
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
 fn light_graph_delivers_and_applies_preset_per_node() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -5517,6 +5570,10 @@ fn main() -> ExitCode {
         }
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "detached_graph_retry_reports_discarded_exclusion",
+                detached_graph_retry_reports_discarded_exclusion,
+            ),
             (
                 "provider_checks_preserve_routes_and_settlement_causes",
                 provider_checks_preserve_routes_and_settlement_causes,
