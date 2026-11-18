@@ -2688,8 +2688,7 @@ mod warning_tests {
 
     const FABRIC_SECTION: DomainSection =
         DomainSection::new::<FabricStub>("fabric", fabric_defaults);
-    const FABRIC_DOMAINS: DomainSections<FabricStub> =
-        DomainSections::new(&[FABRIC_SECTION]);
+    const FABRIC_DOMAINS: DomainSections<FabricStub> = DomainSections::new(&[FABRIC_SECTION]);
 
     #[test]
     fn retired_cargo_cache_settings_produce_actionable_diagnostic()
