@@ -920,7 +920,7 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
     };
     let mut plan = PlanPermissions {
         credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
-            "/fixture/home",
+            "/Users/fixture",
         )),
         policy: None,
         read_only: None,
@@ -1734,7 +1734,7 @@ fn mandatory_alias_categories_cannot_become_authentication_exceptions()
             path: alias.into(),
             scope,
         };
-        mandatory.add_credentials_alias(&original, alias.clone())?;
+        mandatory.add_credentials_alias(&original.clone().into(), alias.clone())?;
         let exact = PathGrant {
             path: match scope {
                 PathScope::Exact => alias.path.clone(),
@@ -1947,5 +1947,126 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
         )
         .is_none()
     );
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+    let home = Path::new("/Users/fixture");
+    assert!(matches!(
+        PathGrant {
+            path: home.into(),
+            scope: PathScope::Subtree
+        }
+        .validate(),
+        Err(PermissionError::BroadRoot)
+    ));
+    // A home-rooted account, a relocated CODEX_HOME, and a built-in store
+    // containing an alternate graph source all use the same boundary.
+    for store in [
+        home.to_owned(),
+        home.join("relocated-codex"),
+        home.join(".claude"),
+    ] {
+        let project = store.join("project");
+        let cwd = project.join("cwd");
+        let scratch = store.join("scratch");
+        let lanes = vec![project.clone(), cwd, scratch];
+        let mut credentials = CredentialRoots::default();
+        credentials.add(
+            &store,
+            CredentialScope::Subtree,
+            "shared fixture",
+            CredentialKind::Store,
+        );
+        let credentials = credentials.with_lane_roots(lanes.clone());
+        // Generic admission refuses materialisation; sandbox grants have their
+        // own admission and only rendered grants become carve-outs.
+        let unlisted = store.join("unlisted-secret");
+        assert!(credentials.refuses(&unlisted, CredentialScope::Exact, true));
+        assert!(
+            super::super::validation::validate_read_exec_grant(
+                &PathGrant {
+                    path: unlisted,
+                    scope: PathScope::Exact
+                },
+                &credentials
+            )
+            .is_ok()
+        );
+        assert!(!credentials.refuses(&project.join("ordinary"), CredentialScope::Exact, true));
+        let (mut plan, mut profile) = write_grants_fixture();
+        plan.credential_roots = credentials;
+        plan.network = NetworkAccess::Local;
+        plan.read_roots = lanes
+            .iter()
+            .map(|path| PathGrant {
+                path: path.clone(),
+                scope: PathScope::Subtree,
+            })
+            .collect();
+        // A selected broad auth grant cannot cancel the shared store denial.
+        profile.spec.authentication[1].roots = vec![PathGrant {
+            path: store.clone(),
+            scope: PathScope::Subtree,
+        }];
+        let source = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+        // The default state is independent of the enclosing store denial.
+        let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
+        for operation in ["file-read*", "file-write*"] {
+            assert!(
+                rule_index_with_facts(
+                    &source,
+                    RuleAction::Deny,
+                    operation,
+                    &[state.to_str().ok_or("state path")?],
+                    &["subpath"],
+                )
+                .is_some()
+            );
+        }
+        // Traversal can inspect the store directory itself, but cannot list
+        // its contents or read xattrs. No broad late allow reopens the store.
+        let store_path = store.to_str().ok_or("store path")?;
+        for operation in ["file-read-data", "file-read-xattr"] {
+            assert!(
+                rule_index_with_facts(
+                    &source,
+                    RuleAction::Deny,
+                    operation,
+                    &[store_path],
+                    &["literal"]
+                )
+                .is_some()
+            );
+        }
+        for operation in [
+            "file-read*",
+            "file-clone",
+            "file-write*",
+            "process-exec",
+            "file-map-executable",
+        ] {
+            let rule = source
+                .lines()
+                .find(|line| {
+                    line.starts_with(&format!(
+                        "(deny {operation} (require-all (subpath \"{}\")",
+                        store.display()
+                    ))
+                })
+                .ok_or("missing shared store denial")?;
+            for lane in &lanes {
+                assert!(
+                    rule.contains(&format!("(require-not (subpath \"{}\"))", lane.display())),
+                    "{rule}"
+                );
+            }
+        }
+    }
     Ok(())
 }

@@ -182,8 +182,8 @@ fn credential_prompt_pending_graph_reopens_and_advances() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn checkpoint_external_text_round_trips_for_generated_prompts() {
-    // A bounded generative property over UTF-8, JSON escapes, text-store size
-    // boundaries and credential shapes. Deterministic seeds keep failures reproducible.
+    // Cover each text shape with padding around the external-text threshold without
+    // repeating 48 durable journal lifecycles. Rotate atoms to vary their neighbours.
     let atoms = [
         "",
         "token=supersecretvalue123456789",
@@ -195,15 +195,13 @@ fn checkpoint_external_text_round_trips_for_generated_prompts() {
         "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         "https://name:password@example.com",
     ];
-    for seed in 0..48_usize {
-        let mut state = seed + 1;
+    for (offset, size) in [0, 4095, 4096, 4097].into_iter().enumerate() {
         let mut prompt = String::new();
-        for _ in 0..(seed % 7 + 1) {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            prompt.push_str(atoms[state % atoms.len()]);
+        for index in 0..atoms.len() {
+            prompt.push_str(atoms[(index + offset) % atoms.len()]);
             prompt.push(' ');
         }
-        prompt.push_str(&"x".repeat([0, 4095, 4096, 4097][seed % 4]));
+        prompt.push_str(&"x".repeat(size));
         advance_reopened_prompt(&prompt);
     }
 }

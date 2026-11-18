@@ -5,7 +5,7 @@
 mod host;
 use super::validation::{profile_path_representable, validate_absolute};
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
-pub use host::{host_credential_roots, host_github_roots};
+pub use host::{host_credential_declarations, host_credential_roots, host_github_roots};
 use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,6 +64,50 @@ pub fn resolve_boundary_path(path: &Path) -> Result<PathBuf, PermissionError> {
 #[serde(transparent)]
 pub struct HostPolicySettings(Value);
 
+/// A mandatory denial is a path predicate, not authority to read or write it.
+/// In particular, HOME is a valid denial root but never a valid broad grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DenialRoot {
+    pub path: PathBuf,
+    pub scope: PathScope,
+}
+
+impl From<PathGrant> for DenialRoot {
+    fn from(filter: PathGrant) -> Self {
+        Self {
+            path: filter.path,
+            scope: filter.scope,
+        }
+    }
+}
+
+impl From<&PathGrant> for DenialRoot {
+    fn from(filter: &PathGrant) -> Self {
+        Self {
+            path: filter.path.clone(),
+            scope: filter.scope,
+        }
+    }
+}
+
+impl From<&DenialRoot> for DenialRoot {
+    fn from(root: &DenialRoot) -> Self {
+        root.clone()
+    }
+}
+
+impl DenialRoot {
+    pub fn validate(&self) -> Result<(), PermissionError> {
+        // This rejects relative, non-normalised and filesystem-root paths.
+        validate_absolute(&self.path)
+    }
+
+    #[cfg(any(target_os = "macos", feature = "snapshot"))]
+    pub(crate) fn overlaps(&self, grant: &PathGrant) -> bool {
+        super::validation::path_overlaps(&self.path, &grant.path)
+    }
+}
+
 /// Host-derived mandatory roots, never loaded from optional settings.
 /// Paths must be canonical host paths; the compiler must hold/revalidate their
 /// anchors before use. Construction records paths without filesystem access;
@@ -71,7 +115,7 @@ pub struct HostPolicySettings(Value);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MandatoryRoots {
     credential_roots: CredentialRoots,
-    credentials: Vec<PathGrant>,
+    credentials: Vec<DenialRoot>,
     non_exempt: Vec<PathGrant>,
     state: PathGrant,
     source: PathGrant,
@@ -101,7 +145,7 @@ impl MandatoryRoots {
         let credentials = credential_roots
             .entries()
             .iter()
-            .map(|root| PathGrant {
+            .map(|root| DenialRoot {
                 path: root.path.clone(),
                 scope: match root.scope {
                     CredentialScope::Exact => PathScope::Exact,
@@ -137,29 +181,77 @@ impl MandatoryRoots {
             source_aliases: Vec::new(),
             credential_endpoints: Vec::new(),
         };
-        for grant in roots
-            .credentials
-            .iter()
-            .chain([&roots.state, &roots.source])
-        {
+        for root in &roots.credentials {
+            root.validate()?;
+        }
+        for grant in [&roots.state, &roots.source] {
             grant.validate()?;
         }
         Ok(roots)
     }
 
+    #[cfg(any(target_os = "macos", feature = "snapshot"))]
+    pub(crate) fn lane_exceptions(&self, root: &DenialRoot) -> Vec<PathGrant> {
+        self.credential_roots
+            .lane_roots()
+            .iter()
+            .filter(|lane| {
+                root.scope == PathScope::Subtree
+                    && **lane != root.path
+                    && lane.starts_with(&root.path)
+                    && !self
+                        .credential_roots
+                        .refuses(lane, CredentialScope::Subtree, false)
+            })
+            .map(|lane| PathGrant {
+                path: lane.clone(),
+                scope: PathScope::Subtree,
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_credential_roots(
+        &mut self,
+        roots: CredentialRoots,
+    ) -> Result<(), PermissionError> {
+        let denials = roots
+            .entries()
+            .iter()
+            .map(|root| {
+                let denial = DenialRoot {
+                    path: root.path.clone(),
+                    scope: match root.scope {
+                        CredentialScope::Exact => PathScope::Exact,
+                        CredentialScope::Subtree => PathScope::Subtree,
+                    },
+                };
+                denial.validate().map_err(|_| {
+                    PermissionError::credential_root_at(&root.path, None, &root.source)
+                })?;
+                Ok(denial)
+            })
+            .collect::<Result<Vec<_>, PermissionError>>()?;
+        self.credentials = denials;
+        self.credential_roots = roots;
+        Ok(())
+    }
+
     /// Add registered identity homes, relocated XDG stores and isolated Agy
     /// homes, including identities not selected by this attempt. Additive only.
-    pub fn add_credentials(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+    pub fn add_credentials(&mut self, root: impl Into<DenialRoot>) -> Result<(), PermissionError> {
         self.add_declared_credential(root, "provider or account registry", CredentialKind::Store)
     }
 
     pub fn add_declared_credential(
         &mut self,
-        root: PathGrant,
+        root: impl Into<DenialRoot>,
         source: impl Into<String>,
         kind: CredentialKind,
     ) -> Result<(), PermissionError> {
-        root.validate()?;
+        let root = root.into();
+        let source = source.into();
+        root.validate()
+            .map_err(|_| PermissionError::credential_root_at(&root.path, None, &source))?;
         self.credential_roots.add(
             root.path.clone(),
             match root.scope {
@@ -182,7 +274,7 @@ impl MandatoryRoots {
     /// Preserve mandatory category when a public credential spelling is a link.
     pub fn add_credentials_alias(
         &mut self,
-        original: &PathGrant,
+        original: &DenialRoot,
         alias: PathGrant,
     ) -> Result<(), PermissionError> {
         let declaration = self.credential_roots.entries().iter().find(|entry| {
@@ -196,12 +288,15 @@ impl MandatoryRoots {
             .map(|entry| (entry.source.clone(), entry.kind.clone()))
             .unwrap_or_else(|| ("credential alias".to_owned(), CredentialKind::Store));
         self.add_declared_credential(alias.clone(), source, kind)?;
-        if self.non_exempt.contains(original) {
+        if self
+            .non_exempt
+            .iter()
+            .any(|root| root.path == original.path && root.scope == original.scope)
+        {
             self.non_exempt.push(alias.clone());
         }
-        if self.github.contains(original) {
-            self.github.push(alias);
-        }
+        // Inventory adds denials, never authentication authority. In particular,
+        // a GitHub config subtree cannot promote an endpoint target to a read.
         Ok(())
     }
 
@@ -312,7 +407,6 @@ impl MandatoryRoots {
             }
         }
         let families: Vec<Vec<&PathGrant>> = vec![
-            self.credentials.iter().collect(),
             std::iter::once(&self.state)
                 .chain(&self.state_aliases)
                 .collect(),
@@ -322,7 +416,11 @@ impl MandatoryRoots {
             self.git.iter().collect(),
             self.protected.iter().collect(),
         ];
-        for roots in families {
+        let families: Vec<Vec<DenialRoot>> = families
+            .into_iter()
+            .map(|roots| roots.into_iter().map(DenialRoot::from).collect())
+            .collect();
+        for roots in families.into_iter().chain([self.credentials.clone()]) {
             for root in &roots {
                 let resolved = resolve_boundary_path(&root.path).map_err(|_| {
                     super::anchors::anchor_at(&root.path, "mandatory path resolution")
@@ -365,7 +463,7 @@ impl MandatoryRoots {
         &self.source_aliases
     }
 
-    pub fn credentials(&self) -> &[PathGrant] {
+    pub fn credentials(&self) -> &[DenialRoot] {
         &self.credentials
     }
     /// A selected login retains reads of its declared endpoints when
@@ -385,10 +483,9 @@ impl MandatoryRoots {
                                 scope: PathScope::Exact,
                             })
                         })
-                    && reads.iter().any(|grant| match grant.scope {
-                        PathScope::Subtree => path.starts_with(&grant.path),
-                        PathScope::Exact => path == &grant.path,
-                    })
+                    && reads
+                        .iter()
+                        .any(|grant| grant.scope == PathScope::Exact && path == &grant.path)
             })
             .map(|(_, target)| PathGrant {
                 path: target.clone(),
@@ -667,6 +764,33 @@ impl HostPolicySettings {
 #[cfg(test)]
 mod boundary_resolution_tests {
     use super::*;
+
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn denial_roots_have_separate_validation_from_grants() {
+        let grant = PathGrant {
+            path: "/Users/fixture".into(),
+            scope: PathScope::Subtree,
+        };
+        assert!(matches!(grant.validate(), Err(PermissionError::BroadRoot)));
+        assert!(DenialRoot::from(grant).validate().is_ok());
+        for path in [
+            "/",
+            "relative",
+            "/Users/../fixture",
+            "/Users//fixture",
+            "/Users/fixture/",
+        ] {
+            assert!(
+                DenialRoot {
+                    path: path.into(),
+                    scope: PathScope::Subtree
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn non_directory_ancestor_preserves_mandatory_literal() -> Result<(), Box<dyn std::error::Error>>

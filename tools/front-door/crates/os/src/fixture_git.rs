@@ -34,7 +34,7 @@ pub fn git_command_at(program: impl AsRef<OsStr>) -> Command {
 
 /// Native Git program for fixtures: the resolved executable, bypassing the lane's PATH wrapper.
 fn git_program() -> OsString {
-    crate::git::git_executable()
+    crate::git::resolve_git_executable(None)
         .map(PathBuf::into_os_string)
         .unwrap_or_else(|| {
             [
@@ -83,11 +83,11 @@ pub fn fixture_git_settings() -> [(OsString, OsString); 12] {
 /// Pass it as `ExecOptions::env`; an unset `env` inherits the lane's Git binding.
 pub fn git_env() -> Vec<(OsString, OsString)> {
     let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| !inherited_git_setting(key))
+        .filter(|(key, _)| !inherited_git_setting(key) && key != provenant_core::consumer_env::GIT)
         .collect();
     // Children that find `git` on PATH, such as cargo's Git CLI, must reach native Git, not a lane wrapper.
     if let Some(dir) =
-        crate::git::git_executable().and_then(|git| git.parent().map(Path::to_path_buf))
+        crate::git::resolve_git_executable(None).and_then(|git| git.parent().map(Path::to_path_buf))
     {
         // A PATH that cannot be joined is left as inherited, not replaced by an empty one.
         if let Ok(path) = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(

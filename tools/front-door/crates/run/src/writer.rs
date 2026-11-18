@@ -2443,10 +2443,12 @@ mod cargo_setup_tests {
     }
 
     #[test]
-    fn writer_preparation_refuses_incomplete_config_while_config_lock_is_held() -> FixtureResult<()>
-    {
+    #[allow(clippy::disallowed_methods)] // The holder thread must keep the real flock for a real interval.
+    fn writer_preparation_waits_for_the_config_lock_holder() -> FixtureResult<()> {
+        // #3393: a concurrent launch queues on the repository lock rather than
+        // failing, and never reads the holder's unfinished Git config.
         if clean_environment_child(stringify!(
-            writer_preparation_refuses_incomplete_config_while_config_lock_is_held
+            writer_preparation_waits_for_the_config_lock_holder
         ))? {
             return Ok(());
         }
@@ -2467,6 +2469,21 @@ mod cargo_setup_tests {
                 provenant_os::fs::PublishMode::Replace,
             )?
             .require_durable()?;
+        let holder_dir = Directory::open_anchor(&fixture.git_dir)?;
+        let holder = std::thread::spawn(move || -> std::result::Result<(), String> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let restored = holder_dir
+                .atomic_write(
+                    OsStr::new("config"),
+                    ".test-config-",
+                    &config,
+                    provenant_os::fs::PublishMode::Replace,
+                )
+                .and_then(|publication| publication.require_durable())
+                .map_err(|error| error.to_string());
+            drop(config_lock);
+            restored
+        });
 
         let clock = crate::tests::clock();
         let result = prepare_writer_with_facts_and_clock(
@@ -2476,25 +2493,12 @@ mod cargo_setup_tests {
             &worktrees::RepoFacts::default(),
             &clock,
         );
-        let observed = common.read_bounded(OsStr::new("config"), 1024 * 1024);
-
-        let restored = common
-            .atomic_write(
-                OsStr::new("config"),
-                ".test-config-",
-                &config,
-                provenant_os::fs::PublishMode::Replace,
-            )
-            .and_then(|publication| publication.require_durable());
-        drop(config_lock);
-        restored?;
-        assert!(matches!(
-            result,
-            Err(RunError::Filesystem(FsError::LockTimeout { path, timeout }))
-                if path.file_name() == Some(OsStr::new(worktrees::REPOSITORY_LOCK))
-                    && timeout.is_zero()
-        ));
-        assert_eq!(observed?, b"[unfinished");
+        holder.join().map_err(|_| "lock holder panicked")??;
+        result?;
+        assert_ne!(
+            common.read_bounded(OsStr::new("config"), 1024 * 1024)?,
+            b"[unfinished"
+        );
         Ok(())
     }
 

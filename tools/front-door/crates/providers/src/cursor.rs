@@ -9,6 +9,24 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use std::{io::Read, path::Path, time::Duration};
 
+const IDENTITY_DATABASE: &str = "state.vscdb";
+const IDENTITY_CONFIG: &str = "cli-config.json";
+
+/// SQLite may consult sidecars while reading the selected identity database.
+fn authentication_endpoints(home: &Path) -> Vec<provenant_confinement::permissions::PathGrant> {
+    [home.join(".cursor"), home.join(".config/cursor")]
+        .into_iter()
+        .flat_map(|directory| {
+            provenant_records::Harness::Cursor
+                .spec()
+                .credential_files
+                .iter()
+                .map(|file| exact(directory.join(file)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 const IDENTITY_LIMIT: usize = 1_048_576;
 
 /// One Cursor identity observation shared by registration and quota capture.
@@ -48,7 +66,7 @@ pub fn read_identity(directory: &Path) -> Result<CursorIdentity, CursorIdentityE
     }
 
     let mut bytes = Vec::new();
-    std::fs::File::open(directory.join("cli-config.json"))
+    std::fs::File::open(directory.join(IDENTITY_CONFIG))
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 CursorIdentityError::CredentialNotFound
@@ -76,7 +94,7 @@ pub fn read_identity(directory: &Path) -> Result<CursorIdentity, CursorIdentityE
 }
 
 fn read_access_token(directory: &Path) -> Result<Option<String>, CursorIdentityError> {
-    let path = directory.join("state.vscdb");
+    let path = directory.join(IDENTITY_DATABASE);
     if !path
         .try_exists()
         .map_err(|_| CursorIdentityError::Unavailable)?
@@ -194,11 +212,7 @@ fn prepare(
     argv.extend(["--".into(), input.prompt.text().into()]);
     let mut package_omissions = Vec::new();
     let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
-    let mut authentication = vec![exact(input.home.join(".cursor/cli-config.json"))];
-    let config = input.home.join(".config/cursor");
-    if config.is_dir() {
-        authentication.push(subtree(config));
-    }
+    let authentication = authentication_endpoints(input.home);
     let staged_skills = input.stage_user_skills();
     let skill_reads = staged_skills.root.iter().map(subtree).collect::<Vec<_>>();
     let mut omitted_discovery = package_omissions;
@@ -232,18 +246,17 @@ fn prepare(
     let mut setup = vec![SetupStep::CreateDir(chats.clone())];
     setup.push(SetupStep::CreateDir(private.join(".cursor")));
     setup.push(SetupStep::CreateDir(private.join(".config")));
-    for (link, target) in [
-        (
-            private.join(".cursor/cli-config.json"),
-            input.home.join(".cursor/cli-config.json"),
-        ),
-        (
-            private.join(".config/cursor"),
-            input.home.join(".config/cursor"),
-        ),
-    ] {
-        if target.exists() {
-            setup.push(SetupStep::Symlink { link, target });
+    setup.push(SetupStep::CreateDir(private.join(".config/cursor")));
+    for endpoint in &authentication {
+        if endpoint.path.exists() {
+            let relative = endpoint
+                .path
+                .strip_prefix(input.home)
+                .map_err(|_| ProviderError::UnsupportedPolicy)?;
+            setup.push(SetupStep::Symlink {
+                link: private.join(relative),
+                target: endpoint.path.clone(),
+            });
         }
     }
     if let Some(skills) = &staged_skills.root {
@@ -440,7 +453,7 @@ mod identity_tests {
 
     fn seed_token(directory: &Path) -> String {
         let token = "header.eyJzdWIiOiJjdXJzb3ItdXNlciJ9.signature";
-        let connection = Connection::open(directory.join("state.vscdb")).unwrap();
+        let connection = Connection::open(directory.join(IDENTITY_DATABASE)).unwrap();
         connection
             .execute("CREATE TABLE ItemTable (key TEXT, value TEXT)", [])
             .unwrap();

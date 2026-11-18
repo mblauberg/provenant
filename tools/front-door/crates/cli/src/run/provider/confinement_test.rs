@@ -171,7 +171,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                     cwd,
                     home: &home,
                     state: &state,
-                    credential_roots: &provenant_core::CredentialRoots::default(),
+                    credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     github_roots: &[],
                     protected_worktrees: &[],
                     scratch: &scratch,
@@ -293,6 +293,405 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn registered_credential_roots_protect_lane_tokens_for_dedicated_and_shared_roots()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let dedicated = base.join("dedicated");
+    let shared = base.join("shared");
+    for dir in [&home, &dedicated, &shared] {
+        std::fs::create_dir(dir)?;
+    }
+    let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+        serde_json::json!({"entries": {
+            "dedicated": {"adapter":"claude", "label":"dedicated", "key":"dedicated", "directory":dedicated},
+            "shared": {"adapter":"claude", "label":"shared", "key":"shared", "directory":shared},
+            "home": {"adapter":"claude", "label":"home", "key":"home", "directory":home}
+        }}),
+    )?;
+    let lane = shared.join("lane");
+    let alias_target = base.join("unselected-endpoint");
+    std::fs::write(&alias_target, b"synthetic credential")?;
+    std::os::unix::fs::symlink(&alias_target, dedicated.join(provenant_providers::claude::LANE_TOKEN_FILE))?;
+    let roots = credential_roots(&Registry::default(), &home, &settings, &[&lane])?;
+    assert!(roots.entries().iter().any(|root| root.path == alias_target && root.scope == CredentialScope::Exact && root.source.contains("claude/dedicated")));
+    for dir in [&dedicated, &shared, &home] {
+        for name in [provenant_providers::claude::LANE_TOKEN_FILE, "undeclared.txt"] {
+            assert!(roots.refuses(&dir.join(name), CredentialScope::Exact, true));
+        }
+        assert!(roots.entries().iter().any(|root| root.path == *dir && root.scope == CredentialScope::Subtree));
+        assert!(roots.entries().iter().any(|root| root.path == dir.join(provenant_providers::claude::LANE_TOKEN_FILE) && root.scope == CredentialScope::Exact && root.source.contains("claude/")));
+    }
+    assert!(!roots.refuses(&lane.join("ordinary.txt"), CredentialScope::Exact, true));
+    assert!(roots.refuses(&shared, CredentialScope::Subtree, true));
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn unresolvable_registered_store_names_its_account() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let account = base.join("account");
+    std::fs::create_dir(&home)?;
+    std::fs::create_dir(&account)?;
+    std::os::unix::fs::symlink(base.join("missing"), account.join("provenant-lane-token"))?;
+    let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+        serde_json::json!({"entries": {"work": {"adapter":"claude", "label":"work", "key":"work", "directory":account}}}),
+    )?;
+    let error = credential_roots(&Registry::default(), &home, &settings, &[])
+        .expect_err("dangling store must refuse");
+    assert!(error.contains("claude/work"), "{error}");
+    assert!(error.contains("provenant-lane-token"), "{error}");
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn host_declared_codex_home_equal_to_home_protects_store_and_admits_project_below_home()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let project = home.join("project");
+    let state = base.join("state");
+    for dir in [&home, &project, &state] {
+        std::fs::create_dir_all(dir)?;
+    }
+    let host = run::HostLaunchContext {
+        credential_roots: vec![provenant_core::CredentialDeclaration {
+            inventory: provenant_core::CredentialInventory::Adapter("codex".into()),
+            root: provenant_core::CredentialRoot {
+                path: home.clone(),
+                scope: CredentialScope::Subtree,
+                source: "provider environment: CODEX_HOME".into(),
+                kind: provenant_core::CredentialKind::Store,
+            },
+        }],
+        ..run::HostLaunchContext::from_environment(&state, &project, PathBuf::from("git"))
+    };
+    let registry = Registry {
+        home: Some(&home),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        host: Some(&host),
+        ..Registry::default()
+    };
+    let settings = provenant_providers::accounts::Settings::default();
+    let roots = credential_roots(&registry, &home, &settings, &[&project])?;
+    assert!(roots.entries().iter().any(|r| r.path == home && r.scope == CredentialScope::Subtree));
+    for name in ["auth.json", "config.toml", "unlisted-secret"] {
+        assert!(roots.refuses(&home.join(name), CredentialScope::Exact, true));
+    }
+    assert!(!roots.refuses(&project.join("ordinary.txt"), CredentialScope::Exact, true));
+    let admission = crate::run::admit_source_root(
+        &project,
+        &state,
+        &project,
+        &roots,
+        crate::run::SourceAdmissionMode::Live,
+    );
+    assert!(
+        admission.is_ok(),
+        "project below home must be admitted, got: {admission:?}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn dangling_account_directory_that_is_also_the_source_root_refuses_naming_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let account = base.join("dangling-account");
+    std::fs::create_dir(&home)?;
+    std::os::unix::fs::symlink(base.join("nonexistent"), &account)?;
+    let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+        serde_json::json!({"entries": {"work": {"adapter":"claude", "label":"work", "key":"work", "directory":account}}}),
+    )?;
+    let error = credential_roots(&Registry::default(), &home, &settings, &[&account])
+        .expect_err("dangling account directory that is also source root must refuse");
+    assert!(error.contains("claude/work"), "{error}");
+    assert!(error.contains("dangling-account"), "{error}");
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn relocated_codex_stores_never_gain_the_builtin_package_exception()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let project = base.join("project");
+    let state = base.join("state");
+    for dir in [&home, &project, &state] {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Exercise each origin independently: default-directory override, host
+    // discovery and registered account. All must retain whole-store protection.
+    for origin in ["default", "host", "account"] {
+        let store = base.join(origin);
+        let mut host = run::HostLaunchContext::from_environment(&state, &project, "git".into());
+        host.credential_roots.clear();
+        host.default_account_directories.clear();
+        host.provider_path_environment.clear();
+        let mut settings = provenant_providers::accounts::Settings::default();
+        match origin {
+            "default" => {
+                host.default_account_directories
+                    .insert("codex".into(), store.clone());
+            }
+            "host" => {
+                host.credential_roots =
+                    provenant_confinement::permissions::host_credential_declarations(|name| {
+                        (name == "CODEX_HOME").then(|| store.clone().into_os_string())
+                    });
+            }
+            _ => {
+                settings = serde_json::from_value(
+                    serde_json::json!({"entries": {"work": {"adapter":"codex", "label":"work", "key":"work", "directory":store}}}),
+                )?;
+            }
+        }
+        let registry = Registry {
+            home: Some(&home),
+            host: Some(&host),
+            ..Registry::default()
+        };
+        let roots = credential_roots(&registry, &home, &settings, &[&project])?;
+        let package = store.join("packages/standalone/releases/1.0/bin/codex");
+        assert!(
+            roots.refuses(&package, CredentialScope::Exact, true),
+            "{origin}"
+        );
+        assert!(!roots.is_codex_standalone_package(&package), "{origin}");
+        assert!(roots.is_codex_standalone_package(
+            &home.join(".codex/packages/standalone/releases/1.0/bin/codex")
+        ));
+        let nested = store.join("project");
+        std::fs::create_dir_all(&nested)?;
+        let shared = credential_roots(&registry, &home, &settings, &[&nested])?;
+        assert!(shared.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false), "{origin}");
+        // Materialised reads cannot inherit the sandbox-only runtime carve-out.
+        assert!(shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
+        assert!(!shared.refuses(&nested.join("ordinary"), CredentialScope::Exact, true), "{origin}");
+        assert!(crate::run::admit_source_root(&project, &state, &nested, &shared, crate::run::SourceAdmissionMode::Live).is_ok(), "{origin}");
+
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    for (store_name, credential) in [
+        (".codex", "auth.json"),
+        (".claude", provenant_providers::claude::LANE_TOKEN_FILE),
+    ] {
+        let store = home.join(store_name);
+        let project = store.join("project");
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut host = run::HostLaunchContext::from_environment(&state, &project, "git".into());
+        host.credential_roots.clear();
+        host.default_account_directories.clear();
+        host.provider_path_environment.clear();
+        let registry = Registry {
+            home: Some(&home),
+            host: Some(&host),
+            ..Registry::default()
+        };
+        let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+        assert!(roots.entries().iter().any(|root| root.path == store && root.scope == CredentialScope::Subtree));
+        assert!(roots.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false));
+        // The initial project's table must never be unioned back into this
+        // launch's mandatory roots, even when the alternate source is .claude.
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), base.join("initial-project"));
+        inputs.state_dir = Some(state.clone());
+        let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let ordinary = project.join("ordinary-file");
+        std::fs::write(&ordinary, b"ordinary lane data")?;
+        std::os::unix::fs::symlink(&ordinary, store.join("ordinary-link"))?;
+        for sandboxed in [false, true] {
+            let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch_mode(
+                &host_roots, &home, &project, &base.join("scratch"), &roots, &[], &[], sandboxed,
+            )?;
+            assert!(!mandatory.credential_roots().refuses(&project, CredentialScope::Subtree, true));
+            assert!(!mandatory.credential_roots().refuses(&ordinary, CredentialScope::Exact, true));
+        }
+        assert!(roots.refuses(&store.join(credential), CredentialScope::Exact, true));
+        assert!(!roots.refuses(&project, CredentialScope::Subtree, true));
+        assert!(
+            crate::run::admit_source_root(
+                &project,
+                &state,
+                &project,
+                &roots,
+                crate::run::SourceAdmissionMode::Live
+            )
+            .is_ok()
+        );
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn shared_host_stores_retain_subtrees_even_without_file_inventories()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("gcloud");
+    let project = home.join("project");
+    let state = base.join("state");
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(&state)?;
+    let mut host = run::HostLaunchContext::from_environment(&state, &project, "git".into());
+    host.default_account_directories.clear();
+    host.provider_path_environment.clear();
+    host.credential_roots =
+        provenant_confinement::permissions::host_credential_declarations(|name| {
+            (name == "GH_CONFIG_DIR").then(|| home.clone().into_os_string())
+        });
+    // The declared inventory survives the host/guardian custody pipe.
+    let host: run::HostLaunchContext = serde_json::from_slice(&serde_json::to_vec(&host)?)?;
+    let registry = Registry {
+        home: Some(&home),
+        host: Some(&host),
+        ..Registry::default()
+    };
+    let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+    for name in ["hosts.yml", "config.yml"] {
+        assert!(roots.refuses(&home.join(name), CredentialScope::Exact, true));
+    }
+    assert!(roots.entries().iter().any(|root| root.path == home && root.scope == CredentialScope::Subtree));
+    assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, false));
+    assert!(
+        crate::run::admit_source_root(
+            &project,
+            &state,
+            &project,
+            &roots,
+            crate::run::SourceAdmissionMode::Live
+        )
+        .is_ok()
+    );
+    let mut unknown_host = host.clone();
+    unknown_host.credential_roots =
+        provenant_confinement::permissions::host_credential_declarations(|name| {
+            (name == "XDG_CONFIG_HOME").then(|| base.clone().into_os_string())
+        });
+    let registry = Registry {
+        host: Some(&unknown_host),
+        ..registry
+    };
+    let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+    assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, false));
+    assert!(!roots.refuses(&project, CredentialScope::Subtree, true));
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{CredentialDeclaration, CredentialInventory, CredentialKind, CredentialRoot, CredentialScope};
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let store = base.join("store");
+    let project = store.join("project");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&project)?;
+    let mut host = run::HostLaunchContext::from_environment(&base.join("state"), &project, "git".into());
+    host.default_account_directories.clear();
+    host.provider_path_environment.clear();
+    for scope in [CredentialScope::Subtree, CredentialScope::Exact] {
+        let credential = project.join("declared-token");
+        host.credential_roots = vec![CredentialDeclaration {
+            root: CredentialRoot {
+                path: if scope == CredentialScope::Subtree { store.clone() } else { credential.clone() },
+                scope,
+                kind: CredentialKind::Store,
+                source: "host fixture inventory".into(),
+            },
+            inventory: CredentialInventory::Files(vec!["project/declared-token".into()]),
+        }];
+        let registry = Registry { host: Some(&host), ..Registry::default() };
+        let error = credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
+        assert!(error.contains("host fixture inventory") && error.contains(credential.to_str().ok_or("path")?), "{error}");
+    }
+    // Both link directions must refuse for exact declarations and inventories:
+    // a public path inside the lane cannot escape by pointing outside it.
+    for inside_to_outside in [true, false] {
+        let (credential, target, name) = if inside_to_outside {
+            (project.join("linked-token"), store.join("outside-target"), "project/linked-token")
+        } else {
+            (store.join("linked-token"), project.join("inside-target"), "linked-token")
+        };
+        std::fs::write(&target, b"synthetic")?;
+        std::os::unix::fs::symlink(&target, &credential)?;
+        for scope in [CredentialScope::Subtree, CredentialScope::Exact] {
+            host.credential_roots = vec![CredentialDeclaration {
+                root: CredentialRoot {
+                    path: if scope == CredentialScope::Subtree { store.clone() } else { credential.clone() },
+                    scope,
+                    kind: CredentialKind::Store,
+                    source: "host symlink inventory".into(),
+                },
+                inventory: CredentialInventory::Files(vec![name.into()]),
+            }];
+            let registry = Registry { host: Some(&host), ..Registry::default() };
+            let error = credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
+            assert!(error.contains("host symlink inventory") && error.contains(credential.to_str().ok_or("path")?), "{error}");
+        }
+        std::fs::remove_file(credential)?;
+    }
+    // Adapter-declared files and Provenant-owned per-account files must also
+    // refuse after alias resolution, even when absent from the filesystem.
+    for name in [".credentials.json", provenant_providers::claude::LANE_TOKEN_FILE] {
+        let token = store.join(name);
+        std::os::unix::fs::symlink(project.join("token-target"), &token)?;
+        // Existing target keeps this a valid alias rather than a dangling link.
+        std::fs::write(project.join("token-target"), b"synthetic")?;
+        let settings = serde_json::from_value(serde_json::json!({"entries": {"work": {
+            "adapter":"claude", "label":"work", "key":"work", "directory":store
+        }}}))?;
+        host.credential_roots.clear();
+        let registry = Registry { host: Some(&host), ..Registry::default() };
+        let error = credential_roots(&registry, &home, &settings, &[&project]).unwrap_err();
+        assert!(error.contains("claude/work") && error.contains(name), "{error}");
+        std::fs::remove_file(token)?;
+    }
+    // A store cannot be the lane root, nor lie within it.
+    for lane in [&store, &base] {
+        host.credential_roots = vec![CredentialDeclaration {
+            root: CredentialRoot {path: store.clone(), scope: CredentialScope::Subtree, source:"host store".into(), kind:CredentialKind::Store},
+            inventory: CredentialInventory::Unknown,
+        }];
+        let registry = Registry { host: Some(&host), ..Registry::default() };
+        assert!(credential_roots(&registry, &home, &Default::default(), &[lane]).is_err());
     }
     Ok(())
 }

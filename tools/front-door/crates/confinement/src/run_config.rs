@@ -1716,19 +1716,25 @@ mod policy_tests {
                 .iter()
                 .any(|g| g.path == Path::new("/fixture/identities/agy-second"))
         );
-        for root in roots
+        for (path_root, scope) in roots
             .credentials()
             .iter()
-            .chain(roots.git())
-            .chain([roots.state(), roots.source()])
+            .map(|root| (root.path.as_path(), root.scope))
+            .chain(
+                roots
+                    .git()
+                    .iter()
+                    .map(|root| (root.path.as_path(), root.scope)),
+            )
+            .chain([roots.state(), roots.source()].map(|root| (root.path.as_path(), root.scope)))
         {
             // An exact store is a file: it and every enclosing path are
             // refused, while a "child" of it names nothing reachable.
-            let child = (root.scope == PathScope::Subtree).then(|| root.path.join("child"));
+            let child = (scope == PathScope::Subtree).then(|| path_root.join("child"));
             for path in [
-                Some(root.path.clone()),
+                Some(path_root.to_owned()),
                 child,
-                Some(root.path.parent().expect("parent").to_owned()),
+                Some(path_root.parent().expect("parent").to_owned()),
             ]
             .into_iter()
             .flatten()

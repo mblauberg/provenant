@@ -1,0 +1,26 @@
+test (ubuntu-latest)	test	2026-11-18T09:14:02.1182340Z Nextest run ID 9c15fbe8-1f14-4a37-9f0f-2f9c2ef39d01
+test (ubuntu-latest)	test	2026-11-18T09:14:02.1182340Z Start: 2026-11-18T09:14:02.1182340Z
+test (ubuntu-latest)	test	2026-11-18T09:14:02.1182340Z
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z FAIL [   0.213s] provenant_cache::tests::reads_expired
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z --- DIAGNOSTIC
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z thread 'reads_expired' panicked at src/cache.rs:120:9:
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z assertion `left == right` failed
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z   left: `3`
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z  right: `2`
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test (ubuntu-latest)	test	2026-11-18T09:14:12.4880010Z
+test (ubuntu-latest)	test	2026-11-18T09:14:13.0200010Z FAIL [   0.102s] provenant_cache::tests::write_conflict
+test (ubuntu-latest)	test	2026-11-18T09:14:13.0200010Z
+test (ubuntu-latest)	test	2026-11-18T09:14:13.0200010Z --- DIAGNOSTIC
+test (ubuntu-latest)	test	2026-11-18T09:14:13.0200010Z thread 'write_conflict' panicked at src/cache.rs:184:5:
+test (ubuntu-latest)	test	2026-11-18T09:14:13.0200010Z explicit panic
+test (ubuntu-latest)	test	2026-11-18T09:14:13.0200010Z
+test (ubuntu-latest)	test	2026-11-18T09:14:16.5000010Z TIMEOUT [  60.000s] provenant_cache::tests::lock_waits_for_reader
+test (ubuntu-latest)	test	2026-11-18T09:14:16.5000010Z
+test (ubuntu-latest)	test	2026-11-18T09:14:16.5020010Z Summary [  14.383s] 12/300 tests run: 3 failed (1 timed out), 9 passed
+test (ubuntu-latest)	test	2026-11-18T09:14:16.5020010Z error: test run failed
+test (ubuntu-latest)	build	2026-11-18T09:13:40.0000000Z error[E0308]: mismatched types
+test (ubuntu-latest)	build	2026-11-18T09:13:40.0000000Z  --> src/cache.rs:88:29
+test (ubuntu-latest)	build	2026-11-18T09:13:40.0000000Z 88 |     let span: Span = counter.next();
+test (ubuntu-latest)	build	2026-11-18T09:13:40.0000000Z error: linking with `cc` failed: exit status 1

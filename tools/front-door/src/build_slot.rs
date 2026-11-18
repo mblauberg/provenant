@@ -1,8 +1,7 @@
 //! `provenant internal build-slot`: the lane's `cargo` shim runs this. Cargo
-//! commands that compile take one host build slot first, then this process
+//! commands that compile and test runs take one host build slot first, then this process
 //! runs cargo as its child and waits, so the slot is held until cargo exits
-//! and not a moment longer. Nextest runs that reuse both Cargo and binary
-//! metadata do not compile and take no slot. The slot descriptor is
+//! and not a moment longer. Test runs hold a slot even when they reuse build metadata. The slot descriptor is
 //! close-on-exec: a daemon or
 //! orphaned grandchild that outlives the build never keeps it.
 //!
@@ -47,7 +46,7 @@ use provenant_core::consumer_env::{
 pub(crate) enum Local {
     #[default]
     All,
-    /// Only `cargo check`; CI runs builds, tests, lints and the rest.
+    /// Warn on compiling commands other than `cargo check`.
     Check,
     None,
 }
@@ -72,9 +71,9 @@ impl Local {
             Self::None => "none",
         }
     }
-    /// The one-line refusal for `args`, or none when the command may run.
+    /// A one-line warning for commands outside the preferred scope.
     /// Subcommands that do not compile (`fmt`, `metadata`, `tree`) always may.
-    pub(crate) fn refusal(self, args: &[OsString]) -> Option<String> {
+    pub(crate) fn warning(self, args: &[OsString]) -> Option<String> {
         let command = subcommand(args)?;
         let allowed = match self {
             Self::All => true,
@@ -83,7 +82,7 @@ impl Local {
         };
         (!allowed).then(|| {
             format!(
-                "cargo {command} is not run in lanes here (lanes.local_cargo = {}); CI runs it. Set the lanes.local_cargo knob (or the node's attempt.local_cargo) to all to run it locally",
+                "cargo {command} exceeds lanes.local_cargo = {}; continuing. Set lanes.local_cargo or attempt.local_cargo to change this advisory policy",
                 self.name()
             )
         })
@@ -169,25 +168,6 @@ pub(crate) fn gated(args: &[OsString]) -> bool {
         }
         if arg.starts_with('-') {
             continue;
-        }
-        if arg == "nextest" {
-            let remaining = args
-                .take_while(|arg| *arg != OsStr::new("--"))
-                .collect::<Vec<_>>();
-            let has_option = |name: &str| {
-                remaining.iter().any(|arg| {
-                    arg.to_str()
-                        .is_some_and(|arg| arg == name || arg.starts_with(&format!("{name}=")))
-                })
-            };
-            if remaining
-                .first()
-                .is_some_and(|arg| *arg == OsStr::new("run"))
-                && has_option("--cargo-metadata")
-                && has_option("--binaries-metadata")
-            {
-                return false;
-            }
         }
         return GATED.contains(&arg);
     }
@@ -445,8 +425,8 @@ fn run_with(
     };
     // A nested cargo (a build script, a test) runs under a parent the policy
     // already let through.
-    if !nested && let Some(message) = gate.local.refusal(args) {
-        return report(&message);
+    if !nested && let Some(message) = gate.local.warning(args) {
+        warning(&message);
     }
     let gate_this = gated(args) && !nested;
     if gate_this
@@ -587,29 +567,29 @@ mod tests {
     }
 
     #[test]
-    fn local_cargo_policy_refuses_by_subcommand() {
+    fn local_cargo_policy_warns_by_subcommand() {
         use super::Local;
         for command in [
             &["test"][..],
             &["+stable", "build", "--release"],
             &["nextest", "run"],
         ] {
-            assert_eq!(Local::All.refusal(&args(command)), None);
-            let message = Local::Check.refusal(&args(command)).unwrap();
-            assert!(message.contains("CI runs it") && message.contains("lanes.local_cargo"));
+            assert_eq!(Local::All.warning(&args(command)), None);
+            let message = Local::Check.warning(&args(command)).unwrap();
+            assert!(message.contains("continuing") && message.contains("lanes.local_cargo"));
             assert!(!message.contains('\n'));
-            assert!(Local::None.refusal(&args(command)).is_some());
+            assert!(Local::None.warning(&args(command)).is_some());
         }
         for command in [
             &["check", "-p", "x"][..],
             &["c"],
             &["--color", "never", "check"],
         ] {
-            assert_eq!(Local::Check.refusal(&args(command)), None);
-            assert!(Local::None.refusal(&args(command)).is_some());
+            assert_eq!(Local::Check.warning(&args(command)), None);
+            assert!(Local::None.warning(&args(command)).is_some());
         }
         for command in [&["fmt"][..], &["metadata"], &[]] {
-            assert_eq!(Local::None.refusal(&args(command)), None);
+            assert_eq!(Local::None.warning(&args(command)), None);
         }
     }
 
@@ -656,6 +636,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Spec: docs/specs/run.md#lane-verification-and-the-host-build-cap
+    #[test]
+    fn local_cargo_scope_warns_and_runs_the_command() {
+        let command = [OsString::from("cargo"), OsString::from("test")];
+        let gate = Gate {
+            settings: None,
+            local: Local::Check,
+            command: &command,
+        };
+        let mut warnings = Vec::new();
+        let mut ran = false;
+        let code = run_with(
+            gate,
+            Vec::new(),
+            false,
+            provenant_config::PortBackend::Builtin,
+            |_| Ok(None),
+            |_, _, _| {
+                ran = true;
+                Ok(0)
+            },
+            |message| warnings.push(message.to_owned()),
+        );
+        assert_eq!(code, 0);
+        assert!(ran);
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("lanes.local_cargo"))
+        );
     }
 
     #[test]
@@ -774,9 +786,9 @@ mod tests {
     }
 
     #[test]
-    fn nextest_run_with_reused_build_metadata_does_not_hold_a_build_slot() {
+    fn nextest_run_with_reused_build_metadata_holds_a_slot() {
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
-        assert!(!gated(&args(&[
+        assert!(gated(&args(&[
             "nextest",
             "run",
             "--cargo-metadata",

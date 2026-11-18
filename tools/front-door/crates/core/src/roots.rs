@@ -174,7 +174,8 @@ impl StateRoot {
         for root in &protected {
             absolute_normal(&root.path)?;
         }
-        let mut warnings = classify(&candidate, &protected)?;
+        let normal_state = inputs.home.join(DEFAULT_STATE_SUFFIX);
+        let mut warnings = classify(&candidate, &protected, &inputs.home, Some(&normal_state))?;
         let resolve = |path: &Path| -> Result<PathBuf, RootError> {
             let bound = resolver.resolve_existing_ancestor(path).map_err(|source| {
                 RootError::Resolution {
@@ -194,7 +195,9 @@ impl StateRoot {
             })
             .collect::<Result<Vec<_>, RootError>>()?;
         let bound = resolve(&candidate)?;
-        for warning in classify(&bound, &bound_protected)? {
+        let bound_home = resolve(&inputs.home).unwrap_or_else(|_| inputs.home.clone());
+        let default = resolve(&normal_state).ok();
+        for warning in classify(&bound, &bound_protected, &bound_home, default.as_deref())? {
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
@@ -202,7 +205,6 @@ impl StateRoot {
         // The normal home-relative store remains normal even when the caller's
         // working directory is HOME or an ancestor (as in scheduled ticks).
         // Other advisory overlaps, including project configuration, still warn.
-        let default = resolve(&inputs.home.join(DEFAULT_STATE_SUFFIX)).ok();
         if default.as_ref() == Some(&bound) {
             let home = resolve(&inputs.home).unwrap_or_else(|_| inputs.home.clone());
             warnings.retain(|warning| {
@@ -297,87 +299,59 @@ pub struct CredentialRoot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CredentialRoots {
     entries: Vec<CredentialRoot>,
+    lane_roots: Vec<PathBuf>,
 }
 
 impl CredentialRoots {
-    pub fn for_home(home: &Path) -> Self {
-        use CredentialKind::{CodexHome, Store};
-        use CredentialScope::{Exact, Subtree};
+    /// Bind the actual launch roots once. Only strict descendants of a store
+    /// are carve-outs; equality and stores inside lane roots remain refused.
+    pub fn with_lane_roots(mut self, lane_roots: Vec<PathBuf>) -> Self {
+        self.lane_roots = lane_roots;
+        self
+    }
 
+    pub fn lane_roots(&self) -> &[PathBuf] {
+        &self.lane_roots
+    }
+
+    pub fn lane_exceptions<'a>(
+        &'a self,
+        root: &'a CredentialRoot,
+    ) -> impl Iterator<Item = &'a PathBuf> {
+        self.lane_roots.iter().filter(move |lane| {
+            root.scope == CredentialScope::Subtree
+                && **lane != root.path
+                && lane.starts_with(&root.path)
+        })
+    }
+
+    fn carve_out(
+        &self,
+        root: &CredentialRoot,
+        path: &Path,
+        scope: CredentialScope,
+        endpoint_denials: bool,
+    ) -> bool {
+        self.lane_exceptions(root).next().is_some()
+            && path != root.path
+            && path.starts_with(&root.path)
+            && !self.entries.iter().any(|endpoint| {
+                endpoint.path == path
+                    || (scope == CredentialScope::Subtree
+                        && (!endpoint_denials || endpoint.scope == CredentialScope::Subtree)
+                        && endpoint.path.starts_with(path))
+            })
+    }
+
+    pub fn for_home(home: &Path) -> Self {
         let mut roots = Self::default();
-        for name in [".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets"] {
-            roots.add(home.join(name), Subtree, "built-in secret store", Store);
-        }
-        roots.add(
-            home.join(".claude"),
-            Subtree,
-            "provider declaration: claude default home",
-            Store,
-        );
-        roots.add(
-            home.join(".claude.json"),
-            Exact,
-            "provider declaration: claude credentials file",
-            Store,
-        );
-        roots.add(
-            home.join(CODEX_ACCOUNT_DIRECTORY.1),
-            Subtree,
-            "provider declaration: codex default home",
-            CodexHome,
-        );
-        roots.add(
-            home.join(".cursor"),
-            Subtree,
-            "provider declaration: cursor default home",
-            Store,
-        );
-        roots.add(
-            home.join(".gemini"),
-            Subtree,
-            "provider declaration: gemini default home",
-            Store,
-        );
-        roots.add(
-            home.join(".agents"),
-            Subtree,
-            "built-in agent credential home",
-            Store,
-        );
-        for (relative, source) in [
-            (".config/cursor", "provider declaration: cursor config"),
-            (".config/opencode", "provider declaration: opencode config"),
-            (
-                ".local/share/opencode",
-                "provider declaration: opencode data",
-            ),
-            (".config/gh", "built-in GitHub CLI credentials"),
-            (".config/gcloud", "built-in Google Cloud credentials"),
-            ("Library/Keychains", "built-in platform keychain"),
-            (
-                "Library/Application Support/GitHub CLI",
-                "built-in GitHub CLI support files",
-            ),
-            (
-                "Archives/git-preservation",
-                "built-in Git preservation archive",
-            ),
-            ("Monero", "built-in Monero credentials"),
-        ] {
-            roots.add(home.join(relative), Subtree, source, Store);
-        }
-        for &name in CARGO_CREDENTIAL_FILES {
-            roots.add(
-                home.join(".cargo").join(name),
-                Exact,
-                "built-in Cargo credential file",
-                Store,
-            );
+        for declaration in crate::CredentialDeclaration::for_home(home) {
+            roots.add_entry(declaration.root);
         }
         roots
     }
 
-    /// Keep every declaration. Only an exact repeat of path, scope and kind
+    /// Keep every declaration. Only an exact repeat of path, scope, source and kind
     /// is dropped, so a store declared at a Codex home's path keeps its own
     /// protection and the package exception cannot absorb it.
     pub fn add(
@@ -388,17 +362,19 @@ impl CredentialRoots {
         kind: CredentialKind,
     ) {
         let path = path.into();
-        if self
-            .entries
-            .iter()
-            .any(|entry| entry.path == path && entry.scope == scope && entry.kind == kind)
-        {
+        let source = source.into();
+        if self.entries.iter().any(|entry| {
+            entry.path == path
+                && entry.scope == scope
+                && entry.kind == kind
+                && entry.source == source
+        }) {
             return;
         }
         self.entries.push(CredentialRoot {
             path,
             scope,
-            source: source.into(),
+            source,
             kind,
         });
     }
@@ -473,8 +449,9 @@ impl CredentialRoots {
     }
 
     /// Any overlap with a declared store is refused, including a grant which
-    /// encloses that store. Exact entries protect the file and its enclosing
-    /// grants; subtree entries also protect descendants.
+    /// encloses that store. Exact entries protect the file and enclosing
+    /// grants; subtree entries also protect descendants. This strict check also
+    /// applies to materialised inputs, which cannot inherit sandbox denials.
     pub fn refuses(&self, path: &Path, scope: CredentialScope, read: bool) -> bool {
         self.refusal(path, scope, read).is_some()
     }
@@ -485,17 +462,75 @@ impl CredentialRoots {
         scope: CredentialScope,
         read: bool,
     ) -> Option<&CredentialRoot> {
-        self.entries.iter().find(|root| {
+        self.refusal_impl(path, scope, read, false)
+    }
+
+    fn refusal_impl(
+        &self,
+        path: &Path,
+        scope: CredentialScope,
+        read: bool,
+        endpoint_denials: bool,
+    ) -> Option<&CredentialRoot> {
+        self.select_refusal(path, |root| {
+            // Endpoints cannot inherit either read or lane carve-outs.
+            if root.path == path
+                || (scope == CredentialScope::Subtree
+                    && (!endpoint_denials || root.scope == CredentialScope::Subtree)
+                    && root.path.starts_with(path))
+            {
+                return true;
+            }
+            if ((read && endpoint_denials)
+                || self
+                    .lane_exceptions(root)
+                    .any(|lane| path.starts_with(lane)))
+                && self.carve_out(root, path, scope, endpoint_denials)
+            {
+                return false;
+            }
             if read
                 && root.kind == CredentialKind::CodexHome
                 && codex_standalone_path(path, &root.path)
             {
                 return false;
             }
-            root.path == path
-                || (scope == CredentialScope::Subtree && root.path.starts_with(path))
-                || (root.scope == CredentialScope::Subtree && path.starts_with(&root.path))
+            root.scope == CredentialScope::Subtree && path.starts_with(&root.path)
         })
+    }
+
+    /// Attribute a refusal among applicable declarations: an exact path match
+    /// first, then the deepest enclosing or enclosed store. Stable tie-breaks
+    /// keep the reported path and source independent of declaration order.
+    /// Callers retain their own admission rules in `applies`.
+    pub fn select_refusal(
+        &self,
+        path: &Path,
+        mut applies: impl FnMut(&CredentialRoot) -> bool,
+    ) -> Option<&CredentialRoot> {
+        self.entries
+            .iter()
+            .filter(|root| applies(root))
+            .max_by(|left, right| {
+                (left.path == path)
+                    .cmp(&(right.path == path))
+                    .then_with(|| {
+                        left.path
+                            .components()
+                            .count()
+                            .cmp(&right.path.components().count())
+                    })
+                    .then_with(|| {
+                        (left.scope == CredentialScope::Exact)
+                            .cmp(&(right.scope == CredentialScope::Exact))
+                    })
+                    .then_with(|| left.path.cmp(&right.path))
+                    .then_with(|| left.source.cmp(&right.source))
+                    .then_with(|| {
+                        (left.kind == CredentialKind::Store)
+                            .cmp(&(right.kind == CredentialKind::Store))
+                    })
+            })
     }
 
     /// A read of a standalone Codex release package beneath a declared Codex
@@ -504,7 +539,9 @@ impl CredentialRoots {
     pub fn is_codex_standalone_package(&self, path: &Path) -> bool {
         self.entries.iter().any(|root| {
             root.kind == CredentialKind::CodexHome && codex_standalone_path(path, &root.path)
-        }) && self.refusal(path, CredentialScope::Subtree, true).is_none()
+        }) && self
+            .refusal_impl(path, CredentialScope::Subtree, true, true)
+            .is_none()
     }
 
     pub fn overlaps(&self, path: &Path) -> bool {
@@ -528,6 +565,7 @@ fn codex_standalone_path(path: &Path, codex_home: &Path) -> bool {
 struct ProtectedRoot {
     path: PathBuf,
     boundary: Option<RootBoundary>,
+    credential_directory: bool,
     source: String,
 }
 
@@ -538,21 +576,25 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
         ProtectedRoot {
             path: inputs.checkout.clone(),
             boundary: None,
+            credential_directory: false,
             source: "root inputs: checkout".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(".local/state/agent-harness"),
             boundary: None,
+            credential_directory: false,
             source: "built-in retired agent-harness location".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(".local/state/provenant"),
             boundary: Some(DataIntegrity),
+            credential_directory: false,
             source: "built-in previous state root".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(LEGACY_V1_STATE_SUFFIX),
             boundary: Some(DataIntegrity),
+            credential_directory: false,
             source: "built-in 1.x state root".into(),
         },
     ];
@@ -562,6 +604,7 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
             .map(|name| ProtectedRoot {
                 path: inputs.checkout.join(name),
                 boundary: None,
+                credential_directory: false,
                 source: format!("project-local agent configuration: {name}"),
             }),
     );
@@ -573,22 +616,26 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
             .map(|entry| ProtectedRoot {
                 path: entry.path.clone(),
                 boundary: Some(Credentials),
+                credential_directory: entry.scope == CredentialScope::Subtree,
                 source: entry.source.clone(),
             }),
     );
     roots.extend(inputs.workspaces.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: None,
+        credential_directory: false,
         source: "root inputs: workspace".into(),
     }));
     roots.extend(inputs.git_metadata.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: Some(GitIsolation),
+        credential_directory: false,
         source: "root inputs: existing Git metadata".into(),
     }));
     roots.extend(inputs.old_roots.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: Some(DataIntegrity),
+        credential_directory: false,
         source: "root inputs: old state root".into(),
     }));
     roots
@@ -600,9 +647,23 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
 /// metadata, a credential store or an advisory location is expected; only a
 /// state root inside one is refused, and a state root inside an advisory
 /// location warns and proceeds.
-fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWarning>, RootError> {
+fn classify(
+    candidate: &Path,
+    protected: &[ProtectedRoot],
+    home: &Path,
+    normal_state: Option<&Path>,
+) -> Result<Vec<RootWarning>, RootError> {
     let mut warnings = Vec::new();
     for root in protected {
+        // A home-rooted account must not displace Provenant's own normal
+        // state tree. This is host state admission, not a launch carve-out;
+        // raw declarations stay intact and every other store still refuses.
+        if root.credential_directory
+            && root.path == home
+            && normal_state.is_some_and(|state| candidate.starts_with(state))
+        {
+            continue;
+        }
         let inside = candidate.starts_with(&root.path);
         if !inside && !root.path.starts_with(candidate) {
             continue;
@@ -648,6 +709,63 @@ mod tests {
         inputs.git_metadata.push(inputs.checkout.join(".git"));
         inputs
     }
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn raw_host_stores_protect_state_without_classifying_a_launch() -> Result<(), RootError> {
+        let mut input = inputs();
+        input.credential_roots.add(
+            "/private/codex",
+            CredentialScope::Subtree,
+            "provider environment: CODEX_HOME",
+            CredentialKind::Store,
+        );
+        input.state_dir = Some("/private/codex/provenant-state".into());
+        assert!(
+            matches!(input.resolve(&Resolver), Err(RootError::Protected { policy_source, .. }) if policy_source.contains("CODEX_HOME"))
+        );
+        input.credential_roots.add(
+            input.home.clone(),
+            CredentialScope::Subtree,
+            "home-rooted account",
+            CredentialKind::Store,
+        );
+        input.state_dir = None;
+        let roots = input.resolve(&Resolver)?;
+        assert!(
+            roots
+                .credential_roots()
+                .entries()
+                .iter()
+                .any(|root| root.path == input.home && root.scope == CredentialScope::Subtree)
+        );
+        input.state_dir = Some(input.home.join("auth.json"));
+        assert!(matches!(
+            input.resolve(&Resolver),
+            Err(RootError::Protected { .. })
+        ));
+        input.state_dir = None;
+        input.credential_roots.add(
+            input
+                .home
+                .join(DEFAULT_STATE_SUFFIX)
+                .join("credential-file"),
+            CredentialScope::Exact,
+            "explicit credential",
+            CredentialKind::Store,
+        );
+        input.state_dir = Some(
+            input
+                .home
+                .join(DEFAULT_STATE_SUFFIX)
+                .join("credential-file"),
+        );
+        assert!(matches!(
+            input.resolve(&Resolver),
+            Err(RootError::Protected { .. })
+        ));
+        Ok(())
+    }
+
     #[test]
     fn explicit_selection_has_priority_and_never_falls_back_on_invalid_input() {
         let mut input = inputs();
@@ -885,6 +1003,72 @@ mod tests {
         );
     }
 
+    #[test]
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    fn refusal_reports_the_most_specific_declaration_in_either_order() {
+        use CredentialScope::{Exact, Subtree};
+
+        let shared = Path::new("/fixture/shared");
+        let nested = shared.join("nested");
+        let lane = nested.join("lane");
+        // The first declaration is the expected attribution, regardless of
+        // insertion order. The lane reproduces discovery outside its carve-out.
+        for (grant, declarations) in [
+            (
+                nested.join("tool"),
+                vec![(nested.clone(), Subtree), (shared.to_owned(), Subtree)],
+            ),
+            (
+                lane.clone(),
+                vec![
+                    (lane.join("store/deep"), Subtree),
+                    (lane.join("store"), Subtree),
+                    (shared.to_owned(), Subtree),
+                ],
+            ),
+            (
+                lane.clone(),
+                vec![
+                    (lane.join("store/auth"), Exact),
+                    (lane.join("store"), Subtree),
+                    (shared.to_owned(), Subtree),
+                ],
+            ),
+            (
+                lane.clone(),
+                vec![
+                    (lane.clone(), Exact),
+                    (lane.join("store/deep"), Subtree),
+                    (shared.to_owned(), Subtree),
+                ],
+            ),
+        ] {
+            for reverse in [false, true] {
+                let expected_path = declarations[0].0.clone();
+                let mut declarations: Vec<_> = declarations.iter().enumerate().collect();
+                if reverse {
+                    declarations.reverse();
+                }
+                let mut roots = CredentialRoots::default();
+                for (index, (path, scope)) in declarations {
+                    roots.add(
+                        path.clone(),
+                        *scope,
+                        format!("source {index}"),
+                        CredentialKind::Store,
+                    );
+                }
+                let roots = roots.with_lane_roots(vec![lane.clone()]);
+                for read in [false, true] {
+                    let refusal = roots.refusal(&grant, Subtree, read).unwrap();
+                    assert_eq!(refusal.path, expected_path);
+                    assert_eq!(refusal.source, "source 0");
+                }
+            }
+        }
+
+    }
+
     /// The package exception never absorbs another declaration, whichever
     /// order declarations arrive in and whichever spelling names them.
     #[test]
@@ -940,7 +1124,7 @@ mod tests {
                 false,
             ),
             (
-                "exact store inside the release",
+                "exact endpoint inside the release keeps its independent denial",
                 &[
                     ("/fixture/home/.codex", Subtree, CodexHome),
                     (
@@ -949,7 +1133,7 @@ mod tests {
                         Store,
                     ),
                 ],
-                false,
+                true,
             ),
             (
                 "unrelated store",
@@ -969,7 +1153,7 @@ mod tests {
             for spelling in [alias, home] {
                 let package = release(spelling);
                 assert_eq!(
-                    roots.refusal(&package, Subtree, true).is_none(),
+                    roots.refusal_impl(&package, Subtree, true, true).is_none(),
                     *exempt,
                     "{name}: read {}",
                     package.display()
@@ -979,6 +1163,14 @@ mod tests {
                     *exempt,
                     "{name}"
                 );
+                // Every endpoint itself remains refused, even when its parent
+                // package can be read with the endpoint independently denied.
+                for endpoint in roots.entries().iter().filter(|root| root.scope == Exact) {
+                    assert!(
+                        roots.refuses(&endpoint.path, Exact, true),
+                        "{name}: endpoint"
+                    );
+                }
                 // The exception never confers writes or reaches the home itself.
                 assert!(roots.refuses(&package, Subtree, false), "{name}: write");
                 assert!(roots.refuses(spelling, Subtree, true), "{name}: home");

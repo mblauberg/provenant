@@ -626,8 +626,7 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             }
             if adapter == "opencode" {
                 assert!(
-                    spec.profile.spec.authentication[0]
-                        .roots
+                    spec.profile.spec.runtime_reads
                         .contains(&crate::launch::exact(&opencode_config))
                 );
             }

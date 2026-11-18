@@ -8,6 +8,7 @@ mod build_slot;
 mod chair;
 mod check_providers;
 mod checks;
+mod ci;
 mod cloud;
 #[cfg(test)]
 mod compose_tests;
@@ -1639,6 +1640,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals, process.workers()),
         Command::Pr(command) => pr::run(command, globals, process.workers()),
+        Command::Ci(command) => ci::run(command, globals),
         Command::Tick => tick::run(globals, process.workers()),
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
