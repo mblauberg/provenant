@@ -71,10 +71,12 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     run(docs, covered)
     code = commit('tools/front-door/crates/workflow/src/x.rs', 'code')
     normal = {'checks': 'run', 'rust': 'run', 'macos_lint': 'deferred', 'macos_native': 'deferred', 'macos_release': 'deferred'}
-    run(code, normal)
+    sel = run(code, normal)
+    assert sel['deferred_tests'] == {'rust': config['suite'][1]['main_tests']}, sel
+    assert 'deferred to main' in summary.read_text()
     os_change = commit('tools/front-door/crates/os/x.rs', 'native')
     run(os_change, {**normal, 'macos_lint': 'run', 'macos_native': 'run'})
-    run(code, all_run, {'PR_LABELS': '["ci:full"]'})
+    assert run(code, all_run, {'PR_LABELS': '["ci:full"]'})['deferred_tests'] == {}
     run(code, all_run, {'DISPATCH_TIER': 'full'})
     # A dispatch renders absent labels as null; auto tier still selects from evidence.
     run(code, all_run, {'EVENT_NAME': 'workflow_dispatch', 'REF': 'refs/heads/topic', 'PR_LABELS': 'null', 'DISPATCH_TIER': 'auto', 'PR_NUMBER': ''},

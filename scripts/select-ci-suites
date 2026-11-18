@@ -42,6 +42,8 @@ def manifest():
         for key in ('watch', 'inert', 'pr_paths'):
             if key in s:
                 strings(s[key], f'{name}.{key}')
+        if 'main_tests' in s and not isinstance(s['main_tests'], str):
+            raise ValueError(f'invalid {name}.main_tests')
     if len(set(names)) != len(names) or len(set(all_jobs)) != len(all_jobs):
         raise ValueError('duplicate suite or job')
     strings(data['defaults']['inert'], 'defaults.inert')
@@ -172,7 +174,7 @@ def select(config, env):
     number = env.get('PR_NUMBER', '')
     result = {'schema_version': 1, 'tested': tested, 'head': head, 'event': event,
               'pr_number': int(number) if number.isdecimal() else None, 'full': False, 'full_reason': None,
-              'evidence': {'main': None, 'pr': None}, 'rust_base': '', 'base': '', 'tree': '', 'suites': {}}
+              'evidence': {'main': None, 'pr': None}, 'rust_base': '', 'base': '', 'tree': '', 'suites': {}, 'deferred_tests': {}}
     try:
         repo = env['GITHUB_REPOSITORY']
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not SHA.fullmatch(tested) or not SHA.fullmatch(head):
@@ -229,8 +231,10 @@ def select(config, env):
             else:
                 state, why, evidence = 'run', 'relevant paths: ' + ', '.join(relevant_main[:5]), None
             result['suites'][name] = {'state': state, 'reason': why, 'evidence': evidence}
+            if state == 'run' and event == 'pull_request' and s.get('main_tests'):
+                result['deferred_tests'][name] = s['main_tests']
     except Exception as error:
-        result.update(full=True, full_reason=f'selection error: {error}', rust_base='')
+        result.update(full=True, full_reason=f'selection error: {error}', rust_base='', deferred_tests={})
         result['suites'] = {s['name']: {'state': 'run', 'reason': result['full_reason'], 'evidence': None} for s in config['suite']}
     return result
 
@@ -244,12 +248,14 @@ def main():
     compact = lambda obj: json.dumps(obj, separators=(',', ':'), ensure_ascii=True)
     suites = {n: entry['state'] for n, entry in result['suites'].items()}
     with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-        out.write(f"suites={compact(suites)}\nselection={compact(result)}\nrust_base={result['rust_base']}\n")
+        out.write(f"suites={compact(suites)}\nselection={compact(result)}\nrust_base={result['rust_base']}\ndeferred_tests={compact(result['deferred_tests'])}\n")
     lines = [f"CI selection: tested {result['tested']}; main {result['evidence']['main'] or '-'}; PR {result['evidence']['pr'] or '-'}; full reason {result['full_reason'] or '-'}", '', '| Suite | State | Evidence | Reason | Estimated minutes |', '| --- | --- | --- | --- | ---: |']
     for s in config['suite']:
         e = result['suites'][s['name']]
         clean = lambda v: str(v).replace('|', '\\|').replace('\n', ' ')
         lines.append(f"| {s['name']} | {e['state']} | {e['evidence'] or '-'} | {clean(e['reason'])} | {s['cost_minutes']} |")
+    for name, tests in result['deferred_tests'].items():
+        lines.append(f"\n{name}: tests matching `{tests}` are deferred to main on this pull request.")
     table = '\n'.join(lines) + '\n'
     print(table, end='')
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:

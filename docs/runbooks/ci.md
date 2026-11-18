@@ -18,6 +18,11 @@ evidence. `covered` means prior green evidence covers its inputs; `deferred`
 means the main-tier suite will run on main. Suites are declared in
 [`config/ci-suites.toml`](../../config/ci-suites.toml).
 
+To move a slow Rust test to the main tier, put it in a module named
+`main_tier`; pull requests skip it and `main` and full runs execute it. The
+filter is `main_tests` on the `rust` suite in the manifest. An on-demand test
+that no CI tier runs uses `#[ignore = "reason"]` and is run by hand.
+
 To request every suite, add `ci:full` to the pull request and push a commit, or
 run `gh workflow run ci.yml --ref BRANCH -f tier=full`. When a `ci:red-main`
 issue opens, inspect its failed jobs and comparison, then fix forward. A PR that
