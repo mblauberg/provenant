@@ -30,7 +30,6 @@ checklists: name the alternatives and say which one you chose and why.
 
 ## Reliability and strictness
 
-- Lanes are as free as native subagents; holds protect only credentials, Git isolation, data integrity and authority.
 - Failures are explicit typed states, never silent fallbacks. Catch mistakes
   before runtime with types, lints and generators.
 - Checks default to allow or warn and have one deciding point. Add no new
