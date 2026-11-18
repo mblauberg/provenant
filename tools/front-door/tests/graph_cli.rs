@@ -2295,6 +2295,21 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
         after_placeholder,
         "exact-value refusal is atomic"
     );
+
+    // An invalid credential set is a check failure, not proof of a match.
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", "x".repeat(16 * 1024 + 1))
+        .args(["retry", &id, "--brief", "ordinary retry brief"])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(!output.status.success(), "{reply}");
+    assert_eq!(reply["error"]["code"], "IO", "{reply}");
+    assert!(
+        !reply.to_string().contains("declared credential value rule"),
+        "a failed check must not claim a credential match: {reply}"
+    );
+    assert_eq!(snapshot()?, after_placeholder, "check failure is atomic");
     Ok(())
 }
 

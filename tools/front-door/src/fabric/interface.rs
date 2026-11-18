@@ -2549,7 +2549,12 @@ impl Factory {
     ) -> Result<(), FacadeError> {
         if let Some(brief) = input.get("brief").and_then(Value::as_str) {
             match provenant_redact::matches_credential_value(brief.as_bytes()) {
-                Err(_) => return Err(FacadeError::io("check retry brief credentials")),
+                Err(_) => {
+                    return Err(FacadeError::io_caused(
+                        "check retry brief credentials",
+                        Some("retry brief credential check failed"),
+                    ));
+                }
                 Ok(true) => {
                     return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
                         provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue,
