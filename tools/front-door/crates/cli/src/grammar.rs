@@ -638,6 +638,9 @@ pub struct GraphRunArgs {
     /// Git base for a new writer branch
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
+    /// Pin a review to this pull request (host resolves its base and head)
+    #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
+    pub pr: Option<u64>,
     /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,

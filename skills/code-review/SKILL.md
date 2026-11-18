@@ -19,7 +19,7 @@ routing requirements. Sources: [review diversity](https://arxiv.org/abs/2610.014
 For a configured panel, pin the subject and base and supply the spec:
 
 ```sh
-provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+provenant run review-panel --pr 123 --brief-file brief.md
 ```
 
 A dotted leaf such as `review.security` selects one lens. Review a changed
