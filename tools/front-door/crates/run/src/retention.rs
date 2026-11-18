@@ -2500,7 +2500,7 @@ mod tests {
             }
             Ok(())
         })?;
-        let read_events = || -> Result<Vec<crate::RunEvent>, RunError> {
+        let read_events = || -> Result<Vec<crate::RunEvent>> {
             let mut result = Vec::new();
             loop {
                 let after = result
