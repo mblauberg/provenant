@@ -512,6 +512,7 @@ pub fn peer(
                     max_nodes: *max_nodes,
                     detail: *detail,
                     hosts: None,
+                    subtree: None,
                 };
                 if *max_nodes > context.config.limits.page_rows {
                     PeerResult::Error {

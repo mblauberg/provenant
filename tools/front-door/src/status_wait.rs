@@ -214,6 +214,22 @@ fn read(
     }
 }
 
+fn reading_pr_event(number: u64, detail: Value) -> Reading {
+    let label = format!("#{number}");
+    match serde_json::from_value::<crate::pr::status::Line>(detail["status"].clone()) {
+        Ok(line) => Reading {
+            settle: match line.verdict() {
+                Some(true) => Settle::Succeeded,
+                Some(false) => Settle::Unsuccessful,
+                None => Settle::Pending,
+            },
+            line: format!("{label} {}", line.class()),
+            data: json!(line),
+        },
+        Err(error) => Reading::unavailable(&label, &format!("invalid PR journal status: {error}")),
+    }
+}
+
 /// Cancellation wakes source pauses and interrupts in-flight GitHub reads.
 #[derive(Default)]
 struct Stop {
@@ -982,6 +998,24 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         }
         _ => Vec::new(),
     };
+    // Capture the shared journal cursor before initial reconciliation. Only
+    // values cross the worker boundary; SQLite connections remain thread local.
+    let graph_subscription = project.as_ref().ok().and_then(|(project, _)| {
+        crate::event_delivery::Journal::tip(&resolved.roots, *project)
+            .ok()
+            .map(|cursor| (resolved.roots.clone(), *project, cursor))
+    });
+    let event_paths = if graph_subscription.is_some() && !event_paths.is_empty() {
+        vec![
+            resolved
+                .roots
+                .state
+                .as_path()
+                .join(provenant_core::changes::FILE_NAME),
+        ]
+    } else {
+        event_paths
+    };
     let setup_fallback = project_error
         .or(pending_index_error)
         .or(observation_path_error);
@@ -1190,6 +1224,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 );
             }
             scope.spawn(move || {
+                let mut journal = graph_subscription.and_then(|(roots, project, cursor)|
+                    crate::event_delivery::Journal::resume_graphs(roots, project, cursor).ok());
+                let mut last_graph_reconcile = Instant::now();
                 let mut session = None;
                 let mut observation_history = observation_history;
                 let mut pending = pending;
@@ -1252,7 +1289,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         } else {
                             next_remote_poll.saturating_duration_since(Instant::now())
                         };
-                        let wait_for = left.min(until_remote);
+                        let wait_for = left.min(until_remote).min(Duration::from_secs(60).saturating_sub(last_graph_reconcile.elapsed()));
                         match source.wait(wait_for) {
                             Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
                                 Some(GraphWake::Event)
@@ -1296,6 +1333,20 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     let remote_poll_due =
                         !remote_indices.is_empty() && Instant::now() >= next_remote_poll;
                     let mut reads = graph_reads_for_wake(&pending, &remote_indices, wake);
+                    let gap_due = last_graph_reconcile.elapsed() >= Duration::from_secs(60);
+                    if let Some(source) = journal.as_mut() {
+                        match source.drain_graphs() {
+                            Ok(graphs) if !gap_due => reads.retain(|index| {
+                                remote_indices.contains(index) || graph_sources.iter().any(|(candidate, source)|
+                                    candidate == index && matches!(source, Source::Graph(target) if graphs.contains(&target.name)))
+                            }),
+                            Ok(_) => { reads = pending.clone(); last_graph_reconcile = Instant::now(); }
+                            Err(_) => { journal = None; reads = pending.clone(); last_graph_reconcile = Instant::now(); }
+                        }
+                    } else if gap_due {
+                        reads = pending.clone();
+                        last_graph_reconcile = Instant::now();
+                    }
                     include_due_remote_reads(
                         &mut reads,
                         &pending,
@@ -1363,31 +1414,128 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             {
                 continue;
             }
-            let sampled = latest[index].is_some();
             let sender = sender.clone();
             let edge = &edge;
             let stop = &stop;
-            let interval = Duration::from_millis(settings.pr_interval_ms);
+            let interval = Duration::from_secs(60);
             scope.spawn(move || {
-                if sampled
-                    && !stop.pause(interval.min(deadline.saturating_duration_since(Instant::now())))
+                let mut session = None;
+                // Each subscription owns its replay cursor. No target can
+                // consume another target's events from a shared cursor.
+                let setup =
+                    (|| -> Result<crate::event_delivery::Journal, Box<dyn std::error::Error>> {
+                        let journal = crate::event_delivery::Journal::open(
+                            edge.roots.state.as_path(),
+                            edge.cwd,
+                        )?;
+                        if let Source::Pr {
+                            number,
+                            repository: Ok(repository),
+                        } = source
+                        {
+                            journal.register_pr(repository, *number, None)?;
+                        }
+                        Ok(journal)
+                    })();
+                let mut event_reader = match setup {
+                    Ok(journal) => Some(journal),
+                    Err(error) => {
+                        crate::event_delivery::warn(&format!(
+                            "PR journal unavailable; reconciling after gaps: {error}"
+                        ));
+                        None
+                    }
+                };
+                let initial = read(
+                    source,
+                    edge,
+                    &mut session,
+                    deadline,
+                    pr_read_timeout,
+                    &stop.cancel,
+                );
+                let done = initial.done();
+                if sender
+                    .send(Update {
+                        target: index,
+                        reading: initial,
+                    })
+                    .is_err()
+                    || done
                 {
                     return;
                 }
-                let mut session = None;
+                let mut last_reconcile = Instant::now();
                 loop {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if stop.cancel.is_cancelled() {
+                    if stop.cancel.is_cancelled()
+                        || deadline.saturating_duration_since(Instant::now()).is_zero()
+                    {
                         break;
                     }
-                    let reading = read(
-                        source,
-                        edge,
-                        &mut session,
-                        deadline,
-                        pr_read_timeout,
-                        &stop.cancel,
-                    );
+                    let reading = match (event_reader.as_mut(), source) {
+                        (
+                            Some(journal),
+                            Source::Pr {
+                                number,
+                                repository: Ok(repository),
+                            },
+                        ) => match journal.next_pr(
+                            repository,
+                            *number,
+                            Duration::from_secs(60)
+                                .saturating_sub(last_reconcile.elapsed())
+                                .min(deadline.saturating_duration_since(Instant::now())),
+                            &stop.cancel,
+                        ) {
+                            Ok(Some(detail)) => {
+                                last_reconcile = Instant::now();
+                                reading_pr_event(*number, detail)
+                            }
+                            Ok(None) if last_reconcile.elapsed() >= Duration::from_secs(60) => {
+                                last_reconcile = Instant::now();
+                                if journal
+                                    .source_current(repository, *number, None)
+                                    .unwrap_or(false)
+                                {
+                                    continue;
+                                }
+                                read(
+                                    source,
+                                    edge,
+                                    &mut session,
+                                    deadline,
+                                    pr_read_timeout,
+                                    &stop.cancel,
+                                )
+                            }
+                            Ok(None) => continue,
+                            Err(error) => {
+                                event_reader = None;
+                                Reading::unavailable(
+                                    &source.label(),
+                                    &format!("PR event journal failed: {error}"),
+                                )
+                            }
+                        },
+                        _ => {
+                            if !stop.pause(
+                                interval
+                                    .saturating_sub(last_reconcile.elapsed())
+                                    .min(deadline.saturating_duration_since(Instant::now())),
+                            ) {
+                                break;
+                            }
+                            last_reconcile = Instant::now();
+                            read(
+                                source,
+                                edge,
+                                &mut session,
+                                deadline,
+                                pr_read_timeout,
+                                &stop.cancel,
+                            )
+                        }
+                    };
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -1396,9 +1544,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         })
                         .is_err()
                         || finished
-                        || left.is_zero()
-                        || !stop
-                            .pause(interval.min(deadline.saturating_duration_since(Instant::now())))
                     {
                         break;
                     }

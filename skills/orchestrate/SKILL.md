@@ -59,6 +59,13 @@ Recover an existing graph with `status`, `output` and `retry` before launching
 replacement work. An idle run or empty queue means no eligible work now, not
 done.
 
+For a Claude Code chair, arm a Monitor on `provenant events --follow --json
+--consumer chair-<session>`. Each JSON line is a notification while the chair
+continues working. Monitors expire after 30 to 60 minutes; re-arm with the same
+consumer to resume from its host cursor. For one outcome, run `provenant wait
+… --json` in the background and receive the notification on exit. Delivery is
+at least once: reconcile the result and deduplicate by event identity.
+
 ## Collect
 
 Check commits, paths, acceptance evidence, review subject and the resolved

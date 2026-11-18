@@ -109,6 +109,18 @@ pub enum Command {
     /// Wait for graph work or pull requests to settle
     #[command(add = crate::metadata::CoreCommand(10, "provenant wait fix-login"))]
     Wait(Wait),
+    /// Replay project observations as JSON lines
+    Events {
+        /// Resume after this project sequence cursor
+        #[arg(long, value_parser = clap::value_parser!(i64).range(0..))]
+        from: Option<i64>,
+        /// Continue delivering observations as they arrive
+        #[arg(long)]
+        follow: bool,
+        /// Persist delivery progress under this consumer name
+        #[arg(long, conflicts_with = "from")]
+        consumer: Option<String>,
+    },
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
@@ -1098,6 +1110,10 @@ pub enum Internal {
     },
     /// Detached cargo-seed refresh queued by the daily collector.
     TickSeed,
+    /// Host-owned forge forwarder; one instance per repository.
+    EventListen {
+        repository: String,
+    },
     /// Run Cargo through the selected build admission backend (the lane's cargo shim). Backend and source come from `PROVENANT_BUILD_ADMISSION_BACKEND` and `PROVENANT_BUILD_ADMISSION_SOURCE`; builtin slot directory/count use `PROVENANT_BUILD_SLOT_STATE` and `PROVENANT_BUILD_SLOTS`, never lane arguments.
     BuildSlot {
         /// The real cargo, then its arguments.

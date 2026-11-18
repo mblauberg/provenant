@@ -24,6 +24,8 @@ mod tracker;
 
 mod chair_log_retention;
 mod checkpoint_retention;
+mod event_delivery;
+mod events;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -1206,6 +1208,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::TickGc) => {
             tick::gc_worker(globals, process.workers())
         }
+        Command::Internal(provenant_cli::Internal::EventListen { repository }) => {
+            event_delivery::listen(&repository, globals)
+        }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
         Command::Internal(provenant_cli::Internal::Launch {
             attempt,
@@ -1381,6 +1386,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             process.workers(),
         ),
         Command::Wait(cmd) => status_wait::run(cmd, globals),
+        Command::Events {
+            from,
+            follow,
+            consumer,
+        } => events::run(from.unwrap_or(0), follow, consumer.as_deref(), globals),
         Command::Land {
             numbers,
             strategy,

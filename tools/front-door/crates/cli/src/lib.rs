@@ -2915,6 +2915,16 @@ mod tests {
         }
         assert!(catalog.error_codes.iter().all(|c| !c.summary.is_empty()));
     }
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn events_accepts_a_named_consumer_and_rejects_an_ambiguous_start() {
+        assert!(matches!(
+            parsed(&["events", "--follow", "--json", "--consumer", "chair"]),
+            ParseOutcome::Invocation(_)
+        ));
+        invalid(&["events", "--consumer", "chair", "--from", "1"]);
+    }
+
     #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [

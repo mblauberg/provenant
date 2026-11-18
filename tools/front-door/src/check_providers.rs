@@ -396,22 +396,23 @@ fn live(
     if let Some(error) = &launch_error {
         row.error_code = Some(error.code().to_owned());
     }
-    // The graph directory is created by launch; subscribe before the first
-    // authoritative status read. Settlement before subscription is visible in
-    // that read, and later settlements remain queued by the native port.
+    // Subscribe to committed host markers before the first authoritative read.
+    let mut journal = crate::event_delivery::Journal::for_project(
+        factory.context.roots.clone(),
+        factory.context.identity.project,
+    )
+    .ok();
     let (mut watcher, setup_error) =
-        match provenant_fabric_runtime::graph::FileJournal::observation_paths(
-            &factory.context.roots.state,
-            factory.context.identity.project,
-            &name,
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|paths| {
-            provenant_os::changes::watch::Watcher::subscribe(&paths)
-                .map_err(|error| error.to_string())
-        }) {
-            Ok(watcher) => (Some(watcher), None),
-            Err(error) => (None, Some(error)),
+        match provenant_os::changes::watch::Watcher::subscribe(&[factory
+            .context
+            .roots
+            .state
+            .as_path()
+            .join(provenant_core::changes::FILE_NAME)])
+        {
+            Ok(watcher) if journal.is_some() => (Some(watcher), None),
+            Ok(_) => (None, Some("shared event journal unavailable".to_owned())),
+            Err(error) => (None, Some(error.to_string())),
         };
     row.observation = Some(crate::status_wait::observation_text(
         watcher.as_ref(),
@@ -445,6 +446,7 @@ fn live(
             return Ok(());
         }
 
+        let last_reconcile = factory.clock.mono_now();
         let mut refresh_status = false;
         while !refresh_status {
             let remaining = wait.remaining(factory.clock.mono_now()).as_micros();
@@ -459,9 +461,22 @@ fn live(
             if let Some(outcome) = native_wait {
                 match outcome {
                     Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
-                        refresh_status = true;
+                        refresh_status = match journal.as_mut().map(|source| source.drain_graphs())
+                        {
+                            Some(Ok(graphs)) => graphs.contains(&name),
+                            _ => {
+                                journal = None;
+                                true
+                            }
+                        };
                     }
                     Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                        refresh_status = factory
+                            .clock
+                            .mono_now()
+                            .as_micros()
+                            .saturating_sub(last_reconcile.as_micros())
+                            >= 60_000_000;
                         // An empty native timeout is only a cancellation/deadline
                         // checkpoint, never a request to reread graph status.
                     }

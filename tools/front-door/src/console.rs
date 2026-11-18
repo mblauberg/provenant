@@ -108,6 +108,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 max_depth,
                 max_nodes,
                 detail,
+                ..
             } => (
                 hosts,
                 provenant_fabric_runtime::hosts::PeerAction::ConsoleTree {
