@@ -142,7 +142,7 @@ fn graph_output_claim_requires_the_retained_launch_and_origin() -> TestResult {
     )? {
         return Ok(());
     }
-    let (rig, mut factory) = receiver().map_err(|error| format!("receiver: {error}"))?;
+    let (_rig, mut factory) = receiver().map_err(|error| format!("receiver: {error}"))?;
     let source = provenant_core::HostId::from_bytes([42; 16]);
     let actor = Address::new(source, "origin")?.actor;
     let agent = format!("graph-{actor}");
@@ -189,7 +189,7 @@ fn graph_output_claim_requires_the_retained_launch_and_origin() -> TestResult {
         agent,
         ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(&rig.home, &rig.project)?,
+            key: CrossHostProjectKey::from_home(Path::new("/fixture"), Path::new("/fixture/repo"))?,
             common_dir: "repo".into(),
         },
         PeerAction::Output {
