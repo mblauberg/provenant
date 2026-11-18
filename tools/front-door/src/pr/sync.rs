@@ -587,4 +587,5 @@ fn acquire_writer(
         &cancel,
         &clock,
     )
+    .map_err(|error| format!("writer custody: {error:?}").into())
 }

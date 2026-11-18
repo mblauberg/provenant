@@ -1,0 +1,14 @@
+doc = "Exercise the main lane paths with small, disposable work."
+nodes = [
+  { id = "read", use = "task", tier = "junior", prompt = "Read the supplied fixture and report its single stated fact." },
+  { id = "review", use = "review", tier = "junior", over = ["correctness", "tests"], min_ok = 2, after = ["read"], prompt = "Review this trivial fixture: the only expected fact is that smoke checks work." },
+  { id = "write", use = "implement", tier = "junior", after = ["review"], worktree = "${worktree}", when = { smoke-write = true }, prompt = "In the supplied scratch worktree, create exactly one file named smoke.txt containing 'smoke ok', then commit it." },
+]
+exports = [
+  { node = "review", outputs = ["result"], when = { smoke-write = false } },
+  { node = "write", outputs = ["result"], when = { smoke-write = true } },
+]
+
+[parameters]
+worktree = { type = "string", default = "", doc = "Scratch worktree for the writer node; without one the writer node is skipped." }
+smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled when worktree is provided and local." }

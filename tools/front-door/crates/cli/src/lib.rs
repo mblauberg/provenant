@@ -1788,6 +1788,11 @@ mod tests {
             invalid(&["run", "task", flag, "example"]);
         }
         valid(&["templates"]);
+        valid(&["upgrade", "--verify", "--dry-run"]);
+        valid(&[
+            "upgrade", "--verify", "--host", "peer-a", "--route", "junior",
+        ]);
+        invalid(&["upgrade", "--dry-run"]);
         valid(&[
             "templates",
             "show",

@@ -935,6 +935,9 @@ impl Factory {
         &self,
         node: &provenant_fabric_runtime::graph::GraphNode,
     ) -> Result<(), FacadeError> {
+        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+            return Ok(());
+        }
         if let Some(name) = node
             .attempt
             .as_ref()
@@ -2011,6 +2014,33 @@ impl Factory {
             if bundled_batch && let Some(branch) = &integration_branch {
                 parameters["integration_branch"] = branch.clone();
             }
+            let bundled_smoke =
+                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Bundled);
+            if bundled_smoke {
+                let is_remote = input
+                    .get("host")
+                    .and_then(Value::as_str)
+                    .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
+                let worktree = parameters
+                    .get("worktree")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let enabled = !is_remote && !worktree.is_empty();
+                parameters["smoke-write"] = json!(enabled);
+                if is_remote {
+                    // A remote graph must not retain or transmit a caller path,
+                    // even though the writer is skipped by its launch condition.
+                    parameters["worktree"] = json!("");
+                }
+                if !enabled {
+                    let reason = if is_remote {
+                        "remote placement does not accept caller paths"
+                    } else {
+                        "no writer worktree supplied"
+                    };
+                    warn_operator(format!("smoke write node skipped: {reason}"));
+                }
+            }
             node["with"] = parameters;
             patch::compile_submission(
                 id,
@@ -2165,7 +2195,9 @@ impl Factory {
                 })?;
             let mut writer_budgets = Vec::new();
             for node in &expanded.nodes {
-                if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                    || !provenant_fabric_runtime::graph::when::holds(&node.when)
+                {
                     continue;
                 }
                 let spec = node.attempt.clone().unwrap_or_default();
@@ -2264,7 +2296,11 @@ impl Factory {
         let credentials = self.credential_roots()?;
         let mut rows = Vec::new();
         for node in nodes {
-            if node.composite.is_some() || node.condition.is_some() || node.decide.is_some() {
+            if !provenant_fabric_runtime::graph::when::holds(&node.when)
+                || node.composite.is_some()
+                || node.condition.is_some()
+                || node.decide.is_some()
+            {
                 continue;
             }
             let resolve = |path: &str| {
@@ -4586,6 +4622,87 @@ mod tests {
                 explain(&factory, changed)?
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
+        let rig = TestRig::new()?;
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+        context.in_lane = false;
+        context.config.peers.insert(
+            "peer-a".into(),
+            provenant_fabric_runtime::config::Peer {
+                host: remote_host,
+                destination: "fixture".into(),
+                remote_executable: None,
+                connect_timeout_seconds: 10,
+            },
+        );
+        let factory = Factory {
+            context,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Workers,
+        };
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 5)
+            .map_err(|error| format!("wait budget: {error:?}"))?;
+        let cancel = CancelToken::new();
+
+        let preview = factory
+            .graph_document(
+                json!({"op":"run", "template":"smoke", "explain":true}),
+                budget,
+                &cancel,
+            )
+            .map_err(|error| format!("default smoke preview: {error:?}"))?;
+        let preview_remote = factory.graph_document(
+            json!({"op":"run", "template":"smoke", "host":"peer-a", "set":{"worktree":rig.project}, "explain":true}),
+            budget,
+            &cancel,
+        ).map_err(|error| format!("remote smoke preview: {error:?}"))?;
+        let preview_local = factory.graph_document(
+            json!({"op":"run", "template":"smoke", "set":{"worktree":rig.project}, "explain":true}),
+            budget,
+            &cancel,
+        ).map_err(|error| format!("local smoke preview: {error:?}"))?;
+        let skipped_writer = |preview: &Value| {
+            preview["skipped"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["node"]
+                        .as_str()
+                        .is_some_and(|id| id.ends_with("task--write"))
+                })
+            })
+        };
+        assert!(skipped_writer(&preview));
+        assert!(preview["skipped"].as_array().unwrap().iter().any(|row| {
+            row["node"]
+                .as_str()
+                .is_some_and(|id| id.ends_with("task--write"))
+                && row["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("smoke-write"))
+        }));
+        assert!(skipped_writer(&preview_remote));
+        assert!(
+            !serde_json::to_string(&preview_remote["document"])?
+                .contains(&rig.project.to_string_lossy().to_string())
+        );
+        assert!(!skipped_writer(&preview_local));
+        assert!(
+            serde_json::to_string(&preview_local["document"])?
+                .contains(&rig.project.to_string_lossy().to_string())
+        );
+
         Ok(())
     }
 

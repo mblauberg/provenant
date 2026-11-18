@@ -52,6 +52,21 @@ pub struct Upgrade {
     /// Upgrade this host and every registered Fabric peer
     #[arg(long, value_parser = ["all"], default_value = "all")]
     pub hosts: String,
+    /// Run the bundled smoke graph after upgrading
+    #[arg(long)]
+    pub verify: bool,
+    /// Show the smoke graph without upgrading or launching it (requires --verify)
+    #[arg(long, requires = "verify")]
+    pub dry_run: bool,
+    /// Place the smoke graph on this Fabric peer
+    #[arg(long, requires = "verify")]
+    pub host: Option<String>,
+    /// Override smoke graph routes
+    #[arg(long, requires = "verify")]
+    pub route: Option<String>,
+    /// Override a smoke template parameter (NAME=VALUE; repeatable)
+    #[arg(long = "set", requires = "verify")]
+    pub set: Vec<String>,
 }
 
 pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = Harness> {

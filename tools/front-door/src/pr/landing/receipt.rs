@@ -19,7 +19,10 @@ fn carry_dir(state: &Path) -> PathBuf {
 }
 
 fn repository_key(repository: &str) -> String {
-    format!("{:x}", Sha256::digest(repository.as_bytes()))
+    Sha256::digest(repository.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub fn write_approval_carry(

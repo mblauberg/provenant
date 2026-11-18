@@ -1166,6 +1166,7 @@ pub struct TemplateLibrary {
 
 const BUNDLED: &[(&str, &str)] = &[
     ("task", include_str!("../../assets/templates/task.toml")),
+    ("smoke", include_str!("../../assets/templates/smoke.toml")),
     (
         "steward",
         include_str!("../../assets/templates/steward.toml"),

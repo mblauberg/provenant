@@ -560,8 +560,13 @@ pub(super) fn validate_flat_plan(
                 "execution bindings require an agent node",
             ));
         }
-        validate_access(node.access, node.worktree.as_deref())
-            .map_err(|reason| node_plan_error(node, reason))?;
+        // Skipped rows remain in the document for status and explain output,
+        // but they do not need launch-time access bindings such as a writer
+        // worktree. Active nodes still pass the full access check.
+        if when::holds(&node.when) {
+            validate_access(node.access, node.worktree.as_deref())
+                .map_err(|reason| node_plan_error(node, reason))?;
+        }
         if node.access == AccessMode::ReadOnly
             && !matches!(node.delivery, None | Some(DeliveryMode::None))
         {

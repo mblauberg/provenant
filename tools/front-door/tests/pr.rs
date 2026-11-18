@@ -541,7 +541,10 @@ fn pr_sync_merges_base_pushes_and_records_repository_scoped_carry() -> Result {
     assert!(parents.split_whitespace().any(|parent| parent == approved));
     assert!(parents.split_whitespace().any(|parent| parent == base));
     let receipts = fs::read_dir(rig.state.join("landing/approval-carry"))?;
-    let repo_key = format!("{:x}", sha2::Sha256::digest(b"owner/repo"));
+    let repo_key = sha2::Sha256::digest(b"owner/repo")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let prefix = format!("{repo_key}-1668-");
     let receipt = receipts
         .filter_map(std::result::Result::ok)

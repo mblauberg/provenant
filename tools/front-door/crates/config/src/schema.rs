@@ -476,7 +476,10 @@ pub fn schema<T: Serialize>(
 /// Key prefix to dedicated command hints.
 pub const DEDICATED_COMMANDS: &[(&str, &str)] = &[
     ("routing.model_exclusions", "provenant route exclude add"),
-    ("domains.routing.model_exclusions", "provenant route exclude add"),
+    (
+        "domains.routing.model_exclusions",
+        "provenant route exclude add",
+    ),
 ];
 
 /// Dedicated command to use instead of editing a key directly through `config apply`.
