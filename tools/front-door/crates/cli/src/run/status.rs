@@ -235,15 +235,27 @@ fn project_lane_inner(
         provenant_records::wire::LanePresence::Unknown => None,
     });
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
-    let waiting_for = wait.map(|wait| wait.waiting_for.description()).or_else(|| {
-        lane.provider_silent_for_ms
-            .0
-            .map(run::provider_silence_reason)
-            .or_else(|| {
-                (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
-                    .then(|| "launch preparation".to_owned())
-            })
-    });
+    let build_wait = host_artifacts
+        && matches!(lane.state, run::AttemptState::Running { .. })
+        && lane.write_grants.iter().any(|grant| {
+            grant.source == provenant_records::run::WriteSource::Scratch
+                && grant
+                    .path
+                    .to_path_buf()
+                    .is_ok_and(|path| provenant_os::build_slots::is_waiting(&path))
+        });
+    let waiting_for = build_wait
+        .then(|| "waiting for a host build slot".to_owned())
+        .or_else(|| wait.map(|wait| wait.waiting_for.description()))
+        .or_else(|| {
+            lane.provider_silent_for_ms
+                .0
+                .map(run::provider_silence_reason)
+                .or_else(|| {
+                    (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
+                        .then(|| "launch preparation".to_owned())
+                })
+        });
     let transcript = lane
         .applied_route
         .as_ref()
@@ -316,6 +328,17 @@ fn project_lane_inner(
             ..Default::default()
         },
     );
+    if let run::AttemptState::Terminal {
+        terminal_cause: Some(run::TerminalCause::HandoffRefused),
+        reason: Some(reason),
+        ..
+    } = &lane.state
+    {
+        projected.reason = Some(format!(
+            "{}; inspect the cause and retry the lane",
+            provenant_confinement::redact::bounded_line(reason, 256)
+        ));
+    }
     if host_artifacts
         && let Some(releasing) =
             run::release_progress(root, lane, census.and_then(|census| census.ok()))

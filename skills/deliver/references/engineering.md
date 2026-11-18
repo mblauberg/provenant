@@ -7,11 +7,10 @@ checklists: name the alternatives and say which one you chose and why.
 ## Root cause and design
 
 - Fix the cause, not the symptom. Sweep for the class of defect and fix what
-  let it through. A flaw that returns after a second fix means the design is
-  wrong: change the design.
+  let it through. Repeated flaws warrant a design review.
 - Long-term structure over patches. A larger redesign is welcome and lands as
-  one complete change.
-- If a small outcome needs a lot of new code, stop and simplify.
+  proportionate changes.
+- If a small outcome needs a lot of new code, look for a simpler structure.
 
 ## Build for change
 
@@ -21,8 +20,7 @@ checklists: name the alternatives and say which one you chose and why.
   declaration already encodes it; if it is wrong, fix that declaration rather
   than layering a second.
 - **Configurable.** Behaviour that varies is data or a config key with its
-  source shown, never a branch or special case for one host, project or
-  provider.
+  source shown where configuration makes variation easier to manage.
 - **Modular.** One owning module per concern with a small interface. Modules
   compose through ports and declarations, so one can be replaced without edits
   elsewhere.
@@ -32,20 +30,16 @@ checklists: name the alternatives and say which one you chose and why.
 
 ## Reliability and strictness
 
-- Lanes are as free as native subagents; holds protect only credentials, Git isolation, data integrity and authority.
 - Failures are explicit typed states, never silent fallbacks. Catch mistakes
   before runtime with types, lints and generators.
 - Checks default to allow or warn and have one deciding point. Add no new
-  refusal, lock, floor, queue or wait. Hard holds belong only at real
-  boundaries: credentials, Git isolation, data
-  integrity and authority (who may approve or merge). When busy, skip and
-  retry. Speed comes from structure (caching, derivation), not locks.
+  refusal without a real boundary: credentials, Git isolation, data integrity, authority or platform safety. Use coordination where needed for
+  correctness; prefer structural speed improvements.
 
 ## No compatibility code
 
-No aliases, older-shape readers, migrations, fallbacks or deprecated keys. Move
-every caller and delete the old shape. Follow best practice, not the current
-shape of the codebase.
+Move callers to the new shape without compatibility code. Follow the owning
+repository’s format policy for persisted data.
 
 ## Tests
 

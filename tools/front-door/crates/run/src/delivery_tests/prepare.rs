@@ -525,10 +525,11 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
         )
     );
     // Upgrades may leave the old lock inodes. New commands must not hold them.
-    for name in [&integrate] {
-        if directory.metadata_at(OsStr::new(name), false).is_err() {
-            directory.create_new(OsStr::new(name))?;
-        }
+    if directory
+        .metadata_at(OsStr::new(&integrate), false)
+        .is_err()
+    {
+        directory.create_new(OsStr::new(&integrate))?;
     }
     std::fs::write(&armed, b"ready")?;
     std::thread::scope(

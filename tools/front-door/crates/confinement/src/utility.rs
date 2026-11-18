@@ -4093,10 +4093,10 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
                 self.changed.notify_all();
             }
             fn wait_for(&self, attempts: usize, reads: usize) -> bool {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let deadline = git_lock_deadline(Duration::from_secs(5)).unwrap();
                 let mut counts = self.counts.lock().unwrap();
                 while counts.0 < attempts || counts.1 < reads {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    let remaining = git_lock_remaining(deadline);
                     if remaining.is_zero() {
                         break;
                     }
@@ -4220,11 +4220,11 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             writer
                 .join()
                 .map_err(|_| "config writer panicked")?
-                .map_err(|error| std::io::Error::other(error))?;
+                .map_err(std::io::Error::other)?;
             let values = reader
                 .join()
                 .map_err(|_| "config reader panicked")?
-                .map_err(|error| std::io::Error::other(error))?;
+                .map_err(std::io::Error::other)?;
             assert!(
                 observed_retry_and_reads,
                 "readers must observe the old snapshot while Git retries its real config.lock write"

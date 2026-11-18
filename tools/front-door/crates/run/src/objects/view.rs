@@ -378,6 +378,7 @@ pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid>
     GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
 }
 
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
     let candidate = scratch.file_name().ok_or_else(invalid)?;
     let candidate = candidate
@@ -790,6 +791,7 @@ fn valid_candidate(name: &str) -> bool {
         .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
 
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn prepare_bound(
     git: &Path,
     repo: &VerifiedRepo,

@@ -8,6 +8,7 @@ fn disk_policy_refusal_uses_resource_projection() {
         available: 1,
         floor: 2,
         reclaimed: 0,
+        gc_scheduled: false,
         origin: SettingSource::Configuration,
     });
     let fact = refusal.resource.expect("disk fact");
@@ -334,82 +335,68 @@ fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
 }
 
 #[test]
-fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result<(), String> {
+fn writer_schedules_background_gc_below_free_floor() -> Result<(), String> {
+    // Spec: docs/specs/disk.md#dispatch-and-new-build-pressure
     use std::cell::Cell;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
-        critical_free: Some("100B".into()),
+        critical_free: Some("50B".into()),
         ..Default::default()
     };
-    for remaining in [99, 100] {
-        let collected = Cell::new(false);
+    let policy = disk_policy(provenant_records::policy::Strength::Refuse);
+
+    for (free, schedule_enabled, expected_calls, expected_refusal, expected_scheduled) in [
+        (75, true, 1, false, true),
+        (49, true, 1, true, true),
+        (100, true, 0, false, false),
+        (49, false, 0, true, false),
+    ] {
+        let settings = provenant_config::GcSettings {
+            schedule: schedule_enabled,
+            ..settings.clone()
+        };
         let samples = Cell::new(0);
+        let calls = Cell::new(0);
         let result = check_writer_disk_with_collection(
             &settings,
-            &disk_policy(provenant_records::policy::Strength::Refuse),
+            &policy,
             Path::new("/state"),
             Path::new("/tree"),
             Path::new("/home"),
             |_| {
                 samples.set(samples.get() + 1);
-                Ok(if collected.get() { remaining } else { 50 })
+                Ok(free)
             },
-            || {
-                assert!(!collected.replace(true));
-                49
-            },
-        );
-        assert_eq!(samples.get(), 6);
-        if remaining == 100 {
-            result?;
-        } else {
-            let error = result.err().ok_or("writer accepted low disk")?;
-            assert!(matches!(
-                error,
-                DiskCheck::Low {
-                    available: 99,
-                    floor: 100,
-                    reclaimed: 49,
-                    ..
-                }
-            ));
-        }
-    }
-    let calls = Cell::new(0);
-    check_writer_disk_with_collection(
-        &settings,
-        &disk_policy(provenant_records::policy::Strength::Refuse),
-        Path::new("/state"),
-        Path::new("/tree"),
-        Path::new("/home"),
-        |_| Ok(100),
-        || {
-            calls.set(calls.get() + 1);
-            0
-        },
-    )?;
-    assert_eq!(calls.get(), 0);
-    let disabled = provenant_config::GcSettings {
-        schedule: false,
-        ..settings
-    };
-    assert!(
-        check_writer_disk_with_collection(
-            &disabled,
-            &disk_policy(provenant_records::policy::Strength::Refuse),
-            Path::new("/state"),
-            Path::new("/tree"),
-            Path::new("/home"),
-            |_| Ok(1),
             || {
                 calls.set(calls.get() + 1);
-                99
-            }
-        )
-        .is_err()
-    );
-    assert_eq!(calls.get(), 0);
+                true
+            },
+        );
 
+        assert_eq!(samples.get(), 3, "free={free}, schedule={schedule_enabled}");
+        assert_eq!(
+            calls.get(),
+            expected_calls,
+            "free={free}, schedule={schedule_enabled}"
+        );
+        assert_eq!(
+            result.is_err(),
+            expected_refusal,
+            "free={free}, schedule={schedule_enabled}"
+        );
+        if let Err(DiskCheck::Low {
+            reclaimed,
+            gc_scheduled,
+            ..
+        }) = result
+        {
+            assert_eq!(
+                reclaimed, 0,
+                "asynchronous GC does not report reclaimed bytes"
+            );
+            assert_eq!(gc_scheduled, expected_scheduled);
+        }
+    }
     Ok(())
 }
 
@@ -428,7 +415,6 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
         &settings,
         &provenant_records::policy::Policy::default(),
         &state,
-        &base,
         &base,
         &home,
     )

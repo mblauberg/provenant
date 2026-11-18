@@ -68,7 +68,7 @@ pub use delivery::{FilteredLanePath, HostDeliveryContext};
 pub use git_context::{
     GitContext, ReviewDiffContext, continuation_history, ensure_local_branch,
     ensure_recorded_local_branch, resolve_git_base, resolve_git_base_with_facts,
-    review_diff_context_at, review_merge_base, review_merge_base_between,
+    resolve_review_commit, review_diff_context_at, review_merge_base, review_merge_base_between,
 };
 pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
@@ -88,7 +88,8 @@ pub use plan::{
 };
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
-    ProviderStateIssue, TOMBSTONE, payload_totals,
+    ProviderStateIssue, ScratchOwner, ScratchOwnerResolver, ScratchPolicy, TOMBSTONE,
+    payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,

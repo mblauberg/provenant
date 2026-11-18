@@ -1749,8 +1749,8 @@ pub fn trusted_lane_toolchain_diagnostic(
     if !protected(&shim) {
         return Err(codes::RUSTUP_SHIM_WRITABLE);
     }
-    // The host puts the lane's `cargo` build-slot shim and shell hook in
-    // `<scratch>/bin`, first on PATH. Scratch is writable, so the lane could add
+    // The host puts lane shims in `<scratch>/bin` and `<scratch>/cargo-bin`.
+    // Scratch is writable, so the lane could add
     // a `rustc` there, but Cargo run through the rustup shim prepends the pinned
     // toolchain to PATH and resolves the compiler from it, so an entry here
     // cannot select another compiler. Any other writable entry is still refused,
@@ -1758,7 +1758,12 @@ pub fn trusted_lane_toolchain_diagnostic(
     let lane_shims: Vec<PathBuf> = grants
         .iter()
         .filter(|grant| grant.source == WriteSource::Scratch)
-        .map(|grant| grant.path.join("bin"))
+        .flat_map(|grant| {
+            [
+                grant.path.join("bin"),
+                grant.path.join(provenant_os::build_slots::SHIM_DIRECTORY),
+            ]
+        })
         .collect();
     for directory in std::env::split_paths(path) {
         if !directory.is_absolute() {
@@ -2409,6 +2414,7 @@ mod cargo_setup_tests {
         std::fs::create_dir_all(home.join(".rustup")).unwrap();
         std::fs::create_dir(&worktree).unwrap();
         std::fs::create_dir_all(scratch.join("bin")).unwrap();
+        std::fs::create_dir_all(scratch.join(provenant_os::build_slots::SHIM_DIRECTORY)).unwrap();
         std::fs::create_dir(scratch.join("other")).unwrap();
         std::fs::write(bin.join("rustup"), b"fixture").unwrap();
         std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
@@ -2427,6 +2433,15 @@ mod cargo_setup_tests {
             (
                 "scratch shim",
                 vec![scratch.join("bin"), bin.clone()],
+                &grants[..],
+                Ok(()),
+            ),
+            (
+                "scratch cargo shim",
+                vec![
+                    scratch.join(provenant_os::build_slots::SHIM_DIRECTORY),
+                    bin.clone(),
+                ],
                 &grants[..],
                 Ok(()),
             ),
@@ -3346,11 +3361,14 @@ impl WriterLaunch {
             let ancestor = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
-                self.branch.as_str(),
-                base,
-                request.task.base_ref.as_deref(),
-                verified_tip,
-                custody.scope().attempt,
+                crate::objects::BranchPublication {
+                    branch: self.branch.as_str(),
+                    base,
+                    launch_ref: request.task.base_ref.as_deref(),
+                    head: verified_tip,
+                    attempt: custody.scope().attempt,
+                },
+                enforcement,
             )?;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.

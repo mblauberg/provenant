@@ -36,6 +36,9 @@ pub enum Console {
         /// Maximum attempts to include
         #[arg(long, default_value_t = 100, catalog_u64_range = 1..=100)]
         max_nodes: u64,
+        /// Show this attempt and its descendants
+        #[arg(long, value_name = "ATTEMPT_ID")]
+        subtree: Option<String>,
         /// Include complete run and attempt records
         #[arg(long)]
         detail: bool,
@@ -282,11 +285,16 @@ fn read_with_budget(
     if let Console::Tree {
         max_depth,
         max_nodes,
+        subtree,
         detail,
         ..
     } = command
     {
-        return tree::read(roots, selected, *max_depth, *max_nodes, *detail);
+        let mut result = tree::read(roots, selected, *max_depth, *max_nodes, *detail)?;
+        if let Some(root) = subtree {
+            tree::select_subtree(&mut result, root, *max_depth)?;
+        }
+        return Ok(result);
     }
     if let Console::Detail { target } = command {
         return detail::read(roots, &detail_reference(roots, selected, target)?);

@@ -7,14 +7,17 @@ Anchor: `crates/cli/src/lib.rs`, `crates/cli/src/render.rs`,
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
 `scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table. Every enumeration an owner declares for the editor, such as `gc.projects.{project}.foreign_worktrees`, publishes its values and runtime default through the same data; the configuration reference fills them in and refuses an entry that restates them.
-The [consumer contract](consumer-contract.md) gives each command, output and variable its tier: the few stable ones hold across 2.x, and the rest evolve with release notes; direct internal-state readers are unsupported.
+The [consumer contract](consumer-contract.md) describes output and variable tiers; command names may change freely. Direct internal-state readers are unsupported.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
+Repository CI selection, its gate and quarantine validation are specified in [CI](ci.md).
 
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
 reported, never resolved by guessing; conflicting manifest settings are refused.
+The `TargetGrammar` declaration identifies each target argument, whose attached
+parser must accept and refuse the values of its declared syntax.
 
 - Why: an action must address the intended work.
 
@@ -22,7 +25,7 @@ reported, never resolved by guessing; conflicting manifest settings are refused.
 
 Help and version inspection require no project state. Paths retain their native
 bytes, and invalid or conflicting arguments are rejected.
-The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains.
+The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains. Every catalogued command resolves to scoped help containing its metadata.
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
 
@@ -130,6 +133,8 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+Graph status rows share the same keys across graph, node and attempt kinds.
+Node warnings are present on node rows and null on graph and attempt rows.
 The graph-listing AGE column measures elapsed time since graph creation, even
 when the graph's state changed more recently.
 For graph nodes with a typed review result, the digest shows execution state
@@ -160,6 +165,18 @@ Transfer to a named session is deferred.
 - Why: a chair acting on a listing must see work still running.
 
 ### Output references and bounded tails
+
+`result NAME[/NODE[#N]]` reads the current lane evidence in one call: state,
+branch, recorded head, handoff status and note, and verification reported in the
+handoff. `--json` retains the structured evidence and `--full` shows the complete
+human view. Missing or unavailable evidence is not proof of a check.
+`retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
+`gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
+idle age; scheduled GC uses the configured `gc.idle`.
+`templates show NAME` inspects an effective template. Configuration edits report the changed key, its effective value and source, and the previous value. A pre-launch refusal retains a redacted cause and names a retry command.
+
+`config show` summarises the effective configuration; `--full` shows its values
+and sources, and `--json` returns the structured configuration.
 
 For a graph with one non-composite top-level node, `output GRAPH` reads that
 node's newest settled attempt. For a composite root it reads the declared bounded result and

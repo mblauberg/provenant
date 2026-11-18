@@ -319,17 +319,18 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
     ));
     let defaults = serde_json::to_value(default_config).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
-    assert_eq!(defaults["gc"]["idle_days"], 7);
+    assert_eq!(defaults["gc"]["idle"], "6h");
     assert_eq!(defaults["gc"]["graph_checkpoint_days"], 90);
     assert!(defaults["gc"]["free_floor"].is_null());
     let config = load(
         &roots(),
-        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle_days=14\ngraph_checkpoint_days=30\nfree_floor='20G'"[..]),
+        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle='14d'\ngraph_checkpoint_days=30\nfree_floor='20G'"[..]),
     )
     .unwrap();
     let value = serde_json::to_value(&config).unwrap();
     assert_eq!(value["gc"]["schedule"], false);
-    assert_eq!(value["gc"]["idle_days"], 14);
+    assert_eq!(value["gc"]["idle"], "14d");
+    assert_eq!(config.gc.idle_seconds(), Ok(1_209_600));
     assert_eq!(value["gc"]["graph_checkpoint_days"], 30);
     assert!(matches!(
         config.origins["gc.graph_checkpoint_days"],
@@ -345,8 +346,8 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
     assert_eq!(configured.gc.projects["example"].keep, ["web/target"]);
     test_support::assert_leaf_origins(&configured);
     for (field, rule) in [
-        ("idle_days=0", "idle_days_range"),
-        ("idle_days=3651", "idle_days_range"),
+        ("idle='invalid'", "invalid_gc_idle_duration"),
+        ("idle=7", "type"),
         ("graph_checkpoint_days=0", "graph_checkpoint_days_range"),
         ("graph_checkpoint_days=3651", "graph_checkpoint_days_range"),
         ("schedule='yes'", "type"),
@@ -370,7 +371,7 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
             &config,
             &format!("gc.{}:", field.split('=').next().unwrap()),
         );
-        assert_eq!(config.gc.idle_days, 7);
+        assert_eq!(config.gc.idle, "6h");
     }
 }
 
@@ -1724,8 +1725,8 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
         ),
         // The same name at two depths: each is reported at its own key.
         (
-            "schema_version=1\n[gc]\nidle_days=7\n[gc.projects.p]\nidle_days=7",
-            "gc.projects.p.idle_days",
+            "schema_version=1\n[gc]\nidle='6h'\n[gc.projects.p]\nidle='7h'",
+            "gc.projects.p.idle",
             5,
         ),
         (
@@ -1773,7 +1774,7 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
 fn wrong_value_type_in_a_serde_decoded_section_still_reports_type() {
     for text in [
         "schema_version=1\n[install]\nbin_dir=4",
-        "schema_version=1\n[gc]\nidle_days='7'",
+        "schema_version=1\n[gc]\nidle=7",
         "schema_version=1\n[retention]\nprovider_state_days='7'",
     ] {
         let config = load(&roots(), Some(text.as_bytes())).unwrap();

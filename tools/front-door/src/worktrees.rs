@@ -430,7 +430,7 @@ fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
 struct GcData {
     #[serde(flatten)]
     report: provenant_confinement::cache::CacheGcReport,
-    idle_days: u64,
+    idle_seconds: u64,
     provider_state: provenant_run::ProviderStateGc,
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
@@ -531,7 +531,7 @@ impl provenant_config::RetentionMeasurements for GcData {
         if self
             .worktree_cleanup
             .iter()
-            .any(|r| !r.byte_errors.is_empty())
+            .any(|r| !r.byte_errors.is_empty() || (!r.dry_run && !r.worktrees.removed.is_empty()))
         {
             provenant_config::ByteObservation::Partial { bytes }
         } else {
@@ -656,7 +656,7 @@ fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandRes
 /// Daily tick task, using the same collection policy and custody as explicit GC.
 pub(crate) fn scheduled_gc(
     globals: &Globals,
-    idle_days: u64,
+    idle_seconds: u64,
     workers: &dyn WorkerObserver,
 ) -> Result<(), String> {
     let command = Gc {
@@ -665,7 +665,8 @@ pub(crate) fn scheduled_gc(
         free_floor: None,
         dry_run: false,
         apply: true,
-        idle_days,
+        idle: Some(idle_seconds),
+        finished_branch: None,
     };
     let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty()
@@ -698,9 +699,67 @@ pub(crate) fn scheduled_gc(
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
 /// worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    if let Some(branch) = &command.finished_branch {
+        if command.dry_run || !command.apply {
+            return crate::fail_with_repair(
+                "gc",
+                Outcome::Refused,
+                "GC",
+                "targeted scratch collection requires --apply and excludes --dry-run",
+                Some(GC_REPAIR),
+                globals,
+            );
+        }
+        return crate::provider_retention::run_branch_scratch(globals, branch);
+    }
+    // Tick and every host-wide sweep share one single-flight lock. Busy is a
+    // skipped best-effort collection, never a dispatch or landing failure.
+    let _sweep = if !command.dry_run {
+        let lock = (|| -> Result<_, Box<dyn std::error::Error>> {
+            let resolved =
+                roots::resolve(globals, roots::Workspace::Home, roots::Product::Required)?;
+            let directory = provenant_config::private_directory(
+                &resolved.roots.state.as_path().join("tick"),
+                true,
+            )?;
+            Ok(directory.try_lock(
+                OsStr::new("gc-worker.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )?)
+        })();
+        match lock {
+            Ok(lock) => Some(lock),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<FsError>(),
+                    Some(FsError::LockTimeout { .. })
+                ) =>
+            {
+                let data = GcData {
+                    notice: Some("sweep already running; skipped".into()),
+                    ..Default::default()
+                };
+                let result =
+                    CommandResult::new("gc", Outcome::Ok, gc_result_data(&data, globals.json));
+                return emit(&result, globals, "sweep already running; skipped", false);
+            }
+            Err(error) => {
+                return crate::fail_with_repair(
+                    "gc",
+                    Outcome::Error,
+                    "GC",
+                    &error.to_string(),
+                    Some(GC_REPAIR),
+                    globals,
+                );
+            }
+        }
+    } else {
+        None
+    };
     match gc(&command, globals, workers) {
         Ok(data) => {
-            let human = gc_data_summary(&data);
+            let human = gc_compact_summary(&data);
             let failed = !data.provider_state.errors.is_empty()
                 || !data.chair_logs.errors.is_empty()
                 || !data.discard_archives.errors.is_empty()
@@ -726,7 +785,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let failure = error.to_string();
             let data = GcData {
                 report: *error.report,
-                idle_days: command.idle_days,
+                idle_seconds: command.idle.unwrap_or(6 * 3600),
                 unobserved_projects,
                 skipped_transient,
                 provider_state: *provider_state,
@@ -757,6 +816,40 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             globals,
         ),
     }
+}
+
+fn gc_compact_summary(data: &GcData) -> String {
+    let scratch_bytes: u64 = data
+        .provider_state
+        .attempt_tmp
+        .iter()
+        .map(|entry| entry.bytes)
+        .sum();
+    let trees: usize = data
+        .worktree_cleanup
+        .iter()
+        .map(|entry| entry.worktrees.removed.len())
+        .sum();
+    let mut summary = format!(
+        "{}: {trees} worktrees, {} attempt scratch directories, {} cache/scratch bytes; {} retention errors\n",
+        if data.report.dry_run {
+            "would collect"
+        } else {
+            "collected"
+        },
+        data.provider_state.attempt_tmp.len(),
+        gc_cache_bytes(data).saturating_add(scratch_bytes),
+        data.retention_errors.len() + data.provider_state.errors.len()
+    );
+    if let Some(notice) = &data.notice {
+        summary.push_str(notice);
+        summary.push('\n');
+    }
+    for alert in &data.alerts {
+        summary.push_str(alert);
+        summary.push('\n');
+    }
+    summary
 }
 
 fn gc_data_summary(data: &GcData) -> String {
@@ -1209,7 +1302,7 @@ pub(crate) struct LandWorktree {
 /// dirty or live worktree and keeps a branch not contained in `integration`.
 /// The worktree is only removed while its HEAD is still `tip`, the commit the
 /// caller proved merged, so commits made since keep the checkout too.
-/// An observed merge cleans only its linked subjects. The normal daily scan
+/// An observed merge cleans only its linked subjects. A later low-space sweep
 /// retries busy/unknown items; it is never the primary event mechanism.
 pub(crate) fn retention_event(
     resolved: &roots::Resolved,
@@ -1245,15 +1338,39 @@ pub(crate) fn retention_event(
             let settings = config
                 .gc
                 .project_settings(&context.binding.project_id().to_string(), &resolved.project);
-            let state = crate::gc_support::lane_states(
-                &resolved.roots,
-                &resolved.home,
-                &resolved.assets,
-                context.binding.project_id(),
-            )
-            .ok();
-            let terminal = |path: &Path| state.as_ref().and_then(|s| s.get(path)) == Some(&true);
-            let free = |path: &Path| state.as_ref().is_some_and(|s| s.no_live_lanes(path));
+            let attempts: std::collections::BTreeMap<_, _> = lanes
+                .iter()
+                .map(|lane| {
+                    let ids = lane
+                        .branch
+                        .as_deref()
+                        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                        .and_then(|branch| {
+                            crate::provider_retention::branch_attempts(
+                                &resolved.roots,
+                                context.binding.project_id(),
+                                branch,
+                            )
+                            .ok()
+                        });
+                    (lane.path.clone(), ids)
+                })
+                .collect();
+            let free = |path: &Path| {
+                attempts
+                    .get(path)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|ids| {
+                        crate::provider_retention::attempts_released(
+                            &resolved.roots,
+                            context.binding.project_id(),
+                            ids,
+                            path,
+                        )
+                        .unwrap_or(false)
+                    })
+            };
+            let terminal = free;
             let owner = crate::retention_owner::Owner::new(
                 &resolved.roots,
                 &resolved.home,
@@ -1277,7 +1394,7 @@ pub(crate) fn retention_event(
                 cancel,
             )?;
             let policy = worktrees::WorktreeGcPolicy {
-                mode: worktrees::CollectionMode::Worktrees,
+                mode: worktrees::CollectionMode::LandingCleanup,
                 proof: Some(evidence),
                 upstream: None,
                 upstream_reference: None,
@@ -1285,7 +1402,13 @@ pub(crate) fn retention_event(
                 no_live_lanes: &free,
                 regenerable: &settings.regenerable,
                 keep: &settings.keep,
-                written_before_ns: i128::MIN,
+                written_before_ns: i128::from(
+                    context
+                        .clock
+                        .wall_now()
+                        .map_err(|_| Error::Budget)?
+                        .as_micros(),
+                ) * 1_000,
                 dry_run: false,
                 include_foreign: settings.foreign_worktrees
                     == provenant_config::ForeignWorktrees::Collect,
@@ -1298,7 +1421,31 @@ pub(crate) fn retention_event(
                 provenant_config::RetentionTrigger::MergeObservation,
             ) {
                 if class.class == provenant_config::RetentionKind::GitWorktrees {
-                    let _ = worktrees::collect(context, &lanes, &policy, cancel)?;
+                    let report = worktrees::collect(context, &lanes, &policy, cancel)?;
+                    for lane in &report.worktrees.removed {
+                        if let Some(branch) = lane
+                            .branch
+                            .as_deref()
+                            .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                            && let Some(Some(ids)) = attempts.get(&lane.path)
+                        {
+                            let _ = crate::provider_retention::spawn_branch_scratch(
+                                &resolved.roots,
+                                &resolved.home,
+                                &resolved.project,
+                                branch,
+                                lane.head,
+                                match &evidence.source {
+                                    LandingSource::IntegrationTarget { reference, .. }
+                                    | LandingSource::TreeEquivalent { reference, .. } => {
+                                        reference.strip_prefix("refs/remotes/").unwrap_or(reference)
+                                    }
+                                    _ => "origin/HEAD",
+                                },
+                                ids,
+                            );
+                        }
+                    }
                 }
             }
             Ok(())
@@ -1314,7 +1461,6 @@ pub(crate) fn land_cleanup(
     workers: &dyn WorkerObserver,
 ) -> Result<LandWorktree, Error> {
     let roots::Resolved {
-        assets,
         home,
         project,
         roots,
@@ -1333,11 +1479,25 @@ pub(crate) fn land_cleanup(
         workers,
         |context, cancel| {
             let mut landed = LandWorktree::default();
+            let project_id = context.binding.project_id();
+            let attempts =
+                crate::provider_retention::branch_attempts(&roots, project_id, branch).ok();
             let Some(lane) = worktrees::list(context, cancel)?.into_iter().find(|lane| {
                 lane.branch
                     .as_deref()
                     .is_some_and(|name| name.strip_prefix("refs/heads/") == Some(branch))
             }) else {
+                if let Some(ids) = &attempts {
+                    let _ = crate::provider_retention::spawn_branch_scratch(
+                        &roots,
+                        &home,
+                        &project,
+                        branch,
+                        tip,
+                        integration,
+                        ids,
+                    );
+                }
                 return Ok(landed);
             };
             landed.registered = true;
@@ -1380,7 +1540,6 @@ pub(crate) fn land_cleanup(
                     return Ok(landed);
                 }
             }
-            let project_id = context.binding.project_id();
             let settings = config
                 .gc
                 .projects
@@ -1391,14 +1550,14 @@ pub(crate) fn land_cleanup(
             if !regenerable.iter().any(|name| name == "target") {
                 regenerable.push("target".into());
             }
-            let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
             // A branch landed by hand may never have had a lane, so unlike a
             // sweep this accepts a worktree no lane used. A live or unobservable
             // lane, or a stale scan, still refuses.
             let idle = |path: &Path| {
-                snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.no_live_lanes(path))
+                attempts.as_ref().is_some_and(|ids| {
+                    crate::provider_retention::attempts_released(&roots, project_id, ids, path)
+                        .unwrap_or(false)
+                })
             };
             let (terminal, no_live_lanes) = (idle, idle);
             // The merge is the proof of completion, so build output written in
@@ -1489,6 +1648,17 @@ pub(crate) fn land_cleanup(
                     landed.kept = Some(message);
                 }
             }
+            if landed.removed {
+                let _ = crate::provider_retention::spawn_branch_scratch(
+                    &roots,
+                    &home,
+                    &project,
+                    branch,
+                    tip,
+                    integration,
+                    attempts.as_deref().unwrap_or(&[]),
+                );
+            }
             Ok(landed)
         },
     )
@@ -1521,7 +1691,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 dry_run: command.dry_run,
                 ..Default::default()
             },
-            idle_days: command.idle_days,
+            idle_seconds: command.idle.unwrap_or(6 * 3600),
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
@@ -1532,6 +1702,24 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         });
     }
     if command.scheduled {
+        let floor = command
+            .free_floor
+            .map(Ok)
+            .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
+            .map_err(Error::DiskSpace)?;
+        if provenant_confinement::disk::lane_available_bytes(roots.state.as_path(), &home, &project)
+            .map_err(Error::DiskSpace)?
+            >= floor
+        {
+            return Ok(GcData {
+                report: provenant_confinement::cache::CacheGcReport {
+                    dry_run: command.dry_run,
+                    ..Default::default()
+                },
+                notice: Some("background sweep skipped: free space is above gc.free_floor".into()),
+                ..Default::default()
+            });
+        }
         let selection = provenant_config::registered_gc_project_selection(&roots)?;
         skipped_transient = selection.skipped_transient;
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
@@ -1593,7 +1781,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     dry_run: command.dry_run,
                     ..Default::default()
                 },
-                idle_days: command.idle_days,
+                idle_seconds: command.idle.unwrap_or(6 * 3600),
                 skipped_transient,
                 notice: command
                     .pressure
@@ -1652,22 +1840,20 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map(Ok)
         .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
         .map_err(Error::DiskSpace)?;
-    let output_idle_days = if Directory::open_anchor(roots.state.as_path())?
-        .available_bytes()
-        .map_err(Error::DiskSpace)?
-        < free_floor
-    {
-        1
-    } else {
-        command.idle_days
-    };
+    let idle_seconds = command.idle.unwrap_or(
+        config
+            .gc
+            .idle_seconds()
+            .map_err(|_| Error::GcObservation("invalid idle duration"))?,
+    );
+    let output_idle_seconds = idle_seconds;
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
         .wall_now()
         .map(|now| i128::from(now.as_micros()) * 1_000)
         .map_err(|_| Error::Budget)?;
     let policy = CacheGcPolicy {
-        idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
+        idle_before_ns: Some(now_ns - i128::from(idle_seconds) * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
         max_total_bytes: Some(
             config
@@ -1705,11 +1891,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_ids: &project_ids,
         policy,
         now_ns,
-        output_idle_days,
+        output_idle_seconds,
         free_floor,
         cache_error: None,
         data: GcData {
-            idle_days: command.idle_days,
+            idle_seconds,
             unobserved_projects,
             skipped_transient,
             ..Default::default()
@@ -1782,7 +1968,7 @@ struct GcAdapters<'a> {
     project_ids: &'a [provenant_core::ProjectId],
     policy: provenant_confinement::cache::CacheGcPolicy,
     now_ns: i128,
-    output_idle_days: u64,
+    output_idle_seconds: u64,
     free_floor: u64,
     cache_error: Option<provenant_confinement::cache::CacheGcError>,
     data: GcData,
@@ -1830,7 +2016,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let config = self.config;
         let workers = self.workers;
         let facts = self.facts;
-        let output_idle_days = self.output_idle_days;
+        let output_idle_seconds = self.output_idle_seconds;
 
         for project in &mut self.projects {
             let settings = config
@@ -2002,7 +2188,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             regenerable: &settings.regenerable,
                             keep: &settings.keep,
                             written_before_ns: now_ns
-                                - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
+                                - i128::from(output_idle_seconds) * 1_000_000_000,
                             include_foreign: !command.pressure
                                 && settings.foreign_worktrees
                                     == provenant_config::ForeignWorktrees::Collect,
@@ -2126,7 +2312,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
 
         self.data.staging_busy = crate::staging_gc::collect(
             roots.state.as_path(),
-            now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
+            now_ns - i128::from(self.data.idle_seconds) * 1_000_000_000,
             command.dry_run,
         )?;
 
@@ -2214,7 +2400,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             self.roots,
             self.home,
             self.assets,
-            self.config.retention.provider_state_days,
+            self.data.idle_seconds,
             (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
             self.command.dry_run,
         );
@@ -2448,8 +2634,7 @@ fn with_context_mode_with_owner<T>(
     };
     let name = binding.project_id().to_string();
     let project_state = if read_only {
-        let project_state = worktrees_state.open_verified_directory(OsStr::new(&name))?;
-        project_state
+        worktrees_state.open_verified_directory(OsStr::new(&name))?
     } else {
         child(&worktrees_state, &name)?
     };

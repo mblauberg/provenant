@@ -32,12 +32,14 @@ them as Markdown under the untracked `<repository>/docs/reference/`.
 - [Routing](routing.md): routes, providers, accounts, quota and readiness
 - [Run](run.md): operation IDs, stop handling and the run contracts below
   - [Launch](run-launch.md): admission, confinement and lane environment
+  - [Lane contracts](lane-contracts.md): launch, observations and result projection
   - [Settlement](run-settlement.md): outcomes, continuation and retention
   - [Git and delivery](run-git.md): Git custody, worktrees and publication
   - [Attribution](run-attribution.md): PR contributions and work correlation
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, lane relay, graphs and peer hosts
 - [Telemetry](telemetry.md): usage ledger, cost and outcomes
+- [CI](ci.md): the required check, suite tiers and green evidence
 - [Workflow](workflow.md): review coverage, receipts and sessions
 - [Rust workspace rules](rust-workspace.md): layering, dependencies,
   errors, unsafe and tests

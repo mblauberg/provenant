@@ -275,7 +275,7 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         Some(efforts) if efforts.is_empty() => text.push_str("supported efforts: none\n"),
         Some(efforts) => text.push_str(&format!("supported efforts: {}\n", efforts.join(", "))),
         None => {
-            text.push_str("model is not in the catalogue; effort support is unrecorded\n");
+            text.push_str("warning: model source=user; absent from the bundled and discovered catalogue, effort support is unrecorded\n");
             if !preview.nearest_models.is_empty() {
                 text.push_str(&format!(
                     "nearest catalogued IDs: {}\n",
@@ -294,6 +294,26 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         text.push_str(&format!("quota source: {source}, coverage: {coverage}\n"));
     }
     text
+}
+pub(super) fn monthly_list_lines(list: &provenant_routing::RouteList) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "monthly enabled={} burst_percent={} initial_launch_cost_basis_points={} source={} knob={}",
+        list.monthly.values.enabled,
+        list.monthly.values.burst_percent,
+        list.monthly.values.initial_launch_cost_basis_points,
+        list.monthly.source,
+        list.monthly.knob
+    ));
+    lines.extend(list.monthly_allowances.iter().map(|row| {
+        format!(
+            "monthly {} account={} {}",
+            row.model.as_str(),
+            row.account.as_deref().unwrap_or("unknown"),
+            row.assessment.detail
+        )
+    }));
+    lines
 }
 pub fn run(
     command: Route,
@@ -379,26 +399,30 @@ pub fn run(
                 let mut lines = vec![format!("catalogue {}", list.catalogue_revision)];
                 lines.extend(list.valid_pairs.iter().map(|pair| {
                     format!(
-                        "{} effort={}",
+                        "{} source={} effort={}",
                         pair.model.as_str(),
+                        pair.source,
                         pair.effort.as_deref().unwrap_or("unspecified")
                     )
                 }));
                 lines.extend(list.models.iter().map(|m| {
                     format!(
-                        "{} efforts=[{}]{}",
+                        "{} source={} efforts=[{}]{}",
                         m.model.as_str(),
+                        m.source,
                         m.efforts.join(","),
                         unobserved_model(&m.model, list)
                     )
                 }));
                 lines.extend(list.named_routes.iter().map(|(name, r)| {
                     format!(
-                        "route {name} = {}{}",
+                        "route {name} = {} source={}{}",
                         r.model.as_str(),
+                        r.source,
                         unobserved_model(&r.model, list)
                     )
                 }));
+                lines.extend(monthly_list_lines(list));
                 lines.extend(list.account_pacing.iter().map(|entry| {
                     format!(
                         "account {}/{} pacing={:?} source={} profile={:?} expires={:?}",
@@ -455,8 +479,9 @@ pub fn run(
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} weight={} pacing={:?}{}{}",
+                                "{} source={} weight={} pacing={:?}{}{}",
                                 member.model.as_str(),
+                                member.source,
                                 member.weight,
                                 member.pacing,
                                 member
@@ -496,6 +521,7 @@ pub fn run(
     let summary = match &result.data {
         Some(Data::List(list)) => {
             let counts = [
+                ("valid pairs", list.valid_pairs.len()),
                 ("models", list.models.len()),
                 ("routes", list.named_routes.len()),
                 ("pools", list.pools.len()),
@@ -504,7 +530,18 @@ pub fn run(
                 ("model exclusions", list.model_exclusions.len()),
                 ("exclusion notes", list.exclusion_notes.len()),
             ];
-            let mut rows = Vec::new();
+            let mut rows: Vec<_> = list
+                .valid_pairs
+                .iter()
+                .map(|pair| {
+                    format!(
+                        "{} source={} effort={}",
+                        pair.model.as_str(),
+                        pair.source,
+                        pair.effort.as_deref().unwrap_or("unspecified")
+                    )
+                })
+                .collect();
             if list.readiness_truncated {
                 rows.push("warning: readiness display limited to 256 account/model rows".into());
             }
@@ -525,8 +562,9 @@ pub fn run(
             }));
             rows.extend(list.named_routes.iter().map(|(name, r)| {
                 format!(
-                    "route {name} = {}{}",
+                    "route {name} = {} source={}{}",
                     r.model.as_str(),
+                    r.source,
                     unobserved_model(&r.model, list)
                 )
             }));

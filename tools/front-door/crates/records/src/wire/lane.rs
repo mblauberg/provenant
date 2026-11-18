@@ -27,6 +27,19 @@ fn settlement_reason_schema() -> Value {
     schema
 }
 
+fn terminal_cause_schema() -> Value {
+    use crate::run::TerminalCause;
+    let mut scalar = choices(&[]);
+    scalar["enum"] = json!(
+        TerminalCause::ALL
+            .iter()
+            .filter(|cause| { !matches!(cause, TerminalCause::ProviderCaptureDefect { .. }) })
+            .collect::<Vec<_>>()
+    );
+    json!({"oneOf": [scalar, object(&[("provider_capture_defect",
+        object(&[("line", unsigned())], &[]))], &[])]})
+}
+
 lane_row! {
     required {
         project_id: String => string();
@@ -84,7 +97,7 @@ lane_row! {
             ("push", choices(&["not_granted", "not_attempted", "not_needed", "pushed", "failed"])),
         ], &[("head", string()), ("ahead", unsigned()), ("dirty_paths", unsigned())]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "project_binding_directory_unsafe", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "empty_writer_result", "context_handoff", "blocked", "lane_token_lost", "steered"]);
+        terminal_cause: crate::run::TerminalCause => terminal_cause_schema();
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
@@ -145,14 +158,7 @@ impl LaneRow {
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
                 terminal_cause
-                    .map(|cause| {
-                        if detail {
-                            cause.detail()
-                        } else {
-                            cause.reason()
-                        }
-                        .to_owned()
-                    })
+                    .map(|cause| cause.diagnostic(detail))
                     .or_else(|| {
                         (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
                             .then(|| outcome.diagnostic_reason().to_owned())
@@ -330,6 +336,13 @@ impl LaneRow {
             lane.state,
             AttemptState::Terminal {
                 outcome: crate::run::Outcome::Lost | crate::run::Outcome::Unsettled,
+                ..
+            }
+        ) && !matches!(
+            lane.state,
+            AttemptState::Terminal {
+                outcome: crate::run::Outcome::Unsettled,
+                terminal_cause: Some(crate::run::TerminalCause::ProviderCaptureDefect { .. }),
                 ..
             }
         ) {
@@ -628,6 +641,7 @@ impl crate::run::TerminalCause {
         Self::CommandUnavailable,
         Self::HostNativeUnconfigured,
         Self::IdentityMismatch,
+        Self::ProviderCaptureDefect { line: 1 },
         Self::StoppedNoWork,
         Self::EmptyWriterResult,
         Self::ContextHandoff,
@@ -670,6 +684,7 @@ mod terminal_cause_tests {
             | TerminalCause::CommandUnavailable
             | TerminalCause::HostNativeUnconfigured
             | TerminalCause::IdentityMismatch
+            | TerminalCause::ProviderCaptureDefect { .. }
             | TerminalCause::StoppedNoWork
             | TerminalCause::EmptyWriterResult
             | TerminalCause::ContextHandoff
@@ -695,7 +710,15 @@ mod terminal_cause_tests {
             };
             let (_, reason) = LaneRow::state_and_reason(&state);
             let reason = reason.unwrap();
-            assert_eq!(reason, format!("{}; fixture scoped note", cause.detail()));
+            if let TerminalCause::ProviderCaptureDefect { line } = cause {
+                assert!(
+                    reason.contains(&format!("stdout.log line {line}")),
+                    "{reason}"
+                );
+                assert!(reason.contains("fixture scoped note"));
+            } else {
+                assert_eq!(reason, format!("{}; fixture scoped note", cause.detail()));
+            }
             assert!(!reason.contains("secret"));
             let (_, label) = LaneRow::state_and_label(&state);
             assert_eq!(label.as_deref(), Some(cause.reason()));

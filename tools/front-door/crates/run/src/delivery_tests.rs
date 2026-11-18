@@ -453,11 +453,14 @@ impl PrepareFixture {
             crate::objects::publish_branch(
                 &git_executable,
                 launch.worktree.repo(),
-                launch.branch.as_str(),
-                base,
-                None,
-                tip,
-                scope.attempt,
+                crate::objects::BranchPublication {
+                    branch: launch.branch.as_str(),
+                    base,
+                    launch_ref: None,
+                    head: tip,
+                    attempt: scope.attempt,
+                },
+                &provenant_records::policy::Policy::default(),
             )?;
             if advance_after_publish {
                 std::fs::write(self.writer.worktree.join("AGENTS.md"), "later writer\n")?;

@@ -33,6 +33,10 @@ a sibling's staged paths.
 Authorised writers share incarnation- and branch-bound private Git data,
 including HEAD, index, refs and objects. Per-attempt configuration and credentials
 remain separate; private data outlives an individual attempt's scratch.
+Settlement copies object files through held, no-follow descriptors into a byte- and entry-bounded
+host-owned sender before sanitising sidecars. It preserves the live shared
+store and its validated host alternate; inconsistent input fails integrity checks
+before publication. Budget preparation also preserves that alternate.
 Git owns the atomicity of config, index, refs and worktree registration. Provenant
 holds no repository-wide lock around Git commands. Explicit `*.lock` collisions
 receive brief bounded retries with jitter; semantic conflicts and permission
@@ -71,6 +75,10 @@ Permanent pre-admission refusals are durable outcomes of their operation. Replay
 returns the refusal without preparing again; a failure to store it is not
 acknowledged as success.
 - Why: a lost response must not turn a refusal into another launch.
+
+A pre-launch routing refusal retains a bounded host-authored explanation in
+its result alongside the safe cause and remedy. Provider-originated diagnostics
+never supply that public explanation.
 
 Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.

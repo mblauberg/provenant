@@ -39,6 +39,7 @@ procedure.
 | `provenant pr land` | provenant land NUMBER --wait |
 | `provenant fabric claim` | provenant adopt KIND:ID or provenant release KIND:ID |
 | `provenant land --batch` | provenant land NUMBER [NUMBER ...] |
+| `provenant gc --idle-days` | provenant gc --idle DURATION |
 | `provenant fabric graph` | provenant status NAME |
 | `provenant fabric mcp` | provenant fabric |
 | `provenant fabric_graph` | provenant run TEMPLATE BRIEF |
@@ -71,8 +72,8 @@ procedure.
 <!-- REMOVED_CLI_END -->
 - **Environment.** `PROVENANT_SESSION_STATE` was removed in 1.x: session
   checkpoints are keyed by the host session ID. `PROVENANT_BUILD_WAIT_SECS`
-  and `PROVENANT_BUILD_WAIT_MARKER` are removed because build slots no longer
-  wait. `PROVENANT_SANDBOX`, `PROVENANT_PROCESS_TREE` and
+  and `PROVENANT_BUILD_WAIT_MARKER` are removed; build-slot waits use host
+  settings and an internal lane signal. `PROVENANT_SANDBOX`, `PROVENANT_PROCESS_TREE` and
   `PROVENANT_LANE_CARGO_LINT_TARGET` keep their names and are stable.
   `PROVENANT_LANE_DEPTH` keeps its name and is evolving.
 - **Tiers.** Most of the contract is `evolving`: it may change in a minor
@@ -118,7 +119,7 @@ it does not list with the `worktree_layout` port (`default` and `roots` in
 
 ```sh
 provenant config ports
-provenant config show
+provenant config show --full
 ```
 
 ## Opt into ports

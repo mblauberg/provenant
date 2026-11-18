@@ -1,5 +1,5 @@
 use crate::{
-    artifacts::{artifact_path, read_sealed, remove_temporary_best_effort, seal},
+    artifacts::{artifact_path, read_sealed, seal},
     db::{bytes, decode, sql_int},
     *,
 };
@@ -486,7 +486,12 @@ impl RunStore {
         Ok(pending)
     }
 
-    fn effects_pending(&self, id: AttemptId, raw: &[u8], call: &Request<'_>) -> Result<bool> {
+    pub(crate) fn effects_pending(
+        &self,
+        id: AttemptId,
+        raw: &[u8],
+        call: &Request<'_>,
+    ) -> Result<bool> {
         // A cancelled delivery waits for an explicit `lane deliver`.
         let retryable = |effect: &EffectDisposition| {
             matches!(
@@ -1238,6 +1243,20 @@ impl RunStore {
                 ),
             };
         old.preparation_failure = preparation_failure;
+        let safe_state = AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause,
+            terminal_note: terminal_note.clone(),
+            stop: None,
+            outcome,
+            exit_code: None,
+            finished_at,
+            reason: reason.clone(),
+        };
+        let refusal_result = provenant_records::wire::lane::LaneRow::state_and_reason(&safe_state)
+            .1
+            .map(|text| provenant_confinement::redact::bounded_line(&text, 256))
+            .unwrap_or_default();
         let publication = TerminalPublication {
             handoff: Ok(None),
             terminal_cause,
@@ -1247,9 +1266,9 @@ impl RunStore {
             started_at: None,
             provider_ms: None,
             reason,
-            result: "",
+            result: &refusal_result,
             complete: true,
-            redacted: false,
+            redacted: true,
             resolved_route: old.resolved_route.clone(),
             applied_route: old.applied_route.clone(),
             observed_route: old.observed_route.clone(),
@@ -1469,12 +1488,6 @@ impl RunStore {
             &mut ProviderStateGc::default(),
         );
         let _ = self.set_temporary_retained(record.attempt_id, true, call);
-        let scratch_declared =
-            provenant_config::retention_schedule(provenant_config::RetentionTrigger::Settlement)
-                .any(|class| class.class == provenant_config::RetentionKind::AttemptScratch);
-        if scratch_declared && remove_temporary_best_effort(&attempt_dir).is_ok() {
-            let _ = self.set_temporary_retained(record.attempt_id, false, call);
-        }
     }
     /// Seal result and terminal intent, then commit the attempt, run summary,
     /// operation state, released admission and event together. Sealing precedes
@@ -2015,8 +2028,16 @@ impl RunStore {
         });
         let identity_conflict =
             live_conflict || identity_evidence.is_some_and(ProviderIdentityEvidence::has_conflict);
+        let strict_identity = self
+            .resume_policy(child.attempt_id, call)?
+            .rule("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE")
+            .rule
+            .strength
+            == provenant_records::policy::Strength::Refuse;
         let evidence_incomplete = terminal_unsettled
-            || identity_evidence.is_none_or(ProviderIdentityEvidence::is_incomplete);
+            || identity_evidence.is_none()
+            || (strict_identity
+                && identity_evidence.is_some_and(ProviderIdentityEvidence::is_incomplete));
         let disposition = self.steer_successor_disposition(
             child.attempt_id,
             child,

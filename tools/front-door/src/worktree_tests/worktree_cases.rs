@@ -292,7 +292,13 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
         1
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
-    assert!(!orphan.exists(), "gc must still sweep orphaned caches");
+    assert!(
+        orphan.exists(),
+        "recent orphan remains within the idle window"
+    );
+    age_gc_output(&orphan)?;
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(!orphan.exists(), "gc must sweep idle orphaned caches");
     rig.assert_v1_root_untouched()
 }
 

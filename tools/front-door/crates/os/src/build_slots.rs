@@ -37,6 +37,27 @@ pub enum BuildSlotsError {
 /// inside `fabric/locks`: a lane writes its landing locks under
 /// `fabric/locks`, and a slot file a lane can unlink is no throttle at all.
 pub const DIRECTORY: [&str; 1] = ["build-slots"];
+/// Per-lane advisory signal held shared while a build waits for admission.
+pub const WAIT_FILE: &str = "build-slot-wait.lock";
+pub const SHIM_DIRECTORY: &str = "cargo-bin";
+
+pub fn mark_waiting(scratch: &Path) -> Result<LockGuard> {
+    use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+    let clock = crate::clock::SystemClock::new();
+    Directory::open_anchor(&scratch.join(SHIM_DIRECTORY))?.lock_existing(
+        std::ffi::OsStr::new(WAIT_FILE),
+        LockMode::Shared,
+        WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(1_000_000)),
+        &CancelToken::new(),
+        &clock,
+    )
+}
+
+pub fn is_waiting(scratch: &Path) -> bool {
+    Directory::open_anchor(&scratch.join(SHIM_DIRECTORY))
+        .and_then(|dir| dir.try_lock_existing(std::ffi::OsStr::new(WAIT_FILE), LockMode::Exclusive))
+        .is_err_and(|error| matches!(error, FsError::LockTimeout { .. }))
+}
 fn directory(state: &Path) -> PathBuf {
     DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n))
 }

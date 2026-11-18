@@ -41,13 +41,15 @@ def main(args):
     # The verifier itself runs inside a Provenant lane, but its tests must
     # start as ordinary test processes. Ambient lane markers otherwise make
     # unit fixtures take production lane-only lookup/relay paths that CI
-    # never exercises. Lane-specific tests pass these markers explicitly to
+    # never exercises. The lane Git executable also rebinds fixture storage.
+    # Lane-specific tests pass these markers explicitly to
     # the child process they are testing.
     test_env = os.environ.copy()
     for name in (
         "PROVENANT_PARENT_ATTEMPT_ID",
         "PROVENANT_RUN_STATE_DIR",
         "PROVENANT_LANE_DEPTH",
+        "PROVENANT_GIT",
     ):
         test_env.pop(name, None)
     with tempfile.TemporaryDirectory(prefix="provenant-nextest-") as scratch:

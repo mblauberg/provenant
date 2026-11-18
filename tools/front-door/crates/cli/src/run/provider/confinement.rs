@@ -707,13 +707,48 @@ fn credential_declarations(
 
     for entry in settings.entries.values() {
         for directory in crate::accounts::credential_directories(entry) {
+            let source = format!(
+                "account registry: {}/{} credential store",
+                entry.adapter, entry.label
+            );
+            if let Some(install) = AdapterSpec::get(&entry.adapter)
+                .and_then(|spec| spec.install)
+                .filter(|install| install.lane_home.0 == "HOME")
+            {
+                // A HOME-rooted account owns client state and credential files,
+                // not the whole HOME. Keep nested account homes independent.
+                declarations.push(CredentialDeclaration {
+                    root: CredentialRoot {
+                        path: directory.join(install.home),
+                        source: source.clone(),
+                        kind: CredentialKind::Store,
+                        scope: CredentialScope::Subtree,
+                    },
+                    inventory: CredentialInventory::Unknown,
+                });
+                if let Some(spec) = AdapterSpec::get(&entry.adapter) {
+                    for relative in spec
+                        .credential_files
+                        .iter()
+                        .chain(spec.credential_auxiliary_files)
+                    {
+                        declarations.push(CredentialDeclaration {
+                            root: CredentialRoot {
+                                path: directory.join(relative),
+                                source: source.clone(),
+                                kind: CredentialKind::Store,
+                                scope: CredentialScope::Exact,
+                            },
+                            inventory: CredentialInventory::Unknown,
+                        });
+                    }
+                }
+                continue;
+            }
             declarations.push(CredentialDeclaration {
                 root: CredentialRoot {
                     path: directory.to_path_buf(),
-                    source: format!(
-                        "account registry: {}/{} credential store",
-                        entry.adapter, entry.label
-                    ),
+                    source,
                     kind: CredentialKind::Store,
                     scope: CredentialScope::Subtree,
                 },
@@ -1794,6 +1829,12 @@ pub(super) fn apply_setup(
             SetupStep::WriteFile { path, bytes } => write_setup_file(roots, path, bytes, false)?,
             SetupStep::WriteExecutable { path, bytes } => {
                 write_setup_file(roots, path, bytes, true)?;
+            }
+            SetupStep::CreateLock(path) => {
+                let (parent, name) = setup_parent(&roots[..roots.len().min(2)], path, false)?;
+                parent
+                    .try_lock(name, provenant_os::fs::LockMode::Exclusive)
+                    .map_err(|error| error.to_string())?;
             }
             SetupStep::Symlink { link, target } => {
                 let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;

@@ -64,6 +64,9 @@ pub enum Command {
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests
     Inbox(Box<crate::inbox::Inbox>),
+    /// Share append-only observations with project lanes
+    #[command(subcommand)]
+    Notes(crate::notes::Notes),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
@@ -106,6 +109,18 @@ pub enum Command {
     /// Wait for graph work or pull requests to settle
     #[command(add = crate::metadata::CoreCommand(10, "provenant wait fix-login"))]
     Wait(Wait),
+    /// Replay project observations as JSON lines
+    Events {
+        /// Resume after this project sequence cursor
+        #[arg(long, catalog_i64_range = 0..)]
+        from: Option<i64>,
+        /// Continue delivering observations as they arrive
+        #[arg(long)]
+        follow: bool,
+        /// Persist delivery progress under this consumer name
+        #[arg(long, conflicts_with = "from")]
+        consumer: Option<String>,
+    },
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
@@ -143,6 +158,13 @@ pub enum Command {
     /// Read an attempt's output
     #[command(add = crate::metadata::CoreCommand(2, "provenant output fix-login/review"))]
     Output(Output),
+    /// Summarise a lane's handoff, branch, head and verification
+    #[command(add = crate::metadata::CoreCommand(11, "provenant result fix-login/implement"))]
+    Result {
+        /// Graph, node or attempt, as NAME[/NODE[#N]]
+        #[arg(value_name = "TARGET", catalog_graph_target())]
+        target: Target,
+    },
     /// Show a graph's recorded revisions and attempt timeline
     Trace(GraphTrace),
     /// Stop a graph, node or attempt subtree
@@ -631,6 +653,9 @@ pub struct GraphRunArgs {
     /// Git base for a new writer branch
     #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
+    /// Pin a review to this pull request (host resolves its base and head)
+    #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
+    pub pr: Option<u64>,
     /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,
@@ -667,7 +692,14 @@ pub struct GraphRunArgs {
 fn graph_name(text: &str) -> Result<String, String> {
     match provenant_fabric_runtime::graph::template::graph_name_fault(text) {
         None => Ok(text.to_owned()),
-        Some(fault) => Err(fault.to_owned()),
+        Some(fault) => {
+            let suggestion = provenant_fabric_runtime::graph::template::default_graph_base(text);
+            if suggestion != text {
+                Err(format!("{fault}; try `{suggestion}`"))
+            } else {
+                Err(fault.to_owned())
+            }
+        }
     }
 }
 
@@ -1010,9 +1042,12 @@ pub struct Gc {
     /// Also delete merged worktrees and ignored declared output (otherwise previewed)
     #[arg(long)]
     pub apply: bool,
-    /// Minimum idle age for standalone caches and ignored output; merged trees are immediate
-    #[arg(long, default_value = "7", catalog_u64_range = 1..=3650)]
-    pub idle_days: u64,
+    /// Collect scratch owned by work that has finished after this branch landed
+    #[arg(long, hide = true, requires = "apply", conflicts_with = "dry_run")]
+    pub finished_branch: Option<String>,
+    /// Unowned idle lifetime (default: gc.idle, shipped default 6h)
+    #[arg(long, catalog_gc_idle())]
+    pub idle: Option<u64>,
 }
 #[derive(Debug, Args)]
 pub struct Remove {
@@ -1095,6 +1130,10 @@ pub enum Internal {
     },
     /// Detached cargo-seed refresh queued by the daily collector.
     TickSeed,
+    /// Host-owned forge forwarder; one instance per repository.
+    EventListen {
+        repository: String,
+    },
     /// Run Cargo through the selected build admission backend (the lane's cargo shim). Backend and source come from `PROVENANT_BUILD_ADMISSION_BACKEND` and `PROVENANT_BUILD_ADMISSION_SOURCE`; builtin slot directory/count use `PROVENANT_BUILD_SLOT_STATE` and `PROVENANT_BUILD_SLOTS`, never lane arguments.
     BuildSlot {
         /// The real cargo, then its arguments.
@@ -1333,11 +1372,16 @@ pub struct Edit {
 }
 #[derive(Debug, Args)]
 pub struct Templates {
-    /// Template to show; omit to list effective templates
-    pub name: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<TemplatesCommand>,
     /// Document containing inline templates (JSON or TOML)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub file: Option<PathBuf>,
+}
+#[derive(Debug, Subcommand)]
+pub enum TemplatesCommand {
+    /// Show one effective template
+    Show { name: String },
 }
 /// A bare graph name: a target with no node.
 fn edit_graph_name(value: &str) -> Result<String, String> {

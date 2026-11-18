@@ -309,6 +309,10 @@ pub enum InvalidInputDetail {
     GraphReason(String),
     OperationFailed,
     GraphRelayCause(GraphRelayCause),
+    RetryNode {
+        graph: String,
+        node: String,
+    },
     /// A `--set` or `with` parameter a template refuses; names are disclosable.
     Parameter(Box<crate::graph::template::ParameterRefusal>),
     TemplateInvalid,
@@ -326,6 +330,11 @@ pub enum InvalidInputDetail {
         limit: usize,
     },
     FieldTitle(String),
+    /// Scanner facts contain only a bounded field name and a closed rule identifier.
+    ContentScan {
+        field: String,
+        assignment: bool,
+    },
     InputUnreadable,
     InputTooLarge,
     InputInvalidUtf8,
@@ -344,6 +353,10 @@ impl InvalidInputDetail {
     fn redacted(&self) -> Self {
         let clean = |field: &String| safe_input_field(field).unwrap_or_default();
         match self {
+            Self::RetryNode { graph, node } => Self::RetryNode {
+                graph: safe_retry_name(graph).unwrap_or("NAME").into(),
+                node: safe_retry_name(node).unwrap_or("NODE").into(),
+            },
             Self::Field(path) => Self::Field(clean(path)),
             Self::FieldDecode { field, missing } => Self::FieldDecode {
                 field: safe_decoded_field(field).unwrap_or_default(),
@@ -354,6 +367,10 @@ impl InvalidInputDetail {
                 limit: *limit,
             },
             Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
+            Self::ContentScan { field, assignment } => Self::ContentScan {
+                field: clean(field),
+                assignment: *assignment,
+            },
             Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.redacted())),
             other => other.clone(),
         }
@@ -375,6 +392,13 @@ impl InvalidInputDetail {
             ),
             Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
+            Self::RetryNode { graph, node } => {
+                if safe_retry_name(graph).is_some() && safe_retry_name(node).is_some() {
+                    Some(format!("select a node to retry with `provenant retry {graph}/{node}`"))
+                } else {
+                    Some("select a node to retry with `provenant retry NAME/NODE`".into())
+                }
+            }
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
@@ -400,8 +424,35 @@ impl InvalidInputDetail {
             Self::FieldTooLarge { field, limit } => safe_input_field(field)
                 .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
+            Self::ContentScan { field, assignment } => safe_input_field(field).map(|path| format!("input field `{path}` matches the {} rule; remove credential material and retry", if *assignment { "credential assignment" } else { "credential token or URL userinfo" })),
         }
     }
+}
+
+fn safe_retry_name(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+    .then_some(name)
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn retry_node_suggestion_redacts_unsafe_names() -> Result<(), Box<dyn std::error::Error>> {
+    let detail = InvalidInputDetail::RetryNode {
+        graph: "graph".into(),
+        node: "secret\nvalue".into(),
+    };
+    let wire = serde_json::to_string(&detail.redacted())?;
+    assert!(!wire.contains("secret"));
+    assert!(
+        detail
+            .safe_text()
+            .is_some_and(|message| message.contains("NAME/NODE"))
+    );
+    Ok(())
 }
 
 /// Template lookup failures are safe to disclose only in the exact form the

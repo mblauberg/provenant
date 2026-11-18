@@ -666,7 +666,7 @@ fn fixture() -> Result {
         .map(|pair| pair[1].as_str());
     if !prompt.contains("fixture missing rollout") {
         // Real rollouts record tool output. A printed credential must be
-        // scrubbed from this transcript at settlement, not only from captures.
+        // scrubbed from this transcript at settlement, before disclosure.
         let recorded = if prompt.contains("fixture printed credential") {
             "printed ghp_abcdefghijklmnopqrstuvwxyz0123456789"
         } else {
@@ -762,12 +762,25 @@ fn fixture() -> Result {
         write!(io::stderr(), "diagnostic {token}")?;
         for frame in [
             json!({"type":"thread.started","thread_id":session}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}{DONE_FENCE}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"Review in progress."}}),
+            // Unclosed quotes inside tool output used to make streaming
+            // redaction consume JSON framing and poison settlement replay.
+            json!({"type":"item.completed","item":{"type":"command_execution",
+                "command":"rg TOKEN=\" source.rs",
+                "aggregated_output":format!("TOKEN=\"{token}\nnext line")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("Final answer: credential {token}{DONE_FENCE}")}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
+            if prompt.contains("corrupt") && frame["item"]["type"] == "command_execution" {
+                writeln!(
+                    io::stdout(),
+                    "{{\"type\":\"item.completed\",\"item\":\"[REDACTED]"
+                )?;
+                continue;
+            }
             let frame = frame.to_string();
-            // Escaping hides the marker from the byte-stream filter. The
-            // decoded answer must pass through redaction again at settlement.
+            // Both literal and JSON-escaped credential markers must be
+            // redacted in the decoded answer, while raw frames stay intact.
             let frame = if prompt.contains("escaped") {
                 frame.replace("ghp_", r"\u0067hp_")
             } else {
@@ -4244,7 +4257,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     Ok(())
 }
 
-fn agy_individual_quota_cools_model_until_reset() -> Result {
+fn agy_individual_quota_cools_model_until_revalidation() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
@@ -4301,15 +4314,17 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
         }
         .check(route)
     };
-    // Past the unknown-reset hour, the stated reset still holds the model.
-    for at in [now, now + 3600, resets - 1] {
+    // An agy refusal holds the model briefly, then revalidates even though the
+    // provider stated a later reset (docs/specs/routing.md).
+    for at in [now, now + 299] {
         assert!(matches!(
             admit(&route, at),
             Err(provenant_quota::QuotaError::Refused(reason))
                 if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
         ));
     }
-    admit(&route, resets)?;
+    assert!(now + 300 < resets);
+    admit(&route, now + 300)?;
     route.model = "gemini-3.8-pro".into();
     admit(&route, now)?;
     Ok(())
@@ -4655,6 +4670,127 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
 
 fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Value> {
     run_graph_provider_with_wait(rig, graph_id, node, "5s")
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+fn detached_graph_retry_reports_discarded_exclusion() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let account =
+        provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
+            .ok_or("account key")?;
+    support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&commit), 0, "{commit:?}");
+    let document = rig.root.join("stale-exclusion.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "stale-exclusion",
+            "exclude": ["legacy-bare-model"],
+            "nodes": [{"id":"reader", "prompt":"fixture read only", "access":"read_only",
+                "route":{"adapter":"codex", "model":"gpt-6-luna"}}]
+        }))?,
+    )?;
+    // The author's own unresolved exclusion on first launch must error visibly at admission.
+    let refusal = rig.command(&["run", "--file", document.to_str().ok_or("document")?])?;
+    assert_ne!(code(&refusal), 0, "{refusal:?}");
+    let refusal_text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&refusal.stdout.bytes),
+        String::from_utf8_lossy(&refusal.stderr.bytes)
+    );
+    assert!(refusal_text.contains("legacy-bare-model"), "{refusal_text}");
+
+    // Initial launch succeeds without the unresolvable exclusion.
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "stale-exclusion",
+            "nodes": [{"id":"reader", "prompt":"fixture read only", "access":"read_only",
+                "route":{"adapter":"codex", "model":"gpt-6-luna"}}]
+        }))?,
+    )?;
+    let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], "30s")?;
+    assert_eq!(
+        settled.checkpoint["nodes"][0]["state"], "succeeded",
+        "{}",
+        settled.checkpoint
+    );
+
+    // Carry over a stale exclusion into the admitted journal record for retry.
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+    use provenant_os::clock::SystemClock;
+
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let resolved_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &resolved_roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut execution = FileJournal::execution(&resolved_roots.state, project, "stale-exclusion")?
+        .ok_or("execution not found")?;
+    execution.document.exclude = vec!["legacy-bare-model".into()];
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&resolved_roots.state, project, "stale-exclusion")?
+            .ok_or("checkpoint not found")?;
+    checkpoint.plan_digest =
+        provenant_fabric_runtime::graph::graph_plan_digest(&execution.document)?.to_string();
+
+    let graphs_dir = resolved_roots
+        .state
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
+    let _ = fs::remove_file(graphs_dir.join("graph-stale-exclusion.json"));
+    let _ = fs::remove_file(graphs_dir.join("graph-stale-exclusion.reserved"));
+    let _ = fs::remove_file(graphs_dir.join("stale-exclusion.events.jsonl"));
+
+    let mut journal = FileJournal::open(
+        &resolved_roots.state,
+        project,
+        "stale-exclusion",
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let retry = rig.command(&["retry", "stale-exclusion/reader", "--json"])?;
+    assert_eq!(code(&retry), 0, "{retry:?}");
+    let wait = rig.command(&["wait", "stale-exclusion", "--timeout", "30s", "--json"])?;
+    assert_eq!(code(&wait), 0, "{wait:?}");
+    let checkpoint = rig.checkpoint("stale-exclusion")?;
+    assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
+    assert_eq!(
+        checkpoint["nodes"][0]["attempts"][0]["launched"], true,
+        "{checkpoint}"
+    );
+    let status = rig.command(&["status", "stale-exclusion"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let text = String::from_utf8_lossy(&status.stdout.bytes);
+    assert!(
+        text.contains("dropping unrecognised carried graph exclusion")
+            && text.contains("legacy-bare-model"),
+        "{text}"
+    );
+    cleanup.disarm();
+    Ok(())
 }
 
 fn light_graph_delivers_and_applies_preset_per_node() -> Result {
@@ -5055,9 +5191,9 @@ fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
         assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
         assert_eq!(
             fs::read_to_string(attempt.join("stderr.log"))?,
-            "shell stderr [REDACTED]\n"
+            "shell stderr ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
         );
-        assert_no_printed_credential(&attempt)?;
+        assert_no_printed_credential_in_derived_files(&attempt)?;
         cleanup.disarm();
     }
     Ok(())
@@ -5111,7 +5247,7 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
     Ok(())
 }
 
-fn assert_no_printed_credential(root: &std::path::Path) -> Result {
+fn assert_no_printed_credential_in_derived_files(root: &std::path::Path) -> Result {
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
         for entry in fs::read_dir(path)? {
@@ -5120,6 +5256,13 @@ fn assert_no_printed_credential(root: &std::path::Path) -> Result {
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if kind.is_file() {
+                // Host-local captures are replay evidence. All derived and
+                // published run files must still be safe to disclose.
+                if entry.path() == root.join("stdout.log")
+                    || entry.path() == root.join("stderr.log")
+                {
+                    continue;
+                }
                 let bytes = fs::read(entry.path())?;
                 assert!(
                     !bytes
@@ -5134,7 +5277,7 @@ fn assert_no_printed_credential(root: &std::path::Path) -> Result {
     Ok(())
 }
 
-fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
+fn raw_capture_settlement_keeps_final_answer_and_redacts_disclosure() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -5154,17 +5297,75 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         let attempt = rig.state.join("attempts").join(id);
         assert_eq!(
             fs::read_to_string(attempt.join("result.md"))?,
-            format!("credential [REDACTED]{DONE_FENCE}")
+            format!("Review in progress.\nFinal answer: credential [REDACTED]{DONE_FENCE}")
         );
         assert_eq!(
             fs::read(attempt.join("stderr.log"))?,
-            b"diagnostic [REDACTED]"
+            b"diagnostic ghp_abcdefghijklmnopqrstuvwxyz0123456789"
         );
         let stdout = fs::read_to_string(attempt.join("stdout.log"))?;
-        assert!(stdout.contains("[REDACTED]"), "{stdout}");
-        assert!(!stdout.contains(r"\u0067hp_"), "{stdout}");
-        assert_no_printed_credential(&attempt)?;
+        for line in stdout.lines() {
+            assert!(
+                serde_json::from_str::<Value>(line).is_ok(),
+                "raw JSONL must remain parseable"
+            );
+        }
+        assert!(stdout.contains("Final answer:"));
+        assert!(stdout.contains(if mode == "escaped" {
+            r"\u0067hp_"
+        } else {
+            "ghp_"
+        }));
+        let target = format!("printed-{mode}/provider#1");
+        for part in ["result", "stderr"] {
+            let output = rig.command(&["output", &target, "--part", part, "--json"])?;
+            assert_eq!(code(&output), 0, "{output:?}");
+            let public = String::from_utf8(output.stdout.bytes)?;
+            assert!(public.contains("[REDACTED]"), "{public}");
+            assert!(
+                !public.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                "{public}"
+            );
+        }
+        assert_no_printed_credential_in_derived_files(&attempt)?;
     }
+    // A genuinely damaged retained frame must not turn the preceding progress
+    // into a task result, even when the provider later exits with a done handoff.
+    let lane = run_graph_provider(
+        &rig,
+        "printed-corrupt",
+        json!({
+            "id":"provider", "prompt":"fixture printed credential corrupt", "access":"read_only", "require_findings":true,
+            "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
+        }),
+    )?;
+    assert_eq!(lane["state"], "unsettled", "{lane}");
+    let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+    let attempt = rig.state.join("attempts").join(id);
+    assert!(
+        fs::read(attempt.join("result.md"))?.is_empty(),
+        "progress must not be published as a result"
+    );
+    let serialized = serde_json::to_string(&lane)?;
+    assert!(
+        serialized.contains("evidence defect at stdout.log line 3"),
+        "{lane}"
+    );
+    let status = rig.command(&["status", "printed-corrupt", "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    let node = status["data"]["rows"]
+        .as_array()
+        .ok_or("status rows")?
+        .iter()
+        .find(|row| row["kind"] == "node" && row["node_id"] == "provider")
+        .ok_or("provider node")?;
+    assert_eq!(node["cause_code"], "provider_capture_defect", "{node}");
+    assert!(
+        node["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("stdout.log line 3")),
+        "{node}"
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -5644,6 +5845,10 @@ fn main() -> ExitCode {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
             (
+                "detached_graph_retry_reports_discarded_exclusion",
+                detached_graph_retry_reports_discarded_exclusion,
+            ),
+            (
                 "provider_checks_preserve_routes_and_settlement_causes",
                 provider_checks_preserve_routes_and_settlement_causes,
             ),
@@ -5738,8 +5943,8 @@ fn main() -> ExitCode {
                 pool_receipt_excludes_prompt_and_credential_from_artifacts,
             ),
             (
-                "printed_credentials_leave_no_plaintext_in_run_files",
-                printed_credentials_leave_no_plaintext_in_run_files,
+                "raw_capture_settlement_keeps_final_answer_and_redacts_disclosure",
+                raw_capture_settlement_keeps_final_answer_and_redacts_disclosure,
             ),
             (
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
@@ -5816,8 +6021,8 @@ fn main() -> ExitCode {
                 opencode_free_reset_cools_pool_until_reset_and_restores,
             ),
             (
-                "agy_individual_quota_cools_model_until_reset",
-                agy_individual_quota_cools_model_until_reset,
+                "agy_individual_quota_cools_model_until_revalidation",
+                agy_individual_quota_cools_model_until_revalidation,
             ),
             (
                 "agy_denied_command_reaches_result_without_entering_terminal_diagnostics",

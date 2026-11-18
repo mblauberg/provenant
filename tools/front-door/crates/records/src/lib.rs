@@ -6,8 +6,8 @@ pub use adapters::{
     ADAPTER_SPECS, AccountModelPlan, AccountQuota, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES,
     CapabilitySupport, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
     HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities, LaunchField, LaunchRequest,
-    LoginObservation, LoginReprobe, ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot,
-    SkillLocation, UnsupportedLaunch,
+    LoginObservation, LoginReprobe, ModelListingFormat, ModelObservation, NamedEntry,
+    QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
 };
 
 /// The instruction content bound into this product build and projected into
@@ -76,8 +76,8 @@ pub use install::{
 mod command_result;
 pub mod wire;
 pub use command_result::{
-    CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode,
-    HelpGroup, Outcome,
+    COMMAND_RESULT_MAX_BYTES, CommandError, CommandResult, HelpArgument, HelpCatalogue,
+    HelpCommand, HelpErrorCode, HelpGroup, Outcome,
 };
 
 mod resolved_route;
@@ -88,6 +88,7 @@ pub use resolved_route::{
     RouteSelectionReceipt, RouteSelectionRedraw, SkippedAccount, TooManyAlternatives,
 };
 
+pub mod lane_contract;
 pub mod result_capture;
 pub mod run;
 

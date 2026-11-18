@@ -1,6 +1,92 @@
 use super::*;
 
 #[test]
+fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult {
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    use provenant_os::exec::Termination;
+    for (stop, clean) in [
+        (None, false),
+        (
+            Some(provenant_supervisor::machine::StopReason::TokenBudget),
+            false,
+        ),
+        (
+            Some(provenant_supervisor::machine::StopReason::TokenBudget),
+            true,
+        ),
+        (
+            Some(provenant_supervisor::machine::StopReason::WallDeadline),
+            false,
+        ),
+    ] {
+        for (termination, eof_fragment) in [
+            (Termination::Exit(0), false),
+            (Termination::Exit(1), false),
+            (Termination::Signal(9), false),
+            (Termination::Exit(0), true),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let run = input();
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let dir = store.attempt_dir(id, false)?;
+            artifacts::seal(&dir, "stdout.log", b"damaged capture", CAPTURE_LIMIT)?;
+            if clean {
+                artifacts::seal(
+                    &dir,
+                    provenant_records::AttemptFile::BudgetCleanPoint.name(),
+                    b"{\"schema_version\":1,\"clean\":true}",
+                    RECORD_LIMIT,
+                )?;
+            }
+            let mut observed = exit();
+            observed.scope = RunStore::scope(&store.record(id, &call)?);
+            observed.stop_reason = stop;
+            observed.termination = Some(termination);
+            observed.provider_identity_eof_fragment = eof_fragment;
+            seal_exit(&store, &observed)?;
+            let fake = Fake {
+            observed: Some(route()),
+            outcome: Some(Outcome::Unsettled),
+            terminal_cause: Some(TerminalCause::ProviderCaptureDefect { line: 3 }),
+            reason: Some("provider capture evidence defect at stdout.log line 3; replay incomplete".into()),
+            complete: Some(false),
+            // Even a done declaration cannot repair missing provider evidence.
+            answer: Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into()),
+            ..Fake::default()
+        };
+            let record = store.finish(id, &dir, &observed, &fake, &call)?;
+            assert!(
+                matches!(
+                    record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Unsettled,
+                        terminal_cause: Some(TerminalCause::ProviderCaptureDefect { line: 3 }),
+                        ..
+                    }
+                ),
+                "stop={stop:?}, clean={clean}, termination={termination:?}, eof={eof_fragment}: {:?}",
+                record.state
+            );
+            assert!(!record.result.ok_or("result")?.complete);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
     for (answer, expected) in [
         ("plain answer", "plain answer"),
@@ -733,6 +819,76 @@ fn handoff_missing_and_done_outcome_contradictions() -> TestResult {
     }
     Ok(())
 }
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn incomplete_identity_evidence_preserves_settlement_failures() -> TestResult {
+    use provenant_records::policy::Strength;
+    for strength in [Strength::Refuse, Strength::Warn, Strength::Off] {
+        for route_mismatch in [true, false] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let context = context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let mut run = input();
+            let mut settings = provenant_config::policy::Settings::default();
+            settings
+                .projects
+                .entry(context.project_id.to_string())
+                .or_default()
+                .rules
+                .insert("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE".into(), strength);
+            run.request.task.profile.launch_policy =
+                Some(settings.resolve(&context.project_id.to_string(), &Default::default()));
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let dir = store.attempt_dir(id, false)?;
+            artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+            let mut observed = exit();
+            observed.scope = RunStore::scope(&store.record(id, &call)?);
+            observed.provider_identity_evidence_incomplete = true;
+            seal_exit(&store, &observed)?;
+            let fake = Fake {
+                observed: Some(if route_mismatch {
+                    RouteRecord {
+                        model: Some("other/model".into()),
+                        ..route()
+                    }
+                } else {
+                    route()
+                }),
+                outcome: (!route_mismatch).then_some(Outcome::Failed),
+                answer: Some("answer".into()),
+                ..Fake::default()
+            };
+            let record = store.finish(id, &dir, &observed, &fake, &call)?;
+            let AttemptState::Terminal {
+                outcome,
+                terminal_cause,
+                ..
+            } = record.state
+            else {
+                return Err("not terminal".into());
+            };
+            assert_eq!(outcome, Outcome::Failed);
+            assert_eq!(
+                terminal_cause,
+                route_mismatch.then_some(TerminalCause::IdentityMismatch)
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn identity_observations_warn_when_missing_and_hold_when_contradictory() -> TestResult {
     for observed_route in [

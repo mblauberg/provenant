@@ -1260,6 +1260,23 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     Ok(safe)
 }
 
+/// Classify a known-shape match without exposing any matched bytes.
+pub fn known_shape_rule(bytes: &[u8]) -> Result<Option<&'static str>, FilterError> {
+    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut sink = |_: &[u8]| {};
+    for chunk in bytes.chunks(8192) {
+        redactor.filter(chunk, &mut sink)?;
+    }
+    redactor.finish(&mut sink)?;
+    Ok(if redactor.tokens.matched {
+        Some("credential token or URL userinfo")
+    } else if redactor.assignments.matched {
+        Some("credential assignment")
+    } else {
+        None
+    })
+}
+
 const SESSION_CHUNK: usize = 32 * 1024;
 const SESSION_DEPTH: u8 = 8;
 const SESSION_ENTRIES: usize = 100_000;

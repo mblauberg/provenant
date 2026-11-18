@@ -6,6 +6,7 @@ use provenant_core::{AttemptId, CancelToken, GitOid};
 use provenant_os::{exec::SystemExecutor, fs::Directory};
 use std::{
     error::Error,
+    ffi::OsStr,
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
@@ -96,7 +97,7 @@ fn private_view_restarts_import_and_publication_in_shallow_repositories() -> Tes
         let (attempt, _) = fixture.overlay()?;
         for checkpoint in 0..4 {
             // Reopen from the durable binding at each restart, including after
-            // sanitisation removed alternates and after publication removed its ref.
+            // import and publication removed the attempt's temporary ref.
             let source = super::bound_source(&attempt)?.ok_or("private view")?;
             let head = super::private_tip(&source, "refs/heads/lane")?;
             super::settle(
@@ -109,11 +110,14 @@ fn private_view_restarts_import_and_publication_in_shallow_repositories() -> Tes
                 super::publish_branch(
                     &fixture.git,
                     fixture.worktree.repo(),
-                    "refs/heads/lane",
-                    fixture.base,
-                    None,
-                    head,
-                    fixture.import_attempt,
+                    super::BranchPublication {
+                        branch: "refs/heads/lane",
+                        base: fixture.base,
+                        launch_ref: None,
+                        head,
+                        attempt: fixture.import_attempt,
+                    },
+                    &provenant_records::policy::Policy::default(),
                 )?;
             }
             let expected = if checkpoint >= 2 { head } else { fixture.base };
@@ -188,11 +192,14 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
             super::publish_branch(
                 &wrapper,
                 fixture.worktree.repo(),
-                "refs/heads/lane",
-                fixture.base,
-                None,
-                fixture.head,
-                fixture.import_attempt,
+                super::BranchPublication {
+                    branch: "refs/heads/lane",
+                    base: fixture.base,
+                    launch_ref: None,
+                    head: fixture.head,
+                    attempt: fixture.import_attempt,
+                },
+                &provenant_records::policy::Policy::default(),
             )
             .is_err()
         );
@@ -207,11 +214,14 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
         super::publish_branch(
             &fixture.git,
             fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            fixture.head,
-            fixture.import_attempt,
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: fixture.head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
         )?;
         assert!(super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage).is_err());
     }
@@ -485,6 +495,34 @@ impl Fixture {
         Ok(output)
     }
 
+    // A private commit leaves a cache-tree in the linked worktree index whose
+    // objects live only in `source`. Host GC reads every worktree index, so
+    // restore this finished fixture's index to a tree the host actually owns.
+    fn collect_shared_objects(&self) -> TestResult {
+        git(
+            &self.git,
+            &self.home,
+            &self.lane,
+            None,
+            &["read-tree", &self.base.to_string()],
+        )?;
+        git(
+            &self.git,
+            &self.home,
+            &self.project,
+            None,
+            &["reflog", "expire", "--expire=now", "--all"],
+        )?;
+        git(
+            &self.git,
+            &self.home,
+            &self.project,
+            None,
+            &["gc", "--prune=now"],
+        )?;
+        Ok(())
+    }
+
     fn import(&self) -> crate::Result<()> {
         super::settle(
             &self.git,
@@ -570,11 +608,14 @@ fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -
         super::publish_branch(
             &fixture.git,
             fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            head,
-            fixture.import_attempt,
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
         )?;
         let content = git(
             &fixture.git,
@@ -585,6 +626,34 @@ fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -
         )?;
         assert_eq!(content.stdout, b"host-prepared private commit\n");
     }
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn shared_object_snapshot_bounds_empty_files_and_directories() -> TestResult {
+    let source = tempfile::tempdir()?;
+    fs::write(source.path().join("first"), b"")?;
+    fs::write(source.path().join("second"), b"")?;
+    fs::create_dir(source.path().join("empty"))?;
+    let source = Directory::open_anchor(source.path())?;
+    assert!(matches!(
+        super::object_bytes_with_entries(&source, 0, &mut 2),
+        Err(crate::RunError::ObjectImportLimit(_))
+    ));
+    assert_eq!(super::object_bytes_with_entries(&source, 0, &mut 3)?, 0);
+    let refused = tempfile::tempdir()?;
+    let refused = Directory::open_anchor(refused.path())?;
+    assert!(matches!(
+        super::snapshot_source(&source, &refused, &mut 0, &mut 2, 0),
+        Err(crate::RunError::ObjectImportLimit(_))
+    ));
+    let copied = tempfile::tempdir()?;
+    let copied = Directory::open_anchor(copied.path())?;
+    super::snapshot_source(&source, &copied, &mut 0, &mut 3, 0)?;
+    assert_eq!(copied.open_read(OsStr::new("first"))?.metadata()?.size, 0);
+    assert_eq!(copied.open_read(OsStr::new("second"))?.metadata()?.size, 0);
+    copied.open_verified_directory(OsStr::new("empty"))?;
     Ok(())
 }
 
@@ -620,6 +689,7 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
 
     let (first_path, first_attempt, _) = prepare("shared-attempt-1")?;
     let first_source = super::bound_source(&first_attempt)?.ok_or("first shared source")?;
+    super::prepare_budget_objects(&first_source.objects, fixture.worktree.repo())?;
     assert_eq!(
         first_source.refs.current_path()?,
         shared_root.join("git-common")
@@ -678,6 +748,22 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
     fixture.git_shared(&shared_root, &["add", "file"])?;
     fixture.git_shared(&shared_root, &["commit", "-qm", "first shared commit"])?;
     let first_head = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
+    fixture.git_shared(&shared_root, &["commit-graph", "write", "--reachable"])?;
+    let graph_path = shared_root.join("git-objects/info/commit-graph");
+    let graph = fs::read(&graph_path)?;
+    // A completed writer imports before its sibling continues using the same
+    // Git state. Import must leave that shared context usable after cleanup.
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&first_source.objects),
+        first_head,
+    )?;
+    assert_eq!(
+        fs::read(graph_path)?,
+        graph,
+        "a sibling's Git cache survives import"
+    );
     drop(first_source);
     drop(first_attempt);
     fs::remove_dir_all(&first_path)?;
@@ -943,11 +1029,14 @@ fn private_ref_overlay_keeps_host_and_sibling_fetch_usable_until_verified_public
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        None,
-        fixture.head,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: fixture.head,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(shared_tip()?, fixture.head);
     Ok(())
@@ -1012,11 +1101,14 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
         super::publish_branch(
             &fixture.git,
             fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            fixture.head,
-            fixture.import_attempt,
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: fixture.head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
         )?;
     }
     let published = oid(git(
@@ -1065,11 +1157,14 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
         super::publish_branch(
             &fixture.git,
             fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            fixture.head,
-            fixture.import_attempt,
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: fixture.head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
         )
         .is_err()
     );
@@ -1119,11 +1214,14 @@ fn same_head_import_pins_survive_independent_publication_cleanup() -> TestResult
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        None,
-        fixture.head,
-        first,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: fixture.head,
+            attempt: first,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert!(super::resolve_ref(&fixture.git, fixture.worktree.repo(), &first_pin).is_err());
     assert_eq!(
@@ -1135,11 +1233,14 @@ fn same_head_import_pins_survive_independent_publication_cleanup() -> TestResult
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        None,
-        fixture.head,
-        second,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: fixture.head,
+            attempt: second,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert!(super::resolve_ref(&fixture.git, fixture.worktree.repo(), &second_pin).is_err());
     Ok(())
@@ -1903,11 +2004,14 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        None,
-        fixture.head,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: fixture.head,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     super::restore_index(&source, fixture.worktree.repo())?;
     let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
@@ -1993,11 +2097,14 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.head,
-        None,
-        tip,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.head,
+            launch_ref: None,
+            head: tip,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     super::restore_index(&next, fixture.worktree.repo())?;
     assert!(
@@ -2035,11 +2142,14 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
         super::publish_branch(
             &fixture.git,
             fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            fixture.head,
-            fixture.import_attempt,
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: fixture.head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
         )?;
         super::restore_index(&source, fixture.worktree.repo())?;
         fs::write(fixture.lane.join("file"), "hidden uncommitted edit\n")?;
@@ -2097,11 +2207,14 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
         super::publish_branch(
             &wrapper,
             fixture.worktree.repo(),
-            "refs/heads/lane",
-            fixture.base,
-            None,
-            fixture.head,
-            fixture.import_attempt,
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: fixture.head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
         )
         .is_err()
     );
@@ -2121,8 +2234,139 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
 }
 
 #[test]
-fn publication_refuses_orphan_history() -> TestResult {
+// Spec: docs/specs/run-settlement.md#settlement
+fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResult {
+    use provenant_records::policy::{Policy, Source, Strength};
     let fixture = Fixture::new("sha1")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let prior = child_of(&fixture, fixture.base, "unique prior branch work")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", "refs/heads/lane", &prior.to_string()],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "update-ref",
+            "refs/provenant/lane-base/test",
+            &prior.to_string(),
+        ],
+    )?;
+    fs::write(fixture.project.join("file"), "different orphan contents\n")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["add", "file"],
+    )?;
+    let orphan_tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["write-tree"],
+    )?)?;
+    assert_ne!(tree, orphan_tree);
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &orphan_tree.to_string(), "-m", "orphan"],
+    )?)?;
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&Directory::open_anchor(&fixture.source)?),
+        orphan,
+    )?;
+    let mut strict = Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([("LANE_TIP_UNROOTED".into(), Strength::Refuse)]),
+        Source::Project,
+    );
+    let refusal = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: prior,
+            launch_ref: None,
+            head: orphan,
+            attempt: fixture.import_attempt,
+        },
+        &strict,
+    );
+    assert!(matches!(
+        refusal,
+        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
+            if tip == orphan && base == prior
+    ));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        prior
+    );
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: prior,
+            launch_ref: None,
+            head: orphan,
+            attempt: fixture.import_attempt,
+        },
+        &Policy::default(),
+    )?;
+    assert_eq!(ancestor, super::Ancestor::Unrooted);
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        orphan
+    );
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", "-d", "refs/provenant/lane-base/test"],
+    )?;
+    fixture.collect_shared_objects()?;
+    assert_eq!(
+        super::resolve_ref(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &format!("refs/provenant/recovery/{prior}")
+        )?,
+        prior
+    );
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["cat-file", "-e", &format!("{prior}^{{commit}}")],
+    )?;
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-settlement.md#settlement
+fn publication_pins_symbolic_recovery_ref_through_collection() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let prior = child_of(&fixture, fixture.base, "displaced work")?;
     let tree = oid(git(
         &fixture.git,
         &fixture.home,
@@ -2137,21 +2381,109 @@ fn publication_refuses_orphan_history() -> TestResult {
         None,
         &["commit-tree", &tree.to_string(), "-m", "orphan"],
     )?)?;
-    assert!(matches!(
+    let recovery = format!("refs/provenant/recovery/{prior}");
+    let target = "refs/heads/recovery-target";
+    let pin = "refs/provenant/lane-base/test";
+    for reference in ["refs/heads/lane", target, pin] {
+        update_ref(&fixture, reference, prior)?;
+    }
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["symbolic-ref", &recovery, target],
+    )?;
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: prior,
+            launch_ref: None,
+            head: orphan,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), target)?,
+        prior
+    );
+    update_ref(&fixture, target, orphan)?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
         None,
-        orphan,
-        fixture.import_attempt,
-    ),
-        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
-            if tip == orphan && base == fixture.base
-    ));
+        &["update-ref", "-d", pin],
+    )?;
+    fixture.collect_shared_objects()?;
+    let refs = git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["for-each-ref", "--format=%(symref)", &recovery],
+    )?;
+    assert_eq!(refs.stdout, b"\n");
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), &recovery)?,
+        prior
+    );
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["cat-file", "-e", &format!("{prior}^{{commit}}")],
+    )?;
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-settlement.md#settlement
+fn publication_refuses_conflicting_recovery_ref_atomically() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let prior = child_of(&fixture, fixture.base, "displaced work")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+    )?)?;
+    let recovery = format!("refs/provenant/recovery/{prior}");
+    update_ref(&fixture, "refs/heads/lane", prior)?;
+    update_ref(&fixture, &recovery, fixture.base)?;
+    assert!(
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: prior,
+                launch_ref: None,
+                head: orphan,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
+        )
+        .is_err()
+    );
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        prior
+    );
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), &recovery)?,
         fixture.base
     );
     Ok(())
@@ -2194,7 +2526,7 @@ fn update_ref(fixture: &Fixture, reference: &str, value: GitOid) -> TestResult {
 }
 
 #[test]
-fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestResult {
+fn publication_can_refuse_an_unrooted_tip_under_strict_policy() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let tree = oid(git(
         &fixture.git,
@@ -2210,14 +2542,25 @@ fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestRe
         None,
         &["commit-tree", &tree.to_string(), "-m", "orphan"],
     )?)?;
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "LANE_TIP_UNROOTED".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
     let error = super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        Some("integration"),
-        orphan,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: Some("integration"),
+            head: orphan,
+            attempt: fixture.import_attempt,
+        },
+        &strict,
     )
     .expect_err("an unrooted tip is refused");
     assert!(error.import_refusal_is_final());
@@ -2232,6 +2575,47 @@ fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestRe
 }
 
 #[test]
+fn successful_git_import_with_graft_hint_keeps_result_and_other_stderr_refuses() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let wrapper = fixture.root.join("git-with-hint");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'hint: Support for <GIT_DIR>/info/grafts is deprecated' >&2\nexec '{}' \"$@\"\n",
+            fixture.git.display()
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    super::require_commit(
+        &wrapper,
+        fixture.worktree.repo().common_git_dir(),
+        fixture.worktree.repo().root_path(),
+        fixture.base,
+        None,
+        None,
+    )?;
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'error: corrupt object' >&2\nexec '{}' \"$@\"\n",
+            fixture.git.display()
+        ),
+    )?;
+    assert!(
+        super::require_commit(
+            &wrapper,
+            fixture.worktree.repo().common_git_dir(),
+            fixture.worktree.repo().root_path(),
+            fixture.base,
+            None,
+            None,
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let lane_base = child_of(&fixture, fixture.base, "lane start")?;
@@ -2242,11 +2626,14 @@ fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult
     let ancestor = super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        lane_base,
-        None,
-        rebased,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: lane_base,
+            launch_ref: None,
+            head: rebased,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(
         ancestor,
@@ -2281,6 +2668,7 @@ fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult
 }
 
 #[test]
+// Spec: docs/specs/run-settlement.md#settlement
 fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let lane_base = child_of(&fixture, fixture.base, "lane start")?;
@@ -2291,11 +2679,14 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     let ancestor = super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        lane_base,
-        Some("integration"),
-        rebased,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: lane_base,
+            launch_ref: Some("integration"),
+            head: rebased,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(
         ancestor,
@@ -2304,20 +2695,55 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
             oid: integration
         }
     );
-    // Without the launch ref the same tip descends from nothing known.
+    // Without the launch ref the same tip is unrooted: strict policy refuses,
+    // while the default warns and publishes it with recovery for displaced work.
     update_ref(&fixture, "refs/heads/lane", lane_base)?;
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "LANE_TIP_UNROOTED".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
+    let refusal = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: lane_base,
+            launch_ref: None,
+            head: rebased,
+            attempt: fixture.import_attempt,
+        },
+        &strict,
+    );
     assert!(matches!(
-        super::publish_branch(
-            &fixture.git,
-            fixture.worktree.repo(),
-            "refs/heads/lane",
-            lane_base,
-            None,
-            rebased,
-            fixture.import_attempt,
-        ),
-        Err(crate::RunError::LaneTipUnrooted { .. })
+        refusal,
+        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
+            if tip == rebased && base == lane_base
     ));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        lane_base
+    );
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: lane_base,
+            launch_ref: None,
+            head: rebased,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(ancestor, super::Ancestor::Unrooted);
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        rebased
+    );
     Ok(())
 }
 
@@ -2328,11 +2754,14 @@ fn publication_from_the_launch_base_reports_no_ancestor_warning() -> TestResult 
     let ancestor = super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        None,
-        tip,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: tip,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(ancestor, super::Ancestor::LaunchBase);
     assert_eq!(ancestor.warning("refs/heads/lane", fixture.base, tip), None);
@@ -2394,11 +2823,14 @@ fn publication_accepts_a_rebase_onto_the_current_origin_default() -> TestResult 
     super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
-        "refs/heads/lane",
-        lane_base,
-        None,
-        rebased,
-        fixture.import_attempt,
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: lane_base,
+            launch_ref: None,
+            head: rebased,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,

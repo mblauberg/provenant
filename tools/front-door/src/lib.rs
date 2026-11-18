@@ -17,12 +17,15 @@ mod custody;
 mod disk;
 mod disk_guard;
 mod fabric;
+mod notes;
 mod tick;
 mod tick_agent;
 mod tracker;
 
 mod chair_log_retention;
 mod checkpoint_retention;
+mod event_delivery;
+mod events;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -42,6 +45,7 @@ mod provider_retention;
 mod release_smoke;
 mod retention_owner;
 mod roots;
+mod scratch_owner;
 mod settlement;
 mod staging_gc;
 mod state_handoff;
@@ -181,8 +185,7 @@ fn emit_summarised<T: Serialize>(
     }
 }
 
-/// A policy explanation is a structured result. Its compact transport projects
-/// complete policy facts rather than cutting the owner's pretty JSON mid-field.
+/// A policy explanation is a structured result; compact output names omitted rows.
 fn land_explanation(
     data: &serde_json::Value,
     globals: &provenant_cli::Globals,
@@ -218,7 +221,8 @@ fn land_explanation(
         rows.push(format!("CI patience: {patience}s ({source})"));
     }
     if let Some(warnings) = data["warnings"].as_array() {
-        rows.extend(
+        rows.splice(
+            0..0,
             warnings
                 .iter()
                 .filter_map(serde_json::Value::as_str)
@@ -238,7 +242,7 @@ fn land_explanation(
         }
     }
     detail.push_str(" land --explain --json");
-    Some(provenant_cli::Summary::complete(
+    Some(provenant_cli::Summary::new(
         "Landing policy",
         rows,
         Some(detail),
@@ -715,11 +719,26 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 serde_json::to_value(schema)?
             }
             ConfigAction::Edit(edit) => {
-                let edited =
-                    config::edit_config(&roots, sections, &options, |doc, _| edit.apply(doc))?;
-                let mut value = serde_json::to_value(&edited.config)?;
-                value["revision"] = edited.after_revision.into();
-                value
+                let mut previous = serde_json::Value::Null;
+                let edited = config::edit_config(&roots, sections, &options, |doc, current| {
+                    previous = match edit {
+                        config::KnobEdit::Set { name, .. } | config::KnobEdit::Unset(name) => {
+                            serde_json::to_value(current.knobs.get(name)).unwrap_or_default()
+                        }
+                        config::KnobEdit::Profile(_) => serde_json::json!(current.profile),
+                    };
+                    edit.apply(doc)
+                })?;
+                match edit {
+                    config::KnobEdit::Set { name, .. } | config::KnobEdit::Unset(name) => {
+                        serde_json::json!({"key": name, "previous": previous,
+                            "effective": edited.config.knobs.get(name), "revision": edited.after_revision})
+                    }
+                    config::KnobEdit::Profile(_) => serde_json::json!({"key": "profile",
+                        "previous": previous, "effective": edited.config.profile,
+                        "source": if matches!(edited.config.origins.get("profile"), Some(config::Origin::User { .. })) { "user" } else { "default" },
+                        "revision": edited.after_revision}),
+                }
             }
             ConfigAction::Apply {
                 patch,
@@ -748,12 +767,50 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
         })
     })();
     match result {
-        Ok(value) => emit(
-            &CommandResult::new(command, Outcome::Ok, value.clone()),
-            globals,
-            &provenant_cli::terse(&value),
-            true,
-        ),
+        Ok(value) => {
+            let human = if command == "config show" {
+                if globals.full {
+                    serde_json::to_string_pretty(&value).unwrap_or_default() + "\n"
+                } else {
+                    let sections = value
+                        .as_object()
+                        .map(|object| {
+                            object
+                                .keys()
+                                .filter(|key| !matches!(key.as_str(), "origins" | "policy_render"))
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let profile = value["profile"].as_str().unwrap_or("unknown");
+                    let revision = value["revision"].as_str().unwrap_or("unknown");
+                    let warnings = value["warnings"].as_array().map_or(0, Vec::len);
+                    format!(
+                        "effective configuration: profile={profile} revision={revision} warnings={warnings}\nsections: {sections}\nUse `provenant config show --full` for values and sources, or `--json` for structured data.\n"
+                    )
+                }
+            } else if command == "config set" || command == "config unset" {
+                format!(
+                    "{}: {}{} (previous: {})\n",
+                    value["key"].as_str().unwrap_or("profile"),
+                    value["effective"],
+                    value["source"]
+                        .as_str()
+                        .map(|source| format!(" (source: {source})"))
+                        .unwrap_or_default(),
+                    value["previous"]
+                )
+            } else {
+                provenant_cli::terse(&value)
+            };
+            emit(
+                &CommandResult::new(command, Outcome::Ok, value),
+                globals,
+                &human,
+                true,
+            )
+        }
         Err(error) => {
             let status = match error.downcast_ref::<provenant_config::ConfigError>() {
                 Some(
@@ -878,18 +935,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
         let disk = disk_guard::LaneDisk::default();
-        let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
-            provenant_confinement::redact::Redactor::new([]),
-            provenant_confinement::redact::Redactor::new([]),
-        ) else {
-            return fail(
-                "internal supervise",
-                Outcome::Error,
-                "REDACTION",
-                "cannot initialise capture redaction",
-                globals,
-            );
-        };
         let (resource_sample_interval, resource_sample_interval_source) =
             match roots::resolve(globals, Workspace::Project, Product::Optional) {
                 Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
@@ -931,8 +976,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
-            stdout_filter: Some(&mut stdout_filter),
-            stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
         };
         match process.supervise(&descriptors, hooks) {
@@ -1205,6 +1248,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::TickGc) => {
             tick::gc_worker(globals, process.workers())
         }
+        Command::Internal(provenant_cli::Internal::EventListen { repository }) => {
+            event_delivery::listen(&repository, globals)
+        }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
         Command::Internal(provenant_cli::Internal::Launch {
             attempt,
@@ -1380,6 +1426,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             process.workers(),
         ),
         Command::Wait(cmd) => status_wait::run(cmd, globals),
+        Command::Events {
+            from,
+            follow,
+            consumer,
+        } => events::run(from.unwrap_or(0), follow, consumer.as_deref(), globals),
         Command::Land {
             numbers,
             strategy,
@@ -1409,6 +1460,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         ),
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
             fabric::unified_graph_output(&cmd, edge, globals, process.workers())
+        }),
+        Command::Result { target } => run_edge(&inv.leaf, globals, |edge| {
+            fabric::unified_graph_result(&target, edge)
         }),
         Command::Stop(cmd) if provenant_cli::fabric::in_lane() => {
             run_edge(&inv.leaf, globals, |_| {
@@ -1563,6 +1617,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
+        Command::Notes(cmd) => notes::run(cmd, globals),
         Command::Quota { command } => {
             let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
                 adapter: None,

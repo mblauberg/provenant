@@ -14,8 +14,8 @@ leaves the mechanism and the tell moves to the next word.
    - Before: This change is pivotal for reliability.
    - After: Retries now stop after three attempts, so a dead queue no longer
      holds the worker for 30 minutes.
-3. **Mannered metaphor** (`a dial worth turning`, `earns its keep`). Newer
-   models drift here once stock phrases are gone. Say the literal thing.
+3. **Mannered metaphor** (`a dial worth turning`, `earns its keep`). Prose
+   drifts here once stock phrases are gone. Say the literal thing.
    - Before: The timeout is a dial worth turning.
    - After: Raising the timeout from 5 s to 20 s removed the failures on slow
      links.
@@ -67,5 +67,4 @@ leaves the mechanism and the tell moves to the next word.
 
 Not mechanisms: em-dash density, `delve`-class vocabulary and single banned
 words turn over with each model release. Don't hunt them by list; fix the
-claim under them. Mechanisms 1, 2, 3, 5 and 11 persist in current models;
-heavy bullets in short chat answers have largely faded.
+claim under them. Mechanisms 1, 2, 3, 5 and 11 persist longest.

@@ -59,9 +59,6 @@ impl crate::LaunchSpec {
     }
     /// Restore selected environment before the provider starts a shell command.
     pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
-        if self.native_environment() {
-            return;
-        }
         let Some((relative, selector)) = adapter.shell_prefix else {
             return;
         };
@@ -73,7 +70,7 @@ impl crate::LaunchSpec {
         });
         self.env.push((selector.into(), path.into_os_string()));
     }
-    /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
+    /// Put a `cargo` shim first on the lane's PATH. Cargo commands
     /// take one host build slot (`slots` across every project on this state
     /// directory) before the real `cargo` runs, and keep it until it exits.
     /// Busy slots warn and the command proceeds.
@@ -89,9 +86,6 @@ impl crate::LaunchSpec {
         scratch: &Path,
         gate: &BuildSlotGate<'_>,
     ) -> Result<BuildSlotSetupOutcome, ProviderError> {
-        if self.native_environment() {
-            return Ok(BuildSlotSetupOutcome::Skipped);
-        }
         match self.configure_build_slots_inner(scratch, gate) {
             Ok(()) => Ok(BuildSlotSetupOutcome::Configured),
             Err(ProviderError::InvalidPath) => {
@@ -123,7 +117,7 @@ impl crate::LaunchSpec {
         {
             return Err(ProviderError::Malformed);
         }
-        let bin = scratch.join("bin");
+        let bin = scratch.join(provenant_os::build_slots::SHIM_DIRECTORY);
         let backend = serde_json::to_string(&gate.backend).map_err(|_| ProviderError::Malformed)?;
         let source = serde_json::to_string(&gate.source).map_err(|_| ProviderError::Malformed)?;
         let disk = gate
@@ -140,12 +134,13 @@ impl crate::LaunchSpec {
             .transpose()?
             .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\n{disk}{backend_env}={} {source_env}={} {state}={} {slots}={} {local}={}\nexport {backend_env} {source_env} {state} {slots} {local}\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\n{disk}{backend_env}={} {source_env}={} {state}={} {slots}={} {local}={} {wait_env}={}\nexport {backend_env} {source_env} {state} {slots} {local} {wait_env}\nexec {} internal build-slot -- {} \"$@\"\n",
             shell_quote(&backend),
             shell_quote(&source),
             text(gate.state)?,
             gate.slots,
             gate.local_cargo,
+            text(scratch)?,
             text(gate.provenant)?,
             text(gate.cargo)?,
             backend_env = consumer_env::BUILD_ADMISSION_BACKEND,
@@ -153,6 +148,7 @@ impl crate::LaunchSpec {
             state = consumer_env::BUILD_SLOT_STATE,
             slots = consumer_env::BUILD_SLOTS,
             local = consumer_env::LOCAL_CARGO,
+            wait_env = consumer_env::BUILD_WAIT_DIR,
         );
         // Validate the environment before mutating setup or grants. The caller
         // can then omit this optional shim if its paths cannot be represented.
@@ -179,6 +175,9 @@ impl crate::LaunchSpec {
             path: bin.join("cargo"),
             bytes: script.into_bytes(),
         });
+        self.setup.push(SetupStep::CreateLock(
+            bin.join(provenant_os::build_slots::WAIT_FILE),
+        ));
         self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
         // Read only: command and none backends do not receive host slot files.
@@ -1231,6 +1230,7 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
     let mut script = b"#!/bin/sh\n".to_vec();
     for name in [
+        "PATH",
         "CARGO_BUILD_JOBS",
         "CARGO_INCREMENTAL",
         "CARGO_PROFILE_DEV_DEBUG",
@@ -2704,7 +2704,7 @@ mod tests {
         let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
         assert_eq!(
             std::env::split_paths(path).next().unwrap(),
-            scratch.join("bin")
+            scratch.join(provenant_os::build_slots::SHIM_DIRECTORY)
         );
         // The lane gets no write to the slot directory, the state root,
         // `fabric/locks` or anything near a repository's `.git`: only a read
@@ -2724,7 +2724,7 @@ mod tests {
             .setup
             .iter()
             .find_map(|step| match step {
-                SetupStep::WriteExecutable { path, bytes } if path.ends_with("bin/cargo") => {
+                SetupStep::WriteExecutable { path, bytes } if path.ends_with("cargo-bin/cargo") => {
                     Some(bytes.clone())
                 }
                 _ => None,
@@ -2775,6 +2775,32 @@ mod tests {
         assert_eq!(
             limits,
             serde_json::to_value(gate.disk_gate.unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_lanes_install_the_cargo_gate() {
+        let mut spec = bare_spec("/usr/bin:/bin");
+        spec.env.push((consumer_env::SANDBOX.into(), "off".into()));
+        let gate = BuildSlotGate {
+            disk_gate: None,
+            provenant: Path::new("/provenant"),
+            state: Path::new("/state"),
+            slots: 1,
+            cargo: Path::new("/cargo"),
+            local_cargo: "all",
+            project: Path::new("/project"),
+            backend: provenant_config::PortBackend::Builtin,
+            source: provenant_config::PortSource::Builtin,
+        };
+        assert!(matches!(
+            spec.configure_build_slots(Path::new("/scratch"), &gate),
+            Ok(BuildSlotSetupOutcome::Configured)
+        ));
+        let path = &spec.env.iter().find(|(name, _)| name == "PATH").unwrap().1;
+        assert_eq!(
+            std::env::split_paths(path).next().as_deref(),
+            Some(Path::new("/scratch/cargo-bin"))
         );
     }
 
@@ -2942,6 +2968,7 @@ mod tests {
         std::fs::write(
             &path,
             claude_shell(&[
+                ("PATH".into(), "/lane/bin:/usr/bin".into()),
                 ("CARGO_BUILD_JOBS".into(), "4".into()),
                 ("CARGO_INCREMENTAL".into(), "0".into()),
                 ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
@@ -2953,13 +2980,13 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = std::process::Command::new(path)
             .env_clear()
-            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$GIT_CONFIG_GLOBAL\" \"$GIT_CONFIG_NOSYSTEM\" 'quoted argument'")
+            .arg("printf '%s\\n' \"$PATH\" \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$GIT_CONFIG_GLOBAL\" \"$GIT_CONFIG_NOSYSTEM\" 'quoted argument'")
             .output()
             .unwrap();
         assert!(result.status.success());
         assert_eq!(
             result.stdout,
-            b"4\n0\nline-tables-only\n/lane/gitconfig\n1\nquoted argument\n"
+            b"/lane/bin:/usr/bin\n4\n0\nline-tables-only\n/lane/gitconfig\n1\nquoted argument\n"
         );
     }
 

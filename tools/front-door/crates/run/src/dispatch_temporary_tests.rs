@@ -147,6 +147,7 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
             std::fs::write(temporary.join("keep.lock"), "keep")?;
         } else {
             // A crash after removal can leave the cleanup hint uncleared.
+            std::fs::remove_dir_all(&temporary)?;
             store.set_temporary_retained(terminal, true, &call)?;
         }
         let custody = context
@@ -179,7 +180,7 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
     Ok(())
 }
 #[test]
-fn reconcile_retries_terminal_temporary_removal() -> TestResult {
+fn reconcile_preserves_terminal_temporary_for_follow_up() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -191,31 +192,40 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     seal_exit(&store, &observed)?;
     store.publish_terminal(id, 1, &super::tests::publication(), &observed, &call)?;
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
-    // Settlement's own removal did not finish. Reconcile must dispose of
-    // these lock-named build artefacts once custody is clear.
+    // Release ends provider custody, not the work itself. Keep this payload
+    // available for a follow-up until an owner proves the work is finished.
     let temporary = strand_temporary(&store, id, &call)?;
     let incremental = temporary.join("candidate-0/target/debug/incremental/x");
     std::fs::create_dir_all(&incremental)?;
     std::fs::write(incremental.join("s-1.lock"), "discard")?;
 
     assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
-    assert_eq!(
-        store.reconcile_with_observer(
-            run.attempt_id,
-            &Fake::default(),
-            &call,
-            &provenant_supervisor::census::SystemProcessObserver
-        )?,
-        vec![(id, Reconciled::TemporaryRemoved)]
+    let found = store.reconcile_with_observer(
+        run.attempt_id,
+        &Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
+    assert!(
+        found
+            .iter()
+            .all(|(_, result)| !matches!(result, Reconciled::TemporaryRemoved))
     );
-    assert!(!temporary.exists());
+    assert!(temporary.exists());
+    assert_eq!(
+        std::fs::read_to_string(incremental.join("s-1.lock"))?,
+        "discard"
+    );
     finish_reactions(&store)?;
-    assert!(store.open_attempts(10, &call)?.is_empty());
+    assert_eq!(
+        store.open_attempts(10, &call)?,
+        store.pending_effect_attempts(id, &call)?
+    );
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
 }
 #[test]
-fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
+fn reconcile_preserves_scratch_and_protected_locks_after_release() -> TestResult {
     use provenant_os::fs::FsError;
     use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
@@ -242,7 +252,7 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
     let attempt = store.attempt_dir(id, false)?;
     let run_dir = store.attempt_dir(run.attempt_id, false)?;
     drop(attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
-    // The run lock may stay held while reconcile removes attempt payload.
+    // The run lock may stay held while reconciliation preserves attempt payload.
     let _held = run_dir.try_lock(OsStr::new("publication.lock"), LockMode::Exclusive)?;
     let locks = [(&attempt, "writer.lock"), (&run_dir, "publication.lock")];
     let before = locks
@@ -250,16 +260,22 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
         .map(|(dir, name)| dir.metadata_at(OsStr::new(name), false))
         .collect::<provenant_os::fs::Result<Vec<_>>>()?;
 
-    assert_eq!(
-        store.reconcile_with_observer(
-            run.attempt_id,
-            &Fake::default(),
-            &call,
-            &provenant_supervisor::census::SystemProcessObserver
-        )?,
-        vec![(id, Reconciled::TemporaryRemoved)]
+    let found = store.reconcile_with_observer(
+        run.attempt_id,
+        &Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
+    assert!(
+        found
+            .iter()
+            .all(|(_, result)| !matches!(result, Reconciled::TemporaryRemoved))
     );
-    assert!(!temporary.exists());
+    assert!(temporary.exists());
+    assert_eq!(
+        std::fs::read_to_string(temporary.join("writer.lock"))?,
+        "disposable payload"
+    );
     for ((dir, name), identity) in locks.into_iter().zip(before) {
         assert!(matches!(
             dir.unlink(OsStr::new(name)),
@@ -328,10 +344,13 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
             &provenant_supervisor::census::SystemProcessObserver,
         )?;
         if reserved {
-            assert!(
-                matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { reason, .. })]
-                if *attempt == id && reason.kind == TemporaryReasonKind::ReservationRetained)
-            );
+            // The graph still owns this scratch. Reconciliation stops before
+            // attempting cleanup, so the attempt-local reservation remains too.
+            assert!(found.is_empty(), "{found:?}");
+            assert!(provenant_supervisor::custody::reservation_present(
+                &store.attempt_dir(id, false)?,
+                RunStore::scope(&store.record(id, &call)?)
+            )?);
         } else {
             assert_eq!(found, vec![(id, Reconciled::Queued)]);
         }
@@ -392,7 +411,8 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             WallTime::from_micros(150)?,
             &call,
         )?;
-        assert!(!temporary.exists());
+        // Model cleanup already performed while the writer reservation remains.
+        std::fs::remove_dir_all(&temporary)?;
         assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         let found = store.reconcile_with_observer(
             run.attempt_id,
@@ -404,7 +424,10 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
             assert!(store.writer_fences()?.is_empty());
             finish_reactions(&store)?;
-            assert!(store.open_attempts(10, &call)?.is_empty());
+            assert_eq!(
+                store.open_attempts(10, &call)?,
+                store.pending_effect_attempts(id, &call)?
+            );
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
@@ -509,7 +532,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     Ok(())
 }
 #[test]
-fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
+fn reconcile_preserves_unowned_symlinked_scratch_without_following_links() -> TestResult {
     use std::os::unix::fs::symlink;
     for link_at_root in [false, true] {
         let temp = tempfile::tempdir()?;
@@ -543,16 +566,31 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
             symlink(&outside, temporary.join("candidate-0/target/outside.lock"))?;
         }
         assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
-        assert_eq!(
-            store.reconcile_with_observer(
-                run.attempt_id,
-                &Fake::default(),
-                &call,
-                &provenant_supervisor::census::SystemProcessObserver
-            )?,
-            vec![(id, Reconciled::TemporaryRemoved)]
+        let found = store.reconcile_with_observer(
+            run.attempt_id,
+            &Fake::default(),
+            &call,
+            &provenant_supervisor::census::SystemProcessObserver,
+        )?;
+        assert!(
+            found
+                .iter()
+                .all(|(_, result)| !matches!(result, Reconciled::TemporaryRemoved))
         );
-        assert!(std::fs::symlink_metadata(&temporary).is_err());
+        if link_at_root {
+            assert!(
+                std::fs::symlink_metadata(&temporary)?
+                    .file_type()
+                    .is_symlink()
+            );
+        } else {
+            let nested_link = temporary.join("candidate-0/target/outside.lock");
+            assert!(
+                std::fs::symlink_metadata(nested_link)?
+                    .file_type()
+                    .is_symlink()
+            );
+        }
         assert_eq!(std::fs::read_to_string(outside.join("keep"))?, "keep");
         assert!(artifacts::read_sealed(&attempt, "result.md", RESULT_LIMIT)?.is_some());
         assert!(artifacts::read_sealed(&attempt, "prompt.txt", RECORD_LIMIT)?.is_some());
@@ -560,7 +598,7 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
     Ok(())
 }
 #[test]
-fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResult {
+fn reconciliation_preserves_attempt_scratch_until_work_finishes() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     for mode in [0o500, 0o750, 0o755] {
         let temp = tempfile::tempdir()?;
@@ -592,15 +630,14 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
             &call,
             &provenant_supervisor::census::SystemProcessObserver,
         )?;
-        if mode & 0o077 == 0 {
-            assert_eq!(found, vec![(id, Reconciled::TemporaryRemoved)]);
-            assert!(std::fs::symlink_metadata(&temporary).is_err());
-            continue;
-        }
         assert!(
-            matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { path, reason })]
-            if *attempt == id && *path == temporary && reason.kind == TemporaryReasonKind::NotPrivate),
-            "{found:?}"
+            found
+                .iter()
+                .all(|(_, result)| !matches!(result, Reconciled::TemporaryRemoved))
+        );
+        assert!(
+            temporary.exists(),
+            "released attempt scratch is retained for follow-up"
         );
         assert_eq!(
             std::fs::metadata(&temporary)?.permissions().mode() & 0o7777,

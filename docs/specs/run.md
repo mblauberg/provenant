@@ -60,8 +60,10 @@ incompatible profile generations are skipped. Refresh currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
 generations and Cargo's normal per-unit freshness checks before reusing artifacts. Published generations are
 immutable, and collection cannot race an active clone. `max_generations` keeps
-history per project; `max_bytes` remains a host-wide allocated-byte limit and
-can evict a project's only generation under byte pressure. Failed refreshes
+history per project; `max_bytes` is a host-wide allocated-byte collection target.
+Collection always keeps each project's newest complete generation, even when
+that generation alone exceeds the target; busy stores and active clones remain
+protected. Failed refreshes
 retry at the next scheduled collection, while busy projects retry on the next
 tick without rebuilding other failed projects. Full requests supersede queued
 busy retries and reevaluate prior failures. Detached pending and active scopes
@@ -101,7 +103,7 @@ unavailable push leaves the committed head and unpushed count visible.
 
 ## Lane verification and the host build cap
 
-A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. The host build cap is `domains.fabric.lanes.max_concurrent_builds`: unset, the count is derived from cores and memory (source `default`); a set value is source `host`; `0` disables the cap. A compiling cargo command that finds every slot busy waits a bounded time, then warns and proceeds.
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. The host build cap is `domains.fabric.lanes.max_concurrent_builds`: unset, the count is derived from cores and memory (source `default`); a set value is source `host`; `0` disables the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
 - Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it

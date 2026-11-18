@@ -12,8 +12,9 @@ gate it. Policy and defaults are overridable data
 
 ## Exact selection, no inference
 
-A request names one exact model or route. No adapter, upgrade, effort or
-downgrade is inferred. An adapter may declare that a valid but unsupported
+A request names one exact model or route. A shipped pool resolves its model-family
+selectors against the effective catalogue; a user model pin stays exact. The
+selected provider, model and effort are recorded before launch. An adapter may declare that a valid but unsupported
 catalogued model effort is dropped before admission; the applied route and
 launch record retain its warning and source. Invalid controls remain errors.
 A family comes only from provider protocol evidence at
@@ -38,7 +39,10 @@ the accepted classification. This does not classify arbitrary later file access.
 ## One resolution, bounded alternatives
 
 Resolution selects a route and bounded, ordered eligible alternatives from one
-snapshot. Preparation fallback follows [retry ownership](retry-owner.md).
+snapshot. An alternative equal to the primary model is dropped with a
+`ROUTING_ALTERNATIVES` warning by default; strict policy refuses it. Malformed
+choices, invalid efforts and duplicate entries within the fallback list remain
+usage errors. Preparation fallback follows [retry ownership](retry-owner.md).
 
 - Why: the fallback plan is decided once and visible.
 
@@ -51,11 +55,31 @@ preference always expires.
 - Why: changing operating policy should not need a Rust change, and a typo must
   not widen access.
 
+## Provider model discovery
+
+Provider CLI listings supply model availability and supported controls. A successful
+refresh records a timestamped snapshot; a failed probe keeps the preceding
+snapshot. The effective catalogue overlays those listings on bundled metadata.
+A listing is not evidence of a model's confidentiality, capability, or answering
+family. Shipped pools and writer advice select the latest numeric version matching
+a family selector; an explicit user pool or model choice stays pinned. Model-specific
+policy values stay with the exact catalogue entry rather than being inferred for a
+new version. Explicit uncatalogued choices may proceed with a source warning.
+`quota tick` refreshes listings and reports changes for installed adapters with a
+registered account and an enabled quota probe. Low-power ticks invoke no discovery
+tools; `knobs.quota.model_discovery` disables discovery globally (default true).
+Probes run concurrently within the quota tick's remaining wall budget, with one
+second reserved for reporting. Failed or overdue probes retain their previous
+snapshots. Advisory family selectors resolve independently, retaining bundled advice
+for a family absent from a partial listing. Discovery messages are transient command
+output, not part of the persisted quota report. Route listings name the source of
+model, valid pair, named route and pool entries in human and JSON output.
+
 ## Provider model scope
 
 Compiled provider model patterns constrain automatic choices from shipped
 pools. Owner-configured pools, routes and model preferences may select other
-catalogued models. When the owner explicitly sets
+models; an uncatalogued selection carries a source warning. When the owner explicitly sets
 `providers.<adapter>.models`, that restriction applies to automatic choices
 from both shipped and owner-configured pools, routes, preferences, fallbacks and
 depletion hand-offs. A fallback model is an automatic alternative, even when
@@ -72,9 +96,18 @@ effort.
 
 ## Pinned review selection
 
-When `provenant run review-panel` or a review leaf supplies both `subject` and
-`review_base`, the host resolves them to immutable commits once. Before
-expanding the full panel, it
+When `provenant run review-panel` or a review leaf supplies `--pr N`, the host
+pins the PR's base and head, independently of the launching checkout. Supplying
+both `subject` and `review_base` pins an explicit range instead. The host uses
+base...head (three-dot) for diff evidence and selection, including branches with
+merges from main. Without a subject, the host warns which checkout-derived range
+it chose and why. Nested review launches retain the same pins. A retry whose
+canonical raw-request identity matches a stored child receipt replays that
+receipt and its admitted pins before host preparation, whether the parent is
+active or inactive. The relay rechecks the stored identity under the journal
+lock so a concurrent admission also wins over newly prepared pins. An active
+launch without a matching receipt resolves current pins; an inactive parent
+cannot admit a new child. Before expanding the full panel, it
 derives changed paths and measured size from the merge-base-to-subject diff and
 passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
 the selected shape and add their lenses; explicit request fields and layered
@@ -96,7 +129,7 @@ the current checkout head.
 Use this command for the complete policy-selected panel:
 
 ```sh
-provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+provenant run review-panel --pr 123 --brief-file brief.md
 ```
 
 The host passes the brief to framing, every selected lens, verification and
@@ -139,10 +172,15 @@ spend the single lineage allowance in [retry owner](retry-owner.md).
 
 ## Unknown never means ready
 
-Unknown or stale quota never causes a refusal, and missing, expired or
+Unknown or stale quota does not establish exhaustion. Monthly allowance pacing
+constrains unobserved cycles as described below. Missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
-limit holds the whole account until its reset. One function,
+limit holds the whole account until its reset. Agy's recorded refusals expire
+within five minutes even when the provider reports a later reset. This bound
+also applies when reading previously published readiness, so a stale multi-day
+estimate cannot prevent a new attempt or probe. Fresh provider evidence may
+renew the refusal. One function,
 `Admission::account_block`, decides account blocks for both resolution and
 the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
@@ -159,6 +197,31 @@ providers at the same tier before stopping at the chair.
   no stale evidence may admit a launch.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
   `crates/routing/src/resolve.rs`
+
+## Monthly allowance ledger
+
+`monthly_allowance_assessment` caps next-launch spend at elapsed cycle fraction
+plus burst, respecting model-pool scope. Missing registered cycles constrain
+eligibility; local logins roll remembered cycles forward or estimate UTC months,
+exposing the source without granting readiness.
+
+`AllowanceLedger` retains costs across policy and cycle-estimate changes.
+When discovery removes accounts, only canonical local-login keys retain debt;
+registered records drop. Ticks clear provider, probe-failure, login
+and readiness observations, retrying cleanup later. Debt cannot supply
+review-family candidates; local preview requires provider or readiness evidence.
+First samples baseline debt; deltas confirm only covered, pre-observation
+reservations. Flat/decreasing reports and incomplete journal coverage retain
+debt. Rollover preserves learned cost.
+
+`reserve_allowance_launch` bypasses inapplicable policies. Contention admits with
+warnings and durable receipts after bounded retries. Receipt acknowledgements
+precede retirement, surviving crashes beyond journal retention.
+
+Canonical local logins accept account overrides. `route list` exposes sourced
+settings, knobs, estimates and budgets; `pacing_preview` shares its assessment.
+[Operating details](../runbooks/routing-and-templates.md#pacing) cover overrides
+and retention.
 
 ## Revisioned, bounded refresh
 
@@ -180,23 +243,34 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. A continuation retains the applied provider and optional account key
+refused. An availability record without an account key may proceed with a
+warning by default; strict `QUOTA_IDENTITY_UNKNOWN` policy excludes it.
+Independent credential, confinement and authority refusals still apply.
+A continuation retains the applied provider and optional account key
 as a pair. A missing provider, or a retained key without an account for that
 provider, is refused; a same-key account from another provider is never
 substituted. An absent applied account key remains absent. Credential roots
 must not be HOME or an ancestor of HOME.
 Additional directories within one account entry are aliases and may overlap.
-Distinct isolated registered-account directories must not overlap;
-`accounts register` refuses these and `check config` reports them. An adapter
+`identity::account_state_paths` resolves each adapter's state and credential
+stores before registration, registry selection and confinement compare them.
+HOME-rooted adapters own their declared client state below HOME (agy uses
+`.gemini`) and their declared credential files; their entire HOME is not a
+credential store. Nested HOME roots are allowed, while overlapping resolved
+stores, including symlink aliases, are refused by `accounts register` and
+reported by `check config`. An adapter
 that declares no registered accounts but uses a local login can have multiple
 quota/menu entries whose directory paths overlap; those entries all describe
 the same local login, not separate credential trees. This allowance is limited
 to that adapter and does not include isolated registered accounts. A login at
-HOME is the adapter's local account and needs no registration. Agy's local
-login remains selectable as `account=local` beside isolated registered accounts,
-but is an in-memory identity
-rather than a registered credential root; automatic routing continues to choose
-among registered accounts. A pin does not switch accounts. Credential custody
+HOME needs no registration. Agy's local login remains selectable as
+`account=local` beside isolated registered accounts and participates in pools
+with its own quota and readiness. It is an in-memory identity rather than a
+registered credential root. Registering HOME explicitly uses its detected
+identity and suppresses the synthetic local entry to avoid routing the same
+login twice. Native launches and account probes set HOME to the selected
+account directory; sandboxed launches retain a private HOME with only the
+selected account's keychain. A pin does not switch accounts. Credential custody
 is owned by [supervision](supervisor.md#native-environment-and-sandbox-tool-stores).
 A registered long-lived lane token is not rotated by the host.
 

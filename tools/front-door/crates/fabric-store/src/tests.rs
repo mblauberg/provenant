@@ -530,6 +530,100 @@ fn event_replay_deduplication_and_durable_cursor() {
             .is_empty()
     );
 }
+
+// Spec: docs/specs/lane-contracts.md#observation-events
+#[test]
+fn observation_reconnect_deduplicates_and_resumes_after_acknowledgement() {
+    use provenant_records::lane_contract::{
+        Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
+    };
+    let f = Fixture::new();
+    let store = f.open();
+    let mut observation = ObservationEvent {
+        header: RecordHeader::V1,
+        id: "source-event-1".into(),
+        cursor: ObservationCursor {
+            project: project(),
+            seq: 0,
+        },
+        lineage: ObservationLineage {
+            attempt: None,
+            parent_attempt: None,
+            work: None,
+            extra: Default::default(),
+        },
+        kind: ObservationKind::CheckRun,
+        coverage: Coverage::Partial,
+        detail: serde_json::json!({"repository":"owner/repo", "head":"abc"}),
+        extra: Default::default(),
+    };
+    let first = store
+        .append_observation(&observation, f.now(), &f.request())
+        .unwrap();
+    assert_eq!(
+        first,
+        store
+            .append_observation(&observation, f.now(), &f.request())
+            .unwrap()
+    );
+    let mut conflict = observation.clone();
+    conflict.detail = serde_json::json!({"head":"different"});
+    assert!(matches!(
+        store.append_observation(&conflict, f.now(), &f.request()),
+        Err(Error::Conflict)
+    ));
+    store
+        .note(
+            &event(
+                project(),
+                None,
+                EventKind::Note,
+                None,
+                "other event".into(),
+                f.now(),
+            ),
+            None,
+            &f.request(),
+        )
+        .unwrap();
+    observation.id = "source-event-2".into();
+    let second = store
+        .append_observation(&observation, f.now(), &f.request())
+        .unwrap();
+    let replay = store
+        .observations(project(), 0, 100, &f.request())
+        .unwrap()
+        .items;
+    assert_eq!(
+        replay
+            .iter()
+            .map(|item| item.cursor.seq)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    store
+        .mark_events_read(project(), actor(3), first, &f.request())
+        .unwrap();
+    drop(store);
+    let store = f.open();
+    let cursor = store
+        .event_cursor(project(), actor(3), &f.request())
+        .unwrap();
+    let resumed = store
+        .observations(project(), cursor, 100, &f.request())
+        .unwrap()
+        .items;
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].id, observation.id);
+    assert_eq!(resumed[0].cursor.seq, second);
+    assert!(
+        store
+            .observations(ProjectId::from_bytes([9; 16]), 0, 100, &f.request())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
 #[test]
 fn a_busy_store_waits_for_the_writer_instead_of_failing() {
     let f = Fixture::new();

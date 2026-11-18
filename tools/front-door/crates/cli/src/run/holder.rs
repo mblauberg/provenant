@@ -1012,9 +1012,17 @@ mod tests {
             Path::new("/nonexistent"),
             false,
         )?;
+        // A complete but malformed record is lost framing, not a final
+        // fragment: it settles as a line-specific capture defect.
+        assert_eq!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
+        );
         assert_eq!(
             decoded.reason.as_deref(),
-            Some("provider protocol is malformed")
+            Some(
+                "provider capture evidence defect at stdout.log line 2; replay incomplete: provider protocol is malformed"
+            )
         );
 
         let valid_tail = make_frames()?;

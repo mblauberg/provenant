@@ -169,12 +169,12 @@ replayable authority.
 
 ### Build admission is a sourced port
 
-Sandboxed Cargo shims use `PortTable.build_admission`, independently of attempt
+Lane Cargo shims, including native launches, use `PortTable.build_admission`, independently of attempt
 admission: builtin uses host slots and the effective disk policy, command runs
 the repository wrapper around Cargo, and none omits admission. The host freezes
 the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
-`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain;
-no shim is installed for them. Local-Cargo policy still applies to every shim
+`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain
+behind the shim. Local-Cargo policy still applies to every shim
 backend. Wrapper execution streams Cargo output without a host-state receipt.
 - Why: build coordination varies by repository without changing attempt custody.
 - Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
@@ -197,7 +197,9 @@ credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
-files. Roots carry declarations; launch preparation classifies built-in,
+files. For HOME-rooted accounts, the stores are the adapter's client state
+below HOME and its declared credential files; registration does not make
+the entire account HOME a credential store. Roots carry declarations; launch preparation classifies built-in,
 provider, host-variable and account declarations once, using the actual launch
 source and cwd, scratch, and the derived writer cache, without unioning an
 earlier project classification. Scratch and the writer cache are lane roots
@@ -292,10 +294,11 @@ inventory; the common Git directory's parent does not establish that owner.
 
 ### Shared Git metadata is read-only
 
-A writer owns a private Git directory with the shared object store as a
-read-only alternate; shared refs, config, hooks and admin metadata stay
-read-only, and the host imports the result and moves the branch by
-compare-and-swap.
+Authorised writers of one worktree incarnation and branch share private Git
+data, with the repository object store as a read-only alternate. Configuration
+and credentials remain private to each attempt. The repository's refs, config,
+hooks and admin metadata stay read-only to lanes; the host imports the result
+and moves the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
 - Why: ordinary Git works in the lane while one host boundary guards shared
   metadata.
 
@@ -355,15 +358,16 @@ The sample is periodic observation, not an atomic census or a memory limit.
 (1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
-available from `provenant config show`.
+available from `provenant config show --full`.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
 - Owner: `crates/supervisor/src/process_tree.rs`, `src/process_tree.rs`
 
 ### Disclosure and safe Git evidence
 
-A prompt snapshot with a known secret is refused before sealing, and output is
-redacted across chunk boundaries before it reaches disk. Quoted credential values
+A prompt snapshot with a known secret is refused before sealing. Host-local
+provider captures preserve raw bytes for settlement replay; decoded results and
+artifact text are redacted at publication and disclosure boundaries. Quoted credential values
 are masked until a definite closing quote: one that every plausible escape layer,
 from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than

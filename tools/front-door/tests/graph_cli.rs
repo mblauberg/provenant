@@ -11,6 +11,27 @@ use std::{
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
 #[test]
+// Spec: docs/specs/cli.md#results
+fn scanner_refusal_names_rule_without_echoing_brief() -> Result {
+    let rig = GraphProject::new()?;
+    prepare_state(&rig)?;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (output, value) = rig.run(&["run", "task", "--brief", secret, "--explain"])?;
+    let wire = value.to_string();
+    assert!(!wire.contains(secret), "credential reached output");
+    if output.status.success() {
+        assert_eq!(
+            value["data"]["document"]["nodes"][0]["prompt"],
+            "[REDACTED]"
+        );
+    } else {
+        assert!(wire.contains("brief"), "missing field in refusal");
+        assert!(wire.contains("credential token"), "missing rule in refusal");
+    }
+    Ok(())
+}
+
+#[test]
 fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     use std::io::Write;
     let rig = GraphProject::new()?;
@@ -607,13 +628,13 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     std::fs::create_dir_all(&user)?;
     std::fs::create_dir_all(&repo)?;
     std::fs::write(user.join("task.toml"), "brief='user'\ntier='junior'\n")?;
-    let (_, value) = rig.run(&["templates", "task"])?;
+    let (_, value) = rig.run(&["templates", "show", "task"])?;
     assert_eq!(value["data"]["templates"][0]["template"]["brief"], "user");
     std::fs::write(
         repo.join("task.toml"),
         "brief='repository'\ntier='senior'\n",
     )?;
-    let (_, value) = rig.run(&["templates", "task"])?;
+    let (_, value) = rig.run(&["templates", "show", "task"])?;
     assert_eq!(
         value["data"]["templates"][0]["template"]["brief"],
         "repository"
@@ -625,7 +646,7 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     )?;
     let output = rig
         .command()
-        .args(["templates", "task", "--file"])
+        .args(["templates", "show", "task", "--file"])
         .arg(inline)
         .output()?;
     let value: Value = serde_json::from_slice(&output.stdout)?;
@@ -635,7 +656,10 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
 }
 
 #[test]
-fn every_bundled_template_is_listed_shown_and_explained() -> Result {
+fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() -> Result {
+    // Spec: docs/specs/fabric.md#bundled-template-declarations
+    use provenant_fabric_runtime::graph::template::{Compiler, TemplateLibrary};
+
     let rig = GraphProject::new()?;
     let (output, value) = rig.run(&["templates"])?;
     assert!(output.status.success(), "{value}");
@@ -644,7 +668,7 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         .iter()
         .filter_map(|entry| entry["name"].as_str())
         .collect();
-    let library = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
+    let library = TemplateLibrary::bundled();
     assert_eq!(names, library.names().collect::<Vec<_>>());
     let directory =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/fabric-runtime/assets/templates");
@@ -673,16 +697,37 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
             .collect::<std::collections::BTreeSet<_>>(),
         expected.iter().map(String::as_str).collect()
     );
+
+    let (output, shown) = rig.run(&["templates", "show", "task"])?;
+    assert!(output.status.success(), "{shown}");
+    assert_eq!(
+        &shown["data"]["templates"][0],
+        listed
+            .iter()
+            .find(|entry| entry["name"] == "task")
+            .ok_or("task template")?
+    );
+
+    // Keep one representative CLI show; exercise every declaration and its
+    // parameter bindings through the in-process compiler.
+    let resolvers = [
+        ("review-frame".to_owned(), vec!["true".to_owned()]),
+        ("review-verify".to_owned(), vec!["true".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["true".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
+        ("review-panel".to_owned(), vec!["correctness".to_owned()]),
+        ("review-advice-correctness".to_owned(), vec![String::new()]),
+    ]
+    .into_iter()
+    .collect();
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
     for entry in listed {
         let name = entry["name"].as_str().ok_or("template name")?;
-        let (output, shown) = rig.run(&["templates", name])?;
-        assert!(output.status.success(), "{name}: {shown}");
-        assert_eq!(shown["data"]["templates"][0], *entry, "{name}");
         let template = &entry["template"];
         let mut node = json!({"id":"exercise", "use":name});
-        if name == "repair" {
-            node["repeat"] = json!({"until":"accepted", "max_rounds":1, "review_repair":true});
-        }
         let mut parameters = json!({});
         if template["parameters"].get("worktree").is_some() {
             parameters["worktree"] = json!(rig.project);
@@ -710,6 +755,35 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
             };
         }
         nodes.push(node);
+        let compiled = compiler
+            .compile_all(&nodes)
+            .map_err(|error| format!("{name}: {error}"))?;
+        assert!(!compiled.is_empty(), "{name}");
+    }
+
+    // These CLI paths exercise behaviour specific to repair loops,
+    // synthesis inputs, and worktree parameter binding.
+    for (name, nodes) in [
+        (
+            "repair",
+            vec![
+                json!({"id":"exercise", "use":"repair", "with":{"worktree":rig.project, "write_scope":["."]}, "repeat":{"until":"accepted", "max_rounds":1, "review_repair":true}}),
+            ],
+        ),
+        (
+            "synthesise",
+            vec![
+                json!({"id":"source", "use":"task"}),
+                json!({"id":"exercise", "use":"synthesise", "after":["source"], "inputs":[{"node":"source", "outputs":["result"]}]}),
+            ],
+        ),
+        (
+            "implement",
+            vec![
+                json!({"id":"exercise", "use":"implement", "worktree":rig.project, "write_scope":["."]}),
+            ],
+        ),
+    ] {
         let path =
             rig.document(&json!({"nodes":nodes, "integration_branch":"batch/integration"}))?;
         let output = rig
@@ -928,7 +1002,7 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
         repo.join("broken.toml"),
         "brief='leaf'\nnodes=[{id='child',use='task'}]\n",
     )?;
-    for args in [vec!["templates"], vec!["templates", "broken"]] {
+    for args in [vec!["templates"], vec!["templates", "show", "broken"]] {
         let (output, _) = rig.run(&args)?;
         assert!(!output.status.success());
     }
@@ -1452,6 +1526,31 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
     }
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-ambiguous",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (output, value) =
+        rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("settled"), "{message}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|next| next.contains("retry steer-ambiguous/accept --brief-file")),
+        "{value}"
+    );
     Ok(())
 }
 
@@ -1698,6 +1797,99 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
     Ok(id.to_owned())
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn settled_graph_retry_requires_a_node() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    let (output, refusal) = rig.run(&["retry", &id])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("provenant retry {id}/task"))),
+        "{refusal}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn graph_retry_extends_budget_after_advisory_failure() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let rig = GraphProject::new()?;
+    let id = "advisory-budget";
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+        {"id":"advisory","kind":"gate","access":"read_only","advisory":true,"condition":{"type":"budget"}},
+        {"id":"pending","kind":"gate","access":"read_only","depends_on":["advisory"],"condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-advisory-budget.json")
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.nodes[0].state = NodeState::Failed;
+    let gate = checkpoint.nodes[0].gate.as_mut().ok_or("gate result")?;
+    gate.passed = false;
+    gate.reason = Some("advisory failed".into());
+    checkpoint.nodes[0]
+        .outputs
+        .as_mut()
+        .ok_or("gate outputs")?
+        .verdict = Some("FAIL".into());
+    checkpoint.nodes[1].state = NodeState::Pending;
+    checkpoint.nodes[1].gate = None;
+    checkpoint.nodes[1].outputs = None;
+    checkpoint.pause = Some(serde_json::from_value(
+        json!({"cause":{"kind":"budget_exceeded"},"reason":"budget spent"}),
+    )?);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph.budget.per_graph]\ntokens = 10\n",
+    )?;
+
+    let (output, retried) = rig.run(&["retry", id, "--extend", "budget.per_graph.tokens=30"])?;
+    assert!(output.status.success(), "{retried}");
+    let resumed = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert!(
+        resumed
+            .extensions
+            .iter()
+            .any(|extension| extension.contains("per_graph.tokens=30")),
+        "{resumed:?}"
+    );
+    assert_ne!(resumed.nodes[1].state, NodeState::Pending, "{resumed:?}");
+    Ok(())
+}
+
 #[test]
 fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
     for qualified in [true, false] {
@@ -1709,7 +1901,18 @@ fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() 
             id.clone()
         };
         let brief = "line one\nline two: corrected scope\n";
-        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
+        let brief_path = rig.project.join("amended-brief.txt");
+        std::fs::write(&brief_path, brief)?;
+        let (output, retried) = if qualified {
+            rig.run(&[
+                "retry",
+                &target,
+                "--brief-file",
+                brief_path.to_str().ok_or("brief path")?,
+            ])?
+        } else {
+            rig.run(&["retry", &target, "--brief", brief])?
+        };
         assert!(output.status.success(), "{target}: {retried}");
         let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
         assert_eq!(prompt, brief, "{target}");
@@ -1734,5 +1937,211 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
     assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
     let (_, after) = rig.run(&["status", "two-nodes"])?;
     assert_eq!(after["data"]["rows"], before["data"]["rows"], "{after}");
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn succeeded_graph_retry_suggests_no_succeeded_node() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"all-succeeded","nodes":[
+        {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    let (output, refusal) = rig.run(&["retry", "all-succeeded"])?;
+    assert!(!output.status.success(), "{refusal}");
+    let message = refusal["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("first"),
+        "must not suggest succeeded node: {message}"
+    );
+    assert!(
+        !message.contains("second"),
+        "must not suggest succeeded node: {message}"
+    );
+    assert!(message.contains("all-succeeded/NODE"), "{message}");
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn cancelled_graph_retry_resumes_without_refusal() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let rig = GraphProject::new()?;
+    let id = "cancelled-retry";
+    let path = rig.document(
+        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+            {"id":"work","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]}),
+    )?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-cancelled-retry.json")
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+    checkpoint.nodes[0].state = NodeState::Skipped;
+    checkpoint.nodes[0].skip_reason = Some("graph cancelled".into());
+    checkpoint.nodes[0].cancelled_from = Some(NodeState::Pending);
+    checkpoint.nodes[0].gate = None;
+    checkpoint.nodes[0].outputs = None;
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", id])?;
+    assert!(
+        output.status.success(),
+        "cancelled graph retry must not be refused: {retried}"
+    );
+    let resumed = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert!(!resumed.cancelled, "cancelled state must be cleared");
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+// A cancel flag on a graph with nothing left to restore resumes nothing, so a
+// retry that does nothing must still be refused (#3456).
+#[test]
+fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        &id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", &id])?;
+    assert!(
+        !output.status.success(),
+        "a retry that restores nothing must not exit 0: {retried}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeDecisionCause};
+
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    checkpoint.nodes[0].expansion_pause = Some("plan expansion limit".into());
+    checkpoint.nodes[0].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
+        active: true,
+        fallback: false,
+        fragment_error: None,
+    });
+    checkpoint.set_pause(
+        provenant_records::pause::PauseCause::InvalidPlanExpansion,
+        "plan expansion limit",
+    );
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        &id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", &id])?;
+    assert!(
+        output.status.success(),
+        "expansion paused retry must not be refused: {retried}"
+    );
+    let resumed = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    assert!(!resumed.nodes.iter().any(|n| matches!(
+        &n.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+    )));
+    assert!(
+        resumed.pause.is_none(),
+        "graph pause must be cleared on resume"
+    );
     Ok(())
 }

@@ -11,6 +11,7 @@ use provenant_os::{
 };
 use std::{
     ffi::{OsStr, OsString},
+    io::Read,
     path::Path,
     time::Duration,
 };
@@ -19,9 +20,11 @@ mod view;
 pub(crate) mod worktree;
 #[cfg(test)]
 use view::object_binding;
+#[cfg(any(test, feature = "fixture"))]
+pub(crate) use view::prepare_bound;
 pub(crate) use view::{
-    ObjectSource, bound_source, copy_index, merge_head, merge_objects, prepare_bound,
-    prepare_read_only, prepare_shared_bound, private_tip, restore_index, set_private_tip,
+    ObjectSource, bound_source, copy_index, merge_head, merge_objects, prepare_read_only,
+    prepare_shared_bound, private_tip, restore_index, set_private_tip,
 };
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
@@ -200,7 +203,12 @@ pub(crate) fn execute_bounded(
         _ => invalid(),
     })?;
     if output.termination != Termination::Exit(0)
-        || settings.clean_stderr && !output.stderr.bytes.is_empty()
+        || output.drain_truncated
+        || output.stdout.truncated
+        || output.stdout.read_failed
+        || output.stderr.read_failed
+        || settings.clean_stderr
+            && (output.stderr.truncated || !only_graft_hint(&output.stderr.bytes))
     {
         if String::from_utf8_lossy(&output.stderr.bytes)
             .contains("pack exceeds maximum allowed size")
@@ -210,6 +218,14 @@ pub(crate) fn execute_bounded(
             ));
         }
         return Err(operation_io(git_dir, Some(output)));
+    }
+    if !output.stderr.bytes.is_empty() {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: lane Git import: {}",
+            String::from_utf8_lossy(&output.stderr.bytes).trim_end()
+        );
     }
     Ok(output.stdout.bytes)
 }
@@ -238,6 +254,27 @@ fn is_atomic_ref_transaction(input: &[u8]) -> bool {
         && commands[1..commands.len() - 2]
             .iter()
             .all(|line| line.starts_with(b"delete refs/provenant/import-extra/"))
+}
+
+// `cat-file --batch` can exit zero for a corrupt object, reporting it as
+// missing on stdout and an error on stderr. Its output is deliberately streamed
+// to discard, so retain the stderr integrity check except for Git's known hint.
+fn only_graft_hint(stderr: &[u8]) -> bool {
+    let Ok(stderr) = std::str::from_utf8(stderr) else {
+        return false;
+    };
+    stderr.lines().all(|line| {
+        matches!(
+            line,
+            "hint:"
+                | "hint: Support for <GIT_DIR>/info/grafts is deprecated"
+                | "hint: and will be removed in a future Git version."
+                | "hint: Please use \"git replace --convert-graft-file\""
+                | "hint: to convert the grafts into replace refs."
+                | "hint: Turn this message off by running"
+                | "hint: \"git config set advice.graftFileDeprecated false\""
+        )
+    })
 }
 
 pub(crate) fn quote_alternate(path: &Path) -> String {
@@ -370,6 +407,8 @@ pub(crate) fn is_ancestor(git: &Path, repo: &VerifiedRepo, ancestor: GitOid, hea
 pub(crate) enum Ancestor {
     /// The pinned launch base: the expected case, nothing to report.
     LaunchBase,
+    /// The tip has no known ancestor but is retained on the lane branch.
+    Unrooted,
     /// A rebase or merge onto other history the host already knows: the
     /// origin default branch, the ref the lane launched against, or a
     /// remote-tracking branch. Publication proceeds and reports it.
@@ -380,6 +419,7 @@ impl Ancestor {
     pub(crate) fn warning(&self, branch: &str, base: GitOid, head: GitOid) -> Option<String> {
         match self {
             Self::LaunchBase => None,
+            Self::Unrooted => None,
             Self::Known { reference, oid } => Some(format!(
                 "lane tip {head} on {branch} no longer descends from its launch base {base}; \
                  published because it descends from {reference} ({oid})"
@@ -440,15 +480,27 @@ fn known_ancestor(
     Ok(None)
 }
 
+pub(crate) struct BranchPublication<'a> {
+    pub branch: &'a str,
+    pub base: GitOid,
+    pub launch_ref: Option<&'a str>,
+    pub head: GitOid,
+    pub attempt: AttemptId,
+}
+
 pub(crate) fn publish_branch(
     git: &Path,
     repo: &VerifiedRepo,
-    branch: &str,
-    base: GitOid,
-    launch_ref: Option<&str>,
-    head: GitOid,
-    attempt: AttemptId,
+    publication: BranchPublication<'_>,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Ancestor> {
+    let BranchPublication {
+        branch,
+        base,
+        launch_ref,
+        head,
+        attempt,
+    } = publication;
     let current = resolve_ref(git, repo, branch)?;
     // Fast-forward from the launch base or from later lane commits, but not
     // from a branch rewound behind its base.
@@ -457,39 +509,61 @@ pub(crate) fn publish_branch(
     if !advances_current && !is_ancestor(git, repo, head, current) {
         return Err(invalid());
     }
-    // The tip and the host's refs do not change on retry, so a tip with no
-    // known ancestor is a final refusal, never a retryable one.
-    let ancestor = known_ancestor(git, repo, base, launch_ref, head)?.ok_or_else(|| {
-        RunError::LaneTipUnrooted {
-            tip: head,
-            base,
-            launch_ref: launch_ref.map(str::to_owned),
+    let ancestor = match known_ancestor(git, repo, base, launch_ref, head)? {
+        Some(ancestor) => ancestor,
+        None => {
+            policy.warn_or(
+                "LANE_TIP_UNROOTED",
+                provenant_records::policy::Facts::violation(format!(
+                    "lane tip {head} has no known ancestor; publishing lane branch anyway"
+                )),
+                |_| RunError::LaneTipUnrooted {
+                    tip: head,
+                    base,
+                    launch_ref: launch_ref.map(str::to_owned),
+                },
+            )?;
+            Ancestor::Unrooted
         }
-    })?;
+    };
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {
         let target = if advances_current { head } else { current };
         let message = match &ancestor {
             Ancestor::LaunchBase => "provenant: verified lane objects".to_owned(),
+            Ancestor::Unrooted => "provenant: verified lane objects (no known ancestor)".to_owned(),
             Ancestor::Known { reference, oid } => {
                 format!("provenant: verified lane objects (descends from {reference} {oid})")
             }
         };
-        command(
+        // Retain any history displaced by a rewrite in the same ref transaction
+        // as the branch CAS. The content-addressed ref is stable on retry.
+        let recovery = format!("refs/provenant/recovery/{current}");
+        let preserve = target != current && !is_ancestor(git, repo, current, target);
+        let transaction = if preserve {
+            let retain = match resolve_ref(git, repo, &recovery) {
+                // --no-deref replaces a symbolic ref itself with a direct pin.
+                Ok(existing) if existing == current => {
+                    format!("update {recovery} {current} {current}")
+                }
+                Ok(_) => return Err(invalid()),
+                Err(_) => format!("create {recovery} {current}"),
+            };
+            format!("{retain}\nupdate {branch} {target} {current}\n")
+        } else {
+            format!("update {branch} {target} {current}\n")
+        };
+        execute_bounded(
             git,
             repo.common_git_dir(),
             repo.root_path(),
-            &args(&[
-                "update-ref",
-                "--no-deref",
-                "-m",
-                &message,
-                branch,
-                &target.to_string(),
-                &current.to_string(),
-            ]),
+            &args(&["update-ref", "--no-deref", "-m", &message, "--stdin"]),
             None,
+            Execution {
+                input: Some(transaction.as_bytes()),
+                ..Execution::default()
+            },
         )?;
     }
     command(
@@ -515,9 +589,27 @@ fn directory(parent: &Directory, name: &OsStr) -> Result<Directory> {
     Ok(parent.open_verified_directory(name)?)
 }
 
-// Validate every entry before Git can traverse it. The provider is dead, but
-// descriptor-relative opens still protect against links in persisted input.
+// Validate entry types before copying; sibling writers may still be active.
+// Git only traverses the host-owned import copy, never this mutable tree.
 fn object_bytes(directory: &Directory, depth: usize) -> Result<u64> {
+    let mut entries = MAX_OBJECT_ENTRIES;
+    object_bytes_with_entries(directory, depth, &mut entries)
+}
+
+const MAX_OBJECT_ENTRIES: u64 = 100_000;
+
+fn object_entry(remaining: &mut u64) -> Result<()> {
+    *remaining = remaining.checked_sub(1).ok_or(RunError::ObjectImportLimit(
+        "lane object store exceeds its entry limit",
+    ))?;
+    Ok(())
+}
+
+fn object_bytes_with_entries(
+    directory: &Directory,
+    depth: usize,
+    entries: &mut u64,
+) -> Result<u64> {
     if depth > 128 {
         return Err(RunError::Validation(
             "lane object store nesting exceeds limit",
@@ -526,12 +618,15 @@ fn object_bytes(directory: &Directory, depth: usize) -> Result<u64> {
     let mut bytes = 0_u64;
     for entry in directory.entries()? {
         let entry = entry?;
+        object_entry(entries)?;
         let metadata = directory.metadata_at(&entry, false)?;
         let size = match metadata.kind {
             FileKind::Regular => metadata.size,
-            FileKind::Directory => {
-                object_bytes(&directory.open_verified_directory(&entry)?, depth + 1)?
-            }
+            FileKind::Directory => object_bytes_with_entries(
+                &directory.open_verified_directory(&entry)?,
+                depth + 1,
+                entries,
+            )?,
             _ => {
                 return Err(RunError::Validation(
                     "lane object store contains a symlink or special file",
@@ -543,6 +638,70 @@ fn object_bytes(directory: &Directory, depth: usize) -> Result<u64> {
         ))?;
     }
     Ok(bytes)
+}
+
+fn snapshot_source(
+    source: &Directory,
+    target: &Directory,
+    remaining: &mut u64,
+    entries: &mut u64,
+    depth: usize,
+) -> Result<()> {
+    if depth > 128 {
+        return Err(RunError::Validation(
+            "lane object store nesting exceeds limit",
+        ));
+    }
+    for name in source.entries()? {
+        let name = name?;
+        object_entry(entries)?;
+        let before = source.metadata_at(&name, false)?;
+        match before.kind {
+            FileKind::Directory => snapshot_source(
+                &source.open_verified_directory(&name)?,
+                &directory(target, &name)?,
+                remaining,
+                entries,
+                depth + 1,
+            )?,
+            FileKind::Regular => {
+                if before.size > *remaining {
+                    return Err(RunError::ObjectImportLimit(
+                        "lane object snapshot grew beyond its byte budget",
+                    ));
+                }
+                let mut input = source.open_read(&name)?;
+                if !before.unchanged(&input.metadata()?) {
+                    return Err(provenant_os::fs::FsError::RaceRefused { name }.into());
+                }
+                let mut output = target.create_new(&name)?;
+                let input_path = source.current_path()?.join(&name);
+                let copied = {
+                    let mut bounded = (&mut input).take(before.size.saturating_add(1));
+                    std::io::copy(&mut bounded, &mut output).map_err(|source| {
+                        RunError::OperationIo {
+                            operation: "snapshot lane Git objects",
+                            path: Some(input_path),
+                            source,
+                        }
+                    })?
+                };
+                if copied != before.size
+                    || !before.unchanged(&input.metadata()?)
+                    || !before.unchanged(&source.metadata_at(&name, false)?)
+                {
+                    return Err(provenant_os::fs::FsError::RaceRefused { name }.into());
+                }
+                *remaining -= copied;
+            }
+            _ => {
+                return Err(RunError::Validation(
+                    "lane object store contains a symlink or special file",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
@@ -561,12 +720,9 @@ fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-        for name in [
-            "alternates",
-            "http-alternates",
-            "commit-graph",
-            "commit-graphs",
-        ] {
+        // The exact validated host alternate is also used by live siblings.
+        // It is host-maintained and must survive budget and import preparation.
+        for name in ["http-alternates", "commit-graph", "commit-graphs"] {
             crate::artifacts::remove_entry_tree(&info, OsStr::new(name))?;
         }
     }
@@ -800,9 +956,15 @@ pub(crate) fn settle_many(
     let source = source.ok_or(RunError::Validation("writer has no private object directory; recover its commits on the host and start a fresh run"))?;
     repo.revalidate().map_err(|_| invalid())?;
     let source_path = source_path(source, repo)?;
-    let bytes = sanitise_source(source, repo)?;
+    let bytes = object_bytes(source, 0)?;
     let (cap, timeout) = import_limits(bytes)?;
     with_clean_view(git, repo, head, cancel, |view, path| {
+        let snapshot = directory(view, OsStr::new("lane-source"))?;
+        let mut remaining = bytes;
+        let mut entries = MAX_OBJECT_ENTRIES;
+        snapshot_source(source, &snapshot, &mut remaining, &mut entries, 0)?;
+        sanitise_source(&snapshot, repo)?;
+        let snapshot_path = snapshot.current_path()?;
         let objects = view.open_verified_directory(OsStr::new("objects"))?;
         let info = objects.open_verified_directory(OsStr::new("info"))?;
         info.atomic_write(
@@ -810,7 +972,7 @@ pub(crate) fn settle_many(
             ".import-",
             format!(
                 "{}\n{}\n",
-                quote_alternate(&source_path),
+                quote_alternate(&snapshot_path),
                 quote_alternate(&repo.common_git_dir().join("objects"))
             )
             .as_bytes(),
@@ -837,8 +999,8 @@ pub(crate) fn settle_many(
             .map(|arg| format!("'{}'", arg.to_string_lossy().replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join(" ");
-        // Git resolves the alternate path again. Recheck custody immediately
-        // before letting the sender access any lane-controlled path.
+        // Recheck the captured source identity and this attempt's custody before
+        // importing the host-owned copy. Siblings may continue writing source.
         if scope.custody.is_some_and(|custody| {
             custody.observe() != provenant_supervisor::custody::RecoveryState::Absent
         }) {

@@ -16,8 +16,11 @@ import refusal retains private Git for recovery.
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`
-and warns. A tip that descends from none of them settles `failed` with a typed
-`LANE_TIP_UNROOTED` cause naming the tip and launch base. That refusal is final:
+and warns. A tip that descends from none of them warns by default; strict
+`LANE_TIP_UNROOTED` policy refuses it with a typed cause naming the tip and
+launch base. When publication displaces a branch tip that is not an ancestor of
+the new tip, the same Git ref transaction retains it at
+`refs/provenant/recovery/<displaced-oid>`. That refusal is final:
 its inputs do not change on retry, so settlement seals it like an exhausted
 import and never retries it. Refusals that depend on a moving branch stay retryable.
 - Why: rebasing a lane onto the branch it feeds is legitimate, and a refusal that
@@ -26,7 +29,15 @@ import and never retries it. Refusals that depend on a moving branch stay retrya
 ## Outcome before release
 
 The shared Run settlement driver commits the provider outcome, result and
-handoff once the provider has exited and its captures are durable. Descendant
+handoff once the provider has exited and its captures are durable. Settlement
+replays the complete retained provider stream before classifying the task; it
+never uses a progress-only prefix after a replay error. An undecodable frame is
+an evidence defect naming its capture and line, and leaves the outcome unsettled
+rather than reporting a generic task failure. Its typed terminal cause carries
+only the host-observed line number, so public status can name the defect without
+exposing the provider error text. Proven custody loss and effective cancellation
+retain their existing priority; a signal, budget stop or EOF fragment alone
+cannot replace a known capture diagnostic. Descendant
 cleanup cannot withhold that decision. A terminal attempt can still be
 releasing: its reservation and writer exclusion remain until cleanup proves
 quiescence and Git import, publication and release receipts have settled.
@@ -188,7 +199,11 @@ and model identity checks.
 
 ## Retention and disclosure
 
-Known credential shapes are filtered from retained output. A result redaction failure
+Host-local stdout and stderr captures retain raw provider bytes for replay.
+Filtering JSONL before retention can destroy framing and hide the final answer.
+Known credential shapes are filtered from decoded results before sealing and
+from artifact text before disclosure; local capture paths are private evidence,
+not safe publication artifacts. A result redaction failure
 withholds the result; a session redaction failure retains it. Either prevents
 delivery. Result-only orphan recovery preserves its sealed bytes and reports
 when it cannot establish redaction.
