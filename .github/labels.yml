@@ -18,6 +18,10 @@
   color: "0075ca"
   description: Improvements or additions to documentation
 
+- name: test
+  color: "bfd4f2"
+  description: Test suite, CI timing or test design work
+
 - name: dependencies
   color: "0366d6"
   description: Dependency updates, including Dependabot pull requests
