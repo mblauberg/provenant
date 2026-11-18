@@ -40,6 +40,14 @@ fn rig() -> Result<TestRig> {
     )?;
     Ok(rig)
 }
+
+fn write_graphql_response(rig: &TestRig, response: serde_json::Value) -> Result {
+    fs::write(
+        rig.project.join("graphql-response.json"),
+        serde_json::to_vec(&response)?,
+    )?;
+    Ok(())
+}
 fn fixture_git(rig: &TestRig, args: &[&str]) -> Result<String> {
     let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
     let output = rig.execute(&git, args, None)?;
@@ -322,6 +330,16 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
     let rig = self::rig()?;
     let git = provenant_os::git::git_executable().ok_or("Git executable")?;
     let remote = rig.root.join("unused-remote.git");
+    fixture_git(
+        &rig,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=main",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
     assert_eq!(
         code(&rig.execute(
             &git,
@@ -637,21 +655,31 @@ fn pr_sync_conflict_aborts_cleanly_and_reports_repair_command() -> Result {
 
 fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     let rig = self::rig()?;
-    fs::write(
-        rig.project.join("status-1668.json"),
-        format!(
-            r#"{{"state":"OPEN","headRefOid":"{HEAD}","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","isDraft":false}}"#
-        ),
-    )?;
-    fs::write(
-        rig.project.join("status-1669.json"),
-        format!(
-            r#"{{"state":"OPEN","headRefOid":"{OTHER}","mergeStateStatus":"BLOCKED","reviewDecision":"","isDraft":true}}"#
-        ),
-    )?;
-    fs::write(
-        rig.project.join("checks-1669.json"),
-        r#"[{"bucket":"pass"},{"bucket":"skipping"},{"bucket":"pending"},{"bucket":"fail"}]"#,
+    let checks = |entries: Vec<serde_json::Value>| serde_json::json!({"contexts":{"totalCount":entries.len(),"nodes":entries}});
+    write_graphql_response(
+        &rig,
+        serde_json::json!({"data":{"repository":{
+            "a00": {
+                "number":1668,"state":"OPEN","headRefOid":HEAD,"isDraft":false,
+                "mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
+                "url":"https://github.com/owner/repo/pull/1668",
+                "statusCheckRollup":checks(vec![
+                    serde_json::json!({"__typename":"CheckRun","name":"ci-status","status":"COMPLETED","conclusion":"SUCCESS"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"optional","status":"COMPLETED","conclusion":"SKIPPED"})
+                ])
+            },
+            "a01": {
+                "number":1669,"state":"OPEN","headRefOid":OTHER,"isDraft":true,
+                "mergeStateStatus":"BLOCKED","reviewDecision":"",
+                "url":"https://github.com/owner/repo/pull/1669",
+                "statusCheckRollup":checks(vec![
+                    serde_json::json!({"__typename":"CheckRun","name":"pass","status":"COMPLETED","conclusion":"SUCCESS"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"skip","status":"COMPLETED","conclusion":"SKIPPED"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"pending","status":"IN_PROGRESS"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"fail","status":"COMPLETED","conclusion":"FAILURE"})
+                ])
+            }
+        }}}),
     )?;
     let output = rig.command(&["pr", "status", "1668", "1669"])?;
     assert_eq!(code(&output), 0, "{output:?}");
@@ -677,36 +705,57 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     }
     let output = rig.command(&["pr", "status", "1668", "1669", "--full"])?;
     assert_eq!(code(&output), 0, "{output:?}");
-    // Empty check data is unavailable, rather than a passing result.
-    fs::write(rig.project.join("checks.json"), "[]")?;
-    let output = rig.command(&["pr", "status", "1668", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert!(report["data"][0]["checks_total"].is_null());
-    let output = rig.command(&["pr", "status", "1668"])?;
-    assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
-    // A failed lookup is distinct and still returns the PR's other facts.
-    fs::write(rig.project.join("checks-fail"), "")?;
-    let output = rig.command(&["pr", "status", "1668", "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(report["data"][0]["head"], HEAD);
-    assert!(report["data"][0]["checks_total"].is_null());
-    assert_eq!(report["data"][0]["merge"], "clean");
-    let output = rig.command(&["pr", "status", "1668"])?;
-    assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
-    no_merge(&rig)
+    Ok(())
+}
+
+fn pr_status_keeps_facts_when_check_data_is_unavailable() -> Result {
+    for fail_checks in [false, true] {
+        let rig = self::rig()?;
+        fs::write(
+            rig.project.join("status-1668.json"),
+            format!(
+                r#"{{"state":"OPEN","headRefOid":"{HEAD}","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","isDraft":false}}"#
+            ),
+        )?;
+        fs::write(rig.project.join("graphql-fail"), "")?;
+        if fail_checks {
+            fs::write(rig.project.join("checks-fail"), "")?;
+        } else {
+            // Empty check data is unavailable, rather than a passing result.
+            fs::write(rig.project.join("checks.json"), "[]")?;
+        }
+        let output = rig.command(&["pr", "status", "1668", "--json"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(report["data"][0]["head"], HEAD);
+        assert!(report["data"][0]["checks_total"].is_null());
+        assert_eq!(report["data"][0]["merge"], "clean");
+        let output = rig.command(&["pr", "status", "1668"])?;
+        assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
+        no_merge(&rig)?;
+    }
+    Ok(())
 }
 
 fn pr_status_preserves_partial_results() -> Result {
     let rig = self::rig()?;
-    fs::write(
-        rig.project.join("status-1668.json"),
-        format!(r#"{{"state":"OPEN","headRefOid":"{HEAD}"}}"#),
+    write_graphql_response(
+        &rig,
+        serde_json::json!({"data":{"repository":{
+            "a00": {"number":1668,"state":"OPEN","headRefOid":HEAD,"isDraft":false,
+                "mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
+                "url":"https://github.com/owner/repo/pull/1668",
+                "statusCheckRollup":{"contexts":{"totalCount":1,"nodes":[
+                    {"__typename":"CheckRun","name":"ci-status","status":"COMPLETED","conclusion":"SUCCESS"}
+                ]}}},
+            "a01": null
+        }}}),
     )?;
     let output = rig.command(&["pr", "status", "1668", "9999", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["data"][0]["head"], HEAD);
+    assert_eq!(report["data"][1]["state"], "UNAVAILABLE");
     assert!(report["data"][1]["error"].is_string());
     Ok(())
 }
@@ -863,6 +912,18 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             io::stdout().write_all(br#"{"nameWithOwner":"owner/repo"}"#)?;
         }
         value if value.starts_with("api graphql -f query=") => {
+            if Path::new("graphql-fail").exists() {
+                writeln!(io::stderr(), "gh: HTTP 500: fixture GraphQL failure")?;
+                return Ok(1);
+            }
+            if Path::new("graphql-response.json").exists() {
+                let response: serde_json::Value =
+                    serde_json::from_slice(&fs::read("graphql-response.json")?)?;
+                let bytes = serde_json::to_vec(&response)?;
+                io::stdout().write_all(b"HTTP/2 200\r\n\r\n")?;
+                io::stdout().write_all(&bytes)?;
+                return Ok(0);
+            }
             let body = serde_json::json!({
                 "data": {
                     "repository": {
@@ -1317,6 +1378,10 @@ fn main() -> ExitCode {
             (
                 "pr_status_prints_one_compact_line_per_pull_request",
                 pr_status_prints_one_compact_line_per_pull_request,
+            ),
+            (
+                "pr_status_keeps_facts_when_check_data_is_unavailable",
+                pr_status_keeps_facts_when_check_data_is_unavailable,
             ),
             (
                 "ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read",

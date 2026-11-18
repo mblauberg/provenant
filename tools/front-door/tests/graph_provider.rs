@@ -3781,7 +3781,7 @@ fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
     assert_eq!(digest["state"], "succeeded");
     assert_eq!(digest["findings_count"], 1);
     assert_eq!(digest["findings_available"], true);
-    let human_status = rig.command(&["status", "composite-output/panel"])?;
+    let human_status = rig.command(&["status", "composite-output/panel", "--full"])?;
     let human_status = String::from_utf8_lossy(&human_status.stdout.bytes);
     assert!(
         human_status.contains("verdict=VERDICT: FAIL"),
@@ -4731,7 +4731,7 @@ fn detached_graph_retry_reports_discarded_exclusion() -> Result {
         checkpoint["nodes"][0]["attempts"][0]["launched"], true,
         "{checkpoint}"
     );
-    let status = rig.command(&["status", "stale-exclusion"])?;
+    let status = rig.command(&["status", "stale-exclusion", "--full"])?;
     assert_eq!(code(&status), 0, "{status:?}");
     let text = String::from_utf8_lossy(&status.stdout.bytes);
     assert!(
