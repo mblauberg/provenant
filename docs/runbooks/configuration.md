@@ -17,6 +17,31 @@ Use `provenant config show --full` to inspect effective settings and their sourc
 the operation. See the [supervisor spec](../specs/supervisor.md) for boundary
 behaviour and [GC](gc.md) for retention configuration.
 
+## Port table
+
+The port table layers compiled builtins, host `state/ports.json`, then project
+`.provenant/ports.json`. A layer only needs the fields it changes: object fields
+deep-merge over the lower layer, so `{"verify": {"base": "origin/master"}}`
+keeps the other verify fields from the layers below it. `schema_version` is
+optional in a layer; it defaults to the current version, and a mismatch warns
+rather than refuses a compatible shape. `provenant config show --full` lists the
+effective `verify.base` and `verify.remote` with the layer or inferred ref that
+supplied each value.
+
+When no layer sets `verify.base`, Provenant infers it from
+`refs/remotes/<remote>/HEAD` for the effective `verify.remote` and marks the
+value as inferred in `config show`. If no remote HEAD resolves, the refusal
+names `verify.base` in `.provenant/ports.json` or host `ports.json` and shows an
+example value. Set `verify.remote` as well when the project does not use the
+default remote. A malformed layer names its file and key; a bad project layer
+is warned and skipped so commands that do not need verify still run, while an
+unreadable host port table still refuses lane identity.
+
+This repository keeps its source at `config/ports.json` and links the optional
+`.provenant/ports.json` path to it. Repository-specific scripts such as
+`scripts/verify-nextest` belong in that source (direct CI reads it without
+Provenant); the builtin verify tiers are neutral cargo commands.
+
 ## Provider model scope
 
 `[providers.cursor]` defaults to `models = ["auto", "composer-*", "grok-*"]`.
