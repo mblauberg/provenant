@@ -7,19 +7,23 @@ description: "Use for independent read-only review of a pinned diff or pull requ
 
 Review independently at a pinned head and prove coverage alongside CI.
 
-Run the `review-panel` template for a complete configured review, with the
-subject and base pinned on the command line and the spec in `--brief-file`:
+The chair or lead chooses whether to review, the reviewers and their number.
+For routine, low-risk work, use one reviewer or none. For risky changes, prefer
+a strong reviewer from another model family, optionally paired with one from
+the author's family. Avoid a lightweight cross-family slot; if only the same
+family is available, warn and proceed. These are overridable preferences, not
+routing requirements. Sources: [review diversity](https://arxiv.org/abs/2610.01471),
+[family bias](https://arxiv.org/abs/2609.17857) and
+[review trade-offs](https://marmelab.com/blog/2026/09/24/the-state-of-ai-harness-engineering-2026.html).
+
+For a configured panel, pin the subject and base and supply the spec:
 
 ```sh
 provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
 ```
 
-The host computes the merge base, supplies pinned Git context and passes the
-brief through framing, every selected lens, verification and synthesis. A dotted
-leaf such as `review.security` selects only one lens; it is useful for a focused
-slice, not a substitute for the complete configured panel. Review each slice
-lightly and the integrated head with the full required panel. A changed subject
-gets a delta review against the prior findings and the invariant under repair.
+A dotted leaf such as `review.security` selects one lens. Review a changed
+subject against prior findings and the invariant under repair.
 
 ## Independence
 
@@ -31,11 +35,9 @@ gets a delta review against the prior findings and the invariant under repair.
 
 ## Rubric
 
-[reviewer-context.md](references/reviewer-context.md) defines blocking,
-should-fix and note, what a finding states and what not to report. Every lens
-receives it, and a manual review applies it too. Inspection questions are in
-[review-lenses.md](references/review-lenses.md); the prompts under
-`references/lenses/` supply the template briefs.
+[reviewer-context.md](references/reviewer-context.md) defines findings;
+[review-lenses.md](references/review-lenses.md) supplies inspection questions.
+Template briefs live under `references/lenses/`.
 
 ## What a clean verdict proves
 
