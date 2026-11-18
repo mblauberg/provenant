@@ -328,7 +328,7 @@ pub trait CiStatus {
 
 /// Which positive settlement proof an observer needs. Cancellation can settle
 /// an attached subtree independently of detached work; observation requires the
-/// referenced run and its ordinary peer subtree to have finished.
+/// accepted or refused operation (and any referenced run/subtree) to be settled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettlementPurpose {
     Observation,
@@ -687,7 +687,7 @@ pub trait AttemptOwner {
     }
 
     /// Read-only, purpose-specific proof without starting or replaying work.
-    /// Observation requires terminal state and released custody. Cancellation
+    /// Observation requires a sealed refusal or terminal state and released custody. Cancellation
     /// may also prove that no operation was accepted or all attached work stopped.
     fn attempt_settled(
         &mut self,

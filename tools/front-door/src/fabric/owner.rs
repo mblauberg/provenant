@@ -2309,6 +2309,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
         purpose: SettlementPurpose,
     ) -> Result<bool, Self::Error> {
+        let terminal_observed = |record: &provenant_run::AttemptRecord| {
+            matches!(record.state, provenant_run::AttemptState::Terminal { .. })
+                && !record.peer.peer_subtree.as_ref().is_some_and(|subtree| {
+                    matches!(
+                        subtree.status,
+                        provenant_records::graph::GraphStatus::Pending
+                            | provenant_records::graph::GraphStatus::Paused
+                    )
+                })
+        };
         if purpose == SettlementPurpose::Cancellation
             && let Some(settled) =
                 self.factory
@@ -2336,30 +2346,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
             };
             let record = owner.snapshot(target, self.budget, self.cancel)?;
-            if record.peer.peer_subtree.as_ref().is_some_and(|subtree| {
-                matches!(
-                    subtree.status,
-                    provenant_records::graph::GraphStatus::Pending
-                        | provenant_records::graph::GraphStatus::Paused
-                )
-            }) {
-                return Ok(false);
-            }
-            return Ok(matches!(
-                record.state,
-                provenant_records::run::AttemptState::Terminal { .. }
-            ) && record.custody_pending == Some(false));
-        }
-        if purpose == SettlementPurpose::Observation {
-            return Ok(false);
+            return Ok(terminal_observed(&record) && record.custody_pending == Some(false));
         }
         let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
         let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let call = owner.call(self.cancel);
         match store.operation(&operation, &call).map_err(run_error)? {
-            // Absence in this host's store cannot settle an uncertain peer
-            // launch whose accepted target has not reached the graph yet.
-            None => Ok(!self.uncertain_peer_placement(attempt)),
+            // Absence is no observation proof. Cancellation also retains a
+            // fence for a peer whose accepted target has not reached this host.
+            None => Ok(purpose == SettlementPurpose::Cancellation
+                && !self.uncertain_peer_placement(attempt)),
             Some(operation) if operation.state == provenant_run::OperationState::Refused => {
                 Ok(true)
             }
@@ -2375,10 +2371,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     if !store.custody_released(&record, &call).map_err(run_error)? {
                         return Ok(false);
                     }
+                    if purpose == SettlementPurpose::Observation {
+                        return Ok(terminal_observed(&record));
+                    }
                 }
                 // A prepared operation with no attempt never admitted work;
                 // an unknown launch without evidence must remain unresolved.
-                Ok(found || operation.state == provenant_run::OperationState::Prepared)
+                Ok(purpose == SettlementPurpose::Cancellation
+                    && (found || operation.state == provenant_run::OperationState::Prepared))
             }
         }
     }

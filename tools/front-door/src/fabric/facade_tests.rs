@@ -715,14 +715,9 @@ pub(crate) mod peer_tests {
             environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
         }
         let cwd = std::env::current_dir()?;
-        // These tables provision and replay several independent variants.
-        let timeout = if name.ends_with("graph_run_controls_reach_the_sealed_attempt")
-            || name.ends_with("graph_target_retry_resets_only_a_terminal_sole_node_and_resumes_unfinished_work")
-        {
-            120
-        } else {
-            30
-        };
+        // The host fixture owns its tighter operation/assertion budgets. This
+        // outer watchdog must also cover graph tables with 120-second budgets.
+        let timeout = 120;
         let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(timeout));
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;

@@ -957,6 +957,7 @@ struct ErrorLauncher {
     errors: std::collections::BTreeMap<usize, crate::coordination::facade::FacadeError>,
     binding_error: Option<crate::coordination::facade::FacadeError>,
     observations: VecDeque<AttemptObservation>,
+    current_observation: Option<AttemptObservation>,
     calls: Vec<AttemptKey>,
     stored_refs: Vec<Option<String>>,
     now: Option<provenant_core::WallTime>,
@@ -1045,8 +1046,9 @@ impl AttemptOwner for ErrorLauncher {
             }
             return Err(error);
         }
-        self.observations
-            .pop_front()
+        self.current_observation
+            .clone()
+            .or_else(|| self.observations.pop_front())
             .ok_or(Self::Error::OwnerUnavailable)
     }
 }

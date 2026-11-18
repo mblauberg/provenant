@@ -443,7 +443,7 @@ pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
     })
 }
 
-/// Facts are requested lazily: a referenced waiting attempt may prove settlement,
+/// Facts are requested lazily: a waiting attempt may prove a settled operation,
 /// without replaying preparation. A deadline check precedes fallback evidence.
 #[derive(Default)]
 pub(super) struct NextAttemptFacts {
@@ -484,11 +484,7 @@ pub(super) fn next_attempt_transition(
     {
         // Backoff defers preparation, not reconciliation of a settled run.
         // Never call observe_or_start early without positive settlement proof.
-        let settled = if progress
-            .attempts
-            .last()
-            .is_some_and(|attempt| attempt.attempt_ref.is_some())
-        {
+        let settled = if !progress.attempts.is_empty() {
             match facts.attempt_settled {
                 Some(settled) => settled,
                 None => return NextAttemptDecision::ObserveSettlement,

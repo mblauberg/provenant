@@ -2199,6 +2199,11 @@ mod tests {
         let mut observed = NextAttemptFacts::default();
         assert_eq!(
             next_attempt_transition(node, progress, &limits, Some(at(1)), &observed),
+            NextAttemptDecision::ObserveSettlement
+        );
+        observed.attempt_settled = Some(false);
+        assert_eq!(
+            next_attempt_transition(node, progress, &limits, Some(at(1)), &observed),
             NextAttemptDecision::Ready(NextAttempt::WaitRetryWake)
         );
         assert_eq!(
