@@ -166,6 +166,142 @@ fn set_node_states(rig: &TestRig, graph: &str, changes: &[(&str, &str)]) -> Resu
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Bound the wait's real-time budget.
+fn a_running_graph_waits_the_full_budget_and_reports_timeout() -> Result {
+    let rig = TestRig::new()?;
+    seed_graph(&rig, "running")?;
+    set_node_states(&rig, "running", &[("slow", "running")])?;
+    let started = std::time::Instant::now();
+    let out = fixture_cli(&rig, &["wait", "running", "--timeout", "3s", "--json"])?;
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "wait returned early for a running graph: {out:?}"
+    );
+    assert_eq!(out.status.code(), Some(124), "{out:?}");
+    let value = json_lines(&out.stdout)?.pop().ok_or("wait envelope")?;
+    assert_eq!(value["data"]["timed_out"], true, "{value}");
+    assert_eq!(value["data"]["targets"][0]["settle"], "pending", "{value}");
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Bound the wait's real-time budget.
+fn a_peer_graph_waits_the_full_budget_at_timeout() -> Result {
+    use provenant_core::CancelToken;
+    use provenant_fabric_runtime::graph::GraphJournal;
+    let rig = TestRig::new()?;
+    seed_graph(&rig, "peer")?;
+    set_node_states(&rig, "peer", &[("slow", "running")])?;
+    let (state, project) = graph_identity(&rig)?;
+    let mut journal = graph_journal(
+        "peer",
+        &state,
+        project,
+        &provenant_os::clock::SystemClock::new(),
+        &CancelToken::new(),
+    )?;
+    let mut checkpoint = journal.load("peer")?.ok_or("checkpoint")?;
+    let node = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "slow")
+        .ok_or("node")?;
+    if let Some(attempt) = node.attempts.first_mut() {
+        attempt.attempt_ref = Some(format!("{}/1", "b".repeat(32)));
+    }
+    journal.save(&checkpoint)?;
+    let started = std::time::Instant::now();
+    let out = fixture_cli(&rig, &["wait", "peer", "--timeout", "3s"])?;
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "wait returned early for a running peer graph: {out:?}"
+    );
+    assert_eq!(out.status.code(), Some(124), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.lines().last(),
+        Some("next: peer still running at timeout; provenant wait peer"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn wait_final_line_states_each_target_and_the_next_command() -> Result {
+    let rig = TestRig::new()?;
+    seed_graph(&rig, "mixed")?;
+    set_node_states(
+        &rig,
+        "mixed",
+        &[
+            ("fast", "succeeded"),
+            ("slow", "failed"),
+            ("blocked", "blocked"),
+        ],
+    )?;
+    // A paused graph settles as needs input, distinct from a failed node.
+    use provenant_core::CancelToken;
+    use provenant_fabric_runtime::graph::GraphJournal;
+    let (state, project) = graph_identity(&rig)?;
+    let mut journal = graph_journal(
+        "mixed",
+        &state,
+        project,
+        &provenant_os::clock::SystemClock::new(),
+        &CancelToken::new(),
+    )?;
+    let mut checkpoint = journal.load("mixed")?.ok_or("checkpoint")?;
+    checkpoint.pause = Some(provenant_records::pause::Pause::new(
+        provenant_records::pause::PauseCause::Stop(
+            provenant_records::stop::StopCause::InputRequired,
+        ),
+        Some("blocked".into()),
+        "waiting for owner input",
+    )?);
+    journal.save(&checkpoint)?;
+
+    let targets = ["mixed/fast", "mixed/slow", "mixed"];
+    let out = fixture_cli(
+        &rig,
+        &[
+            "wait",
+            targets[0],
+            targets[1],
+            targets[2],
+            "--timeout",
+            "30s",
+        ],
+    )?;
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.lines().last(),
+        Some(
+            "next: mixed/fast settled ok, mixed/slow failed, mixed needs input; provenant status mixed/fast mixed/slow mixed"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("local observation:"), "{text}");
+
+    let full = fixture_cli(
+        &rig,
+        &[
+            "wait",
+            targets[0],
+            targets[1],
+            targets[2],
+            "--timeout",
+            "30s",
+            "--full",
+        ],
+    )?;
+    let full_text = String::from_utf8_lossy(&full.stdout);
+    assert!(full_text.contains("local observation:"), "{full_text}");
+    assert_eq!(full_text.lines().last(), text.lines().last(), "{full_text}");
+    Ok(())
+}
+
+#[test]
 fn an_unknown_target_fails_before_waiting() -> Result {
     let rig = TestRig::new()?;
     let out = rig.command(&["wait", "no-such-graph", "--timeout", "1h", "--json"])?;
