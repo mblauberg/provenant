@@ -483,7 +483,6 @@ mod output_projection_tests {
     fn projects_before_paging_and_binds_published_bytes() {
         use super::*;
         let secret = "a-long-private-value";
-        let raw = format!("{}é{}tail", "x".repeat(65535), secret);
         let projector =
             provenant_confinement::publication::Projector::new([secret.as_bytes().to_vec()])
                 .unwrap();
@@ -498,10 +497,20 @@ mod output_projection_tests {
             offset: 65520,
             max_bytes: 100,
         };
-        let actual_digest = provenant_core::Digest::from_bytes(
-            *provenant_records::CanonicalV1::file_digest(raw.as_bytes()).bytes(),
-        );
-        let projected = project_peer_output_with(&input, &projector, |request| {
+        for (raw, expected) in [
+            (
+                format!("{}{secret}tail", "x".repeat(65530)),
+                format!("{}[REDACTED]tail", "x".repeat(65530)),
+            ),
+            (
+                format!("{}é{secret}tail", "x".repeat(65535)),
+                format!("{}é[REDACTED]tail", "x".repeat(65535)),
+            ),
+        ] {
+            let actual_digest = provenant_core::Digest::from_bytes(
+                *provenant_records::CanonicalV1::file_digest(raw.as_bytes()).bytes(),
+            );
+            let projected = project_peer_output_with(&input, &projector, |request| {
             let OutputInput::Read { offset, .. } = request else { unreachable!() };
             let start = offset as usize;
             let end = (start + 65536).min(raw.len());
@@ -511,29 +520,29 @@ mod output_projection_tests {
                 "bytes":OutputBytes::from_bytes(raw.as_bytes()[start..end].to_vec()), "length":raw.len()
             })).map_err(|_| FacadeError::StateCorrupt)
         }).unwrap();
-        let OutputResult::Chunk {
-            bytes: OutputBytes::Utf8(page),
-            length,
-            digest,
-            offset,
-            next_offset,
-            ..
-        } = projected
-        else {
-            panic!("projected chunk")
-        };
-        let expected = format!("{}é[REDACTED]tail", "x".repeat(65535));
-        assert_eq!(page, expected[65520..]);
-        assert!(!page.contains(secret));
-        assert_eq!(length, Some(expected.len() as u64));
-        assert_eq!(offset, 65520);
-        assert_eq!(next_offset, expected.len() as u64);
-        assert_eq!(
-            digest,
-            provenant_core::Digest::from_bytes(
-                *provenant_records::CanonicalV1::file_digest(expected.as_bytes()).bytes()
-            )
-        );
+            let OutputResult::Chunk {
+                bytes: OutputBytes::Utf8(page),
+                length,
+                digest,
+                offset,
+                next_offset,
+                ..
+            } = projected
+            else {
+                panic!("projected chunk")
+            };
+            assert_eq!(page, expected[65520..]);
+            assert!(!page.contains(secret));
+            assert_eq!(length, Some(expected.len() as u64));
+            assert_eq!(offset, 65520);
+            assert_eq!(next_offset, expected.len() as u64);
+            assert_eq!(
+                digest,
+                provenant_core::Digest::from_bytes(
+                    *provenant_records::CanonicalV1::file_digest(expected.as_bytes()).bytes()
+                )
+            );
+        }
         for max_bytes in [0, provenant_records::run::OUTPUT_LIMIT + 1] {
             let mut invalid = input.clone();
             if let OutputInput::Read { max_bytes: max, .. } = &mut invalid {
@@ -556,7 +565,7 @@ mod output_projection_tests {
         assert!(project_peer_output_with(&past_end, &projector, |_| {
             serde_json::from_value(serde_json::json!({
                 "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
-                "offset":0, "next_offset":4, "eof":true, "digest":actual_digest,
+                "offset":0, "next_offset":4, "eof":true, "digest":provenant_core::Digest::from_bytes(*provenant_records::CanonicalV1::file_digest(b"test").bytes()),
                 "bytes":{"encoding":"utf8","data":"test"}, "length":4
             })).map_err(|_| FacadeError::StateCorrupt)
         }).is_err());
