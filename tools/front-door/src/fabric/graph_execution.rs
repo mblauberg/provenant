@@ -36,6 +36,117 @@ impl super::Factory {
 
 use super::*;
 
+/// The effective writer-dirty setting and the layer that set it, read once at
+/// graph submission. An unreadable host config is advisory: warn and use the
+/// compiled default (`refuse`) rather than refusing to observe the setting.
+fn writer_dirty_setting(
+    factory: &super::Factory,
+) -> provenant_run::writer_dirty::ResolvedWriterDirty {
+    use provenant_config::KnobSource;
+    use std::io::Write;
+    let (value, source) = match provenant_cli::config_reads::read_for(
+        &factory.context.roots,
+        "writer dirty preflight",
+    ) {
+        Ok(config) => match config.knobs.get(provenant_run::writer_dirty::KNOB) {
+            Some(knob) => {
+                let source = match knob.source {
+                    KnobSource::Default => "default",
+                    KnobSource::Profile => "host",
+                    KnobSource::Override => "launch",
+                };
+                (knob.value.as_str().map(str::to_owned), source.to_owned())
+            }
+            None => (None, "default".to_owned()),
+        },
+        Err(error) => {
+            let safe = provenant_records::diagnostic::safe_text(&error.to_string());
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: writer dirty setting unavailable ({safe}); using default refuse"
+            );
+            (None, "default".to_owned())
+        }
+    };
+    provenant_run::writer_dirty::ResolvedWriterDirty::resolve(value.as_deref(), &source)
+}
+
+/// Preflight every existing writer worktree at graph submission, before any
+/// plan node can spend tokens. WIP and continued-edit outcomes are recorded
+/// on the node so they reach the graph events.
+fn preflight_writer_worktrees(
+    factory: &super::Factory,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+    document: &mut provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<(), FacadeError> {
+    use provenant_fabric_runtime::graph::AccessMode;
+    use provenant_run::writer_dirty::{self, Preflight};
+    use std::io::Write;
+    let resolved = writer_dirty_setting(factory);
+    let git =
+        provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("git for preflight"))?;
+    for node in &mut document.nodes {
+        if node.access != AccessMode::WorktreeWrite
+            || node
+                .attempt
+                .as_ref()
+                .is_some_and(|spec| spec.new_worktree.is_some())
+        {
+            continue;
+        }
+        let Some(path) = node.worktree.as_deref() else {
+            continue;
+        };
+        let writer = provenant_run::resolve_writer(
+            factory.context.roots.state.as_path(),
+            &factory.cwd,
+            Path::new(path),
+        )
+        .map_err(run_error)?;
+        let writer = provenant_run::prepare_writer_with_facts(
+            &writer,
+            factory.context.roots.state.as_path(),
+            factory.context.identity.project,
+            facts,
+        )
+        .map_err(run_error)?;
+        let paths =
+            writer
+                .uncommitted_paths(&git)
+                .map_err(|error| FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: format!(
+                        "cannot inspect writer worktree {path} before launch: {}",
+                        provenant_records::diagnostic::safe_text(&error.to_string())
+                    ),
+                })?;
+        match writer_dirty::preflight(&resolved, &paths) {
+            Preflight::Clean => {}
+            Preflight::Refuse(reason) => {
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason,
+                });
+            }
+            Preflight::WipCommit => {
+                let message = format!("WIP: graph submission {}", document.graph_id);
+                let head = writer.commit_wip(&git, &message).map_err(run_error)?;
+                node.wip_commit = Some(head.to_string());
+                node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+                    commit: head.to_string(),
+                });
+            }
+            Preflight::ContinueInPlace(warning) => {
+                let _ = writeln!(std::io::stderr().lock(), "{warning}");
+                node.writer_dirty_warning = Some(warning);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Called once, as soon as a submitted graph's first checkpoint is saved.
 pub(crate) type Announce<'a> = &'a dyn Fn(
     &provenant_fabric_runtime::graph::GraphDocument,
@@ -641,6 +752,12 @@ impl Factory {
                         disk: None,
                         fact: None,
                     })?;
+                if !admitted && !resume {
+                    // No node has launched yet: a dirty-worktree refusal here
+                    // costs no plan-node tokens. WIP and continue modes record
+                    // their outcome on the node before any launch.
+                    preflight_writer_worktrees(self, &facts, &mut document)?;
+                }
                 // A new writer does not exist until the kernel has journalled
                 // its provisioning intent. Check its declared branch here;
                 // provisioning still verifies the actual checkout at launch.

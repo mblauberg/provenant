@@ -329,7 +329,7 @@ impl PrepareRefusal {
             .map(|guard| guard.to_string())
             .collect();
         if facts.is_empty() {
-            self.terminal_cause.detail().into()
+            self.terminal_cause.diagnostic(true)
         } else {
             facts.join("; ")
         }

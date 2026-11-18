@@ -760,6 +760,14 @@ pub(super) enum PrepareError {
     SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
     WriterContinuation(String),
+    /// A pin mismatch has its own honest cause, naming both commits; it is not
+    /// a failed launch handoff.
+    #[error("writer worktree head {head} does not match pinned commit {pinned}")]
+    WriterPinMismatch {
+        pinned: provenant_core::GitOid,
+        head: provenant_core::GitOid,
+        uncommitted: Vec<String>,
+    },
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
     #[error(transparent)]
@@ -1067,10 +1075,16 @@ impl PrepareError {
             }
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
-                let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::HandoffRefused,
-                    error.to_string(),
-                );
+                let cause = match error {
+                    run::RunError::WriterSourceMismatch { expected, actual } => {
+                        provenant_records::run::TerminalCause::WriterPinMismatch {
+                            pinned: expected,
+                            head: actual,
+                        }
+                    }
+                    _ => provenant_records::run::TerminalCause::HandoffRefused,
+                };
+                let mut refusal = run::PrepareRefusal::boxed(cause, error.to_string());
                 refusal.boundary_class = boundary_class;
                 refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
                 refusal
@@ -1140,6 +1154,15 @@ impl PrepareError {
                 );
                 refusal
             }
+            Self::WriterPinMismatch { pinned, head, .. } => {
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::WriterPinMismatch { pinned, head },
+                    format!("writer worktree head {head} differs from pinned commit {pinned}"),
+                );
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY".into());
+                refusal
+            }
             error @ (Self::GraphInputsAuthority(_)
             | Self::SourceProfileIsolated(_)
             | Self::SourceViewReadOnly(_)
@@ -1191,6 +1214,36 @@ fn repository_lock_refusal_identifies_cause_and_retry() {
     assert!(note.contains("repository lock busy"));
     assert!(note.contains("provenant retry"));
     assert!(!note.contains("/private"));
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/run.md#writer-pin-and-re-pin
+fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
+    use provenant_records::run::TerminalCause;
+    let pinned = provenant_core::GitOid::parse(&"a".repeat(40)).expect("pinned");
+    let head = provenant_core::GitOid::parse(&"b".repeat(40)).expect("head");
+    for error in [
+        PrepareError::Run(run::RunError::WriterSourceMismatch {
+            expected: pinned,
+            actual: head,
+        }),
+        PrepareError::WriterPinMismatch {
+            pinned,
+            head,
+            uncommitted: vec!["src/main.rs".into()],
+        },
+    ] {
+        let refusal = error.into_refusal();
+        assert_eq!(
+            refusal.terminal_cause,
+            TerminalCause::WriterPinMismatch { pinned, head }
+        );
+        let text = refusal.terminal_cause.diagnostic(true);
+        assert!(text.contains(&pinned.to_string()), "{text}");
+        assert!(text.contains(&head.to_string()), "{text}");
+        assert!(!text.contains(TerminalCause::HandoffRefused.detail()));
+    }
 }
 
 #[cfg(test)]

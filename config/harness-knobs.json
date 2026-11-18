@@ -15,6 +15,7 @@
       "lanes.cargo_target",
       "lanes.ci_scope",
       "lanes.verification",
+      "lanes.writer_dirty",
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.supervision",
@@ -721,6 +722,15 @@
       "reader": "tools/front-door/crates/run/src/verification.rs",
       "effect": "Local verification a writer lane is told to run before it commits. targeted (default) uses a shared warm target for cargo check, clippy on touched crates and targeted tests. check is one cargo check of the package it changed. full runs the repository's documented local checks, leaving the whole workspace suite to CI. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
       "trade_off": "Advisory guidance; the cargo shim warns for commands outside lanes.local_cargo. A wider scope spends the host build cap."
+    },
+    "lanes.writer_dirty": {
+      "type": "enum",
+      "values": ["refuse", "wip_commit", "continue_in_place"],
+      "default": "refuse",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/writer_dirty.rs, tools/front-door/src/fabric/graph_execution.rs",
+      "effect": "What a writer dispatch does when its worktree holds uncommitted edits. refuse (default) refuses at graph submission before any plan node spends tokens, naming the dirty paths and this setting. wip_commit preserves the edits in a local WIP commit before launch and records its id in the graph events. continue_in_place keeps the edits and warns. Credential and Git-internal roots stay a hard refusal under every value. The effective value and its source appear in the refusal and warning. Set per run with --knob lanes.writer_dirty=wip_commit or under [knobs].",
+      "trade_off": "refuse protects token spend but blocks a continued draft until the operator commits or overrides; wip_commit preserves work automatically but creates a commit before the plan node; continue_in_place is cheapest but leaves the writer to respect the edits."
     },
     "lanes.gh_budget": {
       "type": "int",

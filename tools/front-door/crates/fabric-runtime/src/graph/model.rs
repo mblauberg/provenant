@@ -652,6 +652,13 @@ pub struct GraphNode {
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Head of the local WIP commit made at graph submission, when the dirty
+    /// worktree setting chose `wip_commit`. Recorded as a graph event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_commit: Option<String>,
+    /// A retained-edit warning from the token-free dirty-worktree preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_dirty_warning: Option<String>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
