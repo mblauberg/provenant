@@ -572,7 +572,7 @@ impl Holder for HostHolder<'_> {
             return Ok(());
         };
         let guardian = super::nested_authority::current_guardian_identity();
-        let authorize_graph = move |peer_pid| {
+        let authorise_graph = move |peer_pid| {
             super::nested_authority::caller_is_guardian_descendant(peer_pid, guardian.as_ref())
         };
         *self
@@ -584,7 +584,7 @@ impl Holder for HostHolder<'_> {
                 Arc::clone(&fabric.context),
                 self.graph_wake.clone(),
                 self.graph_read.clone(),
-                authorize_graph,
+                authorise_graph,
             )
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?,
         );

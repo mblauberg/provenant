@@ -176,7 +176,7 @@ fn list_impl(
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
     // Git's worktree registry and refs use their own lock files. Capture a
-    // consistent inventory without serializing unrelated repository work.
+    // consistent inventory without serialising unrelated repository work.
     context.repo.revalidate()?;
     let entries = match reuse_inventory
         .then(|| context.facts.cached_inventory(context))

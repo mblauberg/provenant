@@ -349,7 +349,7 @@ pub fn serve_with_read(
     clock: &dyn Clock,
     read: &impl Fn(Value) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
-    serve_authorized(
+    serve_authorised(
         context,
         attempt,
         arguments,
@@ -375,7 +375,7 @@ pub fn serve_with_read_and_parent(
     sealed_parent_worktree: Option<&provenant_records::custody::Subject>,
     read: &impl Fn(Value) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
-    serve_authorized(
+    serve_authorised(
         context,
         attempt,
         arguments,
@@ -386,7 +386,7 @@ pub fn serve_with_read_and_parent(
     )
 }
 
-fn serve_authorized(
+fn serve_authorised(
     context: &Context,
     attempt: &str,
     arguments: Value,

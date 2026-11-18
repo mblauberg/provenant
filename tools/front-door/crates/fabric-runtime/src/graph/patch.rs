@@ -1983,7 +1983,7 @@ mod advisory_write_scope_tests {
                 .all(|node| node.state == NodeState::Pending)
         );
         let persisted: GraphCheckpoint = serde_json::from_value(
-            serde_json::to_value(&checkpoint).expect("checkpoint serializes"),
+            serde_json::to_value(&checkpoint).expect("checkpoint serialises"),
         )
         .expect("checkpoint reloads");
         let warnings = &persisted
