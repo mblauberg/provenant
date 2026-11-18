@@ -427,6 +427,24 @@ impl Contributions {
         })
     }
 
+    /// Whether every locally observed PR binding for a branch is closed.
+    /// `None` means the branch has no PR binding, which is not closure proof.
+    pub fn branch_prs_closed(
+        &self,
+        project: ProjectId,
+        branch: &str,
+        call: &Request<'_>,
+    ) -> Result<Option<bool>> {
+        call.check()?;
+        let (total, closed): (i64, i64) = self.0.query_row(
+            "SELECT count(*), coalesce(sum(closed), 0) FROM branch_prs
+             WHERE project=?1 AND branch=?2",
+            params![project.to_string(), branch],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((total > 0).then_some(closed == total))
+    }
+
     /// Offline candidates for the command layer's GitHub state sweep.
     pub fn open_bindings(
         &self,

@@ -436,6 +436,8 @@ struct GcData {
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
     graph_checkpoints_removed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stale_graphs: Vec<crate::gc_support::StaleGraph>,
     #[serde(skip)]
     graph_bytes: Option<provenant_config::ByteObservation>,
     port_receipts: crate::port_receipt_retention::Report,
@@ -793,6 +795,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
                 graph_checkpoints_removed: 0,
+                stale_graphs: Vec::new(),
                 graph_bytes: None,
                 port_receipts: Default::default(),
                 retention_errors: Vec::new(),
@@ -1674,6 +1677,15 @@ pub(crate) fn land_cleanup(
     )
 }
 
+fn stale_age_text(seconds: u64) -> String {
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::CacheGcPolicy;
 
@@ -1947,6 +1959,69 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         ));
     }
     let mut data = adapters.data;
+
+    // Stale open graphs are advisory: gc always warns and only stops them when
+    // the caller explicitly asked to apply changes.
+    use provenant_fabric_runtime::graph::{CancellationTarget, FileJournal};
+    use provenant_records::diagnostic::SettingSource;
+    let stale_age_seconds = config.gc.stale_graph_age_seconds().unwrap_or(86_400);
+    let stale_source = if matches!(
+        config.origins.get("gc.stale_graph_age"),
+        Some(provenant_config::Origin::User { .. })
+    ) {
+        SettingSource::Configuration
+    } else {
+        SettingSource::ShippedDefault
+    };
+    let now_micros = i64::try_from(now_ns / 1_000).unwrap_or(i64::MAX);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let (stale, scan_warnings) = crate::gc_support::stale_graphs(
+        &roots,
+        &project_ids,
+        stale_age_seconds,
+        now_micros,
+        &clock,
+        &cancel,
+    );
+    data.alerts.extend(scan_warnings);
+    for graph in &stale {
+        data.alerts.push(format!(
+            "graph {} is {} and {} old with {}: run `provenant graph stop {}` or `provenant gc --apply` to stop it (gc.stale_graph_age={stale_age_seconds}s, source: {})",
+            graph.name,
+            graph.state,
+            stale_age_text(graph.age_seconds),
+            graph.evidence,
+            graph.name,
+            stale_source.description(),
+        ));
+        if command.apply {
+            let budget = WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?;
+            match FileJournal::request_cancellation(
+                &roots.state,
+                graph.project,
+                CancellationTarget {
+                    graph_id: &graph.name,
+                    node: None,
+                    reason: Some("gc: stale graph with landed work"),
+                },
+                budget,
+                &cancel,
+                &clock,
+            ) {
+                Ok(_) => data.alerts.push(format!(
+                    "requested stop for stale graph {} ({})",
+                    graph.name, graph.project
+                )),
+                Err(error) => data.alerts.push(format!(
+                    "could not stop stale graph {}: {error}",
+                    graph.name
+                )),
+            }
+        }
+    }
+    data.stale_graphs = stale;
+
     let notice = if command.dry_run {
         Some("Allocated bytes are measured without following links; APFS clones may share physical blocks. Upstream evidence uses last fetched refs in previews.".into())
     } else {
