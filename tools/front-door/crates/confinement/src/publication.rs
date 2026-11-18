@@ -704,51 +704,112 @@ fn transform_documents(text: &str, projector: &Projector) -> Result<String, Proj
 
 // Typed assignments are useful for prose diagnostics and shell/config snippets;
 // only a declared credential key consumes its value. Other prose is untouched.
+fn quoted_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = bytes[start];
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+        } else if bytes[i] == quote {
+            return Some(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 fn assignments(text: &str) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
+    // Structured documents were already projected by transform_documents.
+    // Rescanning their encoded strings could consume a JSON closing quote.
+    let docs: Vec<_> = documents(text)
+        .into_iter()
+        .map(|(start, end, _)| (start, end))
+        .collect();
+    let mut doc = 0;
+    let mut quotes = Vec::new();
     let mut spans = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_' {
-            i += 1;
+        while quotes.last().is_some_and(|end| i >= *end) {
+            if quotes.pop() == Some(i) {
+                i += 1;
+            }
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        while doc < docs.len() && i >= docs[doc].1 {
+            doc += 1;
+        }
+        if doc < docs.len() && i == docs[doc].0 {
+            i = docs[doc].1;
+            continue;
+        }
+        let limit = quotes.last().copied().unwrap_or(bytes.len());
+        let c = text[i..].chars().next().expect("in bounds");
+        if c.is_whitespace() || b",;{}[]()=:".contains(&bytes[i]) {
+            i += c.len_utf8();
             continue;
         }
         let start = i;
-        while i < bytes.len()
-            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'-'))
-        {
-            i += 1;
+        let key: std::borrow::Cow<'_, str>;
+        if matches!(bytes[i], b'"' | b'\'') {
+            let end = quoted_end(&bytes[..limit], i);
+            let mut after = end.unwrap_or(limit);
+            while after < limit && matches!(bytes[after], b' ' | b'\t') {
+                after += 1;
+            }
+            if !end.is_some_and(|_| after < limit && matches!(bytes[after], b'=' | b':')) {
+                // Inspect prose within quotes while keeping its closing quote
+                // outside any unquoted assignment value. Use a stack, not recursion.
+                if bytes[i] == b'"' {
+                    if let Some(end) = end {
+                        quotes.push(end - 1);
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            i = end.expect("quoted key ended");
+            let raw = &text[start..i];
+            key = std::borrow::Cow::Owned(
+                serde_json::from_str::<String>(raw)
+                    .unwrap_or_else(|_| raw[1..raw.len() - 1].to_owned()),
+            );
+        } else {
+            // Canonicalise the whole bare name; punctuation must not expose
+            // a credential-looking suffix. Delimiters require a quoted key.
+            while i < limit {
+                let c = text[i..].chars().next().expect("in bounds");
+                if c.is_whitespace() || b",;{}[]()=:".contains(&bytes[i]) {
+                    break;
+                }
+                i += c.len_utf8();
+            }
+            key = std::borrow::Cow::Borrowed(&text[start..i]);
         }
-        if !secret_field(&text[start..i]) {
+        if !secret_field(&key) {
             continue;
         }
-        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'"' | b'\'') {
+        while i < limit && matches!(bytes[i], b' ' | b'\t' | b'"' | b'\'') {
             i += 1;
         }
-        if i == bytes.len() || !matches!(bytes[i], b'=' | b':') {
+        if i == limit || !matches!(bytes[i], b'=' | b':') {
             continue;
         }
         i += 1;
-        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        while i < limit && matches!(bytes[i], b' ' | b'\t') {
             i += 1;
         }
         let start = i;
-        if i < bytes.len() && matches!(bytes[i], b'"' | b'\'') {
-            let quote = bytes[i];
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                } else if bytes[i] == quote {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
+        if doc < docs.len() && i == docs[doc].0 {
+            i = docs[doc].1;
+        } else if i < limit && matches!(bytes[i], b'"' | b'\'') {
+            i = quoted_end(&bytes[..limit], i).unwrap_or(limit);
         } else {
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !b",;}".contains(&bytes[i])
-            {
+            while i < limit && !bytes[i].is_ascii_whitespace() && !b",;}".contains(&bytes[i]) {
                 i += 1;
             }
         }
@@ -910,8 +971,40 @@ mod tests {
                 "X-API-Key: [REDACTED]; copy private-value",
             ),
             (
-                "not-a-token=ordinary; 7token=ordinary",
-                "not-a-token=ordinary; 7token=ordinary",
+                "api.key=private-value; copy private-value",
+                "api.key=[REDACTED]; copy private-value",
+            ),
+            (
+                "aws.secret.access.key=private-value; copy private-value",
+                "aws.secret.access.key=[REDACTED]; copy private-value",
+            ),
+            (
+                "api+key=private-value; copy private-value",
+                "api+key=[REDACTED]; copy private-value",
+            ),
+            (
+                "api/key=private-value; copy private-value",
+                "api/key=[REDACTED]; copy private-value",
+            ),
+            (
+                r#""api key"="private-value"; copy private-value"#,
+                r#""api key"="[REDACTED]"; copy private-value"#,
+            ),
+            (
+                r#""api,key": private-value; copy private-value"#,
+                r#""api,key": [REDACTED]; copy private-value"#,
+            ),
+            (
+                r#""api\u002ekey"=private-value; copy private-value"#,
+                r#""api\u002ekey"=[REDACTED]; copy private-value"#,
+            ),
+            (
+                "it's token=private'value; copy private'value",
+                "it's token=[REDACTED]; copy private'value",
+            ),
+            (
+                "not-a-token=ordinary; 7token=ordinary; not.a.token=ordinary; not/token=ordinary; not+token=ordinary",
+                "not-a-token=ordinary; 7token=ordinary; not.a.token=ordinary; not/token=ordinary; not+token=ordinary",
             ),
         ] {
             let projected = projector
@@ -919,6 +1012,27 @@ mod tests {
                 .unwrap();
             assert_eq!(projected.bytes(), expected.as_bytes());
         }
+        let quoted_sentence = projector
+            .project(
+                Destination::CrossHostTransport,
+                br#"diagnostic "token: private-value"; copy private-value"#,
+            )
+            .unwrap();
+        let quoted_sentence = std::str::from_utf8(quoted_sentence.bytes()).unwrap();
+        assert_eq!(
+            quoted_sentence,
+            r#"diagnostic "token: [REDACTED]"; copy private-value"#
+        );
+        let json_prose = br#"{"message":"ordinary stays; token: ordinary","ordinary":"ordinary","tag":"submit","id":"submit-test"}"#;
+        let projected = projector
+            .project(Destination::CrossHostTransport, json_prose)
+            .unwrap();
+        let mut expected: Value = serde_json::from_slice(json_prose).unwrap();
+        expected["message"] = Value::String("ordinary stays; token: [REDACTED]".into());
+        assert_eq!(
+            serde_json::from_slice::<Value>(projected.bytes()).unwrap(),
+            expected
+        );
         assert_eq!(projection.raw.bytes, raw.len() as u64);
         assert_eq!(projection.published.bytes, projection.bytes().len() as u64);
     }
