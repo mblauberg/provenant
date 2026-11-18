@@ -335,7 +335,7 @@ pub(super) fn prepare_command(
         }
     }
     set_cargo_profile(&mut spec.env, &settings, !sandbox.effective);
-    if sandbox.effective {
+    {
         set_cargo_jobs(
             &mut spec.env,
             registry
@@ -533,12 +533,25 @@ pub(super) fn configure_build_slots(
             .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
     {
         check_sandbox_off_build_disk(&spec.env, state, policy)?;
-        return Ok(Vec::new());
     }
-    let cargo = home.join(".cargo/bin/cargo");
-    if !spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") || !cargo.is_file() {
+    let default_cargo = home.join(".cargo/bin/cargo");
+    let cargo = if let Some(cargo) =
+        spec.env
+            .iter()
+            .find(|(name, _)| name == "PATH")
+            .and_then(|(_, path)| {
+                std::env::split_paths(path)
+                    .filter(|dir| dir != &scratch.join(provenant_os::build_slots::SHIM_DIRECTORY))
+                    .map(|dir| dir.join("cargo"))
+                    .find(|candidate| candidate.is_absolute() && candidate.is_file())
+            }) {
+        cargo
+    } else if default_cargo.is_file() {
+        default_cargo
+    } else {
+        eprintln!("provenant: cargo was not found; build-slot shim unavailable for this lane");
         return Ok(Vec::new());
-    }
+    };
     let spec = std::cell::RefCell::new(spec);
     provenant_config::dispatch_port_backend(
         &port.backend,

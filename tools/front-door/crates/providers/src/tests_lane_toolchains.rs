@@ -1578,7 +1578,8 @@ fn fresh_codex_home_setup_never_includes_provider_history() -> Result<(), Provid
         // homes receive only auth/skill links and attempt-local directories.
         for step in &launch.setup {
             let paths = match step {
-                crate::launch::SetupStep::CreateDir(path) => vec![path],
+                crate::launch::SetupStep::CreateDir(path)
+                | crate::launch::SetupStep::CreateLock(path) => vec![path],
                 crate::launch::SetupStep::WriteFile { path, .. }
                 | crate::launch::SetupStep::WriteExecutable { path, .. } => vec![path],
                 crate::launch::SetupStep::Symlink { link, target } => vec![link, target],

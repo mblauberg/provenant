@@ -207,26 +207,84 @@ fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
 }
 
 #[test]
-fn commands_that_do_not_compile_and_nested_cargo_never_queue() -> Result {
+fn nested_cargo_does_not_queue_behind_its_parent() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
-    let mut holder = rig.shim(1, &["check"])?;
-    assert!(provenant_test_support::wait_for(
-        "holder started",
-        Duration::from_secs(20),
-        || rig.started("hung"),
-        |ready| *ready
-    )?);
-    // Not a compiling subcommand: runs at once although the only slot is held.
-    let mut format = rig.shim(1, &["fmt"])?;
-    assert!(finish(&mut format, Duration::from_secs(10))?);
-    holder.kill()?;
-    holder.wait()?;
     // A build that itself runs cargo must not wait for a second slot: the
     // outer shim is a live ancestor of the inner one.
     let mut outer = rig.shim(1, &["test"])?;
     assert!(finish(&mut outer, Duration::from_secs(10))?);
     assert!(rig.started("outer"));
+    assert!(rig.started("end"));
+    Ok(())
+}
+
+#[test]
+fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
+    use std::io::BufRead;
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let scratch = rig.state.join("scratch");
+    fs::create_dir_all(scratch.join(provenant_os::build_slots::SHIM_DIRECTORY))?;
+    fs::write(
+        scratch
+            .join(provenant_os::build_slots::SHIM_DIRECTORY)
+            .join(provenant_os::build_slots::WAIT_FILE),
+        "",
+    )?;
+    let shim = scratch
+        .join(provenant_os::build_slots::SHIM_DIRECTORY)
+        .join("cargo");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nexec '{}' internal build-slot -- '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_provenant"),
+            rig.cargo.display()
+        ),
+    )?;
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+    let agent_command = |args: &str, cwd: &std::path::Path| -> Result<Command> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", args])
+            .current_dir(cwd)
+            .env(
+                "PATH",
+                scratch.join(provenant_os::build_slots::SHIM_DIRECTORY),
+            )
+            .env("PROVENANT_BUILD_SLOT_STATE", &rig.state)
+            .env("PROVENANT_BUILD_SLOTS", "1")
+            .env(provenant_core::consumer_env::BUILD_WAIT_DIR, &scratch)
+            .env_remove(provenant_core::consumer_env::BUILD_SLOT)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        set_builtin_admission(&mut command)?;
+        Ok(command)
+    };
+    let mut first = agent_command("exec cargo check", &rig.state)?.spawn()?;
+    assert!(provenant_test_support::wait_for(
+        "first build started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+    let mut second = agent_command("exec cargo build", &scratch)?.spawn()?;
+    let mut stderr = std::io::BufReader::new(second.stderr.take().ok_or("stderr")?);
+    let mut line = String::new();
+    stderr.read_line(&mut line)?;
+    assert!(line.contains("waiting for a host build slot"), "{line}");
+    assert!(provenant_os::build_slots::is_waiting(&scratch));
+    assert!(!rig.started("start"), "the second build must wait");
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-TERM", &first.id().to_string()])
+            .status()?
+            .success()
+    );
+    first.wait()?;
+    assert!(finish(&mut second, Duration::from_secs(10))?);
+    assert!(!provenant_os::build_slots::is_waiting(&scratch));
     assert!(rig.started("end"));
     Ok(())
 }

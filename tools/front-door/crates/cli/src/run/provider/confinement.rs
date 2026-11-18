@@ -1830,6 +1830,12 @@ pub(super) fn apply_setup(
             SetupStep::WriteExecutable { path, bytes } => {
                 write_setup_file(roots, path, bytes, true)?;
             }
+            SetupStep::CreateLock(path) => {
+                let (parent, name) = setup_parent(&roots[..roots.len().min(2)], path, false)?;
+                parent
+                    .try_lock(name, provenant_os::fs::LockMode::Exclusive)
+                    .map_err(|error| error.to_string())?;
+            }
             SetupStep::Symlink { link, target } => {
                 let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;
                 let matches = match parent.metadata_at(name, false) {

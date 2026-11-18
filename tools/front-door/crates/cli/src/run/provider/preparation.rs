@@ -4278,7 +4278,7 @@ pub(super) fn prepare_candidates_inner(
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
-        if sandbox.effective {
+        {
             set_cargo_jobs(
                 &mut spec.env,
                 registry
