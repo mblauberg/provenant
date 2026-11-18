@@ -19,7 +19,10 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
 
 /// Mask a newly supplied brief while retaining user-visible field/span warnings.
 pub fn normalise_brief(text: &str) -> Result<(String, Vec<String>), String> {
-    mask_text(text, "brief", false, &ambient_credentials())
+    let (secrets, mut warnings) = ambient_credentials();
+    let (safe, mask_warnings) = mask_text(text, "brief", false, &secrets)?;
+    warnings.extend(mask_warnings);
+    Ok((safe, warnings))
 }
 
 /// Normalise a fresh graph-shaped launch before template compilation can erase
@@ -30,15 +33,66 @@ pub fn normalise_graph_input(
     input(value, Context::Document)
 }
 
-fn ambient_credentials() -> Vec<Vec<u8>> {
-    std::env::vars_os()
-        .filter(|(key, _)| provenant_confinement::redact::credential_field(&key.to_string_lossy()))
-        .filter_map(|(_, value)| value.into_string().ok())
-        .filter(|value| !value.is_empty() && value != "[REDACTED]")
-        .map(String::into_bytes)
-        .collect()
+const MIN_AMBIENT_CREDENTIAL_LEN: usize = 8;
+const MAX_AMBIENT_SECRETS: usize = 128;
+const MAX_AMBIENT_SECRET_BYTES: usize = 64 * 1024;
+const MAX_AMBIENT_SECRET_LENGTH: usize = 16 * 1024;
+
+fn ambient_credentials() -> (Vec<Vec<u8>>, Vec<String>) {
+    ambient_credentials_from(
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
+    )
 }
 
+fn ambient_credentials_from<K: AsRef<str>, V: AsRef<str>>(
+    vars: impl IntoIterator<Item = (K, V)>,
+) -> (Vec<Vec<u8>>, Vec<String>) {
+    let mut matching: Vec<(String, String)> = vars
+        .into_iter()
+        .filter(|(key, _)| provenant_confinement::redact::credential_field(key.as_ref()))
+        .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()))
+        .collect();
+    matching.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut secrets = Vec::new();
+    let mut warnings = Vec::new();
+    let mut total_bytes = 0usize;
+
+    for (key, value) in matching {
+        if value.is_empty() || value == "[REDACTED]" || value.len() < MIN_AMBIENT_CREDENTIAL_LEN {
+            continue;
+        }
+        if value.len() > MAX_AMBIENT_SECRET_LENGTH {
+            warnings.push(format!(
+                "credential_env_oversize: environment variable `{key}` exceeds maximum length; skipped"
+            ));
+            continue;
+        }
+        let val_bytes = value.into_bytes();
+        if secrets.contains(&val_bytes) {
+            continue;
+        }
+        if secrets.len() >= MAX_AMBIENT_SECRETS {
+            warnings.push(format!(
+                "credential_env_excess: environment variable `{key}` exceeds maximum secret count of {MAX_AMBIENT_SECRETS}; skipped"
+            ));
+            continue;
+        }
+        if total_bytes.saturating_add(val_bytes.len()) > MAX_AMBIENT_SECRET_BYTES {
+            warnings.push(format!(
+                "credential_env_excess: environment variable `{key}` exceeds maximum secret set size; skipped"
+            ));
+            continue;
+        }
+        total_bytes += val_bytes.len();
+        secrets.push(val_bytes);
+    }
+
+    (secrets, warnings)
+}
+
+#[allow(clippy::single_range_in_vec_init)]
 fn mask_text(
     text: &str,
     field: &str,
@@ -83,7 +137,8 @@ pub(super) fn input<T: Serialize + serde::de::DeserializeOwned>(
     input: &T,
     context: Context,
 ) -> Result<(T, Vec<String>), String> {
-    input_with_secrets(input, context, ambient_credentials(), true)
+    let (secrets, warnings) = ambient_credentials();
+    input_with_secrets_and_warnings(input, context, secrets, warnings, true)
 }
 
 /// Check freshly compiled text without re-entering captured input bookkeeping.
@@ -91,13 +146,25 @@ pub(super) fn compiled<T: Serialize + serde::de::DeserializeOwned>(
     value: &T,
     context: Context,
 ) -> Result<(T, Vec<String>), String> {
-    input_with_secrets(value, context, ambient_credentials(), false)
+    let (secrets, warnings) = ambient_credentials();
+    input_with_secrets_and_warnings(value, context, secrets, warnings, false)
 }
 
+#[cfg(test)]
 fn input_with_secrets<T: Serialize + serde::de::DeserializeOwned>(
     input: &T,
     context: Context,
+    secrets: Vec<Vec<u8>>,
+    trace: bool,
+) -> Result<(T, Vec<String>), String> {
+    input_with_secrets_and_warnings(input, context, secrets, Vec::new(), trace)
+}
+
+fn input_with_secrets_and_warnings<T: Serialize + serde::de::DeserializeOwned>(
+    input: &T,
+    context: Context,
     mut secrets: Vec<Vec<u8>>,
+    initial_warnings: Vec<String>,
     trace: bool,
 ) -> Result<(T, Vec<String>), String> {
     fn collect(
@@ -138,13 +205,13 @@ fn input_with_secrets<T: Serialize + serde::de::DeserializeOwned>(
         credential: bool,
         secrets: &[Vec<u8>],
         warnings: &mut Vec<String>,
-        trace: bool,
+        _trace: bool,
     ) -> Result<(), String> {
         let credential = credential || matches!(context, Context::CredentialContent);
         match value {
             serde_json::Value::String(text) => {
                 #[cfg(test)]
-                let trace_enabled = trace;
+                let trace_enabled = _trace;
                 #[cfg(test)]
                 NORMALISATION_TRACE.with_borrow_mut(|trace| {
                     if trace_enabled && let Some(trace) = trace {
@@ -182,7 +249,7 @@ fn input_with_secrets<T: Serialize + serde::de::DeserializeOwned>(
                         credential,
                         secrets,
                         warnings,
-                        trace,
+                        _trace,
                     )?;
                 }
             }
@@ -225,7 +292,7 @@ fn input_with_secrets<T: Serialize + serde::de::DeserializeOwned>(
                         context.credential_child(key, credential),
                         secrets,
                         warnings,
-                        trace,
+                        _trace,
                     )?;
                 }
             }
@@ -238,7 +305,7 @@ fn input_with_secrets<T: Serialize + serde::de::DeserializeOwned>(
     collect(&value, context, false, &mut secrets);
     secrets.sort();
     secrets.dedup();
-    let mut warnings = Vec::new();
+    let mut warnings = initial_warnings;
     let path = if value.is_string() && matches!(context, Context::Content) {
         "brief"
     } else {
@@ -432,7 +499,7 @@ pub(super) fn validate_identities(
     context: Context,
 ) -> Result<(), &'static str> {
     let scan = |text: &str| {
-        provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
+        provenant_confinement::disclosure::scan_conservative_snapshot(text.as_bytes(), &[])
             .map_err(|_| "credential in structured output identity or object key")
     };
     match value {
@@ -764,5 +831,122 @@ mod tests {
             assert!(!serde_json::to_string(&outputs).unwrap().contains(secret));
             assert_eq!(value, original, "refusal must not rewrite identities");
         }
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn captured_assignment_shaped_credentials_in_identities_or_keys_refuse_the_whole_block() {
+        let secret = "password=verysecret123";
+        let base = serde_json::json!({
+            "schema_version": 1,
+            "findings": [{"id":"F1", "file":"src/lib.rs", "severity":"high",
+                "summary":"valid finding", "status":"open", "propagates":"upstream:F1"}],
+            "repair_items": [{"id":"F1", "status":"fixed", "reason":"fixed it"}]
+        });
+        let mut cases = Vec::new();
+        for pointer in [
+            "/findings/0/id",
+            "/findings/0/file",
+            "/findings/0/propagates",
+            "/repair_items/0/id",
+        ] {
+            let mut value = base.clone();
+            *value.pointer_mut(pointer).unwrap() = secret.into();
+            cases.push(value);
+        }
+        let mut keyed = base.clone();
+        keyed["findings"] = serde_json::json!({secret: base["findings"][0].clone()});
+        cases.push(keyed);
+        let mut extension = base.clone();
+        extension["unknown"] = serde_json::json!({"nested": {secret: "extension key"}});
+        cases.push(extension);
+        for value in cases {
+            let original = value.clone();
+            let mut input = crate::result_capture::ResultCapture::new(None);
+            input.push(format!("VERDICT: PASS\n```findings\n{value}\n```\n").as_bytes());
+            let input = input.finish();
+            let outputs =
+                captured_outputs(outputs::make_outputs(Some(&input), None, None, None, None))
+                    .unwrap();
+            assert_eq!(outputs.findings_available, Some(false));
+            assert!(outputs.findings.is_empty());
+            assert!(outputs.repair_items.is_none());
+            assert!(
+                outputs
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with(outputs::FINDINGS_INVALID))
+            );
+            assert!(
+                !serde_json::to_string(&outputs)
+                    .unwrap()
+                    .contains("verysecret123")
+            );
+            assert_eq!(value, original, "refusal must not rewrite identities");
+        }
+    }
+
+    #[test]
+    fn ambient_credentials_ignores_short_values_and_bounds_oversize_and_excess() {
+        // 1. Short values under 8 chars are ignored; identities like fix-1 are not refused.
+        let vars = vec![
+            ("NO_AUTH", "1"),
+            ("APP_TOKEN", "short"),
+            ("SAFE_TOKEN", "correcthorsebattery"),
+        ];
+        let (secrets, warnings) = ambient_credentials_from(vars);
+        assert_eq!(secrets, vec![b"correcthorsebattery".to_vec()]);
+        assert!(warnings.is_empty());
+
+        let doc = serde_json::json!({"nodes":[{"id":"fix-1", "prompt":"work on task"}]});
+        let (safe, doc_warnings) =
+            input_with_secrets_and_warnings(&doc, Context::Document, secrets, warnings, false)
+                .unwrap();
+        assert_eq!(safe["nodes"][0]["id"], "fix-1");
+        assert!(doc_warnings.is_empty());
+
+        // 2. Oversize value (> 16 KiB) is skipped with a warning rather than failing Redactor.
+        let oversize = "s".repeat(MAX_AMBIENT_SECRET_LENGTH + 10);
+        let vars = vec![
+            ("LONG_SECRET", oversize.as_str()),
+            ("VALID_SECRET", "validsecret123"),
+        ];
+        let (secrets, warnings) = ambient_credentials_from(vars);
+        assert_eq!(secrets, vec![b"validsecret123".to_vec()]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("credential_env_oversize"));
+        assert!(warnings[0].contains("LONG_SECRET"));
+
+        // Normal graph input with these secrets succeeds and retains the warning.
+        let doc = serde_json::json!({"nodes":[{"id":"fix-2", "prompt":"validsecret123 in prose"}]});
+        let (safe, doc_warnings) =
+            input_with_secrets_and_warnings(&doc, Context::Document, secrets, warnings, false)
+                .unwrap();
+        assert_eq!(safe["nodes"][0]["prompt"], "[REDACTED] in prose");
+        assert!(
+            doc_warnings
+                .iter()
+                .any(|w| w.contains("credential_env_oversize"))
+        );
+
+        // 3. Excess values (> 128) are bounded with warnings rather than failing Redactor.
+        let mut vars = Vec::new();
+        for i in 0..135 {
+            vars.push((format!("VAR_{i:03}_TOKEN"), format!("secret_value_{i:03}")));
+        }
+        let (secrets, warnings) = ambient_credentials_from(vars);
+        assert_eq!(secrets.len(), MAX_AMBIENT_SECRETS);
+        assert_eq!(warnings.len(), 7);
+        for w in &warnings {
+            assert!(w.contains("credential_env_excess"));
+        }
+
+        // Masking still succeeds.
+        let doc = serde_json::json!({"nodes":[{"id":"fix-3", "prompt":"work"}]});
+        let (safe, doc_warnings) =
+            input_with_secrets_and_warnings(&doc, Context::Document, secrets, warnings, false)
+                .unwrap();
+        assert_eq!(safe["nodes"][0]["id"], "fix-3");
+        assert_eq!(doc_warnings.len(), 7);
     }
 }

@@ -4336,3 +4336,58 @@ fn declared_writer_stop_restarts_with_handoff_and_excludes_the_used_pool_model()
     assert!(owner.prompts[1].contains("First half committed"));
     assert_eq!(owner.permissions[0], owner.permissions[1]);
 }
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn captured_fragment_containing_password_assignment_is_redacted_or_refused() {
+    let prompt = "captured patch prompt password=supersecretvalue123";
+    let doc = "captured template doc password=supersecretvalue123";
+    let patch = json!({
+        "schema_version": 1,
+        "templates": {"probe": {"brief": "work", "doc": doc}},
+        "nodes": [{"id": "child", "use": "probe", "prompt": prompt}]
+    });
+    let text = format!("```fragment\n{patch}\n```");
+    let document = planner(8);
+    let mut journal = MemoryJournal::default();
+    let mut limits = plans::generous();
+    limits.nodes = document.nodes.len();
+    let run = advance_with_budget(
+        &document,
+        &mut fixture_owner(&[&text]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let stored = run.checkpoint.nodes[0].fragment.as_ref().unwrap().clone();
+    assert!(!stored.contains("supersecretvalue123"));
+    assert!(stored.contains("password=[REDACTED]"));
+
+    let patch_bad = json!({
+        "schema_version": 1,
+        "nodes": [{"id": "password=supersecretvalue123", "use": "task"}]
+    });
+    let text_bad = format!("```fragment\n{patch_bad}\n```");
+    let mut bad_journal = MemoryJournal::default();
+    let run_bad = advance_with_budget(
+        &document,
+        &mut fixture_owner(&[&text_bad]),
+        &mut bad_journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(run_bad.status, GraphStatus::Paused);
+    assert_eq!(
+        run_bad.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
+    );
+    assert!(
+        run_bad
+            .checkpoint
+            .pause_reason()
+            .unwrap()
+            .contains("invalid fragment")
+    );
+}

@@ -3,6 +3,7 @@
 //! Callers use this before sealing a prompt. A match refuses without naming
 //! the matching text.
 use crate::redact::{Redactor, RedactorError, prose_spans};
+use provenant_os::exec::CaptureFilter;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,6 +25,33 @@ pub fn scan_snapshot(bytes: &[u8], known_secrets: &[Vec<u8>]) -> Result<(), Disc
     } else {
         Err(DisclosureError::SecretMatch)
     }
+}
+
+const BUFFER_SIZE: usize = 16 * 1024;
+
+/// Conservative scan of an exact in-memory snapshot, including assignment-shaped
+/// credentials. Used for captured output identities and object keys.
+pub fn scan_conservative_snapshot(
+    bytes: &[u8],
+    known_secrets: &[Vec<u8>],
+) -> Result<(), DisclosureError> {
+    let mut redactor =
+        Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
+    for chunk in bytes.chunks(BUFFER_SIZE) {
+        redactor
+            .filter(chunk, &mut |_| {})
+            .map_err(|_| DisclosureError::SecretMatch)?;
+        if redactor.has_redaction() {
+            return Err(DisclosureError::SecretMatch);
+        }
+    }
+    redactor
+        .finish(&mut |_| {})
+        .map_err(|_| DisclosureError::SecretMatch)?;
+    if redactor.has_redaction() {
+        return Err(DisclosureError::SecretMatch);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -49,5 +77,12 @@ mod tests {
     fn snapshot_allows_ordinary_urls() {
         let text = b"bearer values; Bearer values; bare sk-; Akia1234567890123456; read ssh://git@host and https://example.invalid/docs";
         assert!(scan_snapshot(text, &[b"secret-123".to_vec()]).is_ok());
+    }
+
+    #[test]
+    fn conservative_snapshot_refuses_assignment_shapes_and_tokens() {
+        assert!(scan_conservative_snapshot(b"password=secret", &[]).is_err());
+        assert!(scan_conservative_snapshot(b"AKIAIOSFODNN7EXAMPLE", &[]).is_err());
+        assert!(scan_conservative_snapshot(b"plain ordinary text", &[]).is_ok());
     }
 }
