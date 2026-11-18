@@ -125,7 +125,6 @@ provenant-supervisor = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-redact = { workspace = true }
 provenant-sqlite = { workspace = true }
-tempfile = { workspace = true }
 
 [build-dependencies]
 provenant-os = { workspace = true }

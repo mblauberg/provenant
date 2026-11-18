@@ -46,6 +46,7 @@ mod provider_retention;
 mod release_smoke;
 mod retention_owner;
 mod roots;
+mod scratch_dir;
 mod scratch_owner;
 mod settlement;
 mod staging_gc;

@@ -696,10 +696,10 @@ fn format_delta_only(
         _ => return false,
     }
     let workspace = |root: &std::path::Path| root.join(&ports.verify.workspace);
-    let root = match tempfile::Builder::new()
-        .prefix("provenant-approval-format-")
-        .tempdir()
-    {
+    let root = match crate::scratch_dir::ScratchDir::new_in(
+        &std::env::temp_dir(),
+        "provenant-approval-format-",
+    ) {
         Ok(dir) => dir,
         Err(_) => return false,
     };
@@ -1251,8 +1251,20 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("format approval carry unavailable"))
         );
-        std::fs::remove_file(ports_dir.join("ports.json"))
-            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        // An absent project layer falls back to the built-in cargo formatter.
+        // Explicitly remove formatter commands to exercise the missing case.
+        for tier in ports.verify.tiers.values_mut() {
+            tier.commands
+                .retain(|command| super::formatter_kind(command).is_none());
+            if tier.commands.is_empty() {
+                tier.commands.push("true".into());
+            }
+        }
+        std::fs::write(
+            ports_dir.join("ports.json"),
+            serde_json::to_vec(&ports).map_err(|error| LandingError::Failed(error.to_string()))?,
+        )
+        .map_err(|error| LandingError::Failed(error.to_string()))?;
         let no_formatter_state =
             tempfile::tempdir().map_err(|error| LandingError::Failed(error.to_string()))?;
         let mut no_formatter_repo = FakeRepo {

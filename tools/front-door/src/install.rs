@@ -1887,7 +1887,7 @@ fn verify_graph_name() -> String {
     )
 }
 
-struct SmokeProject(tempfile::TempDir);
+struct SmokeProject(crate::scratch_dir::ScratchDir);
 
 impl SmokeProject {
     fn path(&self) -> &Path {
@@ -1924,9 +1924,7 @@ fn verify_smoke_with(
     scratch: &Path,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
-    let project = tempfile::Builder::new()
-        .prefix("provenant-smoke-project-")
-        .tempdir_in(scratch)
+    let project = crate::scratch_dir::ScratchDir::new_in(scratch, "provenant-smoke-project-")
         .map_err(|error| error.to_string())?;
     let project = SmokeProject(project);
     std::fs::write(project.path().join("fixture.txt"), "smoke fixture\n")

@@ -1718,18 +1718,25 @@ mod tests {
             "draft",
             "checks_passed",
             "checks_total",
-            "checks_failed",
-            "checks_pending",
             "failing_checks",
             "merge",
-            "review",
-            "error",
         ] {
             let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
             status[field] = serde_json::json!({"invalid":true});
             let reading = super::reading_pr_event(7, serde_json::json!({"status":status}));
             assert!(!reading.line.contains("unavailable"), "{field}");
             assert!(reading.line.contains("warning"), "{field}");
+            assert_eq!(reading.settle, super::Settle::Pending, "{field}");
+        }
+        // These fields affect the verdict. Malformed values fail closed as an
+        // unavailable, still-pending observation instead of defaulting to a
+        // successful or terminal classification.
+        for field in ["checks_failed", "checks_pending", "review", "error"] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
+            status[field] = serde_json::json!({"invalid":true});
+            let reading = super::reading_pr_event(7, serde_json::json!({"status":status}));
+            assert_eq!(reading.settle, super::Settle::Pending, "{field}");
+            assert!(reading.line.contains("unavailable"), "{field}");
         }
         for field in ["number", "state", "head"] {
             let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
