@@ -1134,6 +1134,13 @@ impl RunStore {
             .values()
             .filter(|entry| entry.pinned || young(entry))
             .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+        if ledger.measured_micros == 0 {
+            report.accounted_bytes = total;
+            report.pinned_bytes = ledger.pinned_bytes;
+            report.total_reclaimed_bytes = ledger.reclaimed_bytes;
+            report.errors.push("payload census is incomplete; a complete measurement is required before cap eviction".into());
+            return Ok(report);
+        }
         let mut changed = measure;
         if total > cap_bytes {
             let mut order: Vec<(String, LedgerEntry)> = ledger
@@ -3816,6 +3823,12 @@ mod tests {
             report.evicted.is_empty(),
             "an incomplete lower bound cannot authorise cap eviction"
         );
+        let pressure = payload(&pair, 0, 8 * DAY_MICROS, false, false)?;
+        assert!(
+            !pressure.errors.is_empty(),
+            "ledger-only pressure retains uncertainty"
+        );
+        assert!(pressure.evicted.is_empty());
         assert!(pair.older.join(STATE).exists() && pair.newer.join(STATE).exists());
         Ok(())
     }
