@@ -1673,6 +1673,22 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     assert!(!roots.state.as_path().join("config.toml").exists());
 }
 #[test]
+fn cargo_target_knob_accepts_shared_private_and_absolute_paths_and_rejects_relative() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
+    assert!(matches!(
+        set("lanes.cargo_target", "relative/path"),
+        Err(ConfigError::KnobValue {
+            rule: "unknown_value",
+            ..
+        })
+    ));
+    assert!(set("lanes.cargo_target", "shared").is_ok());
+    assert!(set("lanes.cargo_target", "private").is_ok());
+    assert!(set("lanes.cargo_target", "/var/cache/cargo-target").is_ok());
+}
+#[test]
 fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());

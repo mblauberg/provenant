@@ -586,6 +586,16 @@ impl TestRig {
     /// wait's own outcome and the graph's checkpoint as the wait left it.
     pub fn run_and_wait(&self, args: &[&str], timeout: &str) -> Result<Settled> {
         let (launch, launch_value) = self.launch(args)?;
+        self.wait_launched(launch, launch_value, timeout)
+    }
+
+    /// Wait for a previously launched graph, allowing independent launches to overlap.
+    pub fn wait_launched(
+        &self,
+        launch: ExecOutcome,
+        launch_value: serde_json::Value,
+        timeout: &str,
+    ) -> Result<Settled> {
         let graph = launch_value["data"]["checkpoint"]["graph_id"]
             .as_str()
             .ok_or_else(|| format!("launch named no graph: {launch_value}"))?

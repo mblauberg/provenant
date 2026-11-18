@@ -76,7 +76,7 @@
           "tools/front-door/crates/os/src/build_slots.rs"
         ],
         "package": "provenant",
-        "binary": "build_slot"
+        "binary": "integration"
       },
       {
         "paths": [

@@ -155,7 +155,7 @@ fn git(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<String, Error>
 }
 
 fn excerpt(text: &str) -> String {
-    provenant_confinement::redact::bounded_line(text.trim(), 600)
+    provenant_redact::bounded_line(text.trim(), 600)
 }
 
 /// Launch records live with the repository's Git data, not the state root.

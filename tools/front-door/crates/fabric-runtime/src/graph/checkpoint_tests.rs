@@ -25,7 +25,7 @@ fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
             let name = format!("graph-{graph_id}.prompt-{digest}");
             let bytes = std::fs::read(fixture_dir.join(&name)).unwrap();
             assert_eq!(
-                provenant_confinement::redact::known_shapes(&bytes).unwrap(),
+                provenant_redact::known_shapes(&bytes).unwrap(),
                 bytes,
                 "fixture blob contains credential-shaped text"
             );
@@ -33,7 +33,7 @@ fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
         }
     }
     assert_eq!(
-        provenant_confinement::redact::known_shapes(CHECKPOINT).unwrap(),
+        provenant_redact::known_shapes(CHECKPOINT).unwrap(),
         CHECKPOINT,
         "fixture checkpoint contains credential-shaped text"
     );

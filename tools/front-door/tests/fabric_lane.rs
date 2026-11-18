@@ -1,5 +1,5 @@
 //! Lane Fabric observations and the attempt-bound host messaging endpoint.
-mod support;
+use crate::support;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, RootInputs};
 use provenant_fabric_runtime::{
     coordination::{CoordinationService, ThreadPause},

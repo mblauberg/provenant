@@ -508,13 +508,23 @@ pub(super) fn writer_directory(
     project_state: &Directory,
     path: &Path,
 ) -> Result<Directory, WorktreeError> {
+    writer_directory_inner(project_state, path, true)
+}
+
+fn writer_directory_inner(
+    project_state: &Directory,
+    path: &Path,
+    observe: bool,
+) -> Result<Directory, WorktreeError> {
     let name = state_dir_name(path);
     match project_state.open_verified_directory(&name) {
         Ok(directory) => {
-            drop(
-                provenant_supervisor::custody::writer_observation_guard(&directory)
-                    .map_err(|_| WorktreeError::UnknownWriter)?,
-            );
+            if observe {
+                drop(
+                    provenant_supervisor::custody::writer_observation_guard(&directory)
+                        .map_err(|_| WorktreeError::UnknownWriter)?,
+                );
+            }
             return Ok(directory);
         }
         Err(error) if error.is_not_found() => {}
@@ -556,10 +566,12 @@ pub(super) fn writer_directory(
         }
     }
     let directory = project_state.open_verified_directory(&name)?;
-    drop(
-        provenant_supervisor::custody::writer_observation_guard(&directory)
-            .map_err(|_| WorktreeError::UnknownWriter)?,
-    );
+    if observe {
+        drop(
+            provenant_supervisor::custody::writer_observation_guard(&directory)
+                .map_err(|_| WorktreeError::UnknownWriter)?,
+        );
+    }
     Ok(directory)
 }
 
@@ -989,6 +1001,43 @@ fn retained_import(slot: &Directory) -> Result<(), String> {
     }
 }
 
+// A claim validates the published gate when it acquires it below. Looking at
+// it here would turn the observer we intend to queue behind into a refusal.
+pub(super) fn claim_writer_directory(
+    project_state: &Directory,
+    path: &Path,
+) -> Result<Directory, WorktreeError> {
+    writer_directory_inner(project_state, path, false)
+}
+
+/// Owner claims queue behind brief observations, but still refuse a live writer
+/// immediately. A report's temporary probe is not writer custody (#3338).
+pub(super) fn claim_writer_guard(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+    cancel: &CancelToken,
+) -> Result<LockGuard, WorktreeError> {
+    let directory = claim_writer_directory(context.project_state, path)?;
+    let observation = match provenant_supervisor::custody::writer_observation_guard(&directory) {
+        Ok(guard) => guard,
+        Err(provenant_supervisor::custody::CustodyError::Busy) => directory
+            .lock_existing(
+                OsStr::new("writer-probe.lock"),
+                LockMode::Exclusive,
+                context.lock_budget,
+                cancel,
+                context.clock,
+            )
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
+                FsError::Cancelled { .. } => WorktreeError::Cancelled,
+                error => error.into(),
+            })?,
+        Err(error) => return Err(custody_refusal(observation_occupancy(path, error))),
+    };
+    cache_writer_guard_under_gate(&directory, path, observation).map_err(custody_refusal)
+}
+
 /// Hold writer exclusion for cache mutation. Membership comes from the
 /// caller's Git inventory; the slot supplies only exclusion.
 pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<LockGuard, Occupancy> {
@@ -997,6 +1046,15 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
         .map_err(|error| unknown(format!("writer slot could not be opened: {error}")))?;
     let observation = provenant_supervisor::custody::writer_admission_guard(&directory)
         .map_err(|error| observation_occupancy(path, error))?;
+    cache_writer_guard_under_gate(&directory, path, observation)
+}
+
+fn cache_writer_guard_under_gate(
+    directory: &Directory,
+    path: &Path,
+    observation: LockGuard,
+) -> Result<LockGuard, Occupancy> {
+    let unknown = |detail: String| Occupancy::custody_unknown(path.to_path_buf(), detail);
     let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {
@@ -1004,8 +1062,8 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
             error => unknown(format!("writer lock could not be acquired: {error}")),
         })?;
     drop(observation);
-    retained_import(&directory).map_err(unknown)?;
-    outstanding_reservation(&directory, path)?;
+    retained_import(directory).map_err(unknown)?;
+    outstanding_reservation(directory, path)?;
     Ok(guard)
 }
 

@@ -353,6 +353,14 @@ pub(crate) fn lane_states(
     _assets: &Path,
     project: provenant_core::ProjectId,
 ) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
+    lane_states_with_observation(roots, project, false)
+}
+
+pub(crate) fn lane_states_with_observation(
+    roots: &Roots,
+    project: provenant_core::ProjectId,
+    preview: bool,
+) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
     let context = ExecutionContext {
         state_root: roots.state.clone(),
         project_id: project,
@@ -365,7 +373,7 @@ pub(crate) fn lane_states(
         stores: Vec::new(),
         stale: std::cell::Cell::new(false),
     };
-    scan_terminal(&context, roots.state.as_path(), &mut snapshot)?;
+    scan_terminal(&context, roots.state.as_path(), &mut snapshot, preview)?;
     for (path, terminal) in &mut snapshot.states {
         if *terminal {
             *terminal = snapshot.terminal_times.get(path).is_some_and(|finished| {
@@ -380,6 +388,7 @@ fn scan_terminal(
     context: &ExecutionContext,
     host_state: &Path,
     snapshot: &mut LaneSnapshot,
+    preview: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let clock = SystemClock;
     let cancel = CancelToken::new();
@@ -412,7 +421,11 @@ fn scan_terminal(
         loop {
             let page = store.lanes(&query, &call)?;
             for attempt in page.lanes {
-                let request = store.request(attempt.attempt_id, &call)?;
+                let request = if preview {
+                    store.request_observed(attempt.attempt_id, &call)?
+                } else {
+                    store.request(attempt.attempt_id, &call)?
+                };
                 let task = &request.task;
                 if let Some(writer) = &task.writer {
                     if !writer.worktree.is_absolute() {

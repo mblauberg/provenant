@@ -1,5 +1,5 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
-mod support;
+use crate::support;
 use provenant_fabric_runtime::hosts::{
     CONSOLE_DETAIL_PROTOCOL, CONSOLE_INBOX_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL,
 };
@@ -1167,6 +1167,12 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
+    // Exercise a real due retry without paying the production five-second
+    // backoff in this receipt-recovery fixture.
+    let config = rig.state.join("config.toml");
+    let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
+    settings["knobs"]["lanes.launch_retry_first_seconds"] = toml_edit::value(1);
+    std::fs::write(config, settings.to_string())?;
     let ssh = rig.root.join("ssh");
     let real = rig.root.join("ssh-real");
     std::fs::rename(&ssh, &real)?;
@@ -1318,8 +1324,9 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     settings["domains"]["fabric"]["graph"]["limits"]["node_prompt_bytes"] =
         toml_edit::value(1024 * 1024);
     std::fs::write(config, settings.to_string())?;
-    // JSON escaping exceeds the peer frame cap although the brief itself fits.
-    std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
+    // JSON escapes each control byte to six wire bytes. Cross the same real
+    // frame cap with less raw text to compile and normalise before dispatch.
+    std::fs::write(&prompt, "\u{0001}".repeat(180 * 1024))?;
     // The second identical launch replays the refused graph (cli.md "Names and
     // replay": exit 0 with its recorded state); neither contacts the peer.
     for replay in [false, true] {

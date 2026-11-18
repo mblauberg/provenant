@@ -74,7 +74,7 @@ fn scanner_refusal(input: &Value) -> Option<FacadeError> {
             Value::String(text) => text.clone(),
             other => other.to_string(),
         };
-        let rule = provenant_confinement::redact::known_shape_rule(text.as_bytes()).ok()??;
+        let rule = provenant_redact::known_shape_rule(text.as_bytes()).ok()??;
         Some(FacadeError::invalid(InvalidInputDetail::ContentScan {
             field: field.into(),
             assignment: rule == "credential assignment",
@@ -4451,12 +4451,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
-        if super::super::peer_tests::host_test(
-            "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit",
-        )? {
-            return Ok(());
+    fn replay_digest_fixture(name: &str) -> Result<Option<(TestRig, Factory)>> {
+        if super::super::peer_tests::host_test(name)? {
+            return Ok(None);
         }
         // `Factory::template_library` honours the caller's XDG directory. Run
         // this fixture with an empty user template root so unrelated templates
@@ -4482,8 +4479,7 @@ mod tests {
             let argv = [
                 std::env::current_exe()?.into_os_string(),
                 "--exact".into(),
-                "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit"
-                    .into(),
+                name.into(),
                 "--nocapture".into(),
             ];
             let cwd = std::env::current_dir()?;
@@ -4500,14 +4496,22 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr.bytes)
             );
             assert!(!output.timed_out, "{output:?}");
-            super::super::peer_tests::assert_one_test_ran(
-                "replay_digest_tracks_launch_input_and_source_commit",
-                &output.stdout.bytes,
-            );
-            return Ok(());
+            super::super::peer_tests::assert_one_test_ran(name, &output.stdout.bytes);
+            return Ok(None);
         }
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
+        Ok(Some((rig, factory)))
+    }
+
+    #[test]
+    fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
+        let Some((_rig, factory)) = replay_digest_fixture(
+            "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit",
+        )?
+        else {
+            return Ok(());
+        };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let explain = |factory: &Factory, input: Value| -> Result<String> {
@@ -4521,14 +4525,12 @@ mod tests {
                 .to_owned())
         };
         let task = json!({"op":"run","brief":"same brief","explain":true});
-        assert_eq!(
-            explain(&factory, task.clone())?,
-            explain(&factory, task.clone())?
-        );
+        let task_digest = explain(&factory, task.clone())?;
+        assert_eq!(task_digest, explain(&factory, task.clone())?);
         // The name is a handle: it never changes the digest.
         let mut named = task.clone();
         named["name"] = json!("handle");
-        assert_eq!(explain(&factory, task.clone())?, explain(&factory, named)?);
+        assert_eq!(task_digest, explain(&factory, named)?);
         let inline =
             json!({"op":"run","document":{"brief":"inline task","tier":"senior"},"explain":true});
         assert_eq!(
@@ -4557,7 +4559,9 @@ mod tests {
             let response = factory.graph_document(changed.clone(), budget, &cancel)?;
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
             assert_ne!(
-                explain(&factory, changed.clone())?,
+                response["document"]["replay_digest"]
+                    .as_str()
+                    .ok_or("replay digest")?,
                 original,
                 "attempt.{field}"
             );
@@ -4568,6 +4572,18 @@ mod tests {
                 "attempt.{field}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn replay_digest_tracks_review_subject() -> Result {
+        let Some((rig, factory)) =
+            replay_digest_fixture("fabric::interface::tests::replay_digest_tracks_review_subject")?
+        else {
+            return Ok(());
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let review = factory.graph_document(
             json!({"op":"run","template":"review","brief":"Review","explain":true}),
             budget,
@@ -4611,23 +4627,61 @@ mod tests {
         assert!(
             matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::UnresolvableBase(ref name)) } if name == "missing-ref")
         );
-        for name in ["review", "review.security", "deliver"] {
-            let mut input = json!({"op":"run","template":name,"brief":"same brief","explain":true});
-            if name == "deliver" {
-                input["set"] = json!({"worktree":rig.project,"write_scope":["src"]});
-            }
-            let first = explain(&factory, input.clone())?;
-            assert_eq!(first, explain(&factory, input.clone())?);
-            crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "new subject"])?;
-            assert_ne!(first, explain(&factory, input.clone())?);
-            let mut changed = input.clone();
-            changed["brief"] = json!("changed brief");
-            assert_ne!(
-                explain(&factory, input.clone())?,
-                explain(&factory, changed)?
-            );
-        }
         Ok(())
+    }
+
+    fn replay_digest_for_template(test_name: &str, template: &str) -> Result {
+        let Some((rig, factory)) = replay_digest_fixture(test_name)? else {
+            return Ok(());
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let explain = |input: Value| -> Result<String> {
+            let label = input.to_string();
+            let response = factory
+                .graph_document(input, budget, &cancel)
+                .map_err(|error| format!("{label}: {error:?}"))?;
+            Ok(response["document"]["replay_digest"]
+                .as_str()
+                .ok_or("replay digest")?
+                .to_owned())
+        };
+        let mut input = json!({"op":"run","template":template,"brief":"same brief","explain":true});
+        if template == "deliver" {
+            input["set"] = json!({"worktree":rig.project,"write_scope":["src"]});
+        }
+        let first = explain(input.clone())?;
+        assert_eq!(first, explain(input.clone())?);
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "new subject"])?;
+        let after_commit = explain(input.clone())?;
+        assert_ne!(first, after_commit);
+        input["brief"] = json!("changed brief");
+        assert_ne!(after_commit, explain(input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn replay_digest_tracks_review_source_commit() -> Result {
+        replay_digest_for_template(
+            "fabric::interface::tests::replay_digest_tracks_review_source_commit",
+            "review",
+        )
+    }
+
+    #[test]
+    fn replay_digest_tracks_security_review_source_commit() -> Result {
+        replay_digest_for_template(
+            "fabric::interface::tests::replay_digest_tracks_security_review_source_commit",
+            "review.security",
+        )
+    }
+
+    #[test]
+    fn replay_digest_tracks_delivery_source_commit() -> Result {
+        replay_digest_for_template(
+            "fabric::interface::tests::replay_digest_tracks_delivery_source_commit",
+            "deliver",
+        )
     }
 
     #[test]
@@ -5312,7 +5366,10 @@ mod tests {
         // checkpoint projection. Exercise the bundled replacement for that
         // workload, including submission metadata and sealed input manifests.
         let path = rig.root.join("acceptance.txt");
-        std::fs::write(&path, "Acceptance evidence.\n".repeat(38_000))?;
+        // Each control byte occupies six bytes in an inline JSON string. The
+        // same real checkpoint limit is crossed with much less ingress text
+        // to normalise, hash and retain in the prompt store.
+        std::fs::write(&path, "\u{0001}".repeat(90_000))?;
         let brief = std::fs::read_to_string(&path)?;
         let limits = &mut factory.context.config.graph.limits;
         limits.node_prompt_bytes = 1_048_576;
@@ -5395,7 +5452,19 @@ mod tests {
         );
         // Short node titles remain readable; the full file brief belongs only
         // in the prompt store, including its copies in submission metadata.
-        assert!(!String::from_utf8(stored)?.contains(&brief));
+        // Inspect decoded strings: a raw-byte absence check would always pass
+        // for escaped briefs, including those with ordinary newlines.
+        let mut values = vec![&envelope];
+        while let Some(value) = values.pop() {
+            match value {
+                Value::String(text) if text.len() >= brief.len() => {
+                    assert!(!text.contains(&brief));
+                }
+                Value::Array(items) => values.extend(items),
+                Value::Object(fields) => values.extend(fields.values()),
+                _ => {}
+            }
+        }
         assert_eq!(
             FileJournal::read_checkpoint(
                 &factory.context.roots.state,

@@ -2,8 +2,8 @@
 //!
 //! Callers use this before sealing a prompt. A match refuses without naming
 //! the matching text.
-use crate::redact::{Redactor, RedactorError};
 use provenant_os::exec::CaptureFilter;
+use provenant_redact::{Redactor, RedactorError};
 use thiserror::Error;
 
 const BUFFER_SIZE: usize = 16 * 1024;

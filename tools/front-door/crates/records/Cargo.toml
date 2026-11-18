@@ -1,5 +1,6 @@
 [package]
 name = "provenant-records"
+autotests = false
 version = "2.1.1"
 edition.workspace = true
 rust-version.workspace = true
@@ -29,3 +30,7 @@ test = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

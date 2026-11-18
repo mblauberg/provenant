@@ -1,6 +1,6 @@
 //! `wait` at the binary boundary: targets resolve before any wait, a settled
 //! graph ends the wait with its verdict, and no work means nothing to wait for.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read},

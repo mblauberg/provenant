@@ -14,10 +14,10 @@ Compiling cargo commands and targeted test runs share the host-wide
 `domains.fabric.lanes.max_concurrent_builds` budget. Busy slots wait a bounded
 time, then warn and proceed; zero disables the cap. Cargo serialises access to a
 shared target with its own locks. `lanes.local_cargo` can warn when a command
-exceeds a host's preferred scope; it does not refuse the command. The current
-launcher provisions private per-worktree targets and does not yet supply a shared
-write grant; provisioning it remains necessary before this tier works for
-ordinary confined launches. A missing warm target is not a reason to start a cold build.
+exceeds a host's preferred scope; it does not refuse the command. By default,
+`lanes.cargo_target` is `shared`, so lanes share a single per-project warm target
+under the host cache. Setting it to `private` preserves per-worktree copy-on-write
+seeding, or an absolute path can be provided. A missing warm target is not a reason to start a cold build.
 
 `scripts/verify-tier` runs the built-in `0` tier (format, check and unit tests
 for touched crates), `1` adds mapped integration binaries, `2` runs the

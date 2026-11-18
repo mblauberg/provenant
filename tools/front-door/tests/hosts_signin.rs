@@ -1,5 +1,5 @@
 //! Doctor probes only disposable fake provider executables in this fixture.
-mod support;
+use crate::support;
 
 use std::{fs, os::unix::fs::PermissionsExt};
 use support::{Result, TestRig, code};

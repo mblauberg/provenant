@@ -32,8 +32,12 @@ ageing provider state or collecting checkpoints. Tick enters the same path.
 Provider state, scratch and payload-cap policies run as separate scheduled
 adapters. The declaration
 also owns settings and subsystem ownership; adding a class requires collection
-and measurement implementations. Preview measures allocated tree bytes without
-following links; APFS clones may share physical blocks, so the change in volume
+and measurement implementations. Preview bounds cache measurement and may omit
+idle candidates whose recent writes could not be checked within the budget.
+Its byte estimates can be partial; a timed-out process census keeps custody unknown.
+The Cargo profile census is skipped and marked
+in JSON. The preview uses local ref evidence without forge
+reads. Apply takes a fresh full observation. Measurements do not follow links; APFS clones may share physical blocks, so the change in volume
 free space can differ. Apply removes eligible attempt scratch without a separate
 pre-deletion size walk. Partial observations and failed paths remain visible in
 JSON and text. Byte rows come from each adapter; unavailable observations remain
@@ -51,7 +55,9 @@ After a merge, background cleanup targets only that branch's worktree and its
 attempt scratch. It does not scan the run store or collect shared caches. At lane
 launch, free space below `gc.free_floor` starts a best-effort background full
 sweep; a shared single-flight lock prevents parallel sweeps. Full GC protects
-busy and recently used shared caches and the newest Cargo seed generation.
+busy and recently used shared caches and the newest Cargo seed generation. Private
+lane caches older than `gc.idle` are also eligible when their owner has settled
+or disappeared. Unknown custody and held Cargo or owner locks keep a cache.
 
 `gc.free_floor` is an advisory collection target. Below it, and below
 `gc.critical_free` (2 GiB by default), dispatch, admission and new builds warn
