@@ -1097,7 +1097,20 @@ pub fn compile_submission(
         library: &library,
         resolvers: context.resolvers,
     };
-    let nodes = compiler.compile_all(&patch.nodes)?;
+    let mut nodes = compiler.compile_all(&patch.nodes)?;
+    for (raw, node) in patch.nodes.iter().zip(&mut nodes) {
+        if raw.get("use").and_then(Value::as_str) == Some("batch")
+            && library.layer("batch") == Some(Layer::Bundled)
+        {
+            plans::provision_paths(
+                std::slice::from_mut(node),
+                graph_id,
+                "",
+                &context.worktree_layout,
+            )
+            .map_err(PatchError::invalid)?;
+        }
+    }
     if nodes.is_empty() {
         return Err(PatchError::invalid("patch adds no nodes"));
     }

@@ -182,9 +182,24 @@ the writer consumes. `domains.fabric.implement.plan` sets the default and
 input, write scope or explicit plan parameter emits the advisory
 `unbounded_brief_junior_writer` warning. Set
 `domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+
+`batch` expands over `items`, accepting either bare strings or structured item tables
+`{ id, brief | brief_file, route | model, write_scope, after, with }`. Mutual exclusion
+is enforced between `brief` and `brief_file`, and between `route` and `model`. Slices
+support ordering via `after`, which names prerequisite item IDs; unknown IDs and dependency
+cycles are refused at compile time with offending IDs named. Slices run under a concurrency
+cap specified by `max_parallel` (default from config `domains.fabric.batch.max_parallel`,
+reported with its source in `--explain`, and overridable per run via `--set max_parallel=N`).
+The host provisions a distinct managed worktree for each slice. A dependent slice
+starts from the current integration head after its prerequisites integrate; an
+independent slice starts from the graph's pinned integration base.
+Queued slices appear as `waiting` in status with reason `cap` or `after`. As each slice settles,
+it integrates into `integration_branch`; a merge conflict pauses only the conflicting slice
+(`blocked` with conflicting files reported) and leaves remaining slices running.
 - Why: single writers start without an implicit planning stage; callers choose
-  when planning adds value.
-- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+  when planning adds value. Batch tasks require flexible per-slice briefs, routing,
+  dependency ordering, bounded concurrency, and isolated merge conflict handling.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/transitions.rs`, `crates/run/src/delivery.rs`
 
 ### Composite settlement
 

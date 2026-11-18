@@ -315,7 +315,7 @@ pub(super) fn apply_attempt_observation(
                 let warned = result_warning.is_some();
                 let mut outputs = make_outputs_with_upstream(
                     result.as_deref(),
-                    result_warning,
+                    result_warning.clone(),
                     result_path,
                     branch,
                     commit.clone(),
@@ -813,7 +813,18 @@ pub(super) fn apply_attempt_observation(
                     | AttemptOutcome::OtherFailure
                     | AttemptOutcome::DeclaredStop
                     | AttemptOutcome::StoppedNoWork => {
-                        progress.state = NodeState::Failed;
+                        let is_merge_conflict = result_warning.as_ref().is_some_and(|w| {
+                            w.contains("integration_conflict") || w.contains("merge conflict")
+                        });
+                        if is_merge_conflict {
+                            progress.state = NodeState::Blocked;
+                            progress.advance_error_code = Some("merge_conflict".into());
+                            progress.advance_error = result_warning
+                                .as_ref()
+                                .map(|w| bounded(w, MAX_ADVANCE_ERROR_BYTES));
+                        } else {
+                            progress.state = NodeState::Failed;
+                        }
                         false
                     }
                 }
@@ -928,6 +939,7 @@ pub(super) fn initial_checkpoint(
                     NodeState::Skipped
                 },
                 cancelled_from: None,
+                wait_reason: None,
                 skip_reason: when::skip_reason(&node.when),
                 advance_error: None,
                 advance_error_code: None,
@@ -1050,6 +1062,39 @@ pub(super) fn admit_attempt(
 ) -> Admission {
     let node = &plan.nodes[node_index];
     let cap = limits.node_prompt_bytes;
+    for parent in plan
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.max_parallel.is_some())
+    {
+        let Some(member) = parent
+            .composite_members
+            .iter()
+            .find(|member| node.id == **member || node.id.starts_with(&format!("{member}--")))
+        else {
+            continue;
+        };
+        let cap = parent.max_parallel.unwrap_or(usize::MAX);
+        let running_siblings = parent
+            .composite_members
+            .iter()
+            .filter(|member_id| {
+                *member_id != member
+                    && checkpoint.nodes.iter().any(|progress| {
+                        (progress.id == **member_id
+                            || progress.id.starts_with(&format!("{member_id}--")))
+                            && progress.state == NodeState::Running
+                    })
+            })
+            .count();
+        if running_siblings >= cap {
+            checkpoint.nodes[node_index].wait_reason = Some("cap".into());
+            return Admission::SaveAndWait;
+        }
+    }
+    if checkpoint.nodes[node_index].wait_reason.as_deref() == Some("cap") {
+        checkpoint.nodes[node_index].wait_reason = None;
+    }
     if node.access == AccessMode::WorktreeWrite
         && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
             index != node_index
@@ -1221,6 +1266,7 @@ pub(super) fn begin_attempt(
         usage: None,
     });
     checkpoint.nodes[node_index].state = NodeState::Running;
+    checkpoint.nodes[node_index].wait_reason = None;
     if let Some(timing) = timing
         && checkpoint.nodes[node_index].launch_retry.is_none()
     {
@@ -1506,6 +1552,7 @@ pub(super) fn node_action<'a>(
 ) -> NodeAction<'a> {
     let node = &plan.nodes[index];
     if checkpoint.nodes[index].state.settled() {
+        checkpoint.nodes[index].wait_reason = None;
         let changed = checkpoint.nodes[index].state == NodeState::Blocked
             && dependency_state(node, plan, checkpoint, positions) == Some(NodeState::Blocked)
             && attribute_blocker(index, node, checkpoint, positions);
@@ -1529,7 +1576,13 @@ pub(super) fn node_action<'a>(
     if let Some(state) = dependency_state(node, plan, checkpoint, positions) {
         let mut changed = checkpoint.nodes[index].state != state;
         if state == NodeState::Blocked {
+            checkpoint.nodes[index].wait_reason = None;
             changed |= attribute_blocker(index, node, checkpoint, positions);
+        } else if state == NodeState::Pending {
+            if checkpoint.nodes[index].wait_reason.as_deref() != Some("after") {
+                checkpoint.nodes[index].wait_reason = Some("after".into());
+                changed = true;
+            }
         } else if changed
             && checkpoint.nodes[index].advance_error_code.as_deref() == Some("upstream_blocked")
         {
@@ -1540,6 +1593,9 @@ pub(super) fn node_action<'a>(
             checkpoint.nodes[index].state = state;
         }
         return NodeAction::Wait { changed };
+    }
+    if checkpoint.nodes[index].wait_reason.as_deref() == Some("after") {
+        checkpoint.nodes[index].wait_reason = None;
     }
     if let Some(spec) = &node.decide {
         return NodeAction::Decide(spec);

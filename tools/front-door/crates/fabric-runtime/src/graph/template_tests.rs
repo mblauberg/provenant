@@ -44,6 +44,31 @@ fn limits() -> crate::config::GraphLimits {
     }
 }
 
+fn compiled_batch(raw: Value) -> GraphDocument {
+    let library = library();
+    let resolvers = BTreeMap::from([
+        ("review-panel".into(), vec!["correctness".into()]),
+        ("review-frame".into(), vec!["false".into()]),
+        ("review-verify".into(), vec!["false".into()]),
+        ("review-synthesis".into(), vec!["false".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
+        ("review-advice-correctness".into(), vec![String::new()]),
+        (BATCH_MAX_PARALLEL_DEFAULT.into(), vec!["4".into()]),
+    ]);
+    let limits = super::plans::generous();
+    let context = super::patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &super::patch::scan_for_secrets,
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    let patch = serde_json::from_value(json!({"schema_version": 1, "nodes": [raw]})).unwrap();
+    super::patch::compile_submission("batch-test", &patch, &context, Some("batch/integration"))
+        .unwrap()
+}
+
 fn expanded_ids(nodes: Vec<GraphNode>) -> Vec<String> {
     let document = document(nodes);
     document.admit(&limits()).unwrap();
@@ -612,11 +637,11 @@ fn delivery_templates_admit_bounded_review_repairs() {
         if template == "deliver" {
             raw["with"]["plan"] = json!(false);
         }
-        let node = compiler.compile(&raw).unwrap();
-        let mut doc = document(vec![node]);
-        if template == "batch" {
-            doc.integration_branch = Some("batch/integration".into());
-        }
+        let doc = if template == "batch" {
+            compiled_batch(raw)
+        } else {
+            document(vec![compiler.compile(&raw).unwrap()])
+        };
         let delivery_limits = crate::config::GraphLimits::default();
         doc.admit(&delivery_limits).unwrap();
         let expanded = doc.expanded(&delivery_limits).unwrap();
@@ -1549,4 +1574,232 @@ fn graph_node_accepts_prompt_and_refuses_removed_brief_spelling() {
         "id":"work", "access":"read_only", "brief":"Do the work"
     }));
     assert!(alias.is_err());
+}
+
+#[test]
+fn batch_items_accept_structured_tables_and_bare_strings() {
+    let directory = tempfile::tempdir().unwrap();
+    let brief_file = directory.path().join("brief.txt");
+    std::fs::write(&brief_file, "file brief").unwrap();
+    let raw = json!({
+        "id": "batch-run",
+        "use": "batch",
+        "with": {
+            "worktree": "/fixture/writer",
+            "items": [
+                "bare-slice",
+                {
+                    "id": "table-slice",
+                    "brief": "custom table brief",
+                    "write_scope": ["src/custom.rs"]
+                },
+                {"id": "file-slice", "brief_file": brief_file}
+            ]
+        }
+    });
+    let doc = compiled_batch(raw);
+    let limits = crate::config::GraphLimits::default();
+    doc.admit(&limits).unwrap();
+    let expanded = doc.expanded(&limits).unwrap();
+
+    let bare = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id.contains("bare-slice"))
+        .unwrap();
+    assert!(bare.prompt.contains("Implement slice bare-slice"));
+
+    let table = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id.contains("table-slice"))
+        .unwrap();
+    assert!(table.prompt.contains("custom table brief"));
+    assert_eq!(table.write_scope, vec!["src/custom.rs"]);
+    assert_ne!(bare.worktree, table.worktree);
+    assert!(bare.provision_worktree && table.provision_worktree);
+    assert!(
+        expanded
+            .nodes
+            .iter()
+            .any(|node| node.id.contains("file-slice") && node.prompt.contains("file brief"))
+    );
+}
+
+#[test]
+fn batch_per_item_routing_route_vs_model() {
+    let raw = json!({
+        "id": "batch-run",
+        "use": "batch",
+        "with": {
+            "worktree": "/fixture/writer",
+            "items": [
+                {
+                    "id": "slice-route",
+                    "route": "senior"
+                },
+                {
+                    "id": "slice-model",
+                    "model": "anthropic/claude-3-5-sonnet"
+                }
+            ]
+        }
+    });
+    let doc = compiled_batch(raw);
+    let limits = crate::config::GraphLimits::default();
+    doc.admit(&limits).unwrap();
+    let expanded = doc.expanded(&limits).unwrap();
+
+    let route_node = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id.contains("slice-route"))
+        .unwrap();
+    assert_eq!(
+        route_node.route.as_ref().unwrap().alias.as_deref(),
+        Some("senior")
+    );
+    assert_eq!(route_node.route.as_ref().unwrap().tier, None);
+
+    let model_node = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id.contains("slice-model"))
+        .unwrap();
+    assert_eq!(
+        model_node.route.as_ref().unwrap().model.as_deref(),
+        Some("claude-3-5-sonnet")
+    );
+    assert_eq!(
+        model_node.route.as_ref().unwrap().adapter.as_deref(),
+        Some("anthropic")
+    );
+    assert_eq!(model_node.route.as_ref().unwrap().tier, None);
+}
+
+#[test]
+fn batch_items_mutual_exclusion_validation() {
+    let bundled = library();
+    let resolvers = std::collections::BTreeMap::new();
+    let compiler = Compiler {
+        library: &bundled,
+        resolvers: &resolvers,
+    };
+
+    let raw_brief_conflict = json!({
+        "id": "batch-run",
+        "use": "batch",
+        "with": {
+            "worktree": "/fixture/writer",
+            "items": [
+                {
+                    "id": "slice-1",
+                    "brief": "do something",
+                    "brief_file": "brief.txt"
+                }
+            ]
+        }
+    });
+    let err = compiler
+        .compile(&raw_brief_conflict)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("cannot specify both `brief` and `brief_file`"),
+        "{err}"
+    );
+
+    let raw_route_conflict = json!({
+        "id": "batch-run",
+        "use": "batch",
+        "with": {
+            "worktree": "/fixture/writer",
+            "items": [
+                {
+                    "id": "slice-2",
+                    "route": "senior",
+                    "model": "openai/gpt-4o"
+                }
+            ]
+        }
+    });
+    let err2 = compiler
+        .compile(&raw_route_conflict)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err2.contains("cannot specify both `route` and `model`"),
+        "{err2}"
+    );
+}
+
+#[test]
+fn batch_items_after_ordering_and_cycle_detection() {
+    let bundled = library();
+    let resolvers = std::collections::BTreeMap::new();
+    let compiler = Compiler {
+        library: &bundled,
+        resolvers: &resolvers,
+    };
+
+    let named = json!({
+        "id": "batch-run", "use": "batch", "with": {
+            "worktree": "/fixture/writer",
+            "items": [{"id": "slice A"}, {"id": "next", "after": ["slice A"]}]
+        }
+    });
+    let named_doc = compiled_batch(named);
+    let expanded = named_doc
+        .expanded(&crate::config::GraphLimits::default())
+        .unwrap();
+    let next = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("--next"))
+        .unwrap();
+    assert!(next.depends_on.iter().any(|id| id.ends_with("--slice-A")));
+    assert!(matches!(
+        next.source.as_ref(),
+        Some(SourceBinding::Integration)
+    ));
+
+    let unknown_after = json!({
+        "id": "batch-run",
+        "use": "batch",
+        "with": {
+            "worktree": "/fixture/writer",
+            "items": [
+                {
+                    "id": "slice-a",
+                    "after": ["unknown-slice"]
+                }
+            ]
+        }
+    });
+    let err = compiler.compile(&unknown_after).unwrap_err().to_string();
+    assert!(err.contains("unknown-slice"), "{err}");
+
+    let cycle = json!({
+        "id": "batch-run",
+        "use": "batch",
+        "with": {
+            "worktree": "/fixture/writer",
+            "items": [
+                {
+                    "id": "slice-a",
+                    "after": ["slice-b"]
+                },
+                {
+                    "id": "slice-b",
+                    "after": ["slice-a"]
+                }
+            ]
+        }
+    });
+    let err_cycle = compiler.compile(&cycle).unwrap_err().to_string();
+    assert!(err_cycle.contains("cycle"), "{err_cycle}");
+    assert!(
+        err_cycle.contains("slice-a") && err_cycle.contains("slice-b"),
+        "{err_cycle}"
+    );
 }

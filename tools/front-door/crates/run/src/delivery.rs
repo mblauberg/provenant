@@ -1892,6 +1892,19 @@ impl HostDeliveryContext {
             || output.stdout.read_failed
             || output.drain_truncated
         {
+            if tool == "git"
+                && args.first() == Some(&"merge-tree")
+                && output.termination == Termination::Exit(1)
+            {
+                let stdout_str = String::from_utf8_lossy(&output.stdout.bytes);
+                let conflicting_files: Vec<String> = stdout_str
+                    .lines()
+                    .skip(1)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                return Err(RunError::MergeConflict { conflicting_files });
+            }
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
@@ -2252,13 +2265,27 @@ impl HostDeliveryContext {
                 .command(
                     &writer.worktree,
                     "git",
-                    &["merge-tree", "--write-tree", &expected, &head.to_string()],
+                    &[
+                        "merge-tree",
+                        "--write-tree",
+                        "--name-only",
+                        "--no-messages",
+                        &expected,
+                        &head.to_string(),
+                    ],
                     stage,
                 )
                 .map_err(|error| match error {
-                    RunError::Delivery(Stage::Integrate) => {
-                        RunError::IntegrationConflict { child_head: head }
+                    RunError::MergeConflict { conflicting_files } => {
+                        RunError::IntegrationConflict {
+                            child_head: head,
+                            conflicting_files,
+                        }
                     }
+                    RunError::Delivery(Stage::Integrate) => RunError::IntegrationConflict {
+                        child_head: head,
+                        conflicting_files: Vec::new(),
+                    },
                     error => error,
                 })?;
             let tree = GitOid::parse(tree.lines().next().unwrap_or_default())

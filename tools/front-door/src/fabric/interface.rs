@@ -1045,6 +1045,10 @@ impl Factory {
             provenant_fabric_runtime::graph::template::IMPLEMENT_PLAN_DEFAULT.into(),
             vec![config.domains.fabric.implement.plan.to_string()],
         );
+        resolvers.insert(
+            provenant_fabric_runtime::graph::template::BATCH_MAX_PARALLEL_DEFAULT.into(),
+            vec![config.domains.fabric.batch.max_parallel.to_string()],
+        );
         Ok(resolvers)
     }
 
@@ -1835,6 +1839,7 @@ impl Factory {
         };
         let mut templates = effective_templates(&library, template_name, input);
         templates["$implement_plan_default"] = json!(self.context.config.implement.plan);
+        templates["$batch_max_parallel_default"] = json!(self.context.config.batch.max_parallel);
         let mut identity_input = input.clone();
         if let Some(subject) = &review_subject {
             identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
@@ -2237,6 +2242,12 @@ impl Factory {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
                         config.origins.get("domains.fabric.implement.plan").map(|origin| json!(origin)).unwrap_or(json!("default"))
+                    }
+                },
+                "max_parallel": {
+                    "value": input.pointer("/set/max_parallel").or_else(|| input.pointer("/document/with/max_parallel")).cloned().unwrap_or(json!(self.context.config.batch.max_parallel)),
+                    "source": if input.pointer("/set/max_parallel").or_else(|| input.pointer("/document/with/max_parallel")).is_some() { json!("parameter (--set)") } else {
+                        config.origins.get("domains.fabric.batch.max_parallel").map(|origin| json!(origin)).unwrap_or(json!("default"))
                     }
                 },
             }));

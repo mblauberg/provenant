@@ -19,6 +19,8 @@ const ITEM: &str = "item";
 /// Host compilation context for a patch emitted by a planner. Every nested
 /// implementation in that patch has already been sized by its producer.
 pub const IMPLEMENT_PLAN_DEFAULT: &str = "implement-plan-default";
+/// Host compilation context for the batch concurrency cap default from config.
+pub const BATCH_MAX_PARALLEL_DEFAULT: &str = "batch-max-parallel-default";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
@@ -102,7 +104,15 @@ pub fn separate_document_fields(node: &mut Value) -> Result<(), String> {
 fn template_syntax(field: &str) -> bool {
     matches!(
         field,
-        "use" | "with" | "over" | "repeat" | "after" | "tier" | "min_ok" | "reduce_verdict"
+        "use"
+            | "with"
+            | "over"
+            | "repeat"
+            | "after"
+            | "tier"
+            | "min_ok"
+            | "reduce_verdict"
+            | "max_parallel"
     )
 }
 
@@ -1441,8 +1451,18 @@ fn implementation_template(name: &str) -> bool {
     name == "implement" || name.starts_with("implement.")
 }
 
-/// One batch item: its key and its per-item `with` overrides.
-type BatchItem = (String, Map<String, Value>);
+/// One batch item: its key and its per-item configuration overrides.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct BatchItemSpec {
+    pub id: String,
+    pub brief: Option<String>,
+    pub route: Option<Value>,
+    pub write_scope: Option<Vec<String>>,
+    pub after: Vec<String>,
+    pub with: Map<String, Value>,
+}
+
+type BatchItem = BatchItemSpec;
 
 impl<'a> Compiler<'a> {
     pub fn new(library: &'a TemplateLibrary) -> Self {
@@ -1619,6 +1639,16 @@ impl<'a> Compiler<'a> {
             {
                 parameters.insert("plan".into(), Value::Bool(default == "true"));
             }
+            if name == "batch"
+                && with.get("max_parallel").is_none()
+                && let Some(default) = self
+                    .resolvers
+                    .get(BATCH_MAX_PARALLEL_DEFAULT)
+                    .and_then(|v| v.first())
+                && let Ok(num) = default.parse::<usize>()
+            {
+                parameters.insert("max_parallel".into(), Value::Number(num.into()));
+            }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair)
                 && with.get("lenses").is_none()
                 && let Some(lenses) = self.resolvers.get("review-panel")
@@ -1761,7 +1791,10 @@ impl<'a> Compiler<'a> {
             });
         let items = match self.items(over) {
             Ok(items) => items,
-            Err(_) if skipped => vec![("skipped".to_owned(), Map::new())],
+            Err(_) if skipped => vec![BatchItemSpec {
+                id: "skipped".to_owned(),
+                ..Default::default()
+            }],
             Err(error) => return Err(error.into()),
         };
         let mut boundary = Map::new();
@@ -1792,6 +1825,10 @@ impl<'a> Compiler<'a> {
             .remove("min_ok")
             .map(|value| interpolate(&value, bindings))
             .transpose()?;
+        let max_parallel = copy
+            .remove("max_parallel")
+            .map(|value| interpolate(&value, bindings))
+            .transpose()?;
         let reduce_verdict = copy.remove("reduce_verdict");
         // A used template that declares `item` receives it unless set.
         if let Some(name) = copy.get("use").and_then(Value::as_str)
@@ -1808,6 +1845,18 @@ impl<'a> Compiler<'a> {
             }
         }
         let mut ids = BTreeSet::new();
+        let item_ids: BTreeMap<_, _> = items
+            .iter()
+            .map(|item| {
+                let assigned = if !ids.contains(&item.id) && valid_node_identifier(&item.id) {
+                    ids.insert(item.id.clone());
+                    item.id.clone()
+                } else {
+                    item_id(&item.id, &mut ids)
+                };
+                (item.id.clone(), assigned)
+            })
+            .collect();
         let mut children = Vec::with_capacity(items.len());
         let lens_panel = over.as_str() == Some("@review-panel")
             && copy
@@ -1833,16 +1882,55 @@ impl<'a> Compiler<'a> {
         if panel_routes.is_some_and(|routes| routes.len() != items.len()) {
             return Err("review panel routes do not match its lenses".into());
         }
-        for (index, (item, overrides)) in items.iter().enumerate() {
+        for (index, item_spec) in items.iter().enumerate() {
             let mut scoped = bindings.clone();
-            scoped.insert(ITEM.into(), Value::String(item.clone()));
+            scoped.insert(ITEM.into(), Value::String(item_spec.id.clone()));
+            if let Some(brief) = &item_spec.brief {
+                scoped.insert("brief".into(), Value::String(brief.clone()));
+            }
             let mut member = copy.clone();
-            if !overrides.is_empty() {
+            if !item_spec.with.is_empty() {
                 let with = member
                     .entry("with")
                     .or_insert_with(|| serde_json::json!({}));
                 let fields = with.as_object_mut().ok_or("slice `with` must be a table")?;
-                fields.extend(overrides.clone());
+                fields.extend(item_spec.with.clone());
+            }
+            if let Some(brief) = &item_spec.brief {
+                member.insert("prompt".into(), Value::String(brief.clone()));
+            }
+            if let Some(route) = &item_spec.route {
+                member.remove("tier");
+                member.insert("route".into(), route.clone());
+            }
+            if let Some(write_scope) = &item_spec.write_scope {
+                member.insert(
+                    "write_scope".into(),
+                    serde_json::to_value(write_scope).map_err(|error| error.to_string())?,
+                );
+            }
+            if !item_spec.after.is_empty() {
+                if member
+                    .get("delivery")
+                    .and_then(Value::as_str)
+                    .is_some_and(|delivery| delivery.starts_with("integrate:"))
+                {
+                    member.insert("source".into(), serde_json::json!({"type": "integration"}));
+                }
+                member.insert(
+                    "after".into(),
+                    serde_json::to_value(
+                        item_spec
+                            .after
+                            .iter()
+                            .map(|id| &item_ids[id])
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
+            }
+            if let Some(max_p) = &max_parallel {
+                member.insert("max_parallel".into(), max_p.clone());
             }
             if let Some(routes) = panel_routes {
                 let fields: Map<String, Value> = serde_json::from_str(&routes[index])
@@ -1865,9 +1953,9 @@ impl<'a> Compiler<'a> {
                 member.remove("family_group");
                 member.extend(fields);
             }
-            member.insert("id".into(), Value::String(item_id(item, &mut ids)));
+            member.insert("id".into(), Value::String(item_ids[&item_spec.id].clone()));
             let mut child = self.lower_in(&Value::Object(member), &scoped, stack)?;
-            append_item(&mut child, item);
+            append_item(&mut child, &item_spec.id);
             children.push(child);
         }
         let exports = default_exports(&children);
@@ -1878,6 +1966,10 @@ impl<'a> Compiler<'a> {
         composite.insert("exports".into(), Value::Array(exports));
         if let Some(min_ok) = min_ok {
             composite.insert("min_successful".into(), min_ok);
+        }
+        if let Some(max_parallel) = max_parallel {
+            composite.insert("max_parallel".into(), max_parallel.clone());
+            boundary.insert("max_parallel".into(), max_parallel);
         }
         if let Some(floor) = coverage_floor {
             composite.insert("soft_review_coverage".into(), Value::Bool(true));
@@ -1903,22 +1995,150 @@ impl<'a> Compiler<'a> {
             Value::Array(values) => values
                 .iter()
                 .map(|value| match value {
-                    Value::String(text) => Ok((text.clone(), Map::new())),
-                    Value::Number(number) => Ok((number.to_string(), Map::new())),
-                    Value::Object(fields)
-                        if fields.keys().all(|key| key == "item" || key == "with") =>
-                    {
-                        let item = fields
-                            .get("item")
-                            .and_then(Value::as_str)
-                            .ok_or("slice item must be text")?;
-                        let with = fields
-                            .get("with")
-                            .and_then(Value::as_object)
-                            .ok_or("slice with must be a table")?;
-                        Ok((item.to_owned(), with.clone()))
+                    Value::String(text) => Ok(BatchItemSpec {
+                        id: text.clone(),
+                        ..Default::default()
+                    }),
+                    Value::Number(number) => Ok(BatchItemSpec {
+                        id: number.to_string(),
+                        ..Default::default()
+                    }),
+                    Value::Object(fields) => {
+                        for key in fields.keys() {
+                            if !matches!(
+                                key.as_str(),
+                                "id"
+                                    | "item"
+                                    | "brief"
+                                    | "brief_file"
+                                    | "route"
+                                    | "model"
+                                    | "write_scope"
+                                    | "after"
+                                    | "with"
+                                    | "plan"
+                            ) {
+                                return Err(format!("slice item has unknown field `{key}`"));
+                            }
+                        }
+                        let id = if let Some(id_val) = fields.get("id") {
+                            id_val.as_str().ok_or("slice id must be text")?.to_owned()
+                        } else if let Some(item_val) = fields.get("item") {
+                            item_val.as_str().ok_or("slice item must be text")?.to_owned()
+                        } else {
+                            return Err("slice table requires an `id`".into());
+                        };
+                        if id.trim().is_empty() || id.contains('\0') {
+                            return Err("slice id must be non-empty text".into());
+                        }
+                        if fields.contains_key("brief") && fields.contains_key("brief_file") {
+                            return Err(format!(
+                                "item `{id}` cannot specify both `brief` and `brief_file`"
+                            ));
+                        }
+                        let brief = if let Some(b) = fields.get("brief") {
+                            Some(
+                                b.as_str()
+                                    .ok_or_else(|| format!("item `{id}` brief must be text"))?
+                                    .to_owned(),
+                            )
+                        } else if let Some(bf) = fields.get("brief_file") {
+                            let path = bf
+                                .as_str()
+                                .ok_or_else(|| format!("item `{id}` brief_file must be text"))?;
+                            let content = std::fs::read_to_string(path).map_err(|error| {
+                                format!("item `{id}` brief_file `{path}` could not be read: {error}")
+                            })?;
+                            if content.len() > 1024 * 1024 {
+                                return Err(format!(
+                                    "item `{id}` brief_file `{path}` exceeds byte limit"
+                                ));
+                            }
+                            Some(content)
+                        } else {
+                            None
+                        };
+                        if fields.contains_key("route") && fields.contains_key("model") {
+                            return Err(format!("item `{id}` cannot specify both `route` and `model`"));
+                        }
+                        let route = if let Some(r) = fields.get("route") {
+                            match r {
+                                Value::String(alias) => Some(serde_json::json!({ "alias": alias })),
+                                Value::Object(_) => Some(r.clone()),
+                                _ => {
+                                    return Err(format!(
+                                        "item `{id}` route must be an alias string or route table"
+                                    ));
+                                }
+                            }
+                        } else if let Some(m) = fields.get("model") {
+                            let model_str = m
+                                .as_str()
+                                .ok_or_else(|| format!("item `{id}` model must be text"))?;
+                            let (adapter, model_name) = model_str.split_once('/').ok_or_else(|| {
+                                format!(
+                                    "item `{id}` model must be in the form `adapter/model` (got `{model_str}`)"
+                                )
+                            })?;
+                            Some(serde_json::json!({
+                                "adapter": adapter,
+                                "model": model_name,
+                            }))
+                        } else {
+                            None
+                        };
+                        let write_scope = if let Some(ws) = fields.get("write_scope") {
+                            let array = ws
+                                .as_array()
+                                .ok_or_else(|| format!("item `{id}` write_scope must be a list"))?;
+                            let scopes: Result<Vec<String>, String> = array
+                                .iter()
+                                .map(|item| {
+                                    item.as_str()
+                                        .map(ToOwned::to_owned)
+                                        .ok_or_else(|| format!("item `{id}` write_scope entries must be text"))
+                                })
+                                .collect();
+                            Some(scopes?)
+                        } else {
+                            None
+                        };
+                        let after = if let Some(a) = fields.get("after") {
+                            let array = a
+                                .as_array()
+                                .ok_or_else(|| format!("item `{id}` after must be a list"))?;
+                            let deps: Result<Vec<String>, String> = array
+                                .iter()
+                                .map(|item| {
+                                    item.as_str()
+                                        .map(ToOwned::to_owned)
+                                        .ok_or_else(|| format!("item `{id}` after entries must be text"))
+                                })
+                                .collect();
+                            deps?
+                        } else {
+                            Vec::new()
+                        };
+                        let mut with_map = if let Some(w) = fields.get("with") {
+                            w.as_object()
+                                .ok_or_else(|| format!("item `{id}` with must be a table"))?
+                                .clone()
+                        } else {
+                            Map::new()
+                        };
+                        if let Some(plan_val) = fields.get("plan") {
+                            with_map.insert("plan".into(), plan_val.clone());
+                        }
+                        Ok(BatchItemSpec {
+                            id,
+                            brief,
+                            route,
+                            write_scope,
+                            after,
+                            with: with_map,
+                        })
                     }
-                    _ => Err("`over` items must be strings or item/with tables"),
+                    _ => Err("`over` items must be strings or item tables".into()),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             Value::String(text) => {
@@ -1929,8 +2149,11 @@ impl<'a> Compiler<'a> {
                     .get(name)
                     .ok_or_else(|| format!("resolver @{name} is not available at this launch"))?
                     .iter()
-                    .map(|item| (item.clone(), Map::new()))
-                    .collect()
+                    .map(|item| Ok(BatchItemSpec {
+                        id: item.clone(),
+                        ..Default::default()
+                    }))
+                    .collect::<Result<Vec<_>, String>>()?
             }
             _ => return Err("`over` takes a list or a resolver named `@name`".into()),
         };
@@ -1939,10 +2162,80 @@ impl<'a> Compiler<'a> {
         }
         if items
             .iter()
-            .any(|(item, _)| item.trim().is_empty() || item.contains('\0'))
+            .any(|item| item.id.trim().is_empty() || item.id.contains('\0'))
         {
             return Err("`over` items must be non-empty text".into());
         }
+
+        let mut seen_ids = BTreeSet::new();
+        for item in &items {
+            if !seen_ids.insert(&item.id) {
+                return Err(format!("duplicate item id `{}` in `items`", item.id));
+            }
+        }
+
+        let known_ids: BTreeSet<&str> = items.iter().map(|it| it.id.as_str()).collect();
+        for item in &items {
+            for dep in &item.after {
+                if !known_ids.contains(dep.as_str()) {
+                    return Err(format!(
+                        "item `{}` in `after` refers to unknown item `{}`",
+                        item.id, dep
+                    ));
+                }
+            }
+        }
+
+        let mut state = BTreeMap::<&str, u8>::new();
+        let adj: BTreeMap<&str, Vec<&str>> = items
+            .iter()
+            .map(|it| {
+                (
+                    it.id.as_str(),
+                    it.after.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+
+        fn dfs<'a>(
+            node: &'a str,
+            adj: &BTreeMap<&'a str, Vec<&'a str>>,
+            state: &mut BTreeMap<&'a str, u8>,
+            path: &mut Vec<&'a str>,
+        ) -> Result<(), String> {
+            state.insert(node, 1);
+            path.push(node);
+            if let Some(deps) = adj.get(node) {
+                for &dep in deps {
+                    match state.get(dep).copied().unwrap_or(0) {
+                        1 => {
+                            let cycle_start = path.iter().position(|&n| n == dep).unwrap_or(0);
+                            let mut cycle: Vec<&str> = path[cycle_start..].to_vec();
+                            cycle.push(dep);
+                            return Err(format!(
+                                "dependency cycle in `after`: {}",
+                                cycle.join(" -> ")
+                            ));
+                        }
+                        0 => {
+                            dfs(dep, adj, state, path)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            path.pop();
+            state.insert(node, 2);
+            Ok(())
+        }
+
+        let mut path = Vec::new();
+        for item in &items {
+            if state.get(item.id.as_str()).copied().unwrap_or(0) == 0 {
+                dfs(item.id.as_str(), &adj, &mut state, &mut path)?;
+            }
+        }
+
         Ok(items)
     }
 

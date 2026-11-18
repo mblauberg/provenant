@@ -3683,6 +3683,33 @@ impl BoundGraphOwner<'_> {
                 } else {
                     (None, None)
                 };
+                let result_warning = result_warning.or_else(|| {
+                    if let Some(delivery) = effective_delivery
+                        && let provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } = &delivery.state
+                    {
+                        Some(reason.clone())
+                    } else {
+                        None
+                    }
+                });
+                let stop = if effective_delivery.as_ref().is_some_and(|delivery| {
+                    matches!(
+                        &delivery.state,
+                        provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } if reason.contains("integration_conflict") || reason.contains("merge conflict")
+                    )
+                }) {
+                    Some(provenant_records::StopCause::Blocked)
+                } else {
+                    stop
+                };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
                 // route fallback for authentication or quota failures.

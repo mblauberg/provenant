@@ -2756,6 +2756,7 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             exports: vec![],
         },
     ));
@@ -2813,6 +2814,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             exports: vec![],
         },
     )];

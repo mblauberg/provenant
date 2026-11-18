@@ -801,7 +801,8 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
         host.integrate(&fixture.writer, &fixture.request, head),
-        Err(RunError::IntegrationConflict { child_head }) if child_head == head
+        Err(RunError::IntegrationConflict { child_head, conflicting_files })
+            if child_head == head && conflicting_files == ["conflict"]
     ));
     assert_eq!(
         host.command(

@@ -127,3 +127,37 @@ For command or host-native routes, configure named entries under
 `[domains.fabric.commands]` or `[domains.fabric.host_native]`; use the config
 schema and route help to select them. Command argv comes from host configuration,
 not the task prompt.
+
+### Batch template
+
+The `batch` template coordinates multiple implementation slices into one
+`integration_branch`, followed by review and bounded repair.
+
+#### Slice parameters and structured items
+
+`items` accepts a list of bare strings (defaulting parameters) or structured tables:
+- `id`: unique identifier for the slice.
+- `brief` or `brief_file`: the prompt or file path containing the slice brief (mutually exclusive).
+- `route` or `model`: per-item model or route override (mutually exclusive).
+- `write_scope`: advisory list of paths the slice is scoped to modify.
+- `after`: list of other slice IDs that must settle successfully before this slice begins. Unknown IDs and dependency cycles are rejected at compile time naming the offending IDs.
+
+#### Concurrency and ordering
+
+The `max_parallel` parameter caps how many slices execute concurrently.
+Each slice uses a separate managed worktree from the configured worktree layout.
+The batch `worktree` parameter remains the checkout used for review repair.
+Slices with `after` start from the integration branch after their prerequisites
+have integrated; independent slices start from the graph's pinned integration base.
+It defaults to `domains.fabric.batch.max_parallel` (shown with its source in `--explain`),
+and can be overridden per run via `--set max_parallel=N`.
+
+Queued slices report as `waiting` in `provenant status`, displaying the wait reason:
+- `waiting: after` when waiting on prerequisite dependencies in `after`.
+- `waiting: cap` when dependencies are satisfied but the concurrency cap is occupied.
+
+#### Incremental integration and conflict isolation
+
+Each slice integrates into `integration_branch` as it settles. If a slice encounters
+a merge conflict, only that slice pauses (`blocked`, with the conflicting files
+reported), allowing independent sibling slices to continue execution uninterrupted.
