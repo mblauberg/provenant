@@ -420,7 +420,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let next_poll_interval = cadence.fast;
         Ok(Self {
             dir,
-            repository,
+            repository: repository.to_owned(),
             forge,
             clock,
             cadence,

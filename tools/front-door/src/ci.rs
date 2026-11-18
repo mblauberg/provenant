@@ -120,8 +120,12 @@ fn failures_pr(number: u64, globals: &Globals) -> u8 {
                     && !entries[0].truncated
                     && entries[0].state != "UNAVAILABLE" =>
             {
-                let entry = entries.into_iter().next().expect("checked");
-                (entry.head, repository_of(&entry.url), entry.checks)
+                let entry = &entries[0];
+                (
+                    entry.head.clone(),
+                    repository_of(&entry.url),
+                    entry.checks.clone(),
+                )
             }
             _ => resolve_pr_rest(state.as_path(), &project, number, &request, try_graphql)?,
         };
@@ -172,13 +176,15 @@ fn failures_run(run: u64, globals: &Globals) -> u8 {
 /// The pull request's head and failed checks through the REST reads, which
 /// remain the path when the batch transport is unavailable. A REST rate limit
 /// falls back to one GraphQL query, and only when that query may still answer.
+type PrObservation = (String, Option<String>, Vec<RawCheck>);
+
 fn resolve_pr_rest(
     state: &Path,
     project: &Path,
     number: u64,
     request: &provenant_config::ports::Request,
     try_graphql: bool,
-) -> Result<(String, Option<String>, Vec<RawCheck>), Box<dyn std::error::Error>> {
+) -> Result<PrObservation, Box<dyn std::error::Error>> {
     #[derive(Deserialize)]
     struct View {
         #[serde(rename = "headRefOid")]
@@ -204,7 +210,7 @@ fn resolve_pr_rest(
             Ok(view) => Ok(view),
             Err(error) => Err(error.to_string()),
         },
-        Err(error) if try_graphql && rate_limited(&error) => {
+        Err(error) if try_graphql && rate_limited(error.as_ref()) => {
             match batch::single(state, project, number) {
                 batch::Batch::Entries(entries) if !entries.is_empty() && !entries[0].truncated => {
                     return Ok((
@@ -398,7 +404,7 @@ fn clock() -> jiff::Timestamp {
 
 /// Apply the compaction bounds, recording what the bounds held back.
 fn compact(jobs: Vec<JobFailures>) -> Vec<JobFailures> {
-    let mut bounded = Vec::with_capacity(jobs.len());
+    let mut result = Vec::with_capacity(jobs.len());
     for mut job in jobs {
         if job.tests.len() > MAX_TESTS_PER_JOB || job.errors.len() > MAX_ERROR_LINES {
             job.truncated = true;
@@ -413,9 +419,9 @@ fn compact(jobs: Vec<JobFailures>) -> Vec<JobFailures> {
                 panic.location = bounded(&panic.location);
             }
         }
-        bounded.push(job);
+        result.push(job);
     }
-    bounded
+    result
 }
 
 fn bounded(text: &str) -> String {
@@ -603,7 +609,7 @@ pub(crate) fn parse_failed_log(text: &str) -> Vec<JobFailures> {
             active = Some((job, jobs[job].tests.len() - 1));
             continue;
         }
-        if let Some(location) = panic_at(&line) {
+        if let Some(location) = panic_at(line) {
             let panic = Panic {
                 location: location.to_owned(),
                 message: String::new(),
@@ -628,7 +634,7 @@ pub(crate) fn parse_failed_log(text: &str) -> Vec<JobFailures> {
             }
             continue;
         }
-        if let Some(legacy) = legacy_panic(&line) {
+        if let Some(legacy) = legacy_panic(line) {
             if let Some((owner, index)) = active.filter(|(owner, _)| *owner == job)
                 && jobs[owner].tests[index].panic.is_none()
             {
@@ -649,7 +655,7 @@ pub(crate) fn parse_failed_log(text: &str) -> Vec<JobFailures> {
         let target = active
             .filter(|(owner, _)| *owner == job)
             .map(|(_, index)| index);
-        if is_error_line(&line) {
+        if is_error_line(line) {
             match target.and_then(|index| jobs[job].tests.get_mut(index)) {
                 Some(test) => test.lines.push(bounded_line(line)),
                 None => push_error(&mut jobs[job], line),
@@ -765,7 +771,9 @@ fn panic_at(line: &str) -> Option<&str> {
 /// A pre-1.73 panic line carries the message and location together.
 fn legacy_panic(line: &str) -> Option<Panic> {
     let rest = line.strip_prefix("thread '")?;
-    let (_, rest) = rest.split_once("', panicked at '")?;
+    let (_, rest) = rest
+        .split_once("' panicked at '")
+        .or_else(|| rest.split_once("', panicked at '"))?;
     let (message, location) = rest.rsplit_once("', ")?;
     Some(Panic {
         message: message.to_owned(),
@@ -796,6 +804,10 @@ fn bounded_line(line: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "worktree driver includes this module without libtest"
+)]
 mod tests {
     use super::*;
 
@@ -812,6 +824,27 @@ mod tests {
         let panic = failure.panic.as_ref().expect("panic");
         assert!(panic.location.ends_with("host_boundaries.rs:399:17"));
         assert!(panic.message.contains("default=allow"));
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn cargo_failure_retains_test_panic_and_error() {
+        let jobs = parse_failed_log(include_str!("ci/fixtures/cargo-failure.log"));
+        let failure = jobs[0]
+            .tests
+            .iter()
+            .find(|test| test.name == "cache_reads_expiry")
+            .unwrap();
+        let panic = failure.panic.as_ref().unwrap();
+        assert!(panic.location.ends_with("src/cache.rs:64:5"));
+        assert!(panic.message.contains("cannot lock cache"));
+        assert!(
+            failure
+                .lines
+                .iter()
+                .chain(&jobs[0].errors)
+                .any(|line| line.contains("test failed"))
+        );
     }
 
     // Spec: docs/specs/cli.md#ci-observations

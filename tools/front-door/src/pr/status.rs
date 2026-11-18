@@ -711,7 +711,7 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     // A rollup too large for one page is not evidence; re-read it exactly.
     for entry in &entries {
         if entry.truncated
-            && let Some(line) = (|| {
+            && let Some(line) = {
                 let request =
                     provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
                 wait_line(
@@ -722,7 +722,7 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
                     std::time::Duration::ZERO,
                 )
                 .ok()
-            })()
+            }
         {
             lines.retain(|(number, _)| *number != entry.number);
             lines.push((entry.number, line));
@@ -752,13 +752,13 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
     match wait_line(project, state, number, &request, std::time::Duration::ZERO) {
         Ok(line) => line,
         Err(error) => {
-            if try_graphql && looks_rate_limited(&error.as_ref()) {
-                if let batch::Batch::Entries(entries) = batch::single(state, project, number)
-                    && let Some(entry) = entries.first()
-                    && !entry.truncated
-                {
-                    return batch::line_from_entry(entry);
-                }
+            if try_graphql
+                && looks_rate_limited(error.as_ref())
+                && let batch::Batch::Entries(entries) = batch::single(state, project, number)
+                && let Some(entry) = entries.first()
+                && !entry.truncated
+            {
+                return batch::line_from_entry(entry);
             }
             Line {
                 number,

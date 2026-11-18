@@ -301,7 +301,9 @@ worktree links without following them through the host filesystem.
 
 ## CI observations
 
-`pr status` reports the head, check rollup and failed check names for selected pull requests. `ci failures pr NUMBER` and `ci failures run ID` report failed test names, panic locations and messages, and error lines from failed job logs; JSON carries structured evidence. Unreadable and truncated evidence remains visible.
+`pr status [NUMBER ...]` reports each pull request's head, check rollup and failed check names in one batched GraphQL read when available; omitting numbers selects this account's open pull requests. The REST observer shares ETag-backed check pages by repository and head SHA. Batched results have a short per-pull-request freshness window and fall back to REST when GraphQL cannot answer; a REST rate limit falls back to GraphQL when available.
+
+`ci failures pr NUMBER` and `ci failures run ID` report failing test names, panic locations and messages, and error lines from failed job logs. The parser handles nextest and legacy `cargo test` output. Human output is compact by default; `--json` returns structured evidence. Failed logs share the CI observation cache for a short freshness window. Unreadable logs and bounded output remain visible in the result.
 
 - Owner: `src/pr/status.rs`, `src/pr/status/batch.rs`, `src/ci.rs`
 - Why: a chair needs actionable CI evidence without mistaking missing observations for success.

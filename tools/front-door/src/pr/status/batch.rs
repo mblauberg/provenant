@@ -14,7 +14,7 @@ use crate::pr::{forge_execute, successful};
 use provenant_config::{Forge, ForgeOperation, ForgePort, HeadersObservation, PortTable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, io, path::Path, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 /// How long one batched read may take, shared with one-shot REST reads.
 const READ_BUDGET: Duration = Duration::from_secs(60);
@@ -50,8 +50,10 @@ pub(crate) struct RawCheck {
 pub(crate) enum Batch {
     Entries(Vec<Entry>),
     /// The batch transport cannot answer now; callers fall back to REST.
+    #[allow(dead_code, reason = "diagnostic retained for fallback failures")]
     Unavailable(String),
     /// The batch transport is rate limited until `1`.
+    #[allow(dead_code, reason = "reset retained for fallback failures")]
     RateLimited(jiff::Timestamp),
 }
 
@@ -80,7 +82,7 @@ pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
     }
     match read(state, project, &repository, numbers) {
         Ok(entries) => {
-            let _ = store_cache(&dir, &entries, now);
+            store_cache(&dir, &entries, now);
             Batch::Entries(entries)
         }
         Err(error) => error,
@@ -125,30 +127,55 @@ fn fresh_cache(
         .read_bounded(std::ffi::OsStr::new(CACHE_FILE), 4 * 1024 * 1024)
         .ok()?;
     let cache: Cache = serde_json::from_slice(&bytes).ok()?;
-    let age = now.as_millisecond().saturating_sub(cache.fetched_at);
-    if !(0..i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)).contains(&age) {
-        return None;
+    cached_entries(&cache, numbers, now, ttl)
+}
+
+fn cached_entries(
+    cache: &Cache,
+    numbers: &[u64],
+    now: jiff::Timestamp,
+    ttl: Duration,
+) -> Option<Vec<Entry>> {
+    let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
+    let mut by_number: BTreeMap<u64, &CachedEntry> = BTreeMap::new();
+    for cached in &cache.entries {
+        let age = now.as_millisecond().saturating_sub(cached.fetched_at);
+        if (0..ttl_ms).contains(&age)
+            && !cached.entry.head.is_empty()
+            && by_number
+                .get(&cached.entry.number)
+                .is_none_or(|known| known.fetched_at < cached.fetched_at)
+        {
+            by_number.insert(cached.entry.number, cached);
+        }
     }
-    let mut by_number: BTreeMap<u64, Entry> = cache
-        .entries
-        .into_iter()
-        .map(|entry| (entry.number, entry))
-        .collect();
     let mut entries = Vec::with_capacity(numbers.len());
     for &number in numbers {
-        let entry = by_number.remove(&number)?;
-        entries.push(entry);
+        entries.push(by_number.get(&number)?.entry.clone());
     }
     Some(entries)
 }
 
 fn store_cache(dir: &provenant_os::fs::Directory, entries: &[Entry], now: jiff::Timestamp) {
-    let cache = Cache {
-        fetched_at: now.as_millisecond(),
-        // Entries carry the head SHA their facts belong to; the TTL bounds how
-        // long a moved head keeps serving.
-        entries: entries.to_vec(),
-    };
+    let mut cache = dir
+        .read_bounded(std::ffi::OsStr::new(CACHE_FILE), 4 * 1024 * 1024)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Cache>(&bytes).ok())
+        .unwrap_or_default();
+    for entry in entries {
+        cache
+            .entries
+            .retain(|cached| cached.entry.number != entry.number);
+        cache.entries.push(CachedEntry {
+            fetched_at: now.as_millisecond(),
+            entry: entry.clone(),
+        });
+    }
+    // Bound the shared index while retaining the newest observations.
+    cache
+        .entries
+        .sort_by_key(|cached| std::cmp::Reverse(cached.fetched_at));
+    cache.entries.truncate(500);
     if let Ok(bytes) = serde_json::to_vec(&cache) {
         let _ = dir.atomic_write(
             std::ffi::OsStr::new(CACHE_FILE),
@@ -159,11 +186,16 @@ fn store_cache(dir: &provenant_os::fs::Directory, entries: &[Entry], now: jiff::
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct Cache {
-    /// Unix milliseconds.
+    entries: Vec<CachedEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedEntry {
+    /// Unix milliseconds; freshness belongs to this pull request head.
     fetched_at: i64,
-    entries: Vec<Entry>,
+    entry: Entry,
 }
 
 fn read(
@@ -237,7 +269,11 @@ fn read(
         .ok_or_else(|| Batch::Unavailable(format!("repository unavailable: {repository}")))?;
     let mut entries = Vec::with_capacity(numbers.len());
     for (index, &number) in numbers.iter().enumerate() {
-        let pull = repo.pulls.get(&alias(index, numbers.len())).cloned();
+        let pull = repo
+            .pulls
+            .get(&alias(index, numbers.len()))
+            .cloned()
+            .flatten();
         entries.push(entry(number, pull));
     }
     Ok(entries)
@@ -252,13 +288,12 @@ fn alias(index: usize, total: usize) -> String {
 fn rollup_query(owner: &str, name: &str, numbers: &[u64]) -> String {
     let mut query = format!("query{{repository(owner:\"{owner}\",name:\"{name}\"){{");
     for (index, &number) in numbers.iter().enumerate() {
-        query.push_str(&format!(
-            "{}:pullRequest(number:{number}){{number state isDraft mergeStateStatus \
-             reviewDecision url headRefOid statusCheckRollup{{\
-             contexts(last:100){{totalCount nodes{{__typename ...on CheckRun{{name status conclusion \
-             detailsUrl}} ...on StatusContext{{context state targetUrl}}}}}}}}}}}",
-            alias(index, numbers.len()),
-        ));
+        query.push_str(&alias(index, numbers.len()));
+        query.push_str(":pullRequest(number:");
+        query.push_str(&number.to_string());
+        query.push_str(
+            "){number state isDraft mergeStateStatus reviewDecision url headRefOid statusCheckRollup{contexts(last:100){totalCount nodes{__typename ...on CheckRun{name status conclusion detailsUrl} ...on StatusContext{context state targetUrl}}}}}",
+        );
     }
     query.push_str("}}");
     query
@@ -279,8 +314,6 @@ struct Repo {
 }
 #[derive(Clone, Deserialize)]
 struct Pull {
-    #[serde(default)]
-    number: u64,
     #[serde(default)]
     state: String,
     #[serde(rename = "isDraft", default)]
@@ -433,6 +466,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[allow(
+        dead_code,
+        reason = "worktree driver includes this module without libtest"
+    )]
     fn pull(sha: &str, checks: Value, total: u64) -> Value {
         json!({
             "number": 7, "state": "OPEN", "isDraft": false,
@@ -442,9 +479,14 @@ mod tests {
         })
     }
 
+    // Spec: docs/specs/cli.md#ci-observations
     #[test]
     fn the_rollup_query_aliases_one_pull_request_per_number() {
         let query = rollup_query("owner", "repo", &[1, 2]);
+        assert_eq!(
+            query.chars().filter(|c| *c == '{').count(),
+            query.chars().filter(|c| *c == '}').count()
+        );
         assert!(query.contains("a00:pullRequest(number:1)"));
         assert!(query.contains("a01:pullRequest(number:2)"));
         assert!(query.contains("contexts(last:100)"));
@@ -520,5 +562,39 @@ mod tests {
         assert_eq!(missing.state, "UNAVAILABLE");
         assert_eq!(missing.head, "unknown");
         assert!(missing.checks.is_empty());
+    }
+
+    #[test]
+    fn batch_cache_reuses_fresh_heads_independently() {
+        let now = jiff::Timestamp::from_millisecond(10_000).unwrap();
+        let cache = Cache {
+            entries: vec![
+                CachedEntry {
+                    fetched_at: 9_500,
+                    entry: entry(
+                        7,
+                        Some(serde_json::from_value(pull("a", json!([]), 0)).unwrap()),
+                    ),
+                },
+                CachedEntry {
+                    fetched_at: 8_000,
+                    entry: entry(
+                        8,
+                        Some(serde_json::from_value(pull("b", json!([]), 0)).unwrap()),
+                    ),
+                },
+            ],
+        };
+
+        assert_eq!(
+            cached_entries(&cache, &[7], now, Duration::from_secs(2))
+                .unwrap()
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            [7]
+        );
+        assert!(cached_entries(&cache, &[7, 8], now, Duration::from_secs(2)).is_none());
+        assert!(cached_entries(&cache, &[9], now, Duration::from_secs(2)).is_none());
     }
 }

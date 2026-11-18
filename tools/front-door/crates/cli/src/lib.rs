@@ -2099,6 +2099,25 @@ mod tests {
             other => panic!("{words:?}: {other:?}"),
         }
     }
+    #[test]
+    fn ci_observation_commands_accept_batch_and_json_forms() {
+        assert!(matches!(
+            valid(&["pr", "status", "12", "34", "--json"]).command,
+            Command::Pr(Pr::Status { numbers }) if numbers == [12, 34]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "pr", "12", "--json"]).command,
+            Command::Ci(Ci::Failures {
+                target: ci::FailureTarget::Pr { number: 12 }
+            })
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "run", "98765", "--json"]).command,
+            Command::Ci(Ci::Failures {
+                target: ci::FailureTarget::Run { run: 98765 }
+            })
+        ));
+    }
     fn invalid(words: &[&str]) {
         assert!(
             matches!(parsed(words), ParseOutcome::Invalid { .. }),
