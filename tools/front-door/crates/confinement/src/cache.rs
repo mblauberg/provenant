@@ -1926,6 +1926,9 @@ mod tests {
             let registry = path.join("private-config/packages");
             let target = path.join("target/debug");
             std::fs::create_dir_all(&target)?;
+            // A real Cargo profile directory carries its lock file; GC probes it
+            // instead of enumerating the profile's (unbounded) artifact entries.
+            std::fs::write(target.join(".cargo-lock"), b"")?;
             for index in 0..2048 {
                 std::fs::write(
                     target.join(format!("artifact-{index:04}")),
