@@ -18,9 +18,7 @@
 //! seeds and first builds cannot escape the budget. Explicit GC and launch
 //! admission share the same collector.
 use provenant_confinement::cache::is_cache_digest;
-use provenant_os::fs::{
-    Directory, FileKind, ForeignLock, LockGuard, LockMode, Metadata, PayloadTree, effective_uid,
-};
+use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, effective_uid};
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
@@ -666,7 +664,7 @@ fn snapshot_epoch(name: &str) -> Option<&str> {
 
 fn snapshot_directory(host: &Path, create: bool) -> Result<Directory, Box<dyn std::error::Error>> {
     Ok(provenant_config::private_directory(
-        &host.join("tick"),
+        &host.join("tick/gc-cache-surveys"),
         create,
     )?)
 }
@@ -1756,7 +1754,7 @@ fn directory_names(
         if !budget.consume() {
             break;
         }
-        names.push(entry.map_err(io::Error::other)?);
+        names.push(entry);
     }
     Ok(names)
 }
@@ -1943,6 +1941,7 @@ fn remove_contents_until(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_os::fs::{ForeignLock, LockGuard, LockMode};
     use std::{
         fs,
         os::unix::{ffi::OsStrExt, fs::PermissionsExt},
@@ -2175,6 +2174,53 @@ mod tests {
         assert!(!resumed.measurement_skipped);
         assert!(resumed.cache_bytes >= 128 * 1024);
         assert!(target.exists());
+    }
+
+    #[test]
+    fn survey_snapshot_cleanup_keeps_the_active_epoch_and_removes_stale_ones() {
+        let host = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(host.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(host.path().join("tick")).unwrap();
+        fs::set_permissions(host.path().join("tick"), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = host.path().join("tick/gc-cache-surveys");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let active = format!("{SURVEY_SNAPSHOT_PREFIX}0000000000000001.json");
+        let unrelated = format!("{SURVEY_SNAPSHOT_PREFIX}invalid.json");
+        fs::write(directory.join(&active), b"active").unwrap();
+        fs::write(directory.join(&unrelated), b"unrelated").unwrap();
+        let stale_names = (2..=130_u64)
+            .map(|epoch| format!("{SURVEY_SNAPSHOT_PREFIX}{epoch:016x}.json"))
+            .collect::<Vec<_>>();
+        for stale in &stale_names {
+            fs::write(directory.join(stale), b"stale").unwrap();
+        }
+
+        let first = prune_stale_survey_snapshots(host.path(), Some(&active));
+
+        assert!(
+            first
+                .iter()
+                .any(|warning| warning.contains("cleanup deferred"))
+        );
+        assert!(directory.join(active).is_file());
+        assert!(directory.join(unrelated).is_file());
+        assert!(
+            stale_names
+                .iter()
+                .any(|stale| directory.join(stale).exists())
+        );
+
+        let second = prune_stale_survey_snapshots(host.path(), Some(&active));
+
+        assert!(second.is_empty());
+        assert!(
+            stale_names
+                .iter()
+                .all(|stale| !directory.join(stale).exists())
+        );
+        assert!(directory.join(active).is_file());
+        assert!(directory.join(unrelated).is_file());
     }
 
     #[test]

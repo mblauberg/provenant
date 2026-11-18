@@ -1198,10 +1198,7 @@ impl LaunchConfinement {
         if self.writer.is_none() {
             return;
         }
-        let current_worktree = self
-            .writer
-            .as_ref()
-            .map(|writer| writer.worktree.path());
+        let current_worktree = self.writer.as_ref().map(|writer| writer.worktree.path());
         let current_common_dir = self
             .writer
             .as_ref()
@@ -1248,7 +1245,10 @@ impl LaunchConfinement {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
         for error in &report.errors {
-            let _ = writeln!(std::io::stderr().lock(), "warning: Cargo cache collection: {error}");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: Cargo cache collection: {error}"
+            );
         }
         if report.cache_bytes.saturating_add(projected_bytes) > budget.bytes {
             let _ = writeln!(
@@ -1360,7 +1360,7 @@ impl LaunchConfinement {
                 .retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
             environment.push((
                 provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-                lint_target.into_os_string(),
+                lint_target.clone().into_os_string(),
             ));
         }
         self.cargo_home
@@ -1388,10 +1388,9 @@ impl LaunchConfinement {
         };
         if self.cargo_target.value.is_private() || self.cargo_target.value.is_shared() {
             for managed_target in [&target, &lint_target] {
-                if let Err(error) = crate::build_dir_gc::mark_managed_target_use(
-                    &self.home,
-                    managed_target,
-                ) {
+                if let Err(error) =
+                    crate::build_dir_gc::mark_managed_target_use(&self.home, managed_target)
+                {
                     use std::io::Write;
                     let _ = writeln!(
                         std::io::stderr().lock(),
