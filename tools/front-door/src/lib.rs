@@ -877,10 +877,8 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
         let disk = disk_guard::LaneDisk::default();
-        let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
-            provenant_confinement::redact::Redactor::new([]),
-            provenant_confinement::redact::Redactor::new([]),
-        ) else {
+        let mut stdout_filter = holder.stdout_filter();
+        let Ok(mut stderr_filter) = provenant_confinement::redact::Redactor::new([]) else {
             return fail(
                 "internal supervise",
                 Outcome::Error,

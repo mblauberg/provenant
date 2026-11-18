@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
 fn guardian_capture_masks_split_credentials_before_retention() {
     struct Capture;
@@ -17,15 +18,37 @@ fn guardian_capture_masks_split_credentials_before_retention() {
             hooks: provenant_supervisor::GuardianHooks<'_>,
         ) -> provenant_supervisor::custody::Result<()> {
             use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
-            let stdout = hooks
+            let unbound_stdout = hooks
                 .stdout_filter
                 .ok_or_else(|| std::io::Error::other("stdout redaction"))?;
             let stderr = hooks
                 .stderr_filter
                 .ok_or_else(|| std::io::Error::other("stderr redaction"))?;
-            let mut stdout =
-                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stdout))
-                    .map_err(std::io::Error::other)?;
+            let mut unbound = StreamCapture::new(
+                StreamPolicy::Capture { limit: 1024 },
+                None,
+                Some(unbound_stdout),
+            )
+            .map_err(std::io::Error::other)?;
+            assert!(
+                unbound
+                    .push(b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end")
+                    .is_ok()
+            );
+            unbound.finish();
+            assert!(unbound.outcome().filter_failed && unbound.outcome().bytes.is_empty());
+
+            // This process seam has no reservation or holder context to admit.
+            // Model an admitted Raw stream with the same Redactor type that
+            // HostHolder selects for that contract, after guardian admission.
+            let mut admitted_stdout =
+                provenant_confinement::redact::Redactor::new([]).map_err(std::io::Error::other)?;
+            let mut stdout = StreamCapture::new(
+                StreamPolicy::Capture { limit: 1024 },
+                None,
+                Some(&mut admitted_stdout),
+            )
+            .map_err(std::io::Error::other)?;
             let mut stderr =
                 StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stderr))
                     .map_err(std::io::Error::other)?;

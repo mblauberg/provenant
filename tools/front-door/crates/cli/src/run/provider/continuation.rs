@@ -467,12 +467,17 @@ pub(super) fn verify_native_continuation(
             }
             Err(
                 error @ (provenant_providers::ProviderError::IdentityMismatch
-                | provenant_providers::ProviderError::Malformed),
+                | provenant_providers::ProviderError::Malformed
+                | provenant_providers::ProviderError::MalformedFrame { .. }),
             ) => {
                 // The rollout reader can reject either its session metadata
                 // or contradictory turn contexts. Its error does not prove
                 // which identity field changed, so retain the rollout fact.
-                let issue = if matches!(error, provenant_providers::ProviderError::Malformed) {
+                let issue = if matches!(
+                    error,
+                    provenant_providers::ProviderError::Malformed
+                        | provenant_providers::ProviderError::MalformedFrame { .. }
+                ) {
                     I::Invalid
                 } else {
                     I::Mismatch
