@@ -280,7 +280,9 @@ pub fn measure_tree_with_progress(
 
     let started = std::time::Instant::now();
     let mut visited = 0_usize;
-    while let Some(frame) = frames.last_mut() {
+    while !frames.is_empty() {
+        let depth = frames.len();
+        let frame = frames.last_mut().ok_or(PermissionError::CacheSweepDepth)?;
         if visited >= MAX_TREE_MEASURE_ENTRIES
             || started.elapsed() >= std::time::Duration::from_secs(1)
             || !keep_going()
@@ -305,7 +307,7 @@ pub fn measure_tree_with_progress(
                 stats.newest_modified_ns = stats.newest_modified_ns.max(metadata.modified_ns);
                 visited += 1;
                 if metadata.kind == FileKind::Directory {
-                    if frames.len() >= MAX_CACHE_SWEEP_DEPTH {
+                    if depth >= MAX_CACHE_SWEEP_DEPTH {
                         return Err(PermissionError::CacheSweepDepth);
                     }
                     let child = frame
