@@ -1935,13 +1935,12 @@ impl Factory {
             )
             .map_err(graph_patch_error)?
         };
-        if review_launch {
-            if let Some(base) =
+        if review_launch
+            && let Some(base) =
                 resolved_review_base.filter(|base| Some(base) != resolved_head.as_ref())
-            {
-                document.review_base = Some(base);
-                document.schema_version = document.schema_version.max(2);
-            }
+        {
+            document.review_base = Some(base);
+            document.schema_version = document.schema_version.max(2);
         }
         if review_subject
             .as_ref()
@@ -2013,6 +2012,14 @@ impl Factory {
         self.confine_nodes(&mut bound)?;
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        if let Some(warning) = review_subject
+            .as_ref()
+            .and_then(|subject| subject.warning.as_ref())
+        {
+            for node in &mut document.nodes {
+                bind_review_warning(node, warning);
+            }
+        }
         document.set_replay_digest(&digest);
         let submission_key = format!("submit:{}", document.graph_id);
         patch::submission(
@@ -2042,10 +2049,7 @@ impl Factory {
             self.context.config.implement.warn_unbounded_junior,
         );
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
-            warnings.push(warning.clone());
-            for node in &mut document.nodes {
-                bind_review_warning(node, &warning);
-            }
+            warnings.push(warning);
         }
         if input["explain"] == true {
             let skipped = provenant_fabric_runtime::graph::when::skipped_rows(
@@ -4496,6 +4500,7 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/routing.md#pinned-review-selection
     fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
         struct Reviewer(usize);
@@ -4544,6 +4549,11 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(
             factory.graph_document(preview, budget, &cancel)?["document"].clone(),
         )?;
+        assert!(
+            document.nodes[0]
+                .prompt
+                .contains("No review subject was supplied")
+        );
         let mut reviewer = Reviewer(0);
         let first = {
             let mut journal = FileJournal::open(

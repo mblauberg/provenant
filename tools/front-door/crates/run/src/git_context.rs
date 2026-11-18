@@ -221,13 +221,20 @@ fn transport_args() -> Vec<String> {
 
 /// The host environment for talking to a remote, bound to this repository.
 fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+    transport_environment_from(env, std::env::vars_os())
+}
+
+fn transport_environment_from(
+    env: &[(OsString, OsString)],
+    host: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
     let bound = env.iter().filter(|(key, _)| {
         matches!(
             key.to_str(),
             Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
         )
     });
-    transport::environment(std::env::vars_os(), bound.cloned())
+    transport::environment(host, bound.cloned())
 }
 
 /// Where a lane can write: its linked worktree, the project's worktree and
@@ -512,7 +519,13 @@ pub fn resolve_review_commit(
 ) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
     resolve_review_commit_with(
-        &executor, git, cwd, host_state, repository, reference, commit,
+        &executor,
+        git,
+        cwd,
+        host_state,
+        repository,
+        (reference, commit),
+        std::env::vars_os(),
     )
 }
 
@@ -522,8 +535,8 @@ fn resolve_review_commit_with(
     cwd: &Path,
     host_state: &Path,
     repository: &str,
-    reference: &str,
-    commit: &str,
+    (reference, commit): (&str, &str),
+    host: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<String> {
     provenant_core::GitOid::parse(commit).map_err(|_| RunError::InvalidBase(commit.into()))?;
     if !repository.starts_with("https://") || repository.contains(['\n', '\r', '\0']) {
@@ -538,7 +551,7 @@ fn resolve_review_commit_with(
     if let Ok(oid) = resolve(executor, git, cwd, commit, &env, Some(host_state)) {
         return Ok(oid);
     }
-    let transport_env = transport_environment(&env);
+    let transport_env = transport_environment_from(&env, host);
     check_transport(executor, git, cwd, &env, &transport_env, Some(host_state))?;
     let hardening = transport_args();
     let args: Vec<&str> = hardening
@@ -1511,34 +1524,10 @@ mod tests {
     // Spec: docs/specs/routing.md#pinned-review-selection
     #[test]
     fn review_commit_fetch_preserves_checkout_refs_and_fetch_head() -> TestResult {
-        struct IsolatedTransport(SystemExecutor);
-        impl Executor for IsolatedTransport {
-            fn execute(
-                &self,
-                options: ExecOptions<'_>,
-            ) -> std::result::Result<ExecOutcome, ExecError> {
-                let mut env = options.env.unwrap_or_default().to_vec();
-                // This fixture owns its repository config; host/lane Git includes
-                // and credential overrides must not become test transport inputs.
-                env.retain(|(key, _)| {
-                    !key.to_str()
-                        .is_some_and(|key| key.starts_with("GIT_CONFIG_"))
-                });
-                env.extend([
-                    ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-                    ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-                    ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-                ]);
-                let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
-                isolated.env = Some(&env);
-                isolated.stdout = options.stdout;
-                isolated.stderr = options.stderr;
-                isolated.stdin = options.stdin;
-                isolated.stop_on_output_limit = options.stop_on_output_limit;
-                self.0.execute(isolated)
-            }
-        }
-        let host_state = tempfile::tempdir()?;
+        use std::os::unix::fs::PermissionsExt;
+        let host_state = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?;
         let upstream = small_history()?;
         let local = small_history()?;
         let run = |root: &Path, args: &[&str]| git(&local.executor, &local.binary, root, args);
@@ -1571,13 +1560,13 @@ mod tests {
         )?;
         assert_eq!(
             resolve_review_commit_with(
-                &IsolatedTransport(SystemExecutor::new(1)?),
+                &local.executor,
                 &local.binary,
                 &local.root,
                 host_state.path(),
                 "https://review.invalid/",
-                "refs/pull/7/head",
-                commit
+                ("refs/pull/7/head", commit),
+                provenant_os::fixture::git_env(),
             )?,
             commit
         );
@@ -1658,7 +1647,7 @@ mod tests {
             b"context"
         );
         assert!(prompt.contains(&scratch.path().join("git-log.txt").display().to_string()));
-        assert!(prompt.contains(&format!("{OID}..{OID}")));
+        assert!(prompt.contains(&format!("{OID}...{OID}")));
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
@@ -1933,7 +1922,7 @@ mod tests {
     fn small_history() -> std::result::Result<HistoryFixture, Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
-        let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let binary = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         let executor = SystemExecutor::new(1)?;
         git(&executor, &binary, &root, &["init", "--quiet"])?;
         for text in ["original line\n", "changed line\n"] {
