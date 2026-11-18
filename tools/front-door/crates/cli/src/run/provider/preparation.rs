@@ -2740,7 +2740,15 @@ pub(super) fn prepare_candidates(
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.unique_accounts();
-    let credential_roots = credential_roots(registry, &home, &settings)?;
+    let cargo_cache = writer
+        .as_ref()
+        .map(|writer| {
+            provenant_confinement::permissions::worktree_cargo_cache_path(&home, &writer.worktree)
+        })
+        .transpose()?;
+    let mut lane_roots = vec![source.as_path(), cwd.as_path(), paths.scratch.as_path()];
+    lane_roots.extend(cargo_cache.as_deref());
+    let credential_roots = credential_roots(registry, &home, &settings, &lane_roots)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
@@ -5656,10 +5664,39 @@ mod route_launch_boundary_regressions {
 
         let mut settings = provenant_providers::accounts::Settings::default();
         settings.entries.insert("work".into(), registered.clone());
-        let roots = credential_roots(&Registry::default(), &home, &settings)?;
+        let roots = credential_roots(&Registry::default(), &home, &settings, &[])?;
+        // HOME-rooted accounts protect client state and declared credentials,
+        // while ordinary HOME children remain available to independent lanes.
+        for relative in [
+            ".gemini/unlisted",
+            "state.vscdb",
+            "state.vscdb-wal",
+            "Library/Keychains/login.keychain-db",
+        ] {
+            assert!(roots.refuses(
+                &registered.directory.join(relative),
+                provenant_core::CredentialScope::Exact,
+                true
+            ));
+        }
+        assert!(!roots.refuses(
+            &registered.directory.join("workspace"),
+            provenant_core::CredentialScope::Subtree,
+            true,
+        ));
+        assert!(
+            credential_roots(
+                &Registry::default(),
+                &home,
+                &settings,
+                &[&registered.directory.join("workspace")],
+            )
+            .is_ok()
+        );
         assert!(roots.entries().iter().any(|root| {
-            root.source == "account registry: agy/work"
+            root.source.starts_with("account registry: agy/work")
                 && root.path == registered.directory.join(".gemini")
+                && root.scope == provenant_core::CredentialScope::Subtree
         }));
         assert!(
             !roots

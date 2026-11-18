@@ -85,11 +85,13 @@ pub enum ScratchOwner {
     Unowned,
 }
 
+pub type ScratchOwnerResolver<'a> = dyn Fn(&AttemptRecord, &CanonicalRequest) -> ScratchOwner + 'a;
+
 pub struct ScratchPolicy<'a> {
     pub idle_seconds: u64,
     pub projects: Option<&'a [provenant_core::ProjectId]>,
     pub attempts: Option<&'a [AttemptId]>,
-    pub owner: Option<&'a dyn Fn(&AttemptRecord, &CanonicalRequest) -> ScratchOwner>,
+    pub owner: Option<&'a ScratchOwnerResolver<'a>>,
 }
 impl ScratchPolicy<'_> {
     pub fn new(idle_seconds: u64) -> Self {

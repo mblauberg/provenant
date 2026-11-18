@@ -13,6 +13,77 @@ use std::path::{Path, PathBuf};
 fn fixture_credentials() -> provenant_core::CredentialRoots {
     provenant_core::CredentialRoots::for_home(Path::new("/Users/alice"))
 }
+
+#[test]
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+fn read_refusal_reports_the_specific_credential_declaration_in_either_order() {
+    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+
+    let shared = PathBuf::from("/fixture/shared");
+    let nested = shared.join("nested");
+    let lane = nested.join("lane");
+    // The first declaration is the expected attribution. Enclosed exact files
+    // keep independent sandbox denials; enclosed subtree stores refuse reads.
+    for (grant, declarations, lane_roots) in [
+        (
+            nested.join("tool"),
+            vec![
+                (nested.clone(), CredentialScope::Subtree),
+                (shared.clone(), CredentialScope::Subtree),
+            ],
+            vec![],
+        ),
+        (
+            lane.clone(),
+            vec![
+                (lane.join("store/deep"), CredentialScope::Subtree),
+                (lane.join("store/deep/auth"), CredentialScope::Exact),
+                (lane.join("store"), CredentialScope::Subtree),
+                (shared.clone(), CredentialScope::Subtree),
+            ],
+            vec![lane.clone()],
+        ),
+        (
+            lane.join("endpoint"),
+            vec![
+                (lane.join("endpoint"), CredentialScope::Exact),
+                (lane.join("endpoint/deeper"), CredentialScope::Subtree),
+                (shared.clone(), CredentialScope::Subtree),
+            ],
+            vec![lane.clone()],
+        ),
+    ] {
+        for reverse in [false, true] {
+            let expected_path = declarations[0].0.clone();
+            let mut declarations: Vec<_> = declarations.iter().enumerate().collect();
+            if reverse {
+                declarations.reverse();
+            }
+            let mut credentials = CredentialRoots::default();
+            for (index, (path, scope)) in declarations {
+                credentials.add(
+                    path.clone(),
+                    *scope,
+                    format!("source {index}"),
+                    CredentialKind::Store,
+                );
+            }
+            let credentials = credentials.with_lane_roots(lane_roots.clone());
+            let error = validate_read_exec_grant(
+                &PathGrant {
+                    path: grant.clone(),
+                    scope: PathScope::Subtree,
+                },
+                &credentials,
+            )
+            .unwrap_err();
+            assert!(matches!(error, PermissionError::CredentialStore {
+                path, root, declaration_source
+            } if path == grant && root == expected_path && declaration_source == "source 0"));
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -424,7 +495,19 @@ fn every_declared_credential_root_protects_grants_and_enclosing_paths() {
                 path: parent.to_owned(),
                 scope: PathScope::Subtree,
             };
-            assert!(validate_read_exec_grant(&enclosing, &credentials).is_err());
+            // Exact endpoints stay denied independently of an enclosing read.
+            // Other declarations (or a broad path) may still refuse this parent.
+            let mut dedicated = provenant_core::CredentialRoots::default();
+            dedicated.add_entry(root.clone());
+            assert_eq!(
+                validate_read_exec_grant(&enclosing, &dedicated).is_err(),
+                scope == PathScope::Subtree || enclosing.validate().is_err(),
+                "{}",
+                root.path.display()
+            );
+            // Materialisation must not copy an endpoint into an unprotected
+            // staging path, even though the sandbox can deny it in place.
+            assert!(refuses_lane_root(&enclosing.path, true, &dedicated));
             assert!(validate_noncredential_grant(&enclosing, &credentials).is_err());
         }
     }

@@ -136,7 +136,7 @@ impl<'a> Owner<'a> {
         let Ok(branch_ref) = GitRefName::branch(&branch) else {
             return ScratchOwner::Owned;
         };
-        match self.forge(project, &branch, &branch_ref) {
+        match self.forge(project, &branch_ref) {
             Some(observation)
                 if Self::forge_proves_finished(&observation, head, |ancestor, descendant| {
                     self.is_ancestor(project, ancestor, &descendant.to_string())
@@ -200,12 +200,7 @@ impl<'a> Owner<'a> {
         branch
     }
 
-    fn forge(
-        &self,
-        project: &Path,
-        branch: &str,
-        branch_ref: &GitRefName,
-    ) -> Option<ForgeObservation> {
+    fn forge(&self, project: &Path, branch_ref: &GitRefName) -> Option<ForgeObservation> {
         let mut owners = self.forge_owners.borrow_mut();
         let owner = owners
             .entry(project.to_path_buf())
@@ -296,10 +291,10 @@ impl<'a> Owner<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn closed_or_merged_branch_finishes_only_covered_attempt_heads() {
+        use super::*;
+
         // Spec: docs/specs/disk.md#classes-grant-no-authority
         let earlier = GitOid::parse(&"4a".repeat(20)).unwrap();
         let closed_head = GitOid::parse(&"5b".repeat(20)).unwrap();

@@ -1461,7 +1461,6 @@ pub(crate) fn land_cleanup(
     workers: &dyn WorkerObserver,
 ) -> Result<LandWorktree, Error> {
     let roots::Resolved {
-        assets,
         home,
         project,
         roots,

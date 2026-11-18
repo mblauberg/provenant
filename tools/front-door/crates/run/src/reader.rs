@@ -693,7 +693,7 @@ impl RunStore {
         self.record_row(id, call, read)
     }
     pub(crate) fn same_session_successor(&self, id: AttemptId) -> Result<Option<AttemptId>> {
-        Ok(self
+        self
             .db
             .query_row(
                 "SELECT id FROM attempts WHERE continues=?1 AND (operation=?2 OR operation=?3) AND refused=0",
@@ -708,7 +708,7 @@ impl RunStore {
             .map(|id| {
                 AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
             })
-            .transpose()?)
+            .transpose()
     }
 
     /// A terminal row may precede the guardian releasing writer custody.

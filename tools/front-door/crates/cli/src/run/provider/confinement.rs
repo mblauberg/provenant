@@ -268,7 +268,7 @@ pub(super) fn confinement_request(
             roots.home,
             roots.cwd,
             roots.scratch,
-            roots.credential_roots.entries(),
+            roots.credential_roots,
             roots.github_roots,
             roots.protected_worktrees,
             sandboxed,
@@ -695,58 +695,68 @@ pub(super) fn protected_worktrees(
     Ok(protected)
 }
 
-/// Inventory names and registration metadata only; credential contents are
-/// never needed to establish the mandatory boundary.
-pub(super) fn credential_roots(
+fn credential_declarations(
     registry: &Registry<'_>,
     home: &Path,
     settings: &provenant_providers::accounts::Settings,
-) -> Result<provenant_core::CredentialRoots, String> {
-    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-    // An adapter's declared root kind (the Codex package exception, for one)
-    // belongs to its default account directory alone, whichever declaration
-    // names it; every other path is a plain store.
-    let kind = |adapter: &str, path: &Path| {
-        AdapterSpec::get(adapter)
-            .and_then(|spec| {
-                let (_, fallback) = spec.default_account_directory?;
-                (path == home.join(fallback)).then(|| (*spec.default_account_root_kind).clone())
-            })
-            .unwrap_or(CredentialKind::Store)
+) -> Vec<provenant_core::CredentialDeclaration> {
+    use provenant_core::{
+        CredentialDeclaration, CredentialInventory, CredentialKind, CredentialRoot, CredentialScope,
     };
-    let mut roots = CredentialRoots::for_home(home);
+    let mut declarations = CredentialDeclaration::for_home(home);
+
     for entry in settings.entries.values() {
-        let source = format!("account registry: {}/{}", entry.adapter, entry.label);
-        for path in crate::accounts::credential_directories(entry).flat_map(|directory| {
-            provenant_providers::identity::account_state_paths(&entry.adapter, directory)
-        }) {
-            roots.add(
-                path.clone(),
-                CredentialScope::Subtree,
-                source.clone(),
-                kind(entry.adapter.as_str(), &path),
-            );
-        }
-    }
-    // Claude declares a sibling JSON profile as well as files inside its
-    // account directory. Keep this exact endpoint for every registered
-    // spelling, including identities this attempt did not select.
-    for entry in settings.entries.values() {
-        if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.credential_profile_sibling) {
+        for directory in crate::accounts::credential_directories(entry) {
             let source = format!(
-                "account registry: {}/{} credential file",
+                "account registry: {}/{} credential store",
                 entry.adapter, entry.label
             );
-            for directory in crate::accounts::credential_directories(entry) {
-                roots.add(
-                    directory.with_extension("json"),
-                    CredentialScope::Exact,
-                    source.clone(),
-                    CredentialKind::Store,
-                );
+            if let Some(install) = AdapterSpec::get(&entry.adapter)
+                .and_then(|spec| spec.install)
+                .filter(|install| install.lane_home.0 == "HOME")
+            {
+                // A HOME-rooted account owns client state and credential files,
+                // not the whole HOME. Keep nested account homes independent.
+                declarations.push(CredentialDeclaration {
+                    root: CredentialRoot {
+                        path: directory.join(install.home),
+                        source: source.clone(),
+                        kind: CredentialKind::Store,
+                        scope: CredentialScope::Subtree,
+                    },
+                    inventory: CredentialInventory::Unknown,
+                });
+                if let Some(spec) = AdapterSpec::get(&entry.adapter) {
+                    for relative in spec
+                        .credential_files
+                        .iter()
+                        .chain(spec.credential_auxiliary_files)
+                    {
+                        declarations.push(CredentialDeclaration {
+                            root: CredentialRoot {
+                                path: directory.join(relative),
+                                source: source.clone(),
+                                kind: CredentialKind::Store,
+                                scope: CredentialScope::Exact,
+                            },
+                            inventory: CredentialInventory::Unknown,
+                        });
+                    }
+                }
+                continue;
             }
+            declarations.push(CredentialDeclaration {
+                root: CredentialRoot {
+                    path: directory.to_path_buf(),
+                    source,
+                    kind: CredentialKind::Store,
+                    scope: CredentialScope::Subtree,
+                },
+                inventory: CredentialInventory::Adapter(entry.adapter.clone()),
+            });
         }
     }
+
     let default_directories = registry
         .host
         .map(|host| host.default_account_directories.clone())
@@ -755,40 +765,208 @@ pub(super) fn credential_roots(
         let Some((environment, fallback)) = spec.default_account_directory else {
             continue;
         };
-        let path = default_directories
+        let host_override = default_directories
             .get(spec.name)
             .cloned()
-            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
-            .unwrap_or_else(|| home.join(fallback));
-        let source = if default_directories.contains_key(spec.name)
-            || host_provider_var(registry, environment).is_some()
-        {
-            format!("provider environment: {environment}")
+            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from));
+        let (path, source, kind) = if let Some(path) = host_override {
+            (
+                path,
+                format!("provider environment: {environment}"),
+                CredentialKind::Store,
+            )
         } else {
-            format!(
-                "provider declaration: {} default account directory",
-                spec.name
+            (
+                home.join(fallback),
+                format!(
+                    "provider declaration: {} default account directory",
+                    spec.name
+                ),
+                (*spec.default_account_root_kind).clone(),
             )
         };
-        let kind = kind(spec.name, &path);
-        roots.add(path, CredentialScope::Subtree, source, kind);
+        declarations.push(CredentialDeclaration {
+            root: CredentialRoot {
+                path,
+                source,
+                kind,
+                scope: CredentialScope::Subtree,
+            },
+            inventory: CredentialInventory::Adapter(spec.name.to_owned()),
+        });
     }
-    let host_roots = registry
-        .host
-        .map(|host| host.credential_roots.clone())
-        .unwrap_or_else(run::HostLaunchContext::credential_roots);
-    for root in host_roots {
-        roots.add(root.path, root.scope, root.source, root.kind);
+
+    declarations.extend(
+        registry
+            .host
+            .map(|host| host.credential_roots.clone())
+            .unwrap_or_else(run::HostLaunchContext::credential_roots),
+    );
+
+    // Sibling profiles are independent exact declarations, not holes in the
+    // directory boundary. Inventoried endpoints also enter the canonical table.
+    let siblings: Vec<_> = declarations
+        .iter()
+        .filter_map(|declaration| {
+            let CredentialInventory::Adapter(adapter) = &declaration.inventory else {
+                return None;
+            };
+            let spec = provenant_records::AdapterSpec::get(adapter)?;
+            spec.credential_profile_sibling
+                .then(|| CredentialDeclaration {
+                    root: CredentialRoot {
+                        path: declaration.root.path.with_extension("json"),
+                        scope: CredentialScope::Exact,
+                        source: declaration.root.source.clone(),
+                        kind: CredentialKind::Store,
+                    },
+                    inventory: CredentialInventory::Unknown,
+                })
+        })
+        .collect();
+    declarations.extend(siblings);
+
+    // Keep distinct kinds and inventories, even when path and source match.
+    let mut unique = Vec::new();
+    for declaration in declarations {
+        if !unique.contains(&declaration) {
+            unique.push(declaration);
+        }
     }
-    // Keep both the declaration and its resolved alias, and give every
-    // spelling of one location all of its declarations. A candidate can use
-    // either spelling, and no credential file contents are opened here.
-    roots.with_aliases(|path| {
-        provenant_confinement::permissions::resolve_boundary_path(path)
-            .map_err(|error| error.to_string())
-    })
+    unique
 }
 
+/// Inventory names and registration metadata only; credential contents are
+/// never needed to establish the mandatory boundary.
+pub(super) fn credential_roots(
+    registry: &Registry<'_>,
+    home: &Path,
+    settings: &provenant_providers::accounts::Settings,
+    lane_roots: &[&Path],
+) -> Result<provenant_core::CredentialRoots, String> {
+    use provenant_core::{CredentialInventory, CredentialRoots, CredentialScope};
+    let declarations = credential_declarations(registry, home, settings);
+    let resolve = |path: &Path| {
+        provenant_confinement::permissions::resolve_boundary_path(path)
+            .map_err(|error| error.to_string())
+    };
+    let resolve_declared = |path: &Path, source: &str| {
+        resolve(path).map_err(|error| {
+            format!(
+                "{source} at {} cannot be resolved precisely: {error}",
+                path.display()
+            )
+        })
+    };
+    for decl in &declarations {
+        resolve_declared(&decl.root.path, &decl.root.source)?;
+    }
+    let resolved_lanes = lane_roots
+        .iter()
+        .map(|lane| {
+            let source = declarations
+                .iter()
+                .find(|decl| decl.root.path == **lane)
+                .map_or("lane root", |decl| decl.root.source.as_str());
+            resolve_declared(lane, source)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Compare both public and resolved spellings, including aliased lane roots.
+    let mut lanes = resolved_lanes;
+    lanes.extend(lane_roots.iter().map(|path| path.to_path_buf()));
+    lanes.sort();
+    lanes.dedup();
+
+    // All declarations, including built-ins, pass through this classifier.
+    let mut roots = CredentialRoots::default();
+    for decl in &declarations {
+        let root = &decl.root;
+        if root.scope == CredentialScope::Exact {
+            let path = resolve_declared(&root.path, &root.source)?;
+            if lanes
+                .iter()
+                .any(|lane| root.path.starts_with(lane) || path.starts_with(lane))
+            {
+                return Err(format!(
+                    "{}: declared credential file {} lies inside lane root",
+                    root.source,
+                    root.path.display()
+                ));
+            }
+            roots.add_entry(root.clone());
+            continue;
+        }
+        let resolved_store = resolve_declared(&root.path, &root.source)?;
+        if lanes
+            .iter()
+            .any(|lane| root.path.starts_with(lane) || resolved_store.starts_with(lane))
+        {
+            return Err(format!(
+                "{}: credential store {} is equal to or inside lane root",
+                root.source,
+                resolved_store.display()
+            ));
+        }
+        roots.add_entry(root.clone());
+        let inventory = match &decl.inventory {
+            CredentialInventory::Adapter(adapter) => {
+                if provenant_records::AdapterSpec::get(adapter)
+                    .is_some_and(|spec| !spec.credential_files.is_empty())
+                {
+                    crate::accounts::exact_directory_credential_paths(
+                        &root.path,
+                        adapter,
+                        &root.source,
+                    )
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            CredentialInventory::Files(files) => {
+                if files.iter().any(|name| {
+                    let path = Path::new(name);
+                    path.as_os_str().is_empty()
+                        || path.is_absolute()
+                        || path
+                            .components()
+                            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+                }) {
+                    return Err(format!(
+                        "{} has an invalid credential file inventory",
+                        root.source
+                    ));
+                }
+                Ok(files.iter().map(|name| root.path.join(name)).collect())
+            }
+            CredentialInventory::Unknown => Ok(Vec::new()),
+        };
+        for path in inventory? {
+            let resolved = resolve_declared(&path, &root.source)?;
+            if lanes
+                .iter()
+                .any(|lane| path.starts_with(lane) || resolved.starts_with(lane))
+            {
+                return Err(format!(
+                    "{}: declared credential file {} lies inside lane root",
+                    root.source,
+                    path.display()
+                ));
+            }
+            roots.add(
+                path,
+                CredentialScope::Exact,
+                root.source.clone(),
+                provenant_core::CredentialKind::Store,
+            );
+        }
+    }
+    let roots = roots.with_lane_roots(lanes);
+
+    bind_credential_roots(roots)
+}
+
+/// Resolve declarations for source admission without classifying a launch.
 pub fn declared_credentials(
     registry: &Registry<'_>,
 ) -> Result<provenant_core::CredentialRoots, String> {
@@ -801,7 +979,28 @@ pub fn declared_credentials(
         .domains
         .accounts
         .unique_accounts();
-    credential_roots(registry, home, &settings)
+    credential_roots(registry, home, &settings, &[])
+}
+
+fn bind_credential_roots(
+    roots: provenant_core::CredentialRoots,
+) -> Result<provenant_core::CredentialRoots, String> {
+    let sources: std::collections::BTreeMap<PathBuf, String> = roots
+        .entries()
+        .iter()
+        .map(|root| (root.path.clone(), root.source.clone()))
+        .collect();
+    roots.with_aliases(|path| {
+        provenant_confinement::permissions::resolve_boundary_path(path).map_err(|error| {
+            match sources.get(path) {
+                Some(source) => format!(
+                    "{source} at {} cannot be resolved precisely: {error}",
+                    path.display()
+                ),
+                None => error.to_string(),
+            }
+        })
+    })
 }
 
 pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
@@ -1073,7 +1272,7 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    let credentials = crate::run::declared_credentials(registry).map_err(|error| {
+    let credentials = declared_credentials(registry).map_err(|error| {
         source_cwd_authority(format!("credential declarations unavailable: {error}"))
     })?;
     let Some(source) = &task.access.source_root else {

@@ -197,11 +197,74 @@ credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
-files. The core root table owns these declarations; state-root selection and
-lane grant validation consume it. File declarations retain exact scope.
-Credential directories are denied after every grant. The standalone Codex
-release package read exception is relative to its declared Codex home; it
-confers no writes and never exempts another overlapping credential declaration.
+files. For HOME-rooted accounts, the stores are the adapter's client state
+below HOME and its declared credential files; registration does not make
+the entire account HOME a credential store. Roots carry declarations; launch preparation classifies built-in,
+provider, host-variable and account declarations once, using the actual launch
+source and cwd, scratch, and the derived writer cache, without unioning an
+earlier project classification. Scratch and the writer cache are lane roots
+just as the source and cwd are. Host state admission also consumes raw host
+declarations and refuses state roots inside dedicated stores. A declaration
+exactly at HOME does not displace Provenant's normal home-relative state tree;
+exact credential declarations there retain their hold. This host-state rule
+does not classify or narrow the later launch boundary.
+Generic and sandbox credential refusals use `CredentialRoots::select_refusal`
+to name the most specific applicable declaration and its origin: an exact path
+match first, then the deepest enclosing or enclosed store, independent of
+declaration order. Equal-depth ties use stable declaration fields.
+
+Mandatory credential denials use `DenialRoot`, independently of grant
+validation: denial paths must be absolute, normalised and below the filesystem
+root. A denial may cover HOME; this never relaxes broad-grant validation.
+
+A store containing no lane root retains whole-subtree protection. A store
+strictly containing lane roots retains whole-subtree protection minus validated
+lane, process-executable, runtime-read and tool-execution grants. Each carve-out
+must be a strict descendant of the store and enclose no dedicated store.
+An enclosed exact credential endpoint retains its independent denial; a grant
+at the endpoint itself refuses. Runtime carve-outs confer read and execution only;
+writes remain limited to lane roots and selected authentication refresh. In the
+open profile, the renderer denies the store subpath with `require-all` and a
+`require-not` carve-out for each admitted grant at its validated scope. Under an
+allowlist profile, default deny protects the store outside those grants. The current production
+renderer is open; this rule also defines the boundary for an allowlist profile.
+Metadata on ancestors of admitted paths remains available for executable and
+dynamic-loader traversal; directory contents and extended attributes stay denied.
+These metadata exceptions do not add read or execution authority over siblings.
+Undeclared store files outside validated carve-outs remain denied in both profiles;
+files inside a lane root are accessible by design. A store equal to or inside
+a lane root refuses the launch. A provider can use its admitted runtime files
+and lane-private writable state while unlisted store files remain inaccessible.
+
+Adapter and host file inventories, including Provenant-owned per-account lane
+tokens and refresh locks, serve only to check that no declared credential file
+lies inside any lane root. Such a file refuses the launch, naming its origin
+and path. Both the declared path and its resolved target are checked against
+every declared and resolved lane root, so neither direction of a symlink can
+evade the boundary. An inventory does not replace or narrow the store denial. Stores without an inventory retain the
+same subtree boundary. A HOME-rooted store may enclose default state: the store
+is a protection rather than an authentication grant, and state retains its
+independent mandatory protection. Independent sibling profiles and file
+declarations keep exact scope. No grant may enclose a store or open
+a store outside its validated carve-outs. Read and execution grants may enclose
+exact credential files because their independent denials still apply; writes
+and lane authority enclosing a declared credential file refuse. Input
+materialisation also refuses enclosing endpoints: staged copies cannot inherit
+the original path's sandbox denial. Selected authentication retains its
+explicit exact-file access; a broad authentication or configuration grant
+cannot reopen a shared store. Adapters declare the selected identity's exact
+authentication endpoints, including database sidecars when required, and stage
+only those endpoints into private authentication state. Credential read aliases
+are derived from exact endpoint declarations after shared-store filtering;
+a discarded subtree read cannot confer alias access. Directory links under a
+store also deny the resolved target subtree when it is outside HOME. A target
+overlapping lane authority refuses inventory; runtime authority overlapping the
+target refuses compilation. Refusals identify the link origin and target path.
+Declared credential denials follow grants in the rendered profile. The
+standalone Codex release package read exception belongs only to the built-in
+default Codex home; dedicated relocated and registered stores retain whole-store
+protection. Shared stores use the validated carve-out rule above. The exception confers no writes and never exempts another
+overlapping credential denial.
 Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
@@ -210,7 +273,9 @@ A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
 their source and proceed. A verified linked worktree is admitted at its real
 path, including beneath project-local agent configuration or outside the
-project, unless it overlaps a declared credential store. Git markers, common
+project. A declared store may strictly contain that root under the carve-out
+rule above; equality, enclosed stores and enclosed credential files refuse.
+Git markers, common
 directories and private worktree Git directories keep their hard hold.
 `run --explain` and launch preparation use one source admission decision and
 report its refusal code and reason or sourced warnings.
