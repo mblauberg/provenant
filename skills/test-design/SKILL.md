@@ -5,12 +5,11 @@ description: "Use for TDD and choosing, writing, merging or deleting tests."
 
 # Test design
 
-Tests pin invariants derived from declarations at public boundaries, using deterministic, modular fixtures.
-Tests cite the spec section they pin with `Spec: docs/specs/NAME.md#anchor`; the drift gate resolves the link, and specs name owning symbols rather than individual tests, line numbers or inventory counts.
+Tests pin observable invariants at public boundaries, using deterministic, modular fixtures.
 Classify failures as defects (fix code), stale or rigid tests (redesign or delete), or rigid code (redesign).
-When a test and the design disagree, the test moves; delete redundant tests and tests of removed mechanisms.
+When a test and the design disagree, investigate which is wrong; delete redundant tests and tests of removed mechanisms.
 Merge near-duplicates into table-driven invariants; avoid exact messages, counts, order or snapshots unless they are the invariant.
-One fact, one declaration: a test derives expectations from it and never keeps a second copy; tools regenerate recorded artefacts.
+Avoid duplicated declarations and implementation-coupled expectations.
 Report each touched failing test as kept, redesigned, merged or deleted, with a one-line reason.
 
 ## Choose and prune
@@ -18,12 +17,10 @@ Report each touched failing test as kept, redesigned, merged or deleted, with a 
 1. Invariants first: test observable behaviour and properties at public
    boundaries. Make illegal states unrepresentable in types or schemas rather
    than asserting them; name the enforcing check.
-2. Minimal regression tests: add at most one focused check per real defect, only
-   where an existing invariant cannot cover it.
+2. Add focused regression coverage where existing invariants leave a gap.
 3. Prune duplicates, type-impossible cases, prose assertions and tests coupled
    to implementation. See [boundaries](references/boundaries.md) and
    [judgement](references/judgement.md) for safeguards.
 
-For risky logic, run mutation testing on the changed surface and investigate
-survivors. Report net tests added and removed in the pull request. Large
-pruning runs as `explore` over areas, then `batch` with disjoint write scopes.
+For risky logic, consider mutation testing on the changed surface and investigate
+survivors.
