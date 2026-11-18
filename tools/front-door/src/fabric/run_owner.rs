@@ -637,7 +637,27 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             path: None,
         },
         Some(detail) => detail,
-        None => facade_error_for_kind(fail.kind),
+        None => with_run_detail(facade_error_for_kind(fail.kind), fail.projection.as_deref()),
+    }
+}
+/// Keep a refusal's local diagnostic text when only its kind survives to the
+/// facade. Peer publication drops this field; the operator still sees why.
+fn with_run_detail(
+    error: FacadeError,
+    projection: Option<&provenant_records::diagnostic::Diagnostic>,
+) -> FacadeError {
+    let Some(detail) = projection.and_then(|diagnostic| diagnostic.detail.clone()) else {
+        return error;
+    };
+    match error {
+        FacadeError::RunKind {
+            code, next, ..
+        } => FacadeError::RunKind {
+            code,
+            next,
+            detail: Some(detail),
+        },
+        other => other,
     }
 }
 /// Translate a submission's refusal at the facade edge. Dispatch access
@@ -683,21 +703,53 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         },
     }
 }
+/// The next step paired with a run kind that has no richer facade variant.
+/// Codes come from `ErrorKind::code()`, already listed in `help --all`; this
+/// table only supplies the repair action an operator can take.
+fn run_kind_next(kind: provenant_run::ErrorKind) -> &'static str {
+    use provenant_run::ErrorKind as E;
+    match kind {
+        E::SecretInput => "remove the secret from the input or pass it through a credential root, then retry",
+        E::Refused => "read the named refusal cause, change the request or policy, then retry",
+        E::Unsupported => "use a route and adapter that support this launch",
+        E::WriterScope => "inspect the managed worktree layout and writer custody, then retry with --branch or an existing --worktree",
+        E::Confinement => "narrow the requested access to the confinement policy and retry",
+        E::DiskFloor => "run `provenant gc --apply` to free space above the configured floor, then retry",
+        E::MemoryPressure => "wait for host memory pressure to ease or reduce concurrent lanes, then retry",
+        E::LaneCap => "wait for a lane slot or raise the configured lane cap, then retry",
+        E::BuildSettings => "fix the named host lane build settings and retry",
+        E::GuardianIdentity => "inspect guardian process identity and boot state, then retry",
+        E::LaneContext | E::ParentAttempt | E::WorktreeRequired | E::SharedSettingsNeverSynced
+        | E::UnknownAccount | E::DuplicatePacingProfile => {
+            "supply the missing lane, parent or account context and retry"
+        }
+        E::Contention | E::Processes | E::MemoryFloor | E::StaleReadiness | E::HostClock => {
+            "wait for the named host resource observation to settle, then retry"
+        }
+        E::Identity | E::Config | E::Limit | E::Prices | E::Fabric | E::Peer
+        | E::PeerUnavailable | E::OwnerUnavailable | E::Internal | E::Git | E::Time
+        | E::Entropy => "inspect the named host or peer failure and retry after repair",
+        E::AmbiguousTarget | E::AbandonBlocked | E::WriterProjectMismatch
+        | E::RetainedWriterImport | E::ObjectImportLimit | E::LaneTipUnrooted
+        | E::UpgradeRequired => "resolve the named state or target condition before retrying",
+        E::LaunchUnknown => "reconcile the run and inspect its receipt before reusing the operation ID",
+        _ => "inspect the typed cause and repair it before retrying",
+    }
+}
+fn run_kind_facade(kind: provenant_run::ErrorKind) -> FacadeError {
+    FacadeError::RunKind {
+        code: kind.code().into(),
+        next: run_kind_next(kind).into(),
+        detail: None,
+    }
+}
 /// Translate a typed run category at the command edge. `ErrorKind` is the one
-/// categorisation of run errors; this only renders it.
+/// categorisation of run errors; this only renders it. Kinds without a richer
+/// facade variant keep their own stable code and repair action instead of
+/// collapsing into one refusal.
 pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput
-        | E::Refused
-        | E::Unsupported
-        | E::WriterScope
-        | E::Confinement
-        | E::DiskFloor
-        | E::MemoryPressure
-        | E::LaneCap
-        | E::BuildSettings
-        | E::GuardianIdentity => FacadeError::ConfinementRefused { resource: None },
         E::WriterBusy => FacadeError::WriterBusy { holder: None },
         E::WriterLockBusy => FacadeError::WriterLockBusy,
         E::WriterUnknown => FacadeError::WriterUnknown,
@@ -705,9 +757,7 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
             access: "requested".into(),
         },
         E::LaneDepth => FacadeError::LaneDepth,
-        E::LaneContext | E::ParentAttempt | E::Invalid | E::WorktreeRequired => {
-            FacadeError::InvalidInput { detail: None }
-        }
+        E::Invalid => FacadeError::InvalidInput { detail: None },
         E::WorktreeNotApplicable => FacadeError::WorktreeNotApplicable,
         E::UnknownHost => FacadeError::UnknownHost,
         E::WorktreeMissing => FacadeError::WorktreeMissing,
@@ -717,18 +767,18 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         E::Nonterminal => FacadeError::NotTerminal,
         E::Cancelled => FacadeError::Cancelled,
         E::Timeout => FacadeError::Timeout,
-        E::QueueFull | E::Contention => FacadeError::Busy,
+        E::QueueFull => FacadeError::Busy,
+        E::Io => FacadeError::io("run operation"),
         E::ContinuationUnsupported => FacadeError::ContinuationUnsupported,
         E::ProviderStateExpired => FacadeError::ProviderStateExpired,
         E::OwnerUnavailable => FacadeError::OwnerUnavailable,
-        // An unregistered worktree must arrive with typed detail and its path.
-        E::StateCorrupt | E::WorktreeUnregistered => FacadeError::StateCorrupt,
+        E::StateCorrupt => FacadeError::StateCorrupt,
         E::BaseUnreachable => FacadeError::BaseUnreachable,
         E::BranchExists => FacadeError::BranchExists,
         E::LaneCoordinationRefused => FacadeError::LaneCoordinationRefused,
         E::UpgradeRefused => FacadeError::UpgradeRefused,
         E::PeerVersion => FacadeError::PeerVersion,
-        _ => FacadeError::io("run operation"),
+        other => run_kind_facade(other),
     }
 }
 fn terminal_cause(

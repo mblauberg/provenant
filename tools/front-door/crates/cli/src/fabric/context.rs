@@ -1122,6 +1122,19 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::UpgradeRefused => (Outcome::Refused, ErrorKind::UpgradeRefused),
         FacadeError::UpgradeRequired { .. } => (Outcome::Refused, ErrorKind::UpgradeRequired),
         FacadeError::Timeout => (Outcome::Error, ErrorKind::Timeout),
+        FacadeError::RunKind { code, .. } => {
+            let kind = ErrorKind::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.code() == code)
+                .unwrap_or(ErrorKind::Refused);
+            let outcome = match kind.category() {
+                "invalid" => Outcome::Invalid,
+                "refused" => Outcome::Refused,
+                _ => Outcome::Error,
+            };
+            (outcome, kind)
+        }
         FacadeError::StaleFence
         | FacadeError::ContinuationUnsupported
         | FacadeError::OutputTooLarge
