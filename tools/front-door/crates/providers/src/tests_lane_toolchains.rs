@@ -1637,3 +1637,40 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
     }
     Ok(())
 }
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn cursor_authentication_declares_only_identity_endpoints() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("cursor", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let spec = crate::cursor::Cursor.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    let roots = &spec.profile.spec.authentication[0].roots;
+    for root in roots {
+        assert_eq!(
+            root.scope,
+            provenant_confinement::permissions::PathScope::Exact
+        );
+        assert!(!covers(
+            root,
+            Path::new("/fixture/home/.config/cursor/sibling-credential")
+        ));
+    }
+    for directory in [".cursor", ".config/cursor"] {
+        for file in ["cli-config.json", "state.vscdb"] {
+            assert!(
+                roots
+                    .iter()
+                    .any(|root| root.path == Path::new("/fixture/home").join(directory).join(file))
+            );
+        }
+    }
+    Ok(())
+}

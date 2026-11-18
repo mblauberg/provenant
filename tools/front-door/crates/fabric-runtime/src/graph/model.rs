@@ -363,7 +363,7 @@ pub struct AttemptSpec {
     /// Explicit write roots outside the worktree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
-    /// Cargo commands this node's lane may run locally: `all`, `check` or
+    /// Preferred Cargo scope for this node: `all`, `check` or
     /// `none`. Sets the `lanes.local_cargo` knob for this node alone; omitted
     /// inherits the run's and the host's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1202,6 +1202,32 @@ pub struct RepairGrowth {
     pub grew: bool,
 }
 
+mod typed_findings_blob {
+    use super::Finding;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Vec<Finding>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error;
+        match value {
+            Some(findings) => serializer
+                .serialize_str(&serde_json::to_string(findings).map_err(S::Error::custom)?),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<Finding>>, D::Error> {
+        use serde::de::Error;
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| serde_json::from_str(&text).map_err(D::Error::custom))
+            .transpose()
+    }
+}
+
 /// Compact, versioned settlement record. No provider transcript is retained.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeOutputs {
@@ -1240,12 +1266,25 @@ pub struct NodeOutputs {
         skip_serializing_if = "Option::is_none"
     )]
     pub artifact_findings: Option<String>,
+    /// Already-normalised findings, stored as a content-addressed JSON blob.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "typed_findings_blob"
+    )]
+    pub full_artifact_findings: Option<Vec<Finding>>,
     #[serde(
         default,
         rename = "_compact_disposition_findings",
         skip_serializing_if = "Option::is_none"
     )]
     pub compact_disposition_findings: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "typed_findings_blob"
+    )]
+    pub full_disposition_findings: Option<Vec<Finding>>,
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub warnings: Vec<String>,

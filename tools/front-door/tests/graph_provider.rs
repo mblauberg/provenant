@@ -853,7 +853,7 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
             .open(rig.state.join("config.toml"))?,
         "\n[domains.fabric.graph]\nlaunch_wait_seconds=5\nwriter_provision_seconds=5"
     )?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
     let committed = rig.execute(
         &git,
         &["commit", "--allow-empty", "-qm", "probe base"],
@@ -1059,7 +1059,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
     let branch_mode = matches!(
         location,
         "branch" | "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
@@ -1318,7 +1318,7 @@ fn writer_cli_launches_from_primary_checkout() -> Result {
 
 fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     let rig = policy_codex_fixture()?;
-    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
     let remote = rig.root.join("remote.git");
     for args in [
         vec!["init", "--bare", remote.to_str().ok_or("remote")?],
@@ -1664,7 +1664,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     let mut host = provenant_run::HostLaunchContext::from_environment(
         &rig.state,
         &rig.project,
-        provenant_os::git::git_executable()
+        provenant_os::git::resolve_git_executable(None)
             .ok_or("git")?
             .canonicalize()?,
     );
@@ -2077,7 +2077,7 @@ fn writer_registry_fixture() -> Result<TestRig> {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
     let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
     assert_eq!(code(&seeded), 0, "{seeded:?}");
     Ok(rig)
@@ -2218,7 +2218,7 @@ fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
     );
     assert!(retry["wake_at"].is_string() || node["advance_error_code"] == "launch_retry_exhausted");
     assert!(!rig.project.join(".worktrees/blocked-writer").exists());
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
     let branch = rig.execute(
         &git,
         &["show-ref", "--verify", "refs/heads/blocked-writer"],
@@ -2274,7 +2274,7 @@ fn expanded_writer_registry_contention_remains_retryable() -> Result {
     let initial = rig.command(&["run", "--file", doc, "--json"])?;
     let initial: Value = serde_json::from_slice(&initial.stdout.bytes)?;
     assert_eq!(initial["data"]["status"], "pending", "{initial}");
-    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
     let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
     assert_eq!(code(&head), 0, "{head:?}");
     let source = std::str::from_utf8(&head.stdout.bytes)?.trim();
@@ -2555,7 +2555,7 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         support::register_account(&rig, "codex", label, &key, &directory)?;
     }
     if writer {
-        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
         assert_eq!(
             code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?),
             0
@@ -3094,7 +3094,7 @@ fn persisted_attempt_with(
 
     let rig = TestRig::new()?;
     if options.stalled_import {
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "seed"], None)?;
         assert_eq!(code(&seeded), 0);
         let created = rig.command(&[
@@ -3348,7 +3348,7 @@ fn persisted_attempt_with(
         let scope = exit.scope;
         let launch = provenant_run::prepare_writer(writer, &rig.state, project_id)?;
         let head = rig.execute(
-            &provenant_os::git::git_executable().ok_or("Git unavailable")?,
+            &provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?,
             &["rev-parse", "HEAD"],
             None,
         )?;
@@ -3986,6 +3986,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     assert!(matches!(
         provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: now,
             records: std::slice::from_ref(&quota_record),
@@ -4048,6 +4049,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     let pools = vec!["opencode-free".to_owned()];
     let admit = |route: &ResolvedRoute, at| {
         provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: at,
             records: std::slice::from_ref(&quota_record),
@@ -4165,6 +4167,7 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     };
     let admit = |route: &ResolvedRoute, now_unix_seconds| {
         provenant_quota::Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds,
             records: std::slice::from_ref(&quota_record),
@@ -4197,7 +4200,7 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
         provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
             .ok_or("account key")?;
     support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
-    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
     let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
     assert_eq!(code(&out), 0, "{out:?}");
     let tree = rig.project.join(".worktrees/retry-stop");
@@ -4306,6 +4309,84 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/run.md#lane-git-and-import
+// The inherited lane Git binding must not become the nested fixture writer's Git.
+fn nested_writer_ignores_outer_lane_git() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let wrapper = temp.path().join("outer-git");
+    fs::write(&wrapper, "#!/bin/sh\nexit 91\n")?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "nested_writer_fixture_child"])
+        .env("PROVENANT_GIT", &wrapper)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "nested writer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn nested_writer_fixture_child() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
+        fs::write(rig.project.join(name), "original\n")?;
+    }
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
+    let remote = rig.root.join("remote.git");
+    for args in [
+        vec!["init", "--bare", remote.to_str().ok_or("remote")?],
+        vec!["add", "."],
+        vec!["commit", "-qm", "base"],
+        vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+        vec![
+            "worktree",
+            "add",
+            "-qb",
+            "nested-writer",
+            ".worktrees/nested-writer",
+        ],
+    ] {
+        let out = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&out), 0, "{out:?}");
+    }
+    let document = rig.project.join("nested-graph.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "nested-graph",
+            "nodes": [{"id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
+                "worktree":".worktrees/nested-writer", "delivery":"push",
+                "attempt":{"preset":"light","isolation":"private"},
+                "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}}]
+        }))?,
+    )?;
+    let settled = rig.run_and_wait(&["--file", "nested-graph.json"], "25s")?;
+    assert_eq!(
+        settled.exit(),
+        0,
+        "{:?}; {}",
+        settled.wait,
+        settled.checkpoint
+    );
+    assert_eq!(
+        settled.checkpoint["nodes"][0]["state"], "succeeded",
+        "{}",
+        settled.checkpoint
+    );
+    Ok(())
+}
+
 fn graph_writer_restarts_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4324,7 +4405,7 @@ fn graph_writer_restarts_fresh() -> Result {
                 }
             ),
         )?;
-        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
         let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
         assert_eq!(code(&out), 0, "{out:?}");
         let tree = rig.project.join(".worktrees/auto-writer");
@@ -4476,7 +4557,7 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
         let expected_attempts = routes.as_array().ok_or("routes")?.len();
         let rig = policy_codex_fixture()?;
         let _cleanup = rig.process_cleanup();
-        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
         let committed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
         assert_eq!(code(&committed), 0, "{committed:?}");
         let document = rig.project.join("preparation-refusal.json");
@@ -4526,7 +4607,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
     }
     let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
-    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
     for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original\n")?;
     }
@@ -4811,7 +4892,7 @@ fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
             policy_codex_fixture()?
         };
         let cleanup = rig.process_cleanup();
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             fs::write(rig.project.join(name), "original instructions\n")?;
         }
@@ -5637,6 +5718,11 @@ fn main() -> ExitCode {
                 declared_stop_writer_retry_uses_the_public_cli,
             ),
             ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
+            ("nested_writer_fixture_child", nested_writer_fixture_child),
+            (
+                "nested_writer_ignores_outer_lane_git",
+                nested_writer_ignores_outer_lane_git,
+            ),
             (
                 "host_native_preparation_uses_the_provider_contract",
                 host_native_preparation_uses_the_provider_contract,

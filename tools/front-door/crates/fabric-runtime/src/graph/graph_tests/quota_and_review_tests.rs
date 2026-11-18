@@ -573,7 +573,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             // exists. Seeding that checkpoint avoids initial admission binding
             // an existing checkout and bypassing the child-creation path.
             let (plan, _) = validate_plan(&document).unwrap();
-            let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+            let digest = plan_digest(&plan)
                 .unwrap()
                 .to_string();
             let mut checkpoint =
@@ -602,7 +602,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         // A Running node without an attempt needs the whole persisted wait
         // proof. Missing or inconsistent retry facts must still be refused.
         let (plan, _) = validate_plan(&document).unwrap();
-        let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+        let digest = plan_digest(&plan)
             .unwrap()
             .to_string();
         let corruptions: [fn(&mut NodeProgress); 8] = [

@@ -12,6 +12,14 @@ pub struct QuotaPolicy {
     pub solo: bool,
 }
 
+/// The built-in default policy, for tests that do not exercise policy.
+#[cfg(test)]
+pub(crate) fn test_policy() -> &'static provenant_records::policy::Policy {
+    static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
+        std::sync::OnceLock::new();
+    POLICY.get_or_init(Default::default)
+}
+
 #[cfg(test)]
 pub(crate) const TEST_POLICIES: &[QuotaPolicy] = &[
     QuotaPolicy {

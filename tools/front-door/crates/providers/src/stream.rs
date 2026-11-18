@@ -177,6 +177,8 @@ fn oversize_ignorable(adapter: &str, head: &[u8]) -> bool {
 /// positions can affect identity or completion; prose is never searched.
 pub struct StreamState {
     adapter: &'static str,
+    /// Immutable operation policy, retained for the lifetime of the stream.
+    pub policy: std::sync::Arc<provenant_records::policy::Policy>,
     decoder: Decoder,
     pending: Vec<u8>,
     discarding: bool,
@@ -200,9 +202,14 @@ pub struct StreamState {
     turn_tool_activity: bool,
 }
 impl StreamState {
-    pub(crate) fn new(adapter: &'static str, decoder: Decoder) -> Self {
+    pub(crate) fn new(
+        adapter: &'static str,
+        decoder: Decoder,
+        policy: &provenant_records::policy::Policy,
+    ) -> Self {
         Self {
             adapter,
+            policy: std::sync::Arc::new(policy.clone()),
             decoder,
             pending: Vec::new(),
             discarding: false,

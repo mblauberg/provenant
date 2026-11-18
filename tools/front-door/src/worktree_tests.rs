@@ -923,11 +923,15 @@ impl provenant_run::Providers for WriterProvider {
                             .ok_or("predecessor")?
                             .parse()
                             .map_err(|_| "head")?,
+                        &provenant_records::policy::Policy::default(),
                     )
                     .map_err(|error| error.to_string())?;
             } else if let Some(head) = &task.head {
                 writer
-                    .require_source(head.parse().map_err(|_| "head")?)
+                    .require_source(
+                        head.parse().map_err(|_| "head")?,
+                        &provenant_records::policy::Policy::default(),
+                    )
                     .map_err(|error| error.to_string())?;
             }
             let executable =

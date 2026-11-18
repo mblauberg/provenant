@@ -52,6 +52,7 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-fabric-runtime = { workspace = true, features = ["fixture"] }
 provenant-routing = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 provenant-providers = { workspace = true, features = ["fixture"] }

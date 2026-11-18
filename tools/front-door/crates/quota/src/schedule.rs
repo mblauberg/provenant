@@ -517,6 +517,7 @@ pub fn report(
     query: &QuotaQuery,
     now: i64,
     path: String,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<QuotaReport, QuotaError> {
     validate_inputs(records, detections)?;
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
@@ -608,6 +609,7 @@ pub fn report(
         // A newer reading that clears the hold clears it here too: the one
         // rule is `Admission::refusal_holds`.
         let admission = crate::Admission {
+            policy,
             policies,
             now_unix_seconds: now,
             records,
@@ -841,6 +843,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(report.accounts[0].status, QuotaStatus::KeychainUnavailable);
@@ -1046,6 +1049,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             180,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap()
         .accounts
@@ -1182,6 +1186,7 @@ mod tests {
                 &QuotaQuery { adapter: None },
                 due,
                 "report.json".into(),
+                crate::source::test_policy(),
             )
             .unwrap();
             assert_eq!(current.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1204,6 +1209,7 @@ mod tests {
             &query,
             101,
             "/report".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(recent.accounts[0].status, QuotaStatus::Unknown);
@@ -1214,6 +1220,7 @@ mod tests {
             &query,
             1000,
             "/report".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(expired.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1275,6 +1282,7 @@ mod tests {
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
+                crate::source::test_policy(),
             )
             .unwrap()
             .accounts
@@ -1434,6 +1442,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             420,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap()
         .accounts
@@ -1506,6 +1515,7 @@ mod tests {
                 &QuotaQuery { adapter: None },
                 420,
                 "report.json".into(),
+                crate::source::test_policy(),
             )
             .unwrap();
             assert_eq!(
@@ -1561,6 +1571,7 @@ mod tests {
                 &QuotaQuery { adapter: None },
                 420,
                 "report.json".into(),
+                crate::source::test_policy(),
             )
             .unwrap()
             .accounts
@@ -1614,6 +1625,7 @@ mod tests {
                 &QuotaQuery { adapter: None },
                 now,
                 "fixture".into(),
+                crate::source::test_policy(),
             )
             .unwrap()
             .accounts
@@ -1670,6 +1682,7 @@ mod tests {
             &QuotaQuery { adapter: None },
             420,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap()
         .accounts
@@ -1950,6 +1963,7 @@ mod transition_tests {
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert!(report.refreshing_ids.is_empty());
@@ -1968,6 +1982,7 @@ mod transition_tests {
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
+            crate::source::test_policy(),
         )
     }
     #[test]
@@ -1990,6 +2005,7 @@ mod transition_tests {
             &QuotaQuery { adapter: None },
             100,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(rep.accounts.len(), 1);
@@ -2102,6 +2118,7 @@ mod transition_tests {
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
+                crate::source::test_policy(),
             )
             .unwrap();
             let observed = report
@@ -2232,6 +2249,7 @@ mod zen_tests {
                     &QuotaQuery { adapter: None },
                     now,
                     "report.json".into(),
+                    crate::source::test_policy(),
                 )
                 .unwrap();
                 for record in &records {
@@ -2300,6 +2318,7 @@ mod zen_tests {
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
+                crate::source::test_policy(),
             )
             .unwrap();
             let row = &report.accounts[0];
@@ -2337,6 +2356,7 @@ mod zen_tests {
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(report_with_reset.accounts[0].status, QuotaStatus::Exhausted);
@@ -2369,6 +2389,7 @@ mod zen_tests {
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         assert_eq!(mixed_report.accounts[0].status, QuotaStatus::Exhausted);
@@ -2403,6 +2424,7 @@ mod zen_tests {
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
+            crate::source::test_policy(),
         )
         .unwrap();
         let row = &report.accounts[0];

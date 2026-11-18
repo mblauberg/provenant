@@ -118,6 +118,54 @@ mod codex_usage_tests {
     }
 }
 
+fn apply_provider_identity(
+    exit: &ExitObservation,
+    decoded: &mut Decoded,
+    _policy: &provenant_records::policy::Policy,
+) {
+    if exit.provider_identity_conflict {
+        decoded.outcome = Outcome::Failed;
+        decoded.complete = false;
+        decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
+        decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+    } else if exit.provider_identity_evidence_incomplete
+        && matches!(
+            decoded.outcome,
+            Outcome::Succeeded
+                | Outcome::ReviewRequired
+                | Outcome::Uncommitted
+                | Outcome::Cancelled
+        )
+    {
+        // Live identity checks run before retained-tail truncation. If a
+        // delimiter-complete frame was oversized, undecodable, or
+        // unreadable, or capture drain timed out, the terminal owner
+        // cannot prove that the provider stayed in the admitted session.
+        // Do not continue on incomplete evidence.
+        decoded.outcome = Outcome::Unsettled;
+        decoded.complete = false;
+        decoded.terminal_cause = None;
+        decoded.reason =
+            Some("provider identity evidence was incomplete; continuation refused".into());
+    } else if exit.provider_identity_eof_fragment
+        && !(exit.cancel_delivered_before_exit == Some(true)
+            && matches!(
+                exit.stop_reason,
+                Some(StopReason::ExplicitCancellation | StopReason::Steered)
+            ))
+        && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch)
+    {
+        // Only a fragment from an actual EOF is eligible for the
+        // intentional-stop exception. Natural completion and uncertain
+        // delivery cannot use it to claim a complete provider result.
+        decoded.outcome = Outcome::Unsettled;
+        decoded.complete = false;
+        decoded.terminal_cause = None;
+        decoded.reason =
+            Some("provider ended with an incomplete final frame; continuation refused".into());
+    }
+}
+
 fn account_directories(
     specs: &[provenant_records::AdapterSpec],
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -161,7 +209,7 @@ pub struct HostLaunchContext {
     /// Host-resolved relocated credential stores, inherited unchanged by children.
     /// Required on the handoff pipe: an older host must not silently omit the
     /// inventory needed by the ambient renderer.
-    pub credential_roots: Vec<provenant_core::CredentialRoot>,
+    pub credential_roots: Vec<provenant_core::CredentialDeclaration>,
     pub github_roots: Vec<PathBuf>,
     /// Trusted path overrides needed to select the same host authentication
     /// mechanism after the guardian clears its process environment.
@@ -201,8 +249,10 @@ impl HostLaunchContext {
     pub fn github_roots() -> Vec<PathBuf> {
         provenant_confinement::permissions::host_github_roots(|name| std::env::var_os(name))
     }
-    pub fn credential_roots() -> Vec<provenant_core::CredentialRoot> {
-        provenant_confinement::permissions::host_credential_roots(|name| std::env::var_os(name))
+    pub fn credential_roots() -> Vec<provenant_core::CredentialDeclaration> {
+        provenant_confinement::permissions::host_credential_declarations(|name| {
+            std::env::var_os(name)
+        })
     }
     pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
         account_directories(provenant_records::ADAPTER_SPECS, |name| {
@@ -1026,7 +1076,13 @@ impl RunStore {
                     .holder_context()
                     .and_then(|context| context.host_delivery.as_ref())
                     .filter(|host| host.has_stop_publish());
+                let enforcement = crate::launch_policy(
+                    &self.writer_registry,
+                    &record.project_id.to_string(),
+                    &task,
+                );
                 let policy = crate::writer::TerminalPolicy {
+                    enforcement: &enforcement,
                     preservation_stop,
                     budget_stop,
                     work: trigger.map(|trigger| crate::writer::StopWorkPolicy {
@@ -1283,35 +1339,8 @@ impl RunStore {
             )?;
             return Ok(None);
         }
-        let session = record.session.as_deref();
-        if session.is_none() && !fresh_with_handoff {
-            return Err(RunError::SteerSessionUnavailable);
-        }
-        let ready = self.steer_session_ready(id, call)?;
-        if terminal_cause == Some(TerminalCause::Steered) && ready.is_none() && !fresh_with_handoff
-        {
-            return Err(RunError::SteerSessionUnavailable);
-        }
-        if let Some(ready) = ready {
-            let route_digest = record
-                .applied_route
-                .as_ref()
-                .map(crate::controls::steer_route_digest)
-                .transpose()?
-                .ok_or(RunError::SteerSessionMismatch)?;
-            if ready.conflict
-                || ready.generation != Self::scope(&record).generation
-                || ready.route_digest != route_digest
-                || matches!((ready.session.as_deref(), session), (Some(observed), Some(expected)) if observed != expected)
-            {
-                return Err(RunError::SteerSessionMismatch);
-            }
-            if !fresh_with_handoff
-                && (!ready.terminal_confirmed || ready.session.is_none() || session.is_none())
-            {
-                return Err(RunError::SteerSessionUnavailable);
-            }
-        }
+        let policy = self.resume_policy(id, call)?;
+        self.check_steer_session(&record, terminal_cause, fresh_with_handoff, call, &policy)?;
         let previous_context = record
             .context
             .as_ref()
@@ -1381,6 +1410,47 @@ impl RunStore {
             self.resume_graph_with_parent_publication_lock(&input, &context, call)?
         };
         Ok(Some(successor.attempt_id))
+    }
+
+    fn check_steer_session(
+        &self,
+        record: &AttemptRecord,
+        terminal_cause: Option<TerminalCause>,
+        fresh_with_handoff: bool,
+        call: &Request<'_>,
+        _policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
+        let id = record.attempt_id;
+        let session = record.session.as_deref();
+        if session.is_none() && !fresh_with_handoff {
+            return Err(RunError::SteerSessionUnavailable);
+        }
+        let ready = self.steer_session_ready(id, call)?;
+        if terminal_cause == Some(TerminalCause::Steered) && ready.is_none() && !fresh_with_handoff
+        {
+            return Err(RunError::SteerSessionUnavailable);
+        }
+        if let Some(ready) = ready {
+            let route_digest = record
+                .applied_route
+                .as_ref()
+                .map(crate::controls::steer_route_digest)
+                .transpose()?
+                .ok_or(RunError::SteerSessionMismatch)?;
+            if ready.conflict
+                || ready.generation != Self::scope(record).generation
+                || ready.route_digest != route_digest
+                || matches!((ready.session.as_deref(), session), (Some(observed), Some(expected)) if observed != expected)
+            {
+                return Err(RunError::SteerSessionMismatch);
+            }
+            if !fresh_with_handoff
+                && (!ready.terminal_confirmed || ready.session.is_none() || session.is_none())
+            {
+                return Err(RunError::SteerSessionUnavailable);
+            }
+        }
+        Ok(())
     }
 
     /// Reconcile a failed import as a final failure once custody proves that
@@ -2015,6 +2085,7 @@ impl RunStore {
                     .flatten()
                     .unwrap_or_default();
                 let continuation = self.continuation_expectation(record.attempt_id, call)?;
+                let request = self.request(record.attempt_id, call)?;
                 providers
                     .decode_captures_with_continuation(
                         route,
@@ -2025,6 +2096,7 @@ impl RunStore {
                         crate::ContinuationDecodeContext {
                             context: completion.holder_context(),
                             expectation: continuation.as_ref(),
+                            task: Some(&request.task),
                         },
                     )
                     .map_err(RunError::ProviderEvidence)?
@@ -2360,7 +2432,13 @@ impl RunStore {
                         .holder_context()
                         .and_then(|context| context.host_delivery.as_ref())
                         .filter(|host| host.has_stop_publish());
+                    let enforcement = crate::launch_policy(
+                        &self.writer_registry,
+                        &record.project_id.to_string(),
+                        &task,
+                    );
                     let policy = crate::writer::TerminalPolicy {
+                        enforcement: &enforcement,
                         preservation_stop,
                         budget_stop,
                         work: trigger.map(|trigger| crate::writer::StopWorkPolicy {
@@ -3046,47 +3124,12 @@ impl RunStore {
                 decoded.reason = Some(TerminalCause::Steered.detail().into());
             }
         }
-        if exit.provider_identity_conflict {
-            decoded.outcome = Outcome::Failed;
-            decoded.complete = false;
-            decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
-            decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
-        } else if exit.provider_identity_evidence_incomplete
-            && matches!(
-                decoded.outcome,
-                Outcome::Succeeded
-                    | Outcome::ReviewRequired
-                    | Outcome::Uncommitted
-                    | Outcome::Cancelled
-            )
-        {
-            // Live identity checks run before retained-tail truncation. If a
-            // delimiter-complete frame was oversized, undecodable, or
-            // unreadable, or capture drain timed out, the terminal owner
-            // cannot prove that the provider stayed in the admitted session.
-            // Do not continue on incomplete evidence.
-            decoded.outcome = Outcome::Unsettled;
-            decoded.complete = false;
-            decoded.terminal_cause = None;
-            decoded.reason =
-                Some("provider identity evidence was incomplete; continuation refused".into());
-        } else if exit.provider_identity_eof_fragment
-            && !(exit.cancel_delivered_before_exit == Some(true)
-                && matches!(
-                    exit.stop_reason,
-                    Some(StopReason::ExplicitCancellation | StopReason::Steered)
-                ))
-            && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch)
-        {
-            // Only a fragment from an actual EOF is eligible for the
-            // intentional-stop exception. Natural completion and uncertain
-            // delivery cannot use it to claim a complete provider result.
-            decoded.outcome = Outcome::Unsettled;
-            decoded.complete = false;
-            decoded.terminal_cause = None;
-            decoded.reason =
-                Some("provider ended with an incomplete final frame; continuation refused".into());
-        }
+        let policy = crate::launch_policy(
+            self.writer_registry(),
+            &record.project_id.to_string(),
+            &task,
+        );
+        apply_provider_identity(exit, &mut decoded, &policy);
         if matches!(
             decoded.outcome,
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
@@ -4050,7 +4093,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -4255,7 +4303,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -4526,7 +4579,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5051,6 +5109,7 @@ mod writer_recovery_tests {
                         &git,
                         source.parse()?,
                         shared_head.ok_or("committed writer head")?,
+                        &provenant_records::policy::Policy::default(),
                     )?;
                     store.check_launch_writer_lineage(
                         &store.record(child, &call)?,
@@ -5210,7 +5269,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5444,7 +5508,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5587,7 +5656,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5757,16 +5831,18 @@ mod writer_recovery_tests {
         }
         if matches!(case, BudgetStopCase::StrictScope) {
             run.request.task.profile.write_scope = vec!["src".into()];
-            run.request
-                .task
-                .profile
-                .knobs
-                .insert("policy.WRITE_SCOPE".into(), serde_json::json!("refuse"));
-            run.request
-                .task
-                .profile
-                .overrides
-                .push("policy.WRITE_SCOPE=refuse".into());
+            let mut settings = provenant_config::policy::Settings::default();
+            settings
+                .projects
+                .entry(execution.project_id.to_string())
+                .or_default()
+                .rules
+                .insert(
+                    "WRITE_SCOPE".into(),
+                    provenant_records::policy::Strength::Refuse,
+                );
+            run.request.task.profile.launch_policy =
+                Some(settings.resolve(&execution.project_id.to_string(), &Default::default()));
         }
         store.create(&run, &call)?;
         let id = run.attempt_id;
@@ -5812,7 +5888,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -6001,8 +6082,10 @@ mod writer_recovery_tests {
                 &recovery,
                 &mut settlement,
                 crate::writer::TerminalPolicy {
+                    enforcement: &store.resume_policy(id, &call)?,
                     budget_stop: true,
-                    ..Default::default()
+                    preservation_stop: None,
+                    work: None,
                 },
             );
             assert!(result.is_err());
@@ -6012,7 +6095,7 @@ mod writer_recovery_tests {
             )?;
             assert_eq!(report["code"], "WRITE_SCOPE");
             assert_eq!(report["strength"], "refuse");
-            assert_eq!(report["source"], "dispatch");
+            assert_eq!(report["source"], "project");
             assert!(
                 !report["out_of_scope_paths"]
                     .as_array()
@@ -6067,8 +6150,10 @@ mod writer_recovery_tests {
                 &recovery,
                 &mut settlement,
                 crate::writer::TerminalPolicy {
+                    enforcement: &store.resume_policy(id, &call)?,
                     budget_stop: true,
-                    ..Default::default()
+                    preservation_stop: None,
+                    work: None,
                 },
             );
             assert!(result.is_err(), "unsafe object store must remain unsettled");
@@ -6133,8 +6218,10 @@ mod writer_recovery_tests {
                 &recovery,
                 &mut settlement,
                 crate::writer::TerminalPolicy {
+                    enforcement: &store.resume_policy(id, &call)?,
                     budget_stop: true,
-                    ..Default::default()
+                    preservation_stop: None,
+                    work: None,
                 },
             );
             assert!(matches!(
@@ -6511,7 +6598,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -6614,7 +6706,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -6756,7 +6853,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -7249,7 +7351,8 @@ mod writer_recovery_tests {
                             launch.branch.as_str(),
                             launch.base,
                             None,
-                            head
+                            head,
+                            &provenant_records::policy::Policy::default(),
                         )
                         .is_err()
                     );
@@ -7479,7 +7582,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;

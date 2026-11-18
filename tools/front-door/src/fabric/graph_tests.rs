@@ -2613,9 +2613,11 @@ mod result_tests {
         let project = factory.context.identity.project;
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"fixture", "nodes":[
-                {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
+                {"id":"ordinary","role":"plan","access":"read_only","prompt":"test","route":{"alias":"senior"}}]
         }))?;
         let mut checkpoint = graph_status_fixture().checkpoint;
+        // Status exercises retained diagnostics on this one planned node.
+        checkpoint.nodes.truncate(1);
         checkpoint.nodes[0].attempts.remove(0);
         checkpoint.nodes[0].attempts[0].key.route_index = 0;
         let refusal = dispatch_refused(provenant_cli::run::Fail {
@@ -2655,6 +2657,7 @@ mod result_tests {
             directory: rig.project.clone(),
             document,
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         drop(journal);
         let before = FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap();

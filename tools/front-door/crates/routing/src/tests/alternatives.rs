@@ -191,7 +191,11 @@ fn resolves_an_available_provider_supplied_only_by_the_registry()
         fn prepare(&self, _: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
             Err(ProviderError::UnsupportedPolicy)
         }
-        fn stream(&self, _: Option<&Continuation>) -> Result<StreamState, ProviderError> {
+        fn stream(
+            &self,
+            _: Option<&Continuation>,
+            _: &provenant_records::policy::Policy,
+        ) -> Result<StreamState, ProviderError> {
             Err(ProviderError::UnsupportedPolicy)
         }
         fn observe(
@@ -575,7 +579,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
     let route = resolve(&request("claude/claude-haiku-4-5-20251001")?, &context)?;
-    let mut stream = Claude.stream(None)?;
+    let mut stream = Claude.stream(None, &provenant_records::policy::Policy::default())?;
     Claude.observe(
         &mut stream,
         include_str!(concat!(

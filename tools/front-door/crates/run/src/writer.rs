@@ -316,8 +316,8 @@ fn resolve_writer_with(
     })
 }
 
-#[derive(Default)]
 pub(crate) struct TerminalPolicy<'a> {
+    pub enforcement: &'a provenant_records::policy::Policy,
     pub preservation_stop: Option<crate::settlement::PreservationStop>,
     pub budget_stop: bool,
     pub work: Option<StopWorkPolicy<'a>>,
@@ -368,7 +368,11 @@ impl WriterLaunch {
 
     /// Bind a graph writer to its immutable source. The launch preparation
     /// rechecks this prepared base while holding writer custody before launch.
-    pub fn require_source(&self, expected: GitOid) -> Result<()> {
+    pub fn require_source(
+        &self,
+        expected: GitOid,
+        _policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         if self.base != expected {
             return Err(RunError::WriterSourceMismatch {
                 expected,
@@ -381,20 +385,6 @@ impl WriterLaunch {
     /// Bind a graph writer continuation to its predecessor head, verifying that
     /// the predecessor head descends from the original lineage source commit.
     pub fn require_continuation_source(
-        &self,
-        git: &Path,
-        source: GitOid,
-        predecessor: GitOid,
-    ) -> Result<()> {
-        self.require_continuation_source_with_policy(
-            git,
-            source,
-            predecessor,
-            &provenant_records::policy::Policy::default(),
-        )
-    }
-
-    pub fn require_continuation_source_with_policy(
         &self,
         git: &Path,
         source: GitOid,
@@ -1227,7 +1217,11 @@ impl LaunchConfinement {
 
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
-    pub(crate) fn prepare_git(&mut self, cancel: &CancelToken) -> Result<()> {
+    pub(crate) fn prepare_git(
+        &mut self,
+        cancel: &CancelToken,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(());
         };
@@ -1249,6 +1243,7 @@ impl LaunchConfinement {
             &self.home,
             Some((authority, &self.plan.permissions().credential_roots)),
             cancel,
+            policy,
         )
     }
     /// Prepare a private target from host-built output while writer custody is held.
@@ -1399,6 +1394,7 @@ fn prepare_writer_git(
         &provenant_core::CredentialRoots,
     )>,
     cancel: &CancelToken,
+    _policy: &provenant_records::policy::Policy,
 ) -> Result<()> {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::{clock::SystemClock, fs::LockMode};
@@ -1978,7 +1974,14 @@ mod cargo_setup_tests {
         }
 
         fn prepare_git(&self, writer: &mut WriterLaunch) -> FixtureResult<()> {
-            prepare_writer_git(writer, &self.state, &self.root, None, &CancelToken::new())?;
+            prepare_writer_git(
+                writer,
+                &self.state,
+                &self.root,
+                None,
+                &CancelToken::new(),
+                &provenant_records::policy::Policy::default(),
+            )?;
             Ok(())
         }
     }
@@ -2247,13 +2250,13 @@ mod cargo_setup_tests {
         let lane = fixture.add_worktree("chore/source", "lane")?;
         let mut writer = fixture.prepare(&lane)?;
         let source = GitOid::parse(&fixture.source)?;
-        writer.require_source(source)?;
+        writer.require_source(source, &provenant_records::policy::Policy::default())?;
 
         let tree = fixture.run_git(&["rev-parse", "HEAD^{tree}"])?;
         let unrelated =
             GitOid::parse(&fixture.run_git(&["commit-tree", &tree, "-m", "unrelated root"])?)?;
         assert!(matches!(
-            writer.require_source(unrelated),
+            writer.require_source(unrelated, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, actual })
                 if expected == unrelated && actual == source
         ));
@@ -2268,14 +2271,19 @@ mod cargo_setup_tests {
         ])?)?;
         writer.base = child;
         let utility = runtime(&fixture.state)?;
-        writer.require_continuation_source(utility.git_program_path(), source, child)?;
+        writer.require_continuation_source(
+            utility.git_program_path(),
+            source,
+            child,
+            &provenant_records::policy::Policy::default(),
+        )?;
         assert!(matches!(
-            writer.require_continuation_source(utility.git_program_path(), unrelated, child),
+            writer.require_continuation_source(utility.git_program_path(), unrelated, child, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, actual })
                 if expected == unrelated && actual == child
         ));
         assert!(matches!(
-            writer.require_continuation_source(utility.git_program_path(), source, source),
+            writer.require_continuation_source(utility.git_program_path(), source, source, &provenant_records::policy::Policy::default()),
             Err(RunError::WriterSourceMismatch { expected, actual })
                 if expected == source && actual == child
         ));
@@ -2434,10 +2442,12 @@ mod cargo_setup_tests {
     }
 
     #[test]
-    fn writer_preparation_refuses_incomplete_config_while_config_lock_is_held() -> FixtureResult<()>
-    {
+    #[allow(clippy::disallowed_methods)] // The holder thread must keep the real flock for a real interval.
+    fn writer_preparation_waits_for_the_config_lock_holder() -> FixtureResult<()> {
+        // #3393: a concurrent launch queues on the repository lock rather than
+        // failing, and never reads the holder's unfinished Git config.
         if clean_environment_child(stringify!(
-            writer_preparation_refuses_incomplete_config_while_config_lock_is_held
+            writer_preparation_waits_for_the_config_lock_holder
         ))? {
             return Ok(());
         }
@@ -2458,6 +2468,21 @@ mod cargo_setup_tests {
                 provenant_os::fs::PublishMode::Replace,
             )?
             .require_durable()?;
+        let holder_dir = Directory::open_anchor(&fixture.git_dir)?;
+        let holder = std::thread::spawn(move || -> std::result::Result<(), String> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let restored = holder_dir
+                .atomic_write(
+                    OsStr::new("config"),
+                    ".test-config-",
+                    &config,
+                    provenant_os::fs::PublishMode::Replace,
+                )
+                .and_then(|publication| publication.require_durable())
+                .map_err(|error| error.to_string());
+            drop(config_lock);
+            restored
+        });
 
         let clock = crate::tests::clock();
         let result = prepare_writer_with_facts_and_clock(
@@ -2467,25 +2492,12 @@ mod cargo_setup_tests {
             &worktrees::RepoFacts::default(),
             &clock,
         );
-        let observed = common.read_bounded(OsStr::new("config"), 1024 * 1024);
-
-        let restored = common
-            .atomic_write(
-                OsStr::new("config"),
-                ".test-config-",
-                &config,
-                provenant_os::fs::PublishMode::Replace,
-            )
-            .and_then(|publication| publication.require_durable());
-        drop(config_lock);
-        restored?;
-        assert!(matches!(
-            result,
-            Err(RunError::Filesystem(FsError::LockTimeout { path, timeout }))
-                if path.file_name() == Some(OsStr::new(worktrees::REPOSITORY_LOCK))
-                    && timeout.is_zero()
-        ));
-        assert_eq!(observed?, b"[unfinished");
+        holder.join().map_err(|_| "lock holder panicked")??;
+        result?;
+        assert_ne!(
+            common.read_bounded(OsStr::new("config"), 1024 * 1024)?,
+            b"[unfinished"
+        );
         Ok(())
     }
 
@@ -3001,8 +3013,8 @@ impl WriterLaunch {
         state: &Path,
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        let policy = writer_policy_for_attempt(state, attempt);
         seal_writer_ownership(attempt, &self.worktree)?;
         let utility = runtime(state)?;
         let head = self
@@ -3081,11 +3093,11 @@ impl WriterLaunch {
     }
     fn report_write_scope(
         &self,
-        state: &Path,
         attempt: &Directory,
         base: GitOid,
         head: GitOid,
         source: Option<&crate::objects::ObjectSource>,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
         let Some(raw) =
             crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
@@ -3101,19 +3113,12 @@ impl WriterLaunch {
         if scope.is_empty() {
             return Ok(());
         }
-        let project = request
-            .task
-            .profile
-            .policy_project
-            .map(|project| project.to_string())
-            .unwrap_or_default();
-        let policy = crate::launch_policy(state, &project, &request.task);
         let saved = crate::artifacts::read_sealed(
             attempt,
             "policy-write-scope.json",
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )
-        .map_err(|_| invalid_write_scope_snapshot(&policy))?;
+        .map_err(|_| invalid_write_scope_snapshot(policy))?;
         if let Some(raw) = saved {
             let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
             let provenant_records::handoff::WriteScopeReport::Full {
@@ -3125,14 +3130,14 @@ impl WriterLaunch {
                 ..
             } = report
             else {
-                return Err(invalid_write_scope_snapshot(&policy));
+                return Err(invalid_write_scope_snapshot(policy));
             };
             if schema_version != 1
                 || code != "WRITE_SCOPE"
                 || saved_base != base.to_string()
                 || saved_head != head.to_string()
             {
-                return Err(invalid_write_scope_snapshot(&policy));
+                return Err(invalid_write_scope_snapshot(policy));
             }
             let effect = policy.check(
                 "WRITE_SCOPE",
@@ -3300,6 +3305,7 @@ impl WriterLaunch {
         policy: TerminalPolicy<'_>,
     ) -> Result<()> {
         let TerminalPolicy {
+            enforcement,
             preservation_stop,
             budget_stop,
             work,
@@ -3381,23 +3387,12 @@ impl WriterLaunch {
         };
         settlement.set_head(verified_tip)?;
         if let Err(error) =
-            self.report_write_scope(state, attempt, base, verified_tip, source.as_ref())
+            self.report_write_scope(attempt, base, verified_tip, source.as_ref(), enforcement)
         {
             if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
                 return Err(error);
             }
-            let request: crate::CanonicalRequest = crate::db::decode(
-                &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
-                    .ok_or(RunError::NotFound)?,
-            )?;
-            let project = request
-                .task
-                .profile
-                .policy_project
-                .map(|project| project.to_string())
-                .unwrap_or_default();
-            let policy = crate::launch_policy(state, &project, &request.task);
-            let effect = policy.check(
+            let effect = enforcement.check(
                 "WRITE_SCOPE",
                 provenant_records::policy::Facts::violation(format!(
                     "scope report unavailable: {error}"
@@ -3456,6 +3451,7 @@ impl WriterLaunch {
                 base,
                 request.task.base_ref.as_deref(),
                 verified_tip,
+                enforcement,
             )?;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.
@@ -3796,26 +3792,6 @@ fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> R
             None,
         ),
     )
-}
-
-fn writer_policy_for_attempt(
-    state: &Path,
-    attempt: &Directory,
-) -> provenant_records::policy::Policy {
-    let request = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
-        .ok()
-        .flatten()
-        .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok());
-    let Some(request) = request else {
-        return Default::default();
-    };
-    let project = request
-        .task
-        .profile
-        .policy_project
-        .map(|project| project.to_string())
-        .unwrap_or_default();
-    crate::launch_policy(state, &project, &request.task)
 }
 
 impl WriterLaunch {

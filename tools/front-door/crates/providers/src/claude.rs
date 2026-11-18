@@ -107,7 +107,7 @@ const MODEL_ON_WIRE: bool = true;
 /// The default config directory's keychain service. A non-default
 /// `CLAUDE_CONFIG_DIR` appends [`keychain_suffix`].
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-pub(crate) const OAUTH_REFRESH_LOCK: &str = "provenant-oauth-refresh.lock";
+pub const OAUTH_REFRESH_LOCK: &str = "provenant-oauth-refresh.lock";
 /// Refresh when the access token expires within this window.
 const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
 /// After a refresh, the CLI may keep a token that is inside the window; accept
@@ -1490,7 +1490,11 @@ mod overload_tests {
     use super::*;
 
     fn finish_text(input: &str) -> Vec<E> {
-        let mut stream = StreamState::new("claude", decode);
+        let mut stream = StreamState::new(
+            "claude",
+            decode,
+            &provenant_records::policy::Policy::default(),
+        );
         let mut events = stream.observe(input.as_bytes()).unwrap();
         let outcome = stream
             .finish(crate::ExitObservation {
@@ -1648,7 +1652,11 @@ mod overload_tests {
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
             "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\"}\n"
         );
-        let mut stream = StreamState::new("claude", decode);
+        let mut stream = StreamState::new(
+            "claude",
+            decode,
+            &provenant_records::policy::Policy::default(),
+        );
         stream.bind_identity("s", "m");
         stream.observe(input.as_bytes()).unwrap();
         let outcome = stream
@@ -1659,7 +1667,11 @@ mod overload_tests {
             .unwrap();
         assert_eq!(outcome.model(), Some("m"));
         assert!(outcome.final_events().contains(&E::Model("m".into())));
-        let mut stream = StreamState::new("claude", decode);
+        let mut stream = StreamState::new(
+            "claude",
+            decode,
+            &provenant_records::policy::Policy::default(),
+        );
         stream.bind_identity("s", "other");
         stream.observe(input.as_bytes()).unwrap();
         assert!(matches!(
@@ -1685,7 +1697,11 @@ mod overload_tests {
             (incomplete, Some(0), false),
             ("", Some(0), false),
         ] {
-            let mut stream = StreamState::new("claude", decode);
+            let mut stream = StreamState::new(
+                "claude",
+                decode,
+                &provenant_records::policy::Policy::default(),
+            );
             let mut events = stream
                 .observe(format!("{assistant}{tail}").as_bytes())
                 .unwrap();
@@ -1712,7 +1728,11 @@ mod overload_tests {
     #[test]
     fn final_answer_identifies_its_model_despite_helper_messages() {
         let run = |answering_model: &str| {
-            let mut stream = StreamState::new("claude", decode);
+            let mut stream = StreamState::new(
+                "claude",
+                decode,
+                &provenant_records::policy::Policy::default(),
+            );
             let input = format!(
                 "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"helper\",\"content\":[{{\"type\":\"text\",\"text\":\"helper output\"}}]}},\"session_id\":\"s\",\"parent_tool_use_id\":null}}\n{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"{answering_model}\",\"content\":[{{\"type\":\"text\",\"text\":\"final answer\"}}]}},\"session_id\":\"s\",\"parent_tool_use_id\":null}}\n{{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"final answer\"}}\n"
             );
@@ -1733,7 +1753,11 @@ mod overload_tests {
 
     #[test]
     fn resumed_answer_rejects_substitution_after_a_helper() {
-        let mut stream = StreamState::new("claude", decode);
+        let mut stream = StreamState::new(
+            "claude",
+            decode,
+            &provenant_records::policy::Policy::default(),
+        );
         stream.bind_identity("s", "requested");
         let input = concat!(
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"helper\",\"content\":[{\"type\":\"text\",\"text\":\"helper\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",

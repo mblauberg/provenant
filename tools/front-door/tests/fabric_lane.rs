@@ -310,7 +310,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let reference = format!("{}/{attempt}", context.identity.host);
-    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":support::GRAPH_CHECKPOINT_SCHEMA_VERSION,"graph_id":graph_id,"plan_digest":"test",
         "nodes":[{"id":"task","worktree":null,"state":"running","attempts":[{
             "key":{"graph_id":graph_id,"node_id":"task","route_index":0, "attempt": 1},
@@ -338,6 +338,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
         directory: rig.project.clone(),
         document,
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     let state = context.roots.state.clone();

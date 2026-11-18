@@ -90,7 +90,6 @@ pub(super) fn contract_error(
     node: &PlannedNode,
     upstream: &[Finding],
     outputs: &NodeOutputs,
-    result: Option<&provenant_records::result_capture::CapturedResult>,
 ) -> Option<(&'static str, String)> {
     let repair_triage = node.repair_triage;
     if template::review_behaviour(node).is_none() && !repair_triage {
@@ -107,9 +106,9 @@ pub(super) fn contract_error(
     {
         let cause = match outputs.verdict.as_deref() {
             Some(other) => format!("`{other}` is not VERDICT: PASS, FAIL or INCONCLUSIVE"),
-            None => result
-                .and_then(|capture| capture.verdict_cause.clone())
-                .or_else(|| outputs.verdict_error.clone())
+            None => outputs
+                .verdict_error
+                .clone()
                 .unwrap_or_else(|| "no VERDICT: line outside fenced blocks".to_owned()),
         };
         return Some((

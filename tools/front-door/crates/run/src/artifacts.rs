@@ -164,10 +164,9 @@ impl RunStore {
                 ));
             }
             hash.update(&buffer[..count]);
-            let safe = redactor
-                .filter(&buffer[..count])
+            redactor
+                .filter(&buffer[..count], &mut |frame| capture.push(frame))
                 .map_err(|_| RunError::Validation("output redaction failed"))?;
-            capture.push(&safe);
         }
         let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
         if total != artifact.bytes {
@@ -197,10 +196,9 @@ impl RunStore {
                 grew.then_some(ArtifactValue::Length(after.size)),
             ));
         }
-        let safe = redactor
-            .finish()
+        redactor
+            .finish(&mut |frame| capture.push(frame))
             .map_err(|_| RunError::Validation("output redaction failed"))?;
-        capture.push(&safe);
         let mut result = capture.finish();
         // One handoff rule: the settled attempt's sealed, sanitised snapshot,
         // not a re-reading of the text.
@@ -640,6 +638,29 @@ mod tests {
             ),
             "{error:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stream_result_with_long_withheld_run_yields_verdict() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let attempt = run.attempt_id;
+        crate::tests::seal_exit_fixture(&store, &run)?;
+        let slashes = "\\".repeat(1024 * 1024 - 1);
+        let text = format!("password={}\"secret\" end\n\nVERDICT: PASS\n", slashes);
+        let mut done = crate::tests::publication();
+        done.result = &text;
+        let exit = crate::tests::exit();
+        store.publish_terminal(attempt, 1, &done, &exit, &call)?;
+        let result = store.stream_result(attempt, &call, None)?;
+        assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
         Ok(())
     }
 }

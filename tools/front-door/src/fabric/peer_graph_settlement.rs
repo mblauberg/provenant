@@ -834,7 +834,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     let document = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"hint-test","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
-    let checkpoint = serde_json::from_value(serde_json::json!({
+    let mut checkpoint = serde_json::from_value(serde_json::json!({
         "schema_version":2,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
             "id":"one","worktree":null,"state":"running","attempts":[{
                 "key":{"graph_id":"hint-test","node_id":"one","route_index":0, "attempt": 1},
@@ -860,6 +860,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
         directory: fixture.rig.project.clone(),
         document,
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     let operation = fixture
@@ -1164,11 +1165,8 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         let id = format!("terminal-{number:04}");
         terminal.graph_id = id.clone();
         execution.document.graph_id = id.clone();
-        let digest = provenant_records::CanonicalV1::record_digest(
-            "fabric-graph-checkpoint",
-            2,
-            &(&terminal, &execution),
-        )?
+        terminal.plan_digest = graph::graph_plan_digest(&execution.document)?.to_string();
+        let digest = provenant_fabric_runtime::graph::checkpoint_digest(&terminal, &execution)?
         .to_string();
         let envelope = serde_json::json!({"schema_version":stored_version,"digest":digest,"checkpoint":terminal,"execution":execution});
         std::fs::write(

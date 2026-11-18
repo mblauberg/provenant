@@ -556,41 +556,34 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
 
 #[test]
 fn graph_secrets_are_refused_before_publication() -> Result {
-    let rig = GraphProject::new()?;
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    // Free-form briefs are normalised at ingress. Schema identities and object
+    // keys must instead be rejected, without publishing graph or scratch state.
     let secret = format!("ghp_{}", "a1".repeat(18));
     for explain in [false, true] {
-        for source in ["brief", "review", "parameter", "file", "inline"] {
-            let mut command = rig.command();
-            command.arg("run");
+        for source in ["graph_id", "node_id", "route", "context_key", "template"] {
+            let rig = GraphProject::new()?;
+            let mut document = json!({
+                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+                "graph_id":"safe-graph", "nodes":[{
+                    "id":"safe-node", "prompt":"Inspect", "access":"read_only",
+                    "route":{"alias":"junior"}
+                }]
+            });
             match source {
-                "brief" => {
-                    command.arg("task").arg(&secret);
-                }
-                "review" => {
-                    command.arg("review").arg(&secret);
-                }
-                "parameter" => {
-                    let templates = rig.project.join(".provenant/templates");
-                    std::fs::create_dir_all(&templates)?;
-                    std::fs::write(
-                        templates.join("parameterised.toml"),
-                        "brief='${text}'\ntier='senior'\n[parameters.text]\ntype='string'\n",
-                    )?;
-                    command
-                        .args(["parameterised", "--set"])
-                        .arg(format!("text={secret}"));
-                }
-                "file" => {
-                    let path = rig.project.join("brief.txt");
-                    std::fs::write(&path, &secret)?;
-                    command.args(["task", "--brief-file"]).arg(path);
-                }
-                "inline" => {
-                    let path = rig.document(&json!({"nodes":[{"id":"x","use":"inline"}],"templates":{"inline":{"brief":secret,"tier":"senior"}}}))?;
-                    command.arg("--file").arg(path);
+                "graph_id" => document["graph_id"] = secret.clone().into(),
+                "node_id" => document["nodes"][0]["id"] = secret.clone().into(),
+                "route" => document["nodes"][0]["route"]["alias"] = secret.clone().into(),
+                "context_key" => document["context"] = json!({(secret.clone()):"note"}),
+                "template" => {
+                    document = json!({"nodes":[{"id":"x","use":secret}],
+                        "templates":{(secret.clone()):{"brief":"Inspect","tier":"senior"}}});
                 }
                 _ => unreachable!(),
             }
+            let path = rig.document(&document)?;
+            let mut command = rig.command();
+            command.args(["run", "--file"]).arg(path);
             if explain {
                 command.arg("--explain");
             }
@@ -598,8 +591,11 @@ fn graph_secrets_are_refused_before_publication() -> Result {
             assert!(!output.status.success(), "{source}: {output:?}");
             assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
             assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
-            assert!(graph_records(&rig.state())?.is_empty());
-            assert!(graph_records(&rig.project.join(".provenant/scratch"))?.is_empty());
+            assert!(graph_records(&rig.state())?.is_empty(), "{source}");
+            assert!(
+                graph_records(&rig.project.join(".provenant/scratch"))?.is_empty(),
+                "{source}"
+            );
         }
     }
     Ok(())

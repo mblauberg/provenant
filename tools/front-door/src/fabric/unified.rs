@@ -97,9 +97,7 @@ impl Factory {
             &target.graph,
         ) {
             Ok(journal) => journal,
-            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                provenant_os::fs::FsError::LockTimeout { .. },
-            )) => {
+            Err(error) if error.is_lock_timeout() => {
                 let checkpoint = FileJournal::read_status_checkpoint(
                     &self.context.roots.state,
                     self.context.identity.project,
@@ -1392,6 +1390,8 @@ pub(crate) fn unified_graph_steer(
             source,
             provenant_records::control::CONTROL_TEXT_BYTES,
         )?;
+        let text = provenant_fabric_runtime::graph::normalise_prompt_text(&text)
+            .map_err(std::io::Error::other)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(
             factory.clock.mono_now(),
@@ -3682,6 +3682,7 @@ mod tests {
         })?;
         let mut before = checkpoint("g");
         before.nodes[0].attempts.clear();
+        journal.prepare_fixture_checkpoint(&mut before)?;
         journal.save(&before)?;
         drop(journal);
         let events = FileJournal::read_events(&roots.state, project, "g")?;
@@ -3889,6 +3890,7 @@ mod tests {
             if graph == "h" {
                 checkpoint.nodes[0].attempts.clear();
             }
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
         }
         let target = |text: &str| text.parse::<provenant_cli::Target>();

@@ -51,6 +51,39 @@ fn settled() -> (GraphDocument, GraphCheckpoint, AttemptKey) {
     (document, checkpoint, owner.calls[0].0.clone())
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn steer_normalises_only_the_new_brief_once() {
+    let mut document = graph(vec![node("work", route("first"))]);
+    // Retained free-form bytes are immutable. Steer introduces only the
+    // replacement brief, which is normalised at this ingress.
+    let old = "historical extension retained unchanged";
+    document.nodes[0].extra.insert("comment".into(), json!(old));
+    let mut owner = FakeOwner {
+        observations: [done_as("original")].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    let brief = "steered brief AKIAIOSFODNN7EXAMPLE";
+    let (_, calls) = prompt_text::trace(|| {
+        retry(&document, &mut checkpoint, Some(brief), &|_| Ok(()), None).unwrap();
+    });
+    prompt_text::assert_once(&calls, brief);
+    assert!(!calls.iter().any(|text| text == old));
+    let replaced = &checkpoint
+        .expansions
+        .last()
+        .unwrap()
+        .patch
+        .as_ref()
+        .unwrap()
+        .replaced[0];
+    assert!(!replaced.prompt.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert_eq!(replaced.extra["comment"], old);
+}
+
 #[test]
 fn node_redo_journals_the_brief_and_launches_a_new_attempt_without_losing_history() {
     let (document, mut checkpoint, original_key) = settled();
@@ -2413,10 +2446,11 @@ fn no_work_stop_is_never_saved_without_its_restart() {
     assert!(journal.1 > 0);
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn no_work_restart_refused_before_planning_saves_a_chair_pause_with_the_stop() {
-    // The handoff lands in the restart brief, and patch admission scans the
-    // brief for secrets, so this restart is refused before it can be planned.
+fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
+    // A new handoff is normalised before storage or continuation. Known
+    // credential shapes cannot poison the next writer's prompt.
     let mut work = node("work", route("first"));
     work.route = None;
     work.routes = Some(vec![route("first"), route("second")]);
@@ -2429,29 +2463,23 @@ fn no_work_restart_refused_before_planning_saves_a_chair_pause_with_the_stop() {
         *result = Some(Box::new(capture(note)));
     }
     let mut owner = FakeOwner {
-        observations: [stop].into(),
+        observations: [stop, done_as("continued")].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    // Settled at Paused, not Pending: the stop and its chair pause are one save.
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(owner.calls.len(), 1);
-    assert!(run.checkpoint.expansions.is_empty());
-    let reason = run.checkpoint.pause_reason().unwrap();
-    assert!(reason.contains("its restart was refused"), "{reason}");
-    assert!(reason.contains("secret"), "{reason}");
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert!(owner.prompts[1].contains("Finish renderer"));
+    assert!(!owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0].previous_attempts[0].outcome,
+        Some(AttemptOutcome::DeclaredStop)
+    );
     assert!(!next_step::pending(&run.checkpoint));
     let saved = journal.load(&document.graph_id).unwrap().unwrap();
-    assert_eq!(saved.pause_reason(), run.checkpoint.pause_reason());
-    assert_eq!(saved.nodes[0].state, NodeState::Failed);
-    // Another advance stays paused and launches nothing.
-    assert_eq!(
-        advance(&document, &mut owner, &mut journal).unwrap().status,
-        GraphStatus::Paused
-    );
-    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(saved, run.checkpoint);
 }
 
 #[test]

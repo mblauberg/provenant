@@ -93,6 +93,8 @@ impl<'a> Owner<'a> {
                     "forge",
                     self.project,
                     self.roots.state.as_path(),
+                    // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
+                    std::sync::Arc::new(provenant_records::policy::Policy::default()),
                 )
                 .map_err(|error| error.to_string())?;
                 let response = forge

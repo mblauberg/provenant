@@ -162,7 +162,13 @@ pub fn run(
     let state = request.state;
     let shadow = request.shadow;
     let mut report = Report::default();
+    let review_warnings = std::cell::RefCell::new(Vec::new());
+    let request = Request {
+        approvals: request.approvals.with_warnings(&review_warnings),
+        ..request
+    };
     let result = run_inner(forge, repo, runner, alarms, request, &mut report);
+    report.warnings.extend(review_warnings.into_inner());
     if let Err(error) = &result {
         let unknown = matches!(
             error,
@@ -269,7 +275,7 @@ fn run_inner(
         .collect();
     let mut open = Vec::new();
     for number in unique {
-        let info = forge.pull_request(number)?;
+        let info = super::ready_pull_request(forge, number)?;
         if let Some(reason) = request
             .pins
             .get(&number)
@@ -373,6 +379,13 @@ fn run_inner(
                 }
                 Err(error) => return Err(error),
             };
+            for step in &candidate.steps {
+                cleanup_unpublished(
+                    super::ready_pull_request(forge, step.pr.number),
+                    repo,
+                    &candidate,
+                )?;
+            }
             let reused = if request.settings.reuse_tested_tree {
                 gate::reusable_evidence(forge, &candidate, request.gate)
             } else {
@@ -1139,7 +1152,7 @@ pub(super) mod tests {
             if !forge_approved {
                 forge.approvals_at_head.clear();
             }
-            let reviews = FakeReviews::of(BTreeMap::from([(
+            let mut reviews = FakeReviews::of(BTreeMap::from([(
                 1,
                 vec![ReviewRecord {
                     reference: "review-attempt".into(),
@@ -1149,6 +1162,8 @@ pub(super) mod tests {
                     independent,
                 }],
             )]));
+            let skipped = "graph-corrupt-review: bad checkpoint digest";
+            reviews.unusable.insert(1, vec![skipped.into()]);
             let state = tempfile::tempdir()?;
             let report = exercise_with(
                 &mut forge,
@@ -1161,6 +1176,12 @@ pub(super) mod tests {
                 state.path(),
                 Approvals::new(&settings.approval_sources, &reviews),
             )?;
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(skipped))
+            );
             if let Some(source) = expected {
                 assert_eq!(report.outcomes[&1], Outcome::Landed);
                 let pr = report
@@ -1187,7 +1208,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_review_store_read_failure_fails_the_run_and_merges_nothing()
+    fn a_review_store_read_failure_warns_and_requires_a_readable_approval()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::super::fakes::FakeReviews;
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
@@ -1209,7 +1230,14 @@ pub(super) mod tests {
             state.path(),
             Approvals::new(&settings.approval_sources, &reviews),
         );
-        assert!(result.is_err());
+        let report = result?;
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("store unreadable"))
+        );
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
         assert!(forge.merges.is_empty() && repo.pushes.is_empty());
         Ok(())
     }
@@ -2139,6 +2167,7 @@ pub(super) mod tests {
         Approval,
         Base,
         Closed,
+        Draft,
     }
     fn recovery_does_not_retry_changed_pr(
         mode: PublishMode,
@@ -2192,6 +2221,7 @@ pub(super) mod tests {
                 forge.pull_requests.get_mut(&1).unwrap().state =
                     super::super::ports::PullRequestState::Closed;
             }
+            RecoveryChange::Draft => forge.pull_requests.get_mut(&1).unwrap().draft = true,
         }
         receipt::record_pending(
             state.path(),
@@ -2255,6 +2285,7 @@ pub(super) mod tests {
                 RecoveryChange::Approval,
                 RecoveryChange::Base,
                 RecoveryChange::Closed,
+                RecoveryChange::Draft,
             ] {
                 recovery_does_not_retry_changed_pr(mode, change)?;
             }
@@ -3392,16 +3423,32 @@ pub(super) mod tests {
     #[test]
     fn refused_prefix_follow_failure_recovers_without_publication()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.post_merge.checks = vec!["ci-status".into()];
+        settings.post_merge.timeout_seconds = 1;
         forge.direct_push = false;
         forge.valid_merge_ids = true;
         forge.refuse_merge = Some(2);
         let landed = format!("{:040x}", 2001);
-        repo.fetches = ["a".repeat(40), "a".repeat(40), "a".repeat(40), landed].into();
+        repo.fetches = [
+            "a".repeat(40),
+            "a".repeat(40),
+            "a".repeat(40),
+            landed.clone(),
+        ]
+        .into();
+        forge.check_runs.insert(
+            landed.clone(),
+            vec![super::super::test_support::LandingFixture::evidence(
+                &landed,
+                GateResult::Passed,
+                None,
+            )],
+        );
         let state = tempfile::tempdir()?;
         let fail = std::rc::Rc::new(std::cell::Cell::new(false));
         forge.fail_fetch_on_refusal = Some(fail.clone());
-        forge.fail_approvals = Some(fail.clone());
+        forge.fail_checks = Some(fail.clone());
         assert!(
             exercise(
                 &mut forge,
@@ -3776,6 +3823,100 @@ pub(super) mod tests {
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
             1
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#merge-guard
+    #[test]
+    fn draft_conversion_between_batches_never_reaches_the_next_gate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.batch_size = 1;
+        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        forge.draft_after_gate = Some((2, flag.clone()));
+        gate.set_draft_on_gate = Some(flag);
+        let state = tempfile::tempdir()?;
+        let result = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::RefusedWith {
+                cause: "PR_DRAFT",
+                ..
+            })
+        ));
+        assert_eq!(gate.observed.len(), 1);
+        assert!(!forge.merge_attempts.contains(&2));
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#merge-guard
+    #[test]
+    fn draft_conversion_during_gate_prevents_publication() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        forge.draft_after_gate = Some((1, flag.clone()));
+        gate.set_draft_on_gate = Some(flag);
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(gate.observed.len(), 1);
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
+        assert!(forge.merge_attempts.is_empty());
+        assert!(!repo.push_attempts.contains(&repo.target_ref));
+        Ok(())
+    }
+
+    #[test]
+    fn driver_refuses_draft_pull_request_before_gate() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let state = tempfile::tempdir()?;
+        forge.pull_requests.get_mut(&1).unwrap().draft = true;
+        let result = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        );
+        let error = result.expect_err("draft pull request must be refused");
+        let cause = match error {
+            LandingError::RunFailed { cause, .. } => *cause,
+            other => other,
+        };
+        let LandingError::RefusedWith {
+            cause,
+            repair,
+            message,
+        } = cause
+        else {
+            panic!("expected RefusedWith, got {cause:?}");
+        };
+        assert_eq!(cause, "PR_DRAFT");
+        assert_eq!(repair, "gh pr ready 1");
+        assert!(message.contains("draft"), "{message}");
+        assert_eq!(gate.observed.len(), 0, "candidate gate must not run");
+        assert_eq!(repo.pushes.len(), 0, "no candidate pushed");
         Ok(())
     }
 }

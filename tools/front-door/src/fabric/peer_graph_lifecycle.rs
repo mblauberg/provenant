@@ -41,10 +41,10 @@ fn graph_factory_reopens_the_retained_directory() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn tick_reports_unreadable_once_and_advances_another_graph()
+fn tick_reports_unreadable_each_time_and_advances_another_graph()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_graph_lifecycle::tick_reports_unreadable_once_and_advances_another_graph",
+        "fabric::peer_tests::peer_graph_lifecycle::tick_reports_unreadable_each_time_and_advances_another_graph",
     )? {
         return Ok(());
     }
@@ -124,7 +124,8 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
         .ok_or("missing good graph")?;
     assert_eq!(good.nodes[0].state, graph::NodeState::Succeeded);
     let second = tick_graphs(&resolved, now, &FreeWorkers)?;
-    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+    assert_eq!(second.errors, first.errors);
     assert_eq!(second.advanced, 0);
     Ok(())
 }
@@ -511,6 +512,7 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
         directory: rig.project.clone(),
         document,
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     let clock = TestClock::new(WallTime::from_unix_seconds(0)?, MonoTime::from_micros(0));
@@ -618,7 +620,7 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
             {"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}
         ]
     }))?;
-    let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
         "schema_version": 2, "graph_id": "reason-test", "plan_digest": "digest", "nodes": [
             {"id":"one", "state":"pending", "worktree":null, "attempts":[]}
         ]
@@ -640,6 +642,7 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
         directory: rig.project.clone(),
         document,
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     let cancelled = factory.graph(

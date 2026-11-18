@@ -268,7 +268,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let caller = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let graph = "lane-read-children";
     let reference = |id| format!("{}/{id}", context.identity.host);
-    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":2,"graph_id":graph,"plan_digest":"fixture",
         "nodes":[
             {"id":"parent","state":"running","attempts":[{"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"senior"},"state":"running","attempt_ref":reference(caller),"launch_actor":"fixture"}]},
@@ -303,6 +303,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         directory: rig.project.clone(),
         document,
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     let mut holder = provenant_run::HolderContext {

@@ -13,8 +13,15 @@ pub(crate) fn select_transport(
     let ports = PortTable::read_for(Some(project), state).map_err(|error| {
         ObserveError::Unavailable(format!("CI port configuration is unavailable: {error}"))
     })?;
-    let mut forge = ForgePort::new(ports.ci_observation, "ci_observation", project, state)
-        .map_err(|error| ObserveError::Unavailable(format!("cannot start CI adapter: {error}")))?;
+    let mut forge = ForgePort::new(
+        ports.ci_observation,
+        "ci_observation",
+        project,
+        state,
+        // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .map_err(|error| ObserveError::Unavailable(format!("cannot start CI adapter: {error}")))?;
     forge.bind(request);
     Ok(forge)
 }

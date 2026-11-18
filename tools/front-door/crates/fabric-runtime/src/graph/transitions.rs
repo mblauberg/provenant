@@ -301,8 +301,8 @@ pub(super) fn apply_attempt_observation(
                 stop,
                 settlement_reason,
             } => {
+                let mut result = result;
                 progress.review_settlement = None;
-                settled_result = result.clone();
                 attempt.usage = usage;
                 attempt.launched = launched;
                 attempt.stop = stop;
@@ -318,6 +318,11 @@ pub(super) fn apply_attempt_observation(
                     commit.clone(),
                     &upstream_findings,
                 );
+                outputs = prompt_text::captured_outputs(outputs)?;
+                if let Some(capture) = result.as_deref_mut() {
+                    prompt_text::captured_handoff(capture)?;
+                }
+                settled_result = result.clone();
                 if !repair::may_report_items(node, plan) {
                     outputs.repair_items = None;
                 }
@@ -366,7 +371,7 @@ pub(super) fn apply_attempt_observation(
                 let review_contract_error = if stopped_without_reply {
                     None
                 } else {
-                    review::contract_error(node, &upstream_findings, &outputs, result.as_deref())
+                    review::contract_error(node, &upstream_findings, &outputs)
                 };
                 if node.access == AccessMode::ReadOnly
                     && template::review_node(node)

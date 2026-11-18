@@ -909,6 +909,7 @@ pub(super) fn resolve_dispatch_excluding_family(
                 let pools = context.catalogue.admission_pools(&model);
                 let now_unix_seconds = context.now.as_timestamp().as_second();
                 let admission = provenant_quota::Admission {
+                    policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds,
                     records,
@@ -1120,6 +1121,7 @@ pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
     registry: &[provenant_providers::Registration],
+    policy: &provenant_records::policy::Policy,
 ) -> Result<(), EdgeError> {
     let catalogue = Catalogue::bundled()?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
@@ -1130,6 +1132,7 @@ pub(crate) fn check_dispatch_candidate(
     let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
+        policy,
         policies: &policies,
         now_unix_seconds: now,
         records: &records,
@@ -1231,6 +1234,7 @@ pub fn resolve_review_family(
                         let pools = context.catalogue.admission_pools(&model);
                         let now = context.now.as_timestamp().as_second();
                         let admission = provenant_quota::Admission {
+                            policy: &context.config.launch_policy,
                             policies,
                             now_unix_seconds: now,
                             records,

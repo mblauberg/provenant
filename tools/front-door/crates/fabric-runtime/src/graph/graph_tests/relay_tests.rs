@@ -395,11 +395,9 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         (
             "a",
             {
-                let mut request = child("secret", "secret-child");
-                request.prompt = "Use sk-abcdefghijklmnopqrstuvwx".into();
-                request
+                child("AKIAIOSFODNN7EXAMPLE", "secret-child")
             },
-            "secret",
+            "invalid",
         ),
     ] {
         let (document, mut checkpoint) =

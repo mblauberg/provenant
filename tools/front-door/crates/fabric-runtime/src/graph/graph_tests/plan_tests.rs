@@ -1085,8 +1085,19 @@ fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
         let run = advance(&doc, &mut owner, &mut journal).unwrap();
         assert!(!run.checkpoint.successful());
         let progress = &run.checkpoint.nodes[0];
-        assert_eq!(progress.attempts.last().unwrap().stop, Some(provenant_records::StopCause::HandoffMalformed));
-        assert!(progress.outputs.as_ref().unwrap().warnings.iter().any(|warning| warning.contains("handoff_malformed")));
+        assert_eq!(
+            progress.attempts.last().unwrap().stop,
+            Some(provenant_records::StopCause::HandoffMalformed)
+        );
+        assert!(
+            progress
+                .outputs
+                .as_ref()
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("handoff_malformed"))
+        );
         assert_eq!(owner.deliveries, 0);
     }
 }
@@ -2012,7 +2023,7 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(
         run.checkpoint.plan_digest,
-        CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+        plan_digest(&base)
             .unwrap()
             .to_string()
     );
@@ -3283,6 +3294,270 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     );
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn submission_normalises_free_form_fields_once() {
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let doc = format!("template documentation {secret}");
+    let parameter_doc = format!("parameter documentation {secret}");
+    let prompt = format!("new submission {secret}");
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "submit-once",
+        "template_library": {"unused": {
+            "doc": doc, "brief": "unused", "parameters": {
+                "value": {"type": "string", "doc": parameter_doc, "default": "ok"}
+            }
+        }},
+        "nodes": [{"id": "work", "prompt": prompt, "access": "read_only",
+            "route": {"alias": "senior"}}]
+    }))
+    .unwrap();
+    let (_, calls) = prompt_text::trace(|| {
+        patch::submission(
+            &mut document,
+            "submit-once",
+            &plans::generous(),
+            provenant_config::PortTable::builtin().worktree_layout,
+        )
+        .unwrap()
+    });
+    for field in [&doc, &parameter_doc, &prompt] {
+        prompt_text::assert_once(&calls, field);
+    }
+    assert!(
+        !document.template_library["unused"]
+            .doc
+            .as_ref()
+            .unwrap()
+            .contains(secret)
+    );
+    assert!(
+        !document.template_library["unused"].parameters["value"]
+            .doc
+            .as_ref()
+            .unwrap()
+            .contains(secret)
+    );
+    assert!(!document.nodes[0].prompt.contains(secret));
+    let mut journal = MemoryJournal::default();
+    let (_, calls) = prompt_text::trace(|| {
+        let mut owner = FakeOwner {
+            observations: [AttemptObservation::Pending {
+                attempt_ref: Some("submission-once".into()),
+            }]
+            .into(),
+            ..Default::default()
+        };
+        advance(&document, &mut owner, &mut journal).unwrap();
+    });
+    assert!(
+        calls.is_empty(),
+        "initial patch admission rewrote stored text: {calls:?}"
+    );
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn live_patch_normalises_docs_and_extensions_once() {
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let doc = format!("inline template documentation {secret}");
+    let parameter_doc = format!("inline parameter documentation {secret}");
+    let comment = format!("node extension {secret}");
+    let (document, mut checkpoint) = running_graph();
+    let (_, calls) = prompt_text::trace(|| {
+        admit(
+            &document,
+            &mut checkpoint,
+            json!({
+                "schema_version": 1,
+                "templates": {"probe": {"doc": doc, "brief": "new work", "parameters": {
+                    "value": {"type": "string", "doc": parameter_doc, "default": "ok"}
+                }}},
+                "nodes": [{"id": "probe", "use": "probe", "extensions": {"comment": comment}}]
+            }),
+        )
+        .unwrap()
+    });
+    for field in [&doc, &parameter_doc, &comment] {
+        prompt_text::assert_once(&calls, field);
+    }
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let added = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "probe")
+        .unwrap();
+    assert!(!added.extra["comment"].as_str().unwrap().contains(secret));
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
+    for text in [
+        "token=[REDACTED]",
+        "token=[REDACTED] next",
+        r#"{"prompt":"token=[REDACTED] next"}"#,
+        r#"{"token":"[REDACTED]"}"#,
+    ] {
+        assert!(patch::scan_for_secrets(text).is_ok());
+    }
+    let (document, mut checkpoint) = running_graph();
+    let admitted = admit_with(
+        &document,
+        &mut checkpoint,
+        None,
+        json!({"schema_version":1, "nodes":[{
+            "id":"masked", "use":"task", "prompt":"token=[REDACTED] next"
+        }]}),
+        &patch::scan_for_secrets,
+    )
+    .unwrap();
+    assert_eq!(admitted.revision, 1);
+    for text in [
+        "token=[REDACTED]secret",
+        "token=[REDACTED",
+        "token=PROVENANTMASK",
+        "token=secret",
+        "AKIAIOSFODNN7EXAMPLE",
+    ] {
+        assert!(patch::scan_for_secrets(text).is_err());
+    }
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
+    // The former placeholder search rescanned this entire suffix once per X
+    // and took about a minute at 128 KiB. Fixed-size scanner state visits each
+    // byte a bounded number of times; the suite's per-test timeout is the
+    // bound, so no wall-clock assertion makes this flaky under load.
+    for size in [32 * 1024, 128 * 1024, 256 * 1024] {
+        let text = format!("PROVENANTMASK{} [REDACTED]", "X".repeat(size));
+        assert!(patch::scan_for_secrets(&text).is_ok());
+    }
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
+    // Build synthetic token shapes from parts; no usable credentials in fixtures.
+    let suffix = "Z".repeat(16);
+    let github_suffix = "q".repeat(36);
+    let bearer_suffix = "x".repeat(24);
+    let cases = [
+        ("AKIA", suffix.as_str()),
+        ("ghp_", github_suffix.as_str()),
+        ("Bearer ", bearer_suffix.as_str()),
+    ];
+    for (prefix, suffix) in cases {
+        let secret = format!("{prefix}{suffix}");
+        for marker in ["", "[REDACTED]"] {
+            let prefix = format!("{marker}{prefix}");
+            for nodes in [
+                json!([{"id":"child", "use":"joined", "with":{"prefix":prefix, "suffix":suffix}}]),
+                json!([{"id":"child", "use":"task", "prompt":format!("{prefix}${{item}}"), "over":[suffix]}]),
+            ] {
+                let patch = json!({"schema_version":1,
+            "templates":{"joined":{"brief":"${prefix}${suffix}", "parameters":{
+                "prefix":{"type":"string"}, "suffix":{"type":"string"}
+            }}},
+            "nodes": nodes});
+                assert!(!patch.to_string().contains(&secret));
+                let (document, mut checkpoint) = running_graph();
+                let before = checkpoint.clone();
+                let error = admit_with(
+                    &document,
+                    &mut checkpoint,
+                    None,
+                    patch.clone(),
+                    &patch::scan_for_secrets,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("secret pattern"), "{error}");
+                assert!(!error.to_string().contains(&secret));
+                assert_eq!(checkpoint, before, "live refusal is atomic");
+
+                let document = planner(8);
+                let output = format!("```fragment\n{patch}\n```");
+                let mut journal = MemoryJournal::default();
+                let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
+                assert_eq!(run.status, GraphStatus::Paused);
+                assert!(run.checkpoint.expansions.is_empty());
+                assert!(
+                    run.checkpoint.nodes[0]
+                        .outputs
+                        .as_ref()
+                        .unwrap()
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("secret pattern"))
+                );
+                assert!(
+                    !serde_json::to_string(&run.checkpoint)
+                        .unwrap()
+                        .contains(&secret)
+                );
+                let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
+                assert_eq!(
+                    replay.checkpoint, run.checkpoint,
+                    "stored refusal replays unchanged"
+                );
+            }
+        }
+    }
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
+    let prompt = "captured patch prompt AKIAIOSFODNN7EXAMPLE";
+    let doc = "captured template doc AKIAIOSFODNN7EXAMPLE";
+    let patch = json!({"schema_version":1,
+        "templates":{"probe":{"brief":"work", "doc":doc}},
+        "nodes":[{"id":"child","use":"probe","prompt":prompt}]});
+    let text = format!("```fragment\n{patch}\n```");
+    let document = planner(8);
+    let mut journal = MemoryJournal::default();
+    let mut limits = plans::generous();
+    limits.nodes = document.nodes.len();
+    let (run, calls) = prompt_text::trace(|| {
+        advance_with_budget(
+            &document,
+            &mut fixture_owner(&[&text]),
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap()
+    });
+    prompt_text::assert_once(&calls, prompt);
+    prompt_text::assert_once(&calls, doc);
+    let stored = run.checkpoint.nodes[0].fragment.as_ref().unwrap().clone();
+    assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"));
+    let (replayed, calls) = prompt_text::trace(|| {
+        resume_with_budget(
+            &document,
+            &mut fixture_owner(&[]),
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &[],
+        )
+        .unwrap()
+    });
+    assert!(calls.is_empty());
+    assert_eq!(
+        replayed.checkpoint.nodes[0].fragment.as_deref(),
+        Some(stored.as_str())
+    );
+}
+
 #[test]
 fn submit_compiles_a_patch_into_a_new_graph() {
     let library = TemplateLibrary::bundled();
@@ -3556,11 +3831,10 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
 #[test]
 fn continuation_fragment_resolves_the_host_review_panel() {
     let mut document = planner(8);
-    document.nodes[0].plan.as_mut().unwrap().resolvers =
-        std::collections::BTreeMap::from([(
-            "review-panel".to_owned(),
-            vec!["correctness".to_owned(), "tests".to_owned()],
-        )]);
+    document.nodes[0].plan.as_mut().unwrap().resolvers = std::collections::BTreeMap::from([(
+        "review-panel".to_owned(),
+        vec!["correctness".to_owned(), "tests".to_owned()],
+    )]);
     let output = result(vec![json!({
         "id":"delta", "use":"review", "over":"@review-panel",
         "with":{"lens":"${item}"}, "acceptance_checks":["Review the repair delta"]

@@ -379,6 +379,7 @@ pub(crate) fn publish_branch(
     base: GitOid,
     launch_ref: Option<&str>,
     head: GitOid,
+    _policy: &provenant_records::policy::Policy,
 ) -> Result<Ancestor> {
     let current = resolve_ref(git, repo, branch)?;
     // Fast-forward from the launch base or from later lane commits, but not

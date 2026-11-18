@@ -15,7 +15,7 @@ fn command_output_is_a_bounded_tail_with_an_exit_verdict() {
         (Some(0), true, "FAIL", OutcomeStatus::Partial),
         (None, false, "FAIL", OutcomeStatus::Failed),
     ] {
-        let mut state = adapter.stream(None).unwrap();
+        let mut state = adapter.stream(None, &provenant_records::policy::Policy::default()).unwrap();
         let bytes = [vec![b'x'; 100_000], b"\xff\nlast line".to_vec()].concat();
         for chunk in bytes.chunks(317) {
             assert!(adapter.observe(&mut state, chunk).unwrap().is_empty());
@@ -50,7 +50,7 @@ fn command_output_is_a_bounded_tail_with_an_exit_verdict() {
 #[test]
 fn command_output_cannot_supply_the_graph_verdict() {
     let adapter = &command::Command;
-    let mut state = adapter.stream(None).unwrap();
+    let mut state = adapter.stream(None, &provenant_records::policy::Policy::default()).unwrap();
     adapter
         .observe(&mut state, b"quoted vErDiCt: FAIL\nVERDICT: FAIL\n")
         .unwrap();
@@ -160,7 +160,7 @@ fn command_credentials_stay_denied_in_every_network_mode() {
     use provenant_confinement::permissions::{NetworkAccess, PathGrant, PathScope};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
-    let base = read_only_plan("/fixture", None);
+    let base = fixture_access_plan(Access::ReadOnly, None, false);
     let mut route = route("command", "");
     route.account_key = None;
     let prompt = Prompt::new("check".into());
@@ -248,7 +248,7 @@ fn command_credentials_stay_denied_in_every_network_mode() {
 
 #[test]
 fn command_runtimes_grant_exact_execution_only() {
-    let base = read_only_plan("/fixture", None);
+    let base = fixture_access_plan(Access::ReadOnly, None, false);
     let mut route = route("command", "");
     route.account_key = None;
     let prompt = Prompt::new("check".into());
@@ -983,7 +983,7 @@ fn replay(
     bytes: &str,
     exit: ExitObservation,
 ) -> Result<(Vec<ProviderEvent>, ProviderOutcome), ProviderError> {
-    let mut state = adapter.stream(None)?;
+    let mut state = adapter.stream(None, &provenant_records::policy::Policy::default())?;
     let mut events = Vec::new();
     // Split inside UTF-8 and JSON tokens, not just at event boundaries.
     for chunk in bytes.as_bytes().chunks(17) {
@@ -1038,7 +1038,7 @@ fn synthetic_and_api_error_messages_cannot_change_answering_identity() -> Result
         let message = format!(
             "{{\"type\":\"assistant\",\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"error\":{error},\"is_api_error_message\":{api_error},\"message\":{{\"role\":\"assistant\",\"model\":\"{model}\",\"content\":[]}}}}\n"
         );
-        let mut resumed = adapter.stream(Some(&continuation))?;
+        let mut resumed = adapter.stream(Some(&continuation), &provenant_records::policy::Policy::default())?;
         let events = adapter.observe(&mut resumed, message.as_bytes())?;
         assert!(
             !events

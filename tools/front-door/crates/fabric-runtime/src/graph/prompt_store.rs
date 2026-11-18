@@ -42,6 +42,8 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                                 | "fragment"
                                 | "excerpt"
                                 | "_artifact_findings"
+                                | "full_artifact_findings"
+                                | "full_disposition_findings"
                         ) || text.len() > 4096)
                 }) {
                     found.push(path);
@@ -89,19 +91,8 @@ pub(super) fn compacted_len<T: serde::Serialize>(value: &T) -> usize {
     canonical_len(&value).saturating_add(prefix_reserve)
 }
 
-/// The prompt as it is persisted: the same known credential shapes that capture
-/// redacts. Redaction runs before the digest, so the stored bytes and their
-/// digest agree.
-fn redact(prompt: &str) -> Result<String, JournalError> {
-    let safe = provenant_confinement::redact::known_shapes(prompt.as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "prompt redaction failed")
-    })?;
-    String::from_utf8(safe)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
-}
-
-/// Move graph briefs, final blocks and excerpts into the store, redacted. Blobs are durable
-/// before the checkpoint that names them is published.
+/// Move normalised graph text into durable blobs without changing its bytes.
+/// Blobs are durable before the checkpoint that names them is published.
 pub(super) fn externalise(
     directory: &Directory,
     id: &str,
@@ -113,7 +104,7 @@ pub(super) fn externalise(
     let mut references = serde_json::Map::new();
     for path in paths {
         let text = value.pointer_mut(&path).ok_or(JournalError::BadEnvelope)?;
-        let prompt = redact(text.as_str().ok_or(JournalError::BadEnvelope)?)?;
+        let prompt = text.as_str().ok_or(JournalError::BadEnvelope)?;
         let digest = hex(prompt.as_bytes());
         let name: OsString = format!("{}{digest}", prefix(id)).into();
         if directory.metadata_at(&name, false).is_err() {
@@ -230,13 +221,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn stored_prompts_are_redacted_before_their_digest_is_taken() {
+    fn stored_prompts_preserve_normalised_bytes_and_digest() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let mut value = json!({"execution": {"document": {"nodes": [
             {"id": "a", "prompt": format!("deploy with {secret} now")}
         ]}}});
+        value = prompt_text::normalise(&value, prompt_text::Context::Content).unwrap();
         externalise(&directory, "g", &mut value).unwrap();
         let digest = value[STORED_TEXT]["/execution/document/nodes/0/prompt"]
             .as_str()

@@ -3,7 +3,10 @@ use super::{
     MandatoryRoots, PathGrant, PathScope, PermissionError, profile_path_representable,
     resolve_boundary_path,
 };
-use provenant_core::{CredentialKind, CredentialRoot, CredentialScope, Roots};
+use provenant_core::{
+    CredentialDeclaration, CredentialInventory, CredentialKind, CredentialRoot, CredentialScope,
+    Roots,
+};
 use provenant_os::fs::Directory;
 use std::{
     ffi::{OsStr, OsString},
@@ -11,58 +14,99 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Concrete dedicated roots for host callers that do not narrow shared stores.
 pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<CredentialRoot> {
+    host_credential_declarations(lookup)
+        .into_iter()
+        .map(|declaration| declaration.root)
+        .collect()
+}
+
+pub fn host_credential_declarations(
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Vec<CredentialDeclaration> {
     let mut roots = Vec::new();
-    for name in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"] {
+    for (name, inventory) in [
+        ("CODEX_HOME", CredentialInventory::Adapter("codex".into())),
+        (
+            "CLAUDE_CONFIG_DIR",
+            CredentialInventory::Adapter("claude".into()),
+        ),
+        ("GH_CONFIG_DIR", CredentialDeclaration::github_inventory()),
+    ] {
         if let Some(path) = lookup(name) {
-            roots.push(CredentialRoot {
-                path: PathBuf::from(path),
-                scope: CredentialScope::Subtree,
-                source: format!("provider environment: {name}"),
-                kind: CredentialKind::Store,
+            roots.push(CredentialDeclaration {
+                inventory,
+                root: CredentialRoot {
+                    path: PathBuf::from(path),
+                    scope: CredentialScope::Subtree,
+                    source: format!("provider environment: {name}"),
+                    kind: CredentialKind::Store,
+                },
             });
         }
     }
     if let Some(directory) = lookup("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
-        roots.push(CredentialRoot {
-            path: directory.with_extension("json"),
-            scope: CredentialScope::Exact,
-            source: "provider environment: CLAUDE_CONFIG_DIR credential file".into(),
-            kind: CredentialKind::Store,
+        roots.push(CredentialDeclaration {
+            inventory: CredentialInventory::Unknown,
+            root: CredentialRoot {
+                path: directory.with_extension("json"),
+                scope: CredentialScope::Exact,
+                source: "provider environment: CLAUDE_CONFIG_DIR credential file".into(),
+                kind: CredentialKind::Store,
+            },
         });
     }
     if let Some(config) = lookup("XDG_CONFIG_HOME").map(PathBuf::from) {
         roots.extend(
-            ["gh", "gcloud", "cursor", "opencode"].map(|name| CredentialRoot {
-                path: config.join(name),
-                scope: CredentialScope::Subtree,
-                source: format!("provider environment: XDG_CONFIG_HOME/{name}"),
-                kind: CredentialKind::Store,
+            [
+                ("gh", CredentialDeclaration::github_inventory()),
+                ("gcloud", CredentialInventory::Unknown),
+                ("cursor", CredentialInventory::Adapter("cursor".into())),
+                ("opencode", CredentialInventory::Adapter("opencode".into())),
+            ]
+            .map(|(name, inventory)| CredentialDeclaration {
+                inventory,
+                root: CredentialRoot {
+                    path: config.join(name),
+                    scope: CredentialScope::Subtree,
+                    source: format!("provider environment: XDG_CONFIG_HOME/{name}"),
+                    kind: CredentialKind::Store,
+                },
             }),
         );
     }
     if let Some(data) = lookup("XDG_DATA_HOME").map(PathBuf::from) {
-        roots.push(CredentialRoot {
-            path: data.join("opencode"),
-            scope: CredentialScope::Subtree,
-            source: "provider environment: XDG_DATA_HOME/opencode".into(),
-            kind: CredentialKind::Store,
+        roots.push(CredentialDeclaration {
+            inventory: CredentialInventory::Adapter("opencode".into()),
+            root: CredentialRoot {
+                path: data.join("opencode"),
+                scope: CredentialScope::Subtree,
+                source: "provider environment: XDG_DATA_HOME/opencode".into(),
+                kind: CredentialKind::Store,
+            },
         });
     }
     if let Some(directory) = lookup("ZDOTDIR").map(PathBuf::from) {
-        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| CredentialRoot {
-            path: directory.join(name),
-            scope: CredentialScope::Exact,
-            source: "host environment: ZDOTDIR shell startup".into(),
-            kind: CredentialKind::Store,
+        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| CredentialDeclaration {
+            inventory: CredentialInventory::Unknown,
+            root: CredentialRoot {
+                path: directory.join(name),
+                scope: CredentialScope::Exact,
+                source: "host environment: ZDOTDIR shell startup".into(),
+                kind: CredentialKind::Store,
+            },
         }));
     }
     if let Some(socket) = lookup("SSH_AUTH_SOCK").map(PathBuf::from) {
-        roots.push(CredentialRoot {
-            path: socket,
-            scope: CredentialScope::Exact,
-            source: "host environment: SSH_AUTH_SOCK".into(),
-            kind: CredentialKind::Store,
+        roots.push(CredentialDeclaration {
+            inventory: CredentialInventory::Unknown,
+            root: CredentialRoot {
+                path: socket,
+                scope: CredentialScope::Exact,
+                source: "host environment: SSH_AUTH_SOCK".into(),
+                kind: CredentialKind::Store,
+            },
         });
     }
     // A relative CARGO_HOME resolves against the host cwd, as Cargo does.
@@ -70,18 +114,19 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<C
         .filter(|value| !value.is_empty())
         .and_then(|value| std::path::absolute(PathBuf::from(value)).ok())
     {
-        roots.extend(
-            provenant_core::CARGO_CREDENTIAL_FILES
-                .iter()
-                .map(|name| CredentialRoot {
+        roots.extend(provenant_core::CARGO_CREDENTIAL_FILES.iter().map(|name| {
+            CredentialDeclaration {
+                inventory: CredentialInventory::Unknown,
+                root: CredentialRoot {
                     path: path.join(name),
                     scope: CredentialScope::Exact,
                     source: "host environment: CARGO_HOME credentials".into(),
                     kind: CredentialKind::Store,
-                }),
-        );
+                },
+            }
+        }));
     }
-    roots.retain(|root| root.path.is_absolute());
+    roots.retain(|root| root.root.path.is_absolute());
     roots
 }
 
@@ -139,7 +184,6 @@ struct InventorySummary {
     unresolved_paths: std::collections::BTreeSet<PathBuf>,
     depth: std::collections::BTreeMap<PathBuf, usize>,
     entries: std::collections::BTreeMap<PathBuf, usize>,
-    outside_home: std::collections::BTreeMap<PathBuf, usize>,
     unrepresentable: std::collections::BTreeMap<PathBuf, usize>,
     inspection: std::collections::BTreeMap<PathBuf, usize>,
     covering_work: std::collections::BTreeMap<PathBuf, usize>,
@@ -163,10 +207,6 @@ impl InventorySummary {
         let mut details = Vec::new();
         for (label, counts) in [
             ("cannot resolve credential symlink", &self.unresolved),
-            (
-                "skipping credential symlink directory outside home",
-                &self.outside_home,
-            ),
             (
                 "cannot represent credential symlink target",
                 &self.unrepresentable,
@@ -224,7 +264,7 @@ impl InventorySummary {
 #[allow(clippy::too_many_arguments)]
 fn inventory_links(
     mandatory: &mut MandatoryRoots,
-    root: &PathGrant,
+    root: &super::DenialRoot,
     home: &Path,
     source: &Path,
     scratch: &Path,
@@ -263,6 +303,14 @@ fn inventory_links(
                 continue;
             };
             let path = entry.path();
+            if mandatory
+                .credential_roots()
+                .lane_roots()
+                .iter()
+                .any(|lane| path.starts_with(lane))
+            {
+                continue;
+            }
             if kind.is_symlink() {
                 let (Ok(target), Ok(metadata)) =
                     (resolve_boundary_path(&path), std::fs::metadata(&path))
@@ -270,6 +318,37 @@ fn inventory_links(
                     summary.record_unresolved(&root.path, &path);
                     continue;
                 };
+                if metadata.is_dir()
+                    && !target.starts_with(home)
+                    && mandatory
+                        .credential_roots()
+                        .lane_roots()
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .chain([source, scratch])
+                        .any(|lane| lane.starts_with(&target) || target.starts_with(lane))
+                {
+                    return Err(PermissionError::credential_root_at(
+                        &target,
+                        None,
+                        format!(
+                            "credential directory link {} under {}",
+                            path.display(),
+                            root.path.display()
+                        ),
+                    ));
+                }
+                // Declared credential endpoints resolving into a lane already
+                // refused during classification. An undeclared link to ordinary
+                // lane data must not turn that target into a credential denial.
+                if mandatory
+                    .credential_roots()
+                    .lane_roots()
+                    .iter()
+                    .any(|lane| target.starts_with(lane))
+                {
+                    continue;
+                }
                 let scope = if metadata.is_dir() {
                     PathScope::Subtree
                 } else {
@@ -289,10 +368,6 @@ fn inventory_links(
                 {
                     continue;
                 }
-                if scope == PathScope::Subtree && !target.starts_with(home) {
-                    InventorySummary::record(&mut summary.outside_home, &root.path);
-                    continue;
-                }
                 if scope == PathScope::Subtree
                     && (source.starts_with(&target) || scratch.starts_with(&target))
                 {
@@ -301,24 +376,50 @@ fn inventory_links(
                 }
                 if !profile_path_representable(&path)
                     || !profile_path_representable(&target)
-                    || (PathGrant {
+                    || (super::DenialRoot {
                         path: target.clone(),
                         scope,
                     })
                     .validate()
                     .is_err()
-                    || (PathGrant {
+                    || (super::DenialRoot {
                         path: path.clone(),
                         scope,
                     })
                     .validate()
                     .is_err()
                 {
+                    if scope == PathScope::Subtree && !target.starts_with(home) {
+                        return Err(PermissionError::credential_root_at(
+                            &target,
+                            None,
+                            format!(
+                                "unrepresentable credential directory link {} under {}",
+                                path.display(),
+                                root.path.display()
+                            ),
+                        ));
+                    }
                     InventorySummary::record(&mut summary.unrepresentable, &root.path);
                     continue;
                 }
-                for path in [path, target] {
-                    mandatory.add_credentials_alias(root, PathGrant { path, scope })?;
+                if scope == PathScope::Subtree && !target.starts_with(home) {
+                    let origin = format!(
+                        "credential directory link {} under {}",
+                        path.display(),
+                        root.path.display()
+                    );
+                    for path in [path, target] {
+                        mandatory.add_declared_credential(
+                            PathGrant { path, scope },
+                            &origin,
+                            CredentialKind::Store,
+                        )?;
+                    }
+                } else {
+                    for path in [path, target] {
+                        mandatory.add_credentials_alias(root, PathGrant { path, scope })?;
+                    }
                 }
             } else if kind.is_dir() {
                 // OpenCode keeps session data here, separately from its root
@@ -361,7 +462,9 @@ impl MandatoryRoots {
             roots,
             home,
             source,
-            roots.state.as_path(),
+            // Without an explicit scratch root, only source is lane work.
+            // Host state is protected separately and may contain installed skills.
+            source,
             credentials,
             github,
             protected,
@@ -378,12 +481,16 @@ impl MandatoryRoots {
         github: &[PathGrant],
         protected: &[PathGrant],
     ) -> Result<Self, PermissionError> {
+        let mut declarations = roots.credential_roots().clone();
+        for root in credentials {
+            declarations.add_entry(root.clone());
+        }
         Self::for_host_with_scratch_mode(
             roots,
             home,
             source,
             scratch,
-            credentials,
+            &declarations,
             github,
             protected,
             true,
@@ -398,7 +505,7 @@ impl MandatoryRoots {
         home: &Path,
         source: &Path,
         scratch: &Path,
-        credentials: &[CredentialRoot],
+        credentials: &provenant_core::CredentialRoots,
         github: &[PathGrant],
         protected: &[PathGrant],
         sandboxed: bool,
@@ -408,32 +515,7 @@ impl MandatoryRoots {
             scope: PathScope::Subtree,
         };
         let mut mandatory = Self::new(home, roots.state.as_path(), source)?;
-        mandatory.credential_roots = roots.credential_roots().clone();
-        mandatory.credentials = mandatory
-            .credential_roots
-            .entries()
-            .iter()
-            .map(|root| PathGrant {
-                path: root.path.clone(),
-                scope: match root.scope {
-                    CredentialScope::Exact => PathScope::Exact,
-                    CredentialScope::Subtree => PathScope::Subtree,
-                },
-            })
-            .collect();
-        for root in credentials {
-            mandatory.add_declared_credential(
-                PathGrant {
-                    path: root.path.clone(),
-                    scope: match root.scope {
-                        CredentialScope::Exact => PathScope::Exact,
-                        CredentialScope::Subtree => PathScope::Subtree,
-                    },
-                },
-                root.source.clone(),
-                root.kind.clone(),
-            )?;
-        }
+        mandatory.set_credential_roots(credentials.clone())?;
         for path in SYSTEM_SHELL_STARTUP
             .iter()
             .map(PathBuf::from)
@@ -515,7 +597,7 @@ impl MandatoryRoots {
                         if target != path
                             && (!profile_path_representable(&path)
                                 || !profile_path_representable(&target)
-                                || (PathGrant {
+                                || (super::DenialRoot {
                                     path: target.clone(),
                                     scope: PathScope::Exact,
                                 })
@@ -675,7 +757,7 @@ mod tests {
                 path: cargo.join(name),
                 scope: PathScope::Exact,
             };
-            assert!(mandatory.credentials().contains(&credential));
+            assert!(mandatory.credentials().contains(&credential.clone().into()));
             assert_eq!(
                 mandatory
                     .validate_extra_write(&credential)
@@ -722,18 +804,21 @@ mod tests {
                 &home,
                 &root.join("source"),
                 &root.join("scratch"),
-                &[],
+                &provenant_core::CredentialRoots::for_home(&home),
                 &[],
                 &[],
                 sandboxed,
             )?;
-            assert_eq!(inventory.credentials().contains(&alias), sandboxed);
+            assert_eq!(
+                inventory.credentials().contains(&alias.clone().into()),
+                sandboxed
+            );
         }
         Ok(())
     }
 
     #[test]
-    fn inventory_finds_dotfiles_links_and_skips_lane_directories()
+    fn inventory_finds_dotfiles_links_and_refuses_external_lane_directories()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
@@ -752,9 +837,29 @@ mod tests {
         let hidden = root.join("not-followed");
         std::fs::write(&hidden, b"fixture")?;
         std::os::unix::fs::symlink(&hidden, dotfiles.join("keys/nested"))?;
-        std::os::unix::fs::symlink(root.join("source"), store.join("source"))?;
-        std::os::unix::fs::symlink(root.join("source"), store.join("auth.json"))?;
-        std::os::unix::fs::symlink(&scratch, store.join("scratch"))?;
+        // A directory link outside HOME overlapping lane authority refuses,
+        // whether or not its name is a declared credential endpoint.
+        for (target, name) in [
+            (root.join("source"), "source"),
+            (root.join("source"), "auth.json"),
+            (scratch.clone(), "scratch"),
+        ] {
+            let link = store.join(name);
+            std::os::unix::fs::symlink(&target, &link)?;
+            assert!(matches!(
+                MandatoryRoots::for_host_with_scratch(
+                    &roots,
+                    &home,
+                    &root.join("source"),
+                    &scratch,
+                    &[],
+                    &[],
+                    &[]
+                ),
+                Err(PermissionError::CredentialRootAt { .. })
+            ));
+            std::fs::remove_file(link)?;
+        }
         let inventory = MandatoryRoots::for_host_with_scratch(
             &roots,
             &home,
@@ -768,7 +873,11 @@ mod tests {
             (key, PathScope::Exact),
             (dotfiles.join("keys"), PathScope::Subtree),
         ] {
-            assert!(inventory.credentials().contains(&PathGrant { path, scope }));
+            assert!(
+                inventory
+                    .credentials()
+                    .contains(&(PathGrant { path, scope }).into())
+            );
         }
         for path in [root.join("source"), scratch] {
             assert!(
@@ -818,7 +927,9 @@ mod tests {
             PathBuf::from("/etc/profile"),
         ] {
             assert!(
-                inventory.credentials().contains(&exact(path.clone())),
+                inventory
+                    .credentials()
+                    .contains(&(exact(path.clone())).into()),
                 "{}",
                 path.display()
             );
@@ -858,7 +969,7 @@ mod tests {
             };
             inventory_links(
                 &mut mandatory,
-                &grant,
+                &super::super::DenialRoot::from(&grant),
                 &home,
                 &base.join("source"),
                 &base.join("scratch"),
@@ -870,10 +981,15 @@ mod tests {
         assert_eq!(summary.unresolved.get(&home.join("second")), Some(&2));
         assert_eq!(summary.depth.get(&home.join("first")), Some(&1));
         assert_eq!(summary.depth.get(&home.join("second")), Some(&1));
-        assert!(mandatory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            mandatory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
         inventory_summarises_skipped_links_and_inspection_failures()?;
         inventory_summarises_directory_inspection_errors()?;
         Ok(())
@@ -902,7 +1018,7 @@ mod tests {
             }
             inventory_links(
                 &mut mandatory,
-                &PathGrant {
+                &super::super::DenialRoot {
                     path: store,
                     scope: PathScope::Subtree,
                 },
@@ -912,7 +1028,12 @@ mod tests {
                 &mut summary,
             )?;
         }
-        assert!(!summary.outside_home.is_empty());
+        assert!(
+            mandatory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == outside && grant.scope == PathScope::Subtree)
+        );
         assert!(!summary.unrepresentable.is_empty());
         assert!(!summary.inspection.is_empty());
         assert!(!summary.covering_work.is_empty());
@@ -920,7 +1041,7 @@ mod tests {
             !mandatory
                 .credentials()
                 .iter()
-                .any(|grant| grant.path == target || grant.path == outside)
+                .any(|grant| grant.path == target)
         );
         Ok(())
     }
@@ -934,7 +1055,7 @@ mod tests {
         // overlong component; create it so both platforms reach that error.
         std::fs::create_dir(&home)?;
         let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
-        let root = PathGrant {
+        let root = super::super::DenialRoot {
             path: home.join("x".repeat(1024)),
             scope: PathScope::Subtree,
         };
@@ -1000,7 +1121,7 @@ mod tests {
         let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
-            &PathGrant {
+            &super::super::DenialRoot {
                 path: store,
                 scope: PathScope::Subtree,
             },
@@ -1016,10 +1137,15 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&warnings)
         );
-        assert!(mandatory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            mandatory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
         Ok(())
     }
 
@@ -1043,10 +1169,15 @@ mod tests {
             &[],
             &[],
         )?;
-        assert!(inventory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact,
-        }));
+        assert!(
+            inventory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact,
+                })
+                .into()
+            )
+        );
         Ok(())
     }
 
@@ -1082,7 +1213,7 @@ mod tests {
         let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
-            &huge,
+            &super::super::DenialRoot::from(&huge),
             &home,
             &root.join("source"),
             &root.join("scratch"),
@@ -1103,10 +1234,15 @@ mod tests {
             &[],
             &[],
         )?;
-        assert!(inventory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            inventory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
         assert!(
             !inventory
                 .credentials()
@@ -1144,7 +1280,7 @@ mod tests {
         };
         inventory_links(
             &mut mandatory,
-            &grant,
+            &super::super::DenialRoot::from(&grant),
             &root.join("home"),
             &root.join("source"),
             &root.join("scratch"),
@@ -1206,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_skips_unrepresentable_links_and_external_directories()
+    fn inventory_denies_external_directories_and_skips_unrepresentable_links()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::ffi::OsStringExt;
 
@@ -1242,9 +1378,6 @@ mod tests {
             &bad_target,
             &store.join("bad-target"),
             &store.join("auth.json"),
-            &external_dir,
-            &store.join("external-dir"),
-            &store.join("config.yml"),
             &store.join("hosts.yml"),
         ] {
             assert!(
@@ -1256,7 +1389,13 @@ mod tests {
                 path.display()
             );
         }
-        for path in [&external_file, &internal_dir] {
+        for path in [
+            &external_file,
+            &internal_dir,
+            &external_dir,
+            &store.join("external-dir"),
+            &store.join("config.yml"),
+        ] {
             assert!(
                 inventory
                     .credentials()
@@ -1317,7 +1456,7 @@ mod tests {
             std::os::unix::fs::symlink(&target, &endpoint)?;
             let inventory =
                 MandatoryRoots::for_host(&roots, &home, &root.join("source"), &[], &[], &[])?;
-            assert!(inventory.credentials().contains(&exact(target)));
+            assert!(inventory.credentials().contains(&(exact(target)).into()));
             assert!(
                 inventory
                     .credential_alias_reads(&[exact(endpoint.clone())])
@@ -1350,7 +1489,11 @@ mod tests {
             path,
             scope: PathScope::Exact,
         };
-        assert!(inventory.credentials().contains(&exact(target.clone())));
+        assert!(
+            inventory
+                .credentials()
+                .contains(&(exact(target.clone())).into())
+        );
         assert_eq!(
             inventory.credential_alias_reads(&[exact(endpoint)]),
             vec![exact(target)]
@@ -1433,7 +1576,7 @@ mod tests {
         )?;
         for ((store, endpoint), target) in endpoints.iter().zip(&targets) {
             assert!(
-                inventory.credentials().contains(target),
+                inventory.credentials().contains(&target.clone().into()),
                 "missing target for {endpoint}"
             );
             assert!(
@@ -1450,7 +1593,7 @@ mod tests {
                 Err(provenant_records::diagnostic::BoundaryClass::Credentials)
             );
         }
-        assert!(inventory.github().contains(&targets[8]));
+        assert!(!inventory.github().contains(&targets[8]));
         assert!(inventory.non_exempt().contains(&targets[9]));
         assert!(!inventory.non_exempt().contains(&targets[1]));
         #[cfg(target_os = "macos")]

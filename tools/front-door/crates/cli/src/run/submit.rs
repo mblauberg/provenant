@@ -593,7 +593,12 @@ fn submit_with_launcher(
     refusal: run::RefusalContext,
     launch: impl FnOnce(&run::AttemptRecord, bool) -> Result<Vec<run::Started>, Fail>,
 ) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
-    let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
+    let project_policy = provenant_config::policy::read(
+        edge.roots.state.as_path(),
+        &session.context.project_id.to_string(),
+        &Default::default(),
+    );
+    let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots, &project_policy)?;
     let config = crate::config_reads::read_for(edge.roots, "run")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
     let profile = match &submission.task.attempt.sealed_profile {

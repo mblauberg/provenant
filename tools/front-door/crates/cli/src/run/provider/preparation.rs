@@ -2741,7 +2741,15 @@ pub(super) fn prepare_candidates(
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.unique_accounts();
-    let credential_roots = credential_roots(registry, &home, &settings)?;
+    let cargo_cache = writer
+        .as_ref()
+        .map(|writer| {
+            provenant_confinement::permissions::worktree_cargo_cache_path(&home, &writer.worktree)
+        })
+        .transpose()?;
+    let mut lane_roots = vec![source.as_path(), cwd.as_path(), paths.scratch.as_path()];
+    lane_roots.extend(cargo_cache.as_deref());
+    let credential_roots = credential_roots(registry, &home, &settings, &lane_roots)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
@@ -3547,7 +3555,8 @@ pub(super) fn prepare_candidates(
             reasons.push(name_skipped_accounts(skipped, &route, &entries));
             continue;
         }
-        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
+        if let Err(error) =
+            crate::route::check_dispatch_candidate(roots, &route, provider_registry, &launch_policy)
         {
             // Admission refuses an account whose allowance is spent. Another
             // account may still serve the same model, so move on to it once per
@@ -3797,14 +3806,13 @@ pub(super) fn prepare_candidates(
         };
         let text = format!(
             "{}\n{text}",
-            run::lane_preamble_with_policy(
+            run::lane_preamble_with(
                 &model_policy.guidance(),
                 &limits,
                 writer
                     .is_some()
                     .then(|| run::ResolvedCiScope::resolve(&task.profile)),
                 writable_handoff.then_some(handoff.as_path()),
-                &launch_policy,
                 &extras,
             )
         );
@@ -5656,9 +5664,20 @@ mod route_launch_boundary_regressions {
 
         let mut settings = provenant_providers::accounts::Settings::default();
         settings.entries.insert("work".into(), registered.clone());
-        let roots = credential_roots(&Registry::default(), &home, &settings)?;
+        let roots = credential_roots(&Registry::default(), &home, &settings, &[])?;
+        // Dedicated stores protect every file, including undeclared siblings;
+        // inventories are used only to reject credentials inside lane roots.
+        for relative in ["state.vscdb", "state.vscdb-wal", "unlisted"] {
+            assert!(roots.refuses(
+                &registered.directory.join(relative),
+                provenant_core::CredentialScope::Exact,
+                true
+            ));
+        }
         assert!(roots.entries().iter().any(|root| {
-            root.source == "account registry: agy/work" && root.path == registered.directory
+            root.source.starts_with("account registry: agy/work")
+                && root.path == registered.directory
+                && root.scope == provenant_core::CredentialScope::Subtree
         }));
         assert!(
             !roots

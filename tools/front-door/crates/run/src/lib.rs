@@ -6,7 +6,7 @@ mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with_policy,
+    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
     sanitise_handoff, sanitise_handoff_result,
 };
 mod verification;
@@ -111,7 +111,11 @@ pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;
 
 /// Return the depth of the run being dispatched under this lane.
-pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
+pub fn next_lane_depth(
+    parent_depth: u64,
+    max_depth: u64,
+    _policy: &provenant_records::policy::Policy,
+) -> Result<u64> {
     let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;
     if depth > max_depth {
         return Err(RunError::DepthExceeded { depth, max_depth });

@@ -1,0 +1,26 @@
+### Report
+
+#### 1. Workspace Version
+In [Cargo.toml](file:///Users/user/Repos/provenant/tools/front-door/Cargo.toml#L66-L68), the version is **`2.0.5`** (with member crates in `crates/*` also at version `2.0.5`).
+
+#### 2. Number of Bullets Per Section
+In [v2.0.5.md](file:///Users/user/Repos/provenant/docs/release-notes/v2.0.5.md#L7-L25):
+- **Breaking changes**: 1 bullet ([L9](file:///Users/user/Repos/provenant/docs/release-notes/v2.0.5.md#L9))
+- **Behaviour changes**: 3 bullets ([L13-L15](file:///Users/user/Repos/provenant/docs/release-notes/v2.0.5.md#L13-L15))
+- **Fixes**: 6 bullets ([L19-L24](file:///Users/user/Repos/provenant/docs/release-notes/v2.0.5.md#L19-L24))
+
+Total: 10 bullets across 3 sections.
+
+```handoff
+{
+  "schema_version": 2,
+  "status": "done",
+  "note": "Read tools/front-door/Cargo.toml and docs/release-notes/v2.0.5.md; identified workspace version as 2.0.5 and counted bullets per section in release notes.",
+  "remaining": [],
+  "decisions": [],
+  "verify": [
+    "tools/front-door/Cargo.toml inspected: package version is 2.0.5 and crate members are version 2.0.5",
+    "docs/release-notes/v2.0.5.md inspected: Breaking changes (1 bullet), Behaviour changes (3 bullets), Fixes (6 bullets)"
+  ]
+}
+```

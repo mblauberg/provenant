@@ -342,10 +342,16 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
 }
 #[test]
 fn nested_lane_depth_stops_at_the_configured_maximum() {
-    assert!(matches!(next_lane_depth(0, 2), Ok(1)));
-    assert!(matches!(next_lane_depth(1, 2), Ok(2)));
     assert!(matches!(
-        next_lane_depth(2, 2),
+        next_lane_depth(0, 2, &provenant_records::policy::Policy::default()),
+        Ok(1)
+    ));
+    assert!(matches!(
+        next_lane_depth(1, 2, &provenant_records::policy::Policy::default()),
+        Ok(2)
+    ));
+    assert!(matches!(
+        next_lane_depth(2, 2, &provenant_records::policy::Policy::default()),
         Err(RunError::DepthExceeded {
             depth: 3,
             max_depth: 2

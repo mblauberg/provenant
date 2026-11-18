@@ -807,7 +807,7 @@ pub struct BuildSlotGate<'a> {
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
     /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
-    /// refuses the rest; see the `lanes.local_cargo` knob.
+    /// warns on the rest; see the `lanes.local_cargo` knob.
     pub local_cargo: &'a str,
 }
 
@@ -2435,7 +2435,11 @@ mod tests {
                 spec: ProviderProfileSpec::default(),
                 observations: Default::default(),
             },
-            stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
+            stream: crate::StreamState::new(
+                "claude",
+                |_| Ok(Vec::new()),
+                &provenant_records::policy::Policy::default(),
+            ),
         }
     }
 

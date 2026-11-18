@@ -73,6 +73,20 @@ collected name is not allocated to a later graph.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`,
   `src/fabric/interface.rs`
 
+### Graph checkpoints cover persisted text
+
+Graph admission normalises prompt text before planning or digesting; result
+and patch ingress use the same normal form. `FileJournal` hashes that typed
+checkpoint and execution, externalises text without changing its bytes, and
+validates the reconstructed result before atomic publication. Landing review queries retain valid settlements while reporting
+unreadable graph sources by graph ID. Readers of an atomic checkpoint see one
+complete published record. Every corrupt checkpoint stays visible as unreadable
+through status and each tick, with its graph ID. Pending-index recovery never
+uses unverified lifecycle fields to classify a corrupt record as settled.
+- Why: stored text must verify on reload, and one damaged graph must not hide
+  independent review evidence in another.
+- Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
+
 ## SQLite stores
 
 ### A format major permits additive evolution
