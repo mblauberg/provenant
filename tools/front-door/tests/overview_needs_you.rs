@@ -1,5 +1,5 @@
 //! The local overview is a compact, app-independent read of attention.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, code};
 

@@ -15,7 +15,9 @@ fn command_output_is_a_bounded_tail_with_an_exit_verdict() {
         (Some(0), true, "FAIL", OutcomeStatus::Partial),
         (None, false, "FAIL", OutcomeStatus::Failed),
     ] {
-        let mut state = adapter.stream(None, &provenant_records::policy::Policy::default()).unwrap();
+        let mut state = adapter
+            .stream(None, &provenant_records::policy::Policy::default())
+            .unwrap();
         let bytes = [vec![b'x'; 100_000], b"\xff\nlast line".to_vec()].concat();
         for chunk in bytes.chunks(317) {
             assert!(adapter.observe(&mut state, chunk).unwrap().is_empty());
@@ -50,7 +52,9 @@ fn command_output_is_a_bounded_tail_with_an_exit_verdict() {
 #[test]
 fn command_output_cannot_supply_the_graph_verdict() {
     let adapter = &command::Command;
-    let mut state = adapter.stream(None, &provenant_records::policy::Policy::default()).unwrap();
+    let mut state = adapter
+        .stream(None, &provenant_records::policy::Policy::default())
+        .unwrap();
     adapter
         .observe(&mut state, b"quoted vErDiCt: FAIL\nVERDICT: FAIL\n")
         .unwrap();
@@ -570,83 +574,86 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
     use std::path::PathBuf;
     use std::process::Command;
 
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let repo = root.join("repo café: '\"\\\nend");
+    let other = root.join("other");
+    let linked = root.join("linked");
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("Native Git is unavailable")?;
+    let host_git = |cwd: &Path, args: &[&std::ffi::OsStr]| {
+        let output = provenant_os::fixture::git_command_at(&git)
+            .current_dir(cwd)
+            .env_clear()
+            .envs(provenant_os::fixture::fixture_git_settings())
+            .env("TMPDIR", &root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{cwd:?} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    for dir in [&repo, &other] {
+        std::fs::create_dir(dir)?;
+        host_git(dir, &["init".as_ref(), "-q".as_ref()]);
+        host_git(
+            dir,
+            &[
+                "commit".as_ref(),
+                "--allow-empty".as_ref(),
+                "-qm".as_ref(),
+                dir.as_os_str(),
+            ],
+        );
+    }
+    host_git(
+        &repo,
+        &[
+            "-c".as_ref(),
+            "protocol.file.allow=always".as_ref(),
+            "submodule".as_ref(),
+            "add".as_ref(),
+            "-q".as_ref(),
+            other.as_os_str(),
+            "vendor/lib".as_ref(),
+        ],
+    );
+    host_git(
+        &repo,
+        &["commit".as_ref(), "-qam".as_ref(), "submodule".as_ref()],
+    );
+    host_git(
+        &repo,
+        &[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "-qb".as_ref(),
+            "linked".as_ref(),
+            linked.as_os_str(),
+        ],
+    );
+    host_git(
+        &repo,
+        &[
+            "remote".as_ref(),
+            "add".as_ref(),
+            "origin".as_ref(),
+            other.as_os_str(),
+        ],
+    );
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
             .is_some_and(|spec| spec.launch.write)
     }) {
         let id = entry.adapter.id();
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        let repo = root.join("repo café: '\"\\\nend");
-        let other = root.join("other");
-        let linked = root.join("linked");
-        let git = provenant_os::git::git_executable().ok_or("Git is unavailable on PATH")?;
-        let host_git = |cwd: &Path, args: &[&std::ffi::OsStr]| {
-            let output = provenant_os::fixture::git_command_at(&git)
-                .current_dir(cwd)
-                .env_clear()
-                .envs(provenant_os::fixture::fixture_git_settings())
-                .env("TMPDIR", &root)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{id}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            output.stdout
-        };
-        for dir in [&repo, &other] {
-            std::fs::create_dir(dir)?;
-            host_git(dir, &["init".as_ref(), "-q".as_ref()]);
-            host_git(
-                dir,
-                &[
-                    "commit".as_ref(),
-                    "--allow-empty".as_ref(),
-                    "-qm".as_ref(),
-                    dir.as_os_str(),
-                ],
-            );
-        }
-        host_git(
-            &repo,
-            &[
-                "-c".as_ref(),
-                "protocol.file.allow=always".as_ref(),
-                "submodule".as_ref(),
-                "add".as_ref(),
-                "-q".as_ref(),
-                other.as_os_str(),
-                "vendor/lib".as_ref(),
-            ],
-        );
-        host_git(
-            &repo,
-            &["commit".as_ref(), "-qam".as_ref(), "submodule".as_ref()],
-        );
-        host_git(
-            &repo,
-            &[
-                "worktree".as_ref(),
-                "add".as_ref(),
-                "-qb".as_ref(),
-                "linked".as_ref(),
-                linked.as_os_str(),
-            ],
-        );
-        host_git(
-            &repo,
-            &[
-                "remote".as_ref(),
-                "add".as_ref(),
-                "origin".as_ref(),
-                other.as_os_str(),
-            ],
-        );
-        let scratch = root.join("scratch");
-        let shared_git = root.join("shared-git");
+        // Share immutable repository/submodule setup; each adapter owns its
+        // scratch Git metadata, shared state and a distinct publishing ref.
+        let scratch = root.join(format!("scratch-{id}"));
+        let shared_git = root.join(format!("shared-git-{id}"));
+        let published = format!("refs/heads/published-{id}");
         let base = fixture_access_plan(
             access,
             provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
@@ -905,7 +912,8 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
         assert!(explicit_other.status.success());
         assert_eq!(explicit_other.stdout, other_head);
         if access == Access::ReadOnly {
-            std::fs::write(other.join("reader-upstream"), "fetched content")?;
+            let reader_content = format!("fetched content {id}");
+            std::fs::write(other.join("reader-upstream"), &reader_content)?;
             host_git(&other, &["add".as_ref(), "reader-upstream".as_ref()]);
             host_git(
                 &other,
@@ -958,7 +966,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             assert!(!repo.join(".git/refs/remotes/origin/reader").exists());
             assert_eq!(
                 lane_git(&["show".as_ref(), "FETCH_HEAD:reader-upstream".as_ref()]),
-                b"fetched content"
+                reader_content.as_bytes()
             );
         }
         let input = scratch.join("input");
@@ -993,7 +1001,8 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                 lane_git(&["log".as_ref(), "-1".as_ref(), "--format=%H".as_ref()]),
                 format!("{head}\n").as_bytes()
             );
-            std::fs::write(other.join("upstream-blob"), "fetched upstream blob")?;
+            let upstream_content = format!("fetched upstream blob {id}");
+            std::fs::write(other.join("upstream-blob"), &upstream_content)?;
             host_git(&other, &["add".as_ref(), "upstream-blob".as_ref()]);
             host_git(
                 &other,
@@ -1024,7 +1033,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             ]);
             assert_eq!(
                 std::fs::read(linked.join("upstream-blob"))?,
-                b"fetched upstream blob"
+                upstream_content.as_bytes()
             );
             lane_git(&[
                 "-c".as_ref(),
@@ -1032,20 +1041,17 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                 "push".as_ref(),
                 "--quiet".as_ref(),
                 "origin".as_ref(),
-                "HEAD:refs/heads/published".as_ref(),
+                format!("HEAD:{published}").as_ref(),
             ]);
             assert_eq!(
-                host_git(
-                    &other,
-                    &["rev-parse".as_ref(), "refs/heads/published".as_ref()]
-                ),
+                host_git(&other, &["rev-parse".as_ref(), published.as_ref()]),
                 lane_git(&["rev-parse".as_ref(), "HEAD".as_ref()]),
                 "{id} pushed merged head",
             );
             assert_eq!(
                 host_git(
                     &other,
-                    &["show".as_ref(), "refs/heads/published:lane-blob".as_ref()]
+                    &["show".as_ref(), format!("{published}:lane-blob").as_ref()]
                 ),
                 b"private committed blob",
                 "{id} pushed private blob",
@@ -1068,6 +1074,8 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                     "HEAD".as_ref(),
                 ],
             );
+            std::fs::remove_file(linked.join("lane-blob"))?;
+            std::fs::remove_file(linked.join("upstream-blob"))?;
         }
     }
     Ok(())
@@ -1146,7 +1154,10 @@ fn synthetic_and_api_error_messages_cannot_change_answering_identity() -> Result
         let message = format!(
             "{{\"type\":\"assistant\",\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"error\":{error},\"is_api_error_message\":{api_error},\"message\":{{\"role\":\"assistant\",\"model\":\"{model}\",\"content\":[]}}}}\n"
         );
-        let mut resumed = adapter.stream(Some(&continuation), &provenant_records::policy::Policy::default())?;
+        let mut resumed = adapter.stream(
+            Some(&continuation),
+            &provenant_records::policy::Policy::default(),
+        )?;
         let events = adapter.observe(&mut resumed, message.as_bytes())?;
         assert!(
             !events

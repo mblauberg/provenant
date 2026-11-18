@@ -159,7 +159,7 @@ impl RunStore {
 /// Redact decoded handoff values before a graph consumes local or peer output.
 pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
-        let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+        let safe = provenant_redact::known_shapes(text.as_bytes())
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
@@ -277,7 +277,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
         Err(error) => {
             let mut value = serde_json::json!(error);
             let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+                let safe = provenant_redact::known_shapes(text.as_bytes())
                     .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
                 String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
             });
@@ -307,6 +307,7 @@ pub struct BuildCap {
 pub struct PreambleExtras {
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
+    pub cargo_target: Option<crate::ResolvedCargoTarget>,
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
@@ -366,8 +367,13 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::VerificationResolution::paragraph)
                 .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
+            let cargo_target = extras
+                .cargo_target
+                .as_ref()
+                .map(crate::ResolvedCargoTarget::preamble)
+                .unwrap_or_else(|| crate::ResolvedCargoTarget::default().preamble());
             format!(
-                "{verification}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}",
+                "{verification}{cargo_target}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -417,10 +423,12 @@ mod tests {
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
         assert!(writer.contains("git commit -- <paths>"));
+        assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(!reader.contains("CI scope:"));
+        assert!(!reader.contains("Cargo target"));
         assert!(reader.contains("Progress handoff JSON:"));
         assert!(
             !lane_preamble("Model policy.", &Default::default(), None, None)
@@ -774,7 +782,7 @@ mod tests {
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
         handoff.note = note;
         let redact = |text: &str| {
-            let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+            let safe = provenant_redact::known_shapes(text.as_bytes())
                 .map_err(|_| RunError::Validation("redaction"))?;
             String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
         };

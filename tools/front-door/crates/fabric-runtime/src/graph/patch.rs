@@ -263,7 +263,7 @@ pub struct PatchContext<'a> {
 /// The confinement secret scan, as submission applies it.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
     // Scan the original bytes so redaction markers retain their token boundaries.
-    let filtered = provenant_confinement::redact::known_shapes(text.as_bytes())
+    let filtered = provenant_redact::known_shapes(text.as_bytes())
         .map_err(|_| "patch secret scan failed".to_owned())?;
     if filtered == text.as_bytes() {
         Ok(())

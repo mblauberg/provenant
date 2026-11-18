@@ -259,7 +259,7 @@ pub fn save_lane_owner_when_free(
     validate_binding(context)?;
     // Serialize only this worktree's owner-record CAS; its writer-custody guard
     // excludes concurrent owner publication while the record is saved.
-    let slot = writer_directory(context.project_state, worktree.path())?;
+    let slot = claim_writer_directory(context.project_state, worktree.path())?;
     let _owner = slot
         .lock(
             OsStr::new("owner.lock"),
@@ -276,8 +276,7 @@ pub fn save_lane_owner_when_free(
     if !tree.identity().same_identity(&worktree.identity()) {
         return Err(WorktreeError::IdentityChanged);
     }
-    let _writer =
-        cache_writer_guard(context.project_state, tree.path()).map_err(custody_refusal)?;
+    let _writer = claim_writer_guard(context, tree.path(), cancel)?;
     let branch = format!("refs/heads/{}", owner.branch);
     if !context
         .facts

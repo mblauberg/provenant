@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use serde_json::Value;
 use std::fs;
 use support::{Result, TestRig, code, register_account};

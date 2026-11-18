@@ -424,7 +424,7 @@ pub(super) fn dependency_preparation_event(
     match result {
         Ok(event) => Some(event),
         Err(error) => {
-            let warning = provenant_confinement::redact::bounded_line(
+            let warning = provenant_redact::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
@@ -584,7 +584,7 @@ fn prepare_writer_dependencies_with_policy(
 ) -> Result<serde_json::Value, String> {
     let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
     if let Err(error) = &result {
-        let detail = provenant_confinement::redact::bounded_line(
+        let detail = provenant_redact::bounded_line(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
@@ -3857,6 +3857,7 @@ pub(super) fn prepare_candidates_inner(
         );
         let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
         let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
@@ -3866,6 +3867,7 @@ pub(super) fn prepare_candidates_inner(
                 slots: lanes.build_limit(total),
                 source: lanes.build_limit_source(),
             }),
+            cargo_target: Some(cargo_target.clone()),
         };
         let text = format!(
             "{}\n{text}",
@@ -4056,6 +4058,27 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
+        let common_git_dir = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+            AccessMode::ReadOnly => None,
+        };
+        let private_cache = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
+            AccessMode::ReadOnly => &plan.permissions().scratch.path,
+        };
+        let (cargo_target_dir, cargo_target_lint) =
+            cargo_target.target_paths(&home, common_git_dir, private_cache);
+        // A shared or configured target lies outside the lane cache. Create it
+        // here so a sandboxed lane's grants can anchor to it; Cargo would
+        // create it itself only after the profile is fixed.
+        let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
+            .into_iter()
+            .filter(|path| !path.starts_with(private_cache))
+            .find_map(|path| {
+                std::fs::create_dir_all(path)
+                    .err()
+                    .map(|error| format!("cannot create Cargo target {}: {error}", path.display()))
+            });
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -4076,6 +4099,10 @@ pub(super) fn prepare_candidates_inner(
                         Some(sandbox.env_value().into())
                     } else if key == "PATH" {
                         Some(lane_path.path().to_os_string())
+                    } else if key == "CARGO_TARGET_DIR" || key == "CARGO_BUILD_BUILD_DIR" {
+                        Some(cargo_target_dir.as_os_str().to_os_string())
+                    } else if key == provenant_core::consumer_env::LANE_CARGO_LINT_TARGET {
+                        Some(cargo_target_lint.as_os_str().to_os_string())
                     } else {
                         host_provider_var(registry, key)
                     }
@@ -4496,6 +4523,9 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
         }
+        if let Some(warning) = &cargo_target_warning {
+            push_launch_warning(&mut route, warning.clone());
+        }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);
         }
@@ -4758,6 +4788,7 @@ pub(super) fn prepare_candidates_inner(
                 state_root: roots.state.as_path().to_path_buf(),
                 sandbox,
                 backend: None,
+                cargo_target: cargo_target.clone(),
             }),
         });
     }

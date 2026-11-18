@@ -1415,7 +1415,7 @@ pub(crate) fn fetch_missing_remote_branch(
 
 /// Bounded, sanitised Git stderr, shared by fetches and mutations.
 fn git_stderr_excerpt(bytes: &[u8]) -> String {
-    crate::redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
+    provenant_redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
 }
 
 /// Run a read for the release scan, where shallow boundaries must not hide

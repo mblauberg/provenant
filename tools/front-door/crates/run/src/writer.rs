@@ -1082,6 +1082,8 @@ pub struct LaunchConfinement {
     /// Bound once before sealing launch evidence; compilation uses this exact
     /// probed backend under writer custody, without a second selection.
     pub backend: Option<BoundSandboxBackend>,
+    /// Cargo target resolution mode and source.
+    pub cargo_target: crate::ResolvedCargoTarget,
 }
 /// A probed backend and the limits whose sources were sealed with it.
 pub struct BoundSandboxBackend {
@@ -1237,18 +1239,47 @@ impl LaunchConfinement {
         if cancel.is_cancelled() {
             return;
         }
-        let cache = match &self.plan.permissions().mode {
+        let common_git_dir = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+            AccessMode::ReadOnly => None,
+        };
+        let private_cache = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
         };
+        let (target, lint_target) =
+            self.cargo_target
+                .target_paths(&self.home, common_git_dir, private_cache);
         self.cargo_home
-            .lane_cargo_environment(&self.home, cache, environment);
+            .lane_cargo_environment_with_target(&self.home, &target, environment);
+        if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
+            environment
+                .retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
+            environment.push((
+                provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
+                lint_target.into_os_string(),
+            ));
+        }
         self.cargo_home
             .source_environment(self.plan.permissions().network, environment);
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
-                self.seed_cargo_target(worktree, &authority.cargo_cache().path, environment, cancel)
+                if !self.cargo_target.value.is_private() {
+                    let _ = std::fs::create_dir_all(&target);
+                    if self.cargo_target.value.is_shared() {
+                        crate::cargo_seed::Outcome::skipped("shared_target")
+                    } else {
+                        crate::cargo_seed::Outcome::skipped("custom_target")
+                    }
+                } else {
+                    self.seed_cargo_target(
+                        worktree,
+                        &authority.cargo_cache().path,
+                        environment,
+                        cancel,
+                    )
+                }
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -1329,6 +1360,13 @@ impl LaunchConfinement {
                 &self.plan.permissions().credential_roots,
             )
             .map_err(RunError::Confinement)?;
+            let (target, lint_target) = self.cargo_target.target_paths(
+                &self.home,
+                Some(authority.common_git_dir()),
+                &authority.cargo_cache().path,
+            );
+            let _ = std::fs::create_dir_all(&target);
+            let _ = std::fs::create_dir_all(&lint_target);
         }
         Ok(())
     }

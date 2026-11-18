@@ -544,7 +544,7 @@ impl provenant_config::RetentionMeasurements for GcData {
         }
     }
     fn build_directories(&self) -> provenant_config::ByteObservation {
-        if self.build_dirs.errors.is_empty() {
+        if self.build_dirs.errors.is_empty() && !self.build_dirs.measurement_skipped {
             provenant_config::ByteObservation::Measured {
                 bytes: self.build_dirs.bytes,
             }
@@ -898,7 +898,10 @@ fn gc_data_summary(data: &GcData) -> String {
             "removed"
         }
     ));
-    human.push_str(&format!(
+    if data.build_dirs.measurement_skipped {
+        human.push_str("lane build directory census skipped in preview\n");
+    } else {
+        human.push_str(&format!(
         "{} lane build director(ies), {} bytes {}; {} bytes of lane build output remain, {} busy, {} recent\n",
         data.build_dirs.removed.len(),
         data.build_dirs.bytes,
@@ -911,6 +914,7 @@ fn gc_data_summary(data: &GcData) -> String {
         data.build_dirs.busy.len(),
         data.build_dirs.recent.len(),
     ));
+    }
     for error in &data.build_dirs.errors {
         human.push_str(&format!("lane build output: {error}\n"));
     }
@@ -1144,6 +1148,7 @@ enum GcOutput<'a> {
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
         build_dir_bytes: u64,
+        build_dir_measurement_skipped: bool,
         graph_checkpoints_removed: usize,
         port_receipts: &'a crate::port_receipt_retention::Report,
         retention_errors: &'a [provenant_config::RetentionIssue],
@@ -1199,6 +1204,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
         build_dir_bytes: data.build_dirs.cache_bytes,
+        build_dir_measurement_skipped: data.build_dirs.measurement_skipped,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
         port_receipts: &data.port_receipts,
         retention_errors: &data.retention_errors,
@@ -1275,7 +1281,11 @@ fn gc_project(
                         .join("worktrees")
                         .join(context.binding.project_id().to_string()),
                 )?,
-                lanes: worktrees::list_for_gc(context, cancel)?,
+                lanes: if read_only {
+                    worktrees::list_for_gc_preview(context, cancel)?
+                } else {
+                    worktrees::list_for_gc(context, cancel)?
+                },
             })
         },
     )
@@ -1823,6 +1833,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .ok_or(Error::GcObservation(
                 "GC requires a verified primary checkout",
             ))?;
+
         let selected = gc_project(
             &roots,
             &home,
@@ -1832,6 +1843,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &facts,
             command.dry_run,
         )?;
+
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
@@ -2085,16 +2097,18 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     // the callbacks below, which collect() invokes under the
                     // worktree writer lock before each mutation.
                     let states = RefCell::new(
-                        crate::gc_support::lane_states(
+                        crate::gc_support::lane_states_with_observation(
                             roots,
-                            home,
-                            assets,
                             project.binding.project_id(),
+                            command.dry_run,
                         )
                         .ok(),
                     );
                     let rescan_failed = std::cell::Cell::new(false);
                     let refresh = || {
+                        if command.dry_run && states.borrow().is_some() {
+                            return;
+                        }
                         crate::gc_support::refresh_if_stale(
                             &states,
                             &rescan_failed,
@@ -2130,7 +2144,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         .map(|now| i128::from(now.as_micros()) * 1_000)
                         .map_err(|_| Error::Budget)?;
                     let retention_owner =
-                        crate::retention_owner::Owner::new(roots, home, &project.path);
+                        crate::retention_owner::Owner::new(roots, home, &project.path)
+                            .with_dry_run(command.dry_run);
                     let retirement_writer = if command.apply && !command.dry_run {
                         let authority = provenant_cli::fabric::Context::open(
                             roots.clone(),
@@ -2175,6 +2190,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                                 .map(|reader| reader as &dyn crate::lane_cleanup::RetirementLookup)
                         })
                         .ok_or(Error::GcObservation("retirement reader unavailable"))?;
+
                     let mut report = worktrees::collect(
                         context,
                         &lanes,
@@ -2200,6 +2216,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         },
                         cancel,
                     )?;
+
                     if !report.dry_run {
                         let writer = retirement_writer.as_ref().ok_or(Error::GcObservation(
                             "retirement writer unavailable during apply",
@@ -2226,6 +2243,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         let sweep =
                             crate::lane_cleanup::Sweep::new(report.dry_run || !command.apply)
                                 .with_retention(&retention_owner, &settings);
+
                         report.refs = crate::lane_cleanup::collect(
                             context,
                             upstream
