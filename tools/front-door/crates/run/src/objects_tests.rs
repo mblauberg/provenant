@@ -456,6 +456,34 @@ impl Fixture {
             .output()?)
     }
 
+    // A private commit leaves a cache-tree in the linked worktree index whose
+    // objects live only in `source`. Host GC reads every worktree index, so
+    // restore this finished fixture's index to a tree the host actually owns.
+    fn collect_shared_objects(&self) -> TestResult {
+        git(
+            &self.git,
+            &self.home,
+            &self.lane,
+            None,
+            &["read-tree", &self.base.to_string()],
+        )?;
+        git(
+            &self.git,
+            &self.home,
+            &self.project,
+            None,
+            &["reflog", "expire", "--expire=now", "--all"],
+        )?;
+        git(
+            &self.git,
+            &self.home,
+            &self.project,
+            None,
+            &["gc", "--prune=now"],
+        )?;
+        Ok(())
+    }
+
     fn import(&self) -> crate::Result<()> {
         super::settle(
             &self.git,
@@ -1861,20 +1889,7 @@ fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResul
         None,
         &["update-ref", "-d", "refs/provenant/lane-base/test"],
     )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.project,
-        None,
-        &["reflog", "expire", "--expire=now", "--all"],
-    )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.project,
-        None,
-        &["gc", "--prune=now"],
-    )?;
+    fixture.collect_shared_objects()?;
     assert_eq!(
         super::resolve_ref(
             &fixture.git,
@@ -1946,20 +1961,7 @@ fn publication_pins_symbolic_recovery_ref_through_collection() -> TestResult {
         None,
         &["update-ref", "-d", pin],
     )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.project,
-        None,
-        &["reflog", "expire", "--expire=now", "--all"],
-    )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.project,
-        None,
-        &["gc", "--prune=now"],
-    )?;
+    fixture.collect_shared_objects()?;
     let refs = git(
         &fixture.git,
         &fixture.home,
@@ -2200,6 +2202,7 @@ fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult
 }
 
 #[test]
+// Spec: docs/specs/run-settlement.md#settlement
 fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let lane_base = child_of(&fixture, fixture.base, "lane start")?;
@@ -2223,8 +2226,17 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
             oid: integration
         }
     );
-    // Without the launch ref the same tip descends from nothing known.
+    // Without the launch ref the same tip is unrooted: strict policy refuses,
+    // while the default warns and publishes it with recovery for displaced work.
     update_ref(&fixture, "refs/heads/lane", lane_base)?;
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "LANE_TIP_UNROOTED".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
     assert!(matches!(
         super::publish_branch(
             &fixture.git,
@@ -2233,10 +2245,29 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
             lane_base,
             None,
             rebased,
-            &provenant_records::policy::Policy::default(),
+            &strict,
         ),
-        Err(crate::RunError::LaneTipUnrooted { .. })
+        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
+            if tip == rebased && base == lane_base
     ));
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        lane_base
+    );
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        lane_base,
+        None,
+        rebased,
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(ancestor, super::Ancestor::Unrooted);
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        rebased
+    );
     Ok(())
 }
 

@@ -2488,6 +2488,9 @@ pub(super) fn prepare_candidates(
     )
 }
 
+#[cfg(test)]
+type AlterAvailability<'a> = dyn Fn(&mut Vec<provenant_providers::AvailabilityRecord>) + 'a;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_candidates_inner(
     registry: &Registry<'_>,
@@ -2499,9 +2502,7 @@ pub(super) fn prepare_candidates_inner(
     locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
-    #[cfg(test)] alter_availability: Option<
-        &dyn Fn(&mut Vec<provenant_providers::AvailabilityRecord>),
-    >,
+    #[cfg(test)] alter_availability: Option<&AlterAvailability<'_>>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(

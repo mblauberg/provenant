@@ -38,7 +38,10 @@ the accepted classification. This does not classify arbitrary later file access.
 ## One resolution, bounded alternatives
 
 Resolution selects a route and bounded, ordered eligible alternatives from one
-snapshot. Preparation fallback follows [retry ownership](retry-owner.md).
+snapshot. An alternative equal to the primary model is dropped with a
+`ROUTING_ALTERNATIVES` warning by default; strict policy refuses it. Malformed
+choices, invalid efforts and duplicate entries within the fallback list remain
+usage errors. Preparation fallback follows [retry ownership](retry-owner.md).
 
 - Why: the fallback plan is decided once and visible.
 
