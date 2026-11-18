@@ -1891,10 +1891,27 @@ impl BinaryRunOwner<'_> {
                 let local_call = self.call(cancel);
                 // Subscribe once before the first target read. A settlement
                 // during registration or the first read remains observable.
-                let event_paths = local_session
-                    .as_ref()
-                    .map(|session| session.store.observation_paths())
-                    .unwrap_or_default();
+                let mut journal = crate::event_delivery::Journal::for_project(
+                    self.factory.context.roots.clone(),
+                    self.factory.context.identity.project,
+                )
+                .ok();
+                let event_paths = if journal.is_some() {
+                    vec![
+                        self.factory
+                            .context
+                            .roots
+                            .state
+                            .as_path()
+                            .join(provenant_core::changes::FILE_NAME),
+                    ]
+                } else {
+                    local_session
+                        .as_ref()
+                        .map(|session| session.store.observation_paths())
+                        .unwrap_or_default()
+                };
+                let mut last_local_reconcile = self.factory.clock.mono_now();
                 let mut observation =
                     crate::status_wait::LocalObservation::subscribe(&event_paths, cadence);
                 let remote_pending = !remote_batches.is_empty();
@@ -1948,6 +1965,7 @@ impl BinaryRunOwner<'_> {
                         return Err(FacadeError::Timeout);
                     }
                     if read_local {
+                        last_local_reconcile = self.factory.clock.mono_now();
                         let Some(session) = &local_session else {
                             return Err(FacadeError::StateCorrupt);
                         };
@@ -2055,14 +2073,32 @@ impl BinaryRunOwner<'_> {
                                 .saturating_sub(self.factory.clock.mono_now().as_micros()),
                         )
                     };
-                    let maximum = remaining.min(until_remote);
+                    let gap_left = 60_000_000_u64.saturating_sub(
+                        self.factory
+                            .clock
+                            .mono_now()
+                            .as_micros()
+                            .saturating_sub(last_local_reconcile.as_micros()),
+                    );
+                    let maximum = remaining
+                        .min(until_remote)
+                        .min(std::time::Duration::from_micros(gap_left));
                     let wake = observation
                         .wait(maximum, cancel, &self.factory.clock)
                         .map_err(|_| FacadeError::io("wait pacing clock"))?;
                     match wake {
                         crate::status_wait::ObservationWake::Changed
                         | crate::status_wait::ObservationWake::Woken => {
-                            read_local = !local_indices.is_empty();
+                            read_local = !local_indices.is_empty()
+                                && match journal.as_mut().map(|source| source.drain_attempts()) {
+                                    Some(Ok(changed)) => local_indices
+                                        .iter()
+                                        .any(|index| changed.contains(&targets[*index].attempt)),
+                                    _ => {
+                                        journal = None;
+                                        true
+                                    }
+                                };
                         }
                         crate::status_wait::ObservationWake::PacedFallback => {
                             read_local = !local_indices.is_empty();
@@ -2072,6 +2108,17 @@ impl BinaryRunOwner<'_> {
                         crate::status_wait::ObservationWake::Cancelled => {
                             return Err(FacadeError::Cancelled);
                         }
+                    }
+                    if self
+                        .factory
+                        .clock
+                        .mono_now()
+                        .as_micros()
+                        .saturating_sub(last_local_reconcile.as_micros())
+                        >= 60_000_000
+                    {
+                        read_local = !local_indices.is_empty();
+                        last_local_reconcile = self.factory.clock.mono_now();
                     }
                     if !remote_batches.is_empty()
                         && self.factory.clock.mono_now() >= next_remote_poll

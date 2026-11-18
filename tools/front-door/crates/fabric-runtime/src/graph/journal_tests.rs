@@ -410,6 +410,24 @@ fn watching_the_checkpoint_observes_publication_after_the_precommit_event_log() 
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
+    let request = provenant_fabric_store::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_fabric_store::Store::open(&root, &request).unwrap();
+    let first = store.observations(project, 0, 100, &request).unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(
+        first.items[0].kind,
+        provenant_records::lane_contract::ObservationKind::GraphCheckpoint
+    );
+    assert_eq!(first.items[0].detail["graph"], "g-test");
+    // Host recovery replays one committed marker; a new source save has its own identity.
+    FileJournal::index_observation(&root, project, "g-test").unwrap();
+    assert_eq!(
+        store.observation_tip(project, &request).unwrap(),
+        first.items[0].cursor.seq
+    );
     let paths = FileJournal::observation_paths(&root, project, "g-test").unwrap();
     let directory = journal.directory.current_path().unwrap();
     let checkpoint = directory.join(journal.checkpoint_name());
@@ -418,6 +436,14 @@ fn watching_the_checkpoint_observes_publication_after_the_precommit_event_log() 
 
     journal.save(&fixture.checkpoint).unwrap();
 
+    assert_eq!(
+        store
+            .observations(project, 0, 100, &request)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
     assert!(
         directory
             .join(super::journal::events::name("g-test"))

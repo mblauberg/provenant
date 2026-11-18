@@ -3051,6 +3051,7 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
         }
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         Ok(())
     };
     let failed = recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step);
@@ -3080,6 +3081,7 @@ fn two_concurrent_drains_react_once() -> TestResult {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         Ok(())
     };
     // One drain is mid-flight and holds the run's lock; a second, from another
@@ -3113,6 +3115,7 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         Ok(())
     })?;
     store.prune_reactions(i64::MAX, &call)?;
@@ -3162,6 +3165,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         Ok(())
     })?;
     assert!(!store.reaction_pending(input.attempt_id, &call)?);
@@ -3217,6 +3221,7 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         reaction.graph_done = true;
         Ok(())
     })?;
@@ -3228,10 +3233,52 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         reaction.graph_done = true;
         Ok(())
     })?;
     assert!(store.open_attempts(10, &call)?.is_empty());
+    Ok(())
+}
+
+// Spec: docs/specs/lane-contracts.md#observation-events
+#[test]
+fn completed_legacy_reactions_are_requeued_for_journal_indexing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let mut reaction = store.reaction(input.attempt_id, &call)?.ok_or("row")?;
+    reaction.graph_done = true;
+    reaction.notice_done = true;
+    reaction.log_done = true;
+    reaction.ledger_done = true;
+    let mut legacy = serde_json::to_value(&reaction)?;
+    legacy
+        .as_object_mut()
+        .ok_or("object")?
+        .remove("observation_done");
+    store.db.execute(
+        "UPDATE reactions SET payload=?1,pending=0 WHERE attempt=?2",
+        rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
+    )?;
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
+    assert_eq!(store.requeue_unindexed_observations(&call)?, 1);
+    assert!(store.reaction_pending(input.attempt_id, &call)?);
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
+        assert!(
+            reaction.graph_done
+                && reaction.notice_done
+                && reaction.log_done
+                && reaction.ledger_done
+        );
+        reaction.observation_done = true;
+        Ok(())
+    })?;
+    assert_eq!(store.requeue_unindexed_observations(&call)?, 0);
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
     Ok(())
 }
 
@@ -3417,6 +3464,7 @@ fn provider_state_collection_uses_configured_logs_age() -> TestResult {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
+        reaction.observation_done = true;
         Ok(())
     })?;
     store
