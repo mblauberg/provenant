@@ -109,7 +109,7 @@ mkdir -p "$tmp/nogh"
 cp "$tmp/bin/cargo" "$tmp/nogh/cargo"
 printf '## Additions\n\n- Later fix.\n' > docs/release-notes/next.d/later.md
 commit 'Merge pull request #104 from fixture/four'
-PATH="$tmp/nogh:/usr/bin:/bin" "$script" v2.3.1 > "$tmp/out2" 2> "$tmp/err2"
+GH="$tmp/nogh/gh" PATH="$tmp/nogh:/usr/bin:/bin" "$script" v2.3.1 > "$tmp/out2" 2> "$tmp/err2"
 grep -F 'gh is unavailable; skipping the fragment check' "$tmp/err2" > /dev/null
 grep -F 'version = "2.3.1"' tools/front-door/Cargo.toml > /dev/null
 [ -f docs/release-notes/v2.3.1.md ]
