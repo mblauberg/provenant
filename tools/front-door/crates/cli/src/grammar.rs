@@ -64,6 +64,9 @@ pub enum Command {
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests
     Inbox(Box<crate::inbox::Inbox>),
+    /// Share append-only observations with project lanes
+    #[command(subcommand)]
+    Notes(crate::notes::Notes),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts

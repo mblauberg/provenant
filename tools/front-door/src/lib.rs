@@ -17,6 +17,7 @@ mod custody;
 mod disk;
 mod disk_guard;
 mod fabric;
+mod notes;
 mod tick;
 mod tick_agent;
 mod tracker;
@@ -1563,6 +1564,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
+        Command::Notes(cmd) => notes::run(cmd, globals),
         Command::Quota { command } => {
             let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
                 adapter: None,
