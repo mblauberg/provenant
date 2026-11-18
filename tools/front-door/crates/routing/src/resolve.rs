@@ -2928,9 +2928,11 @@ fn classify_pool(
             .unwrap_or(1)
             .max(1);
         let observed_prior = context.selection_evidence.and_then(|evidence| {
-            evidence.priors.iter().find(|prior| {
-                prior.model == member.model && prior.pool == name && prior.role == role
-            })
+            evidence.prior(&crate::OutcomeKey::new(
+                member.model.clone(),
+                name,
+                role_key.clone(),
+            ))
         });
         let prior = context
             .config
