@@ -88,6 +88,7 @@ const INSTALL_FIELDS: &[FieldMetadata] = &[
 ];
 const PROVIDER_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("{provider}.models", "array"),
+    FieldMetadata::new("{provider}.clean_config", "bool"),
     FieldMetadata::enumeration("{provider}.out_of_scope_pin", &["warn", "refuse", "allow"]),
     FieldMetadata::new("{provider}.update", "bool"),
     FieldMetadata::int("{provider}.update_interval_seconds", 1, i64::MAX),

@@ -129,6 +129,29 @@ penalties and divides by one plus live lanes.
 
 - Why: capability is a preference, while attributed comparable outcomes supply the evidence that adjusts declared route weights.
 
+## Provider configuration and local diagnostics
+
+Provider configuration choices are host-sourced settings. Codex writers may
+suppress inherited configuration through `ProviderSettings::clean_config`;
+read-only execution retains clean configuration where extensions could exceed
+its authority. The applied route retains the choice and source without widening
+credential or filesystem grants.
+
+Unavailable adapter, model and effort capabilities may select an eligible
+fallback. Invalid invocation syntax remains an operation error. Neither
+establishes an authority boundary. Account, route, continuation, explicit
+read-only and pinned-source bindings still do.
+
+Authorised task text reaches provider stdin or argv unchanged, including
+secret-shaped prose and whitespace. Cloud handoff instructions append to the
+brief. Local diagnostics retain content subject to formatting and length bounds;
+hook context is not silently rewritten. Publication and credential-source
+boundaries own disclosure filters. Advisory GitHub deny-list matches warn and
+forward the exact invocation; host publication authority remains separate.
+
+Why: #3422 separates preferences and capabilities from hard boundaries and
+preserves authorised execution context.
+
 ## Capacity is not quota
 
 Capacity (`model_unavailable`) and account allowance (`quota_limited`) are

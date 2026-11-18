@@ -374,6 +374,16 @@ fn find_branch(
 #[cfg(test)]
 mod diagnostic_tests {
     #[test]
+    // Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
+    fn excerpt_bounds_local_diagnostics_without_scanning_task_text() {
+        assert_eq!(
+            super::excerpt("  pass: fix the code\npassword=fixture-token  "),
+            "pass: fix the code password=fixture-token"
+        );
+        assert!(super::excerpt(&"é".repeat(1000)).chars().count() <= 600);
+    }
+
+    #[test]
     fn unsafe_binding_error_keeps_safe_local_location_and_remedy() {
         let error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
             path: std::path::PathBuf::from("/private/project-state"),

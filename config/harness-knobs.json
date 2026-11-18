@@ -35,6 +35,7 @@
       "domains.fabric.lanes.max_concurrent_builds",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
+      "providers.codex.clean_config",
       "gc.graph_checkpoint_days"
   ],
   "host_gc_settings": {

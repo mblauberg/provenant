@@ -1,8 +1,4 @@
-//! One canonical golden plus declaration-level Seatbelt grant invariants.
-//!
-//! The golden comes from the adapter's real `prepare` under fixed fake paths.
-//! Regenerate with
-//! `PROVENANT_UPDATE_SNAPSHOTS=1 cargo test -p provenant-providers claude_read_only_profile_matches_the_single_golden`.
+//! Focused provider grant invariants across access modes and network settings.
 use super::tests::{fixture_access_plan, fixture_input, fixture_token, route};
 use super::*;
 use provenant_confinement::cargo::CargoHome;
@@ -12,14 +8,9 @@ use provenant_confinement::permissions::{
 };
 use provenant_confinement::plan::ReadOnlyGrants;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-const UPDATE_ENV: &str = "PROVENANT_UPDATE_SNAPSHOTS";
 const HOME: &str = "/fixture/home";
-
-fn snapshot_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/seatbelt")
-}
 
 fn grant(path: &str, scope: PathScope) -> PathGrant {
     PathGrant {
@@ -30,7 +21,7 @@ fn grant(path: &str, scope: PathScope) -> PathGrant {
 
 /// Grants `prepare` adds only when the host has the path (the macOS-only SSL
 /// and Command Line Tools roots, a Homebrew or `/usr/local` prefix). They would
-/// make the snapshots differ by machine, so the tests drop them.
+/// make fixtures differ by machine, so the tests drop them.
 fn host_probed(path: &Path) -> bool {
     if path.starts_with("/opt/homebrew/Cellar/provider/1.0") {
         return false;
@@ -118,31 +109,10 @@ fn prepared(
         grants.retain(|grant| !host_probed(&grant.path));
     }
     if let Some(socket) = &mut profile.spec.fabric_socket {
-        // Golden profiles are shared by macOS and Linux.
+        // Grant fixtures are shared by macOS and Linux.
         socket.path = "/fixture/host/fabric-relay.sock".into();
     }
     Ok((confined.permissions().clone(), profile))
-}
-
-/// Project all Cargo-owned roots out of provider snapshots; their policy is
-/// asserted from the Cargo declaration and writer authority below.
-fn cargo_snapshot_text(rendered: &str, cargo_home: &CargoHome, plan: &PlanPermissions) -> String {
-    let mut roots = vec![cargo_home.path.clone()];
-    if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) = &plan.mode {
-        roots.push(authority.cargo_cache().path.clone());
-    }
-    let mut snapshot = String::new();
-    for line in rendered.split_inclusive('\n') {
-        let cargo_owned = line
-            .split('"')
-            .skip(1)
-            .step_by(2)
-            .any(|path| roots.iter().any(|root| Path::new(path).starts_with(root)));
-        if !cargo_owned {
-            snapshot.push_str(line);
-        }
-    }
-    snapshot
 }
 
 /// The credential mechanism each adapter's fixture plan selects.
@@ -484,31 +454,45 @@ fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
     Ok(())
 }
 
+// Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
 #[test]
-fn claude_read_only_profile_matches_the_single_golden() -> Result<(), Box<dyn std::error::Error>> {
-    let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
-    let case = cases()?
-        .into_iter()
-        .find(|case| case.name == "claude-read-only")
-        .ok_or("missing declared Claude reader case")?;
-    let cargo_home = CargoHome::resolve(Path::new(HOME), |_| None)?;
-    let rendered = cargo_snapshot_text(
-        &render(&case.plan, &case.profile, Path::new(HOME))?,
-        &cargo_home,
-        &case.plan,
-    );
-    let dir = snapshot_dir();
-    let path = dir.join("claude-read-only.sb");
-    if update {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, &rendered)?;
-        return Ok(());
+fn provider_profiles_keep_open_defaults_explicit_network_and_mandatory_boundaries()
+-> Result<(), Box<dyn std::error::Error>> {
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        for network in [
+            NetworkAccess::Open,
+            NetworkAccess::Provider,
+            NetworkAccess::Local,
+        ] {
+            let (plan, profile) = prepared(id, Access::ReadOnly, login(id), false, Some(network))?;
+            let rendered = render(&plan, &profile, Path::new(HOME))?;
+            assert!(rendered.contains("(allow default)"), "{id}");
+            assert_eq!(
+                rendered.contains("(deny network*)"),
+                network != NetworkAccess::Open,
+                "{id}"
+            );
+            let credential = Path::new(HOME).join(".ssh");
+            for operation in ["file-read*", "file-write*"] {
+                assert!(
+                    rendered.contains(&format!(
+                        "(deny {operation} (subpath \"{}\"))",
+                        credential.display()
+                    )),
+                    "{id}: {operation} credential boundary"
+                );
+            }
+            for root in &plan.read_roots {
+                assert!(
+                    rendered.contains(&format!(
+                        "(deny file-write* (subpath \"{}\"))",
+                        root.path.display()
+                    )),
+                    "{id}: read-only root"
+                );
+            }
+        }
     }
-    let expected = std::fs::read(&path)?;
-    assert_eq!(
-        expected.as_slice(),
-        rendered.as_bytes(),
-        "the canonical profile golden changed"
-    );
     Ok(())
 }

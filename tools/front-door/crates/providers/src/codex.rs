@@ -151,7 +151,7 @@ fn prepare(
         ]
         .map(OsString::from),
     );
-    if input.sandboxed() && input.confined.codex_policy() == CodexPolicy::Clean {
+    if input.confined.codex_policy() == CodexPolicy::Clean {
         argv.push("--ignore-user-config".into());
     } else {
         argv.extend([

@@ -1571,13 +1571,16 @@ mod answer_delivery_tests {
         let dir = tempfile::tempdir()?;
         let settings = provenant_cli::domains::LocalGateSettings {
             mode: provenant_cli::domains::LocalGateMode::Enforce,
-            commands: vec!["printf 'gate output'; printf ' failure tail' >&2; exit 1".into()],
+            commands: vec![
+                "printf 'gate output pass: fix the code'; printf ' failure tail' >&2; exit 1"
+                    .into(),
+            ],
             timeout_seconds: 2,
         };
         let diagnostic = run_local_gate(&settings, dir.path())
             .unwrap_err()
             .to_string();
-        assert!(diagnostic.contains("gate output failure tail"));
+        assert!(diagnostic.contains("gate output pass: fix the code failure tail"));
         Ok(())
     }
 

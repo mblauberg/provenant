@@ -153,6 +153,19 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
         adapter.prepare(input),
         Err(ProviderError::CapabilityUnavailable(_))
     ));
+    route.model.clear();
+    let writer = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut input = fixture_input(&route, &writer, &prompt, Path::new("/fixture/repo"), None);
+    input.command = Some(command::Invocation {
+        argv: &argv,
+        runtimes: &[],
+        program: Path::new("/fixture/tool"),
+    });
+    assert!(matches!(
+        adapter.prepare(input),
+        Err(ProviderError::CapabilityUnavailable(_))
+    ));
+
 }
 
 #[test]

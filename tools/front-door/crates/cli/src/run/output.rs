@@ -1210,11 +1210,12 @@ mod tests {
     #[test]
     fn provider_error_from_result_keeps_the_whole_multiline_message() {
         let message = provider_error_from_result(
-            b"Model not recognized: gemini-3.8-pro\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
+            b"Model not recognized: gemini-3.8-pro\npass: fix the code\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
         )
         .unwrap();
         assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
         assert!(message.ends_with("GPT-OSS 120B (Medium)"));
+        assert!(message.contains("pass: fix the code"));
         assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 
@@ -1231,8 +1232,8 @@ mod tests {
     #[test]
     fn provider_error_keeps_non_warning_lines_that_mention_warn() {
         assert_eq!(
-            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
-            Some("test-failed WARN: assertion failed")
+            provider_error_from_stderr(b"test-failed WARN: pass: fix the code\n").as_deref(),
+            Some("test-failed WARN: pass: fix the code")
         );
     }
 

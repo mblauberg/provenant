@@ -2971,6 +2971,13 @@ mod tests {
     #[test]
     fn unrepresentable_git_paths_are_rejected() -> Result<(), ProviderError> {
         use std::os::unix::ffi::OsStringExt;
+        let nul = PathBuf::from(OsString::from_vec(b"/fixture/git\0".to_vec()));
+        let error = git_wrapper(&nul, &GitWrapper::default()).unwrap_err();
+        assert!(matches!(error, ProviderError::InvalidInvocation(_)));
+        assert_eq!(
+            error.boundary_class(),
+            provenant_records::diagnostic::BoundaryClass::None
+        );
         let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         assert!(matches!(
             fixture_lane(&bad, 1).pinned_environment(),
