@@ -128,7 +128,7 @@ struct PruneCursor {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct RootCursor {
     kind: CacheKind,
-    offset: i64,
+    offset: provenant_os::fs::DirectoryPosition,
     scanned: usize,
 }
 
@@ -149,7 +149,7 @@ struct MeasureFrame {
     inode: u64,
     modified_ns: i128,
     /// Opaque `telldir` cookie, valid while this directory remains unchanged.
-    offset: i64,
+    offset: provenant_os::fs::DirectoryPosition,
     bytes: u64,
     newest: i128,
 }
@@ -1166,7 +1166,7 @@ fn discover_with_progress(
         snapshot.completed.clear();
         snapshot.root_cursor = Some(RootCursor {
             kind,
-            offset: 0,
+            offset: Default::default(),
             scanned: 0,
         });
         snapshot.measuring = None;
@@ -1186,7 +1186,7 @@ fn discover_with_progress(
             snapshot.root_cursor = match kind {
                 CacheKind::Lane => Some(RootCursor {
                     kind: CacheKind::Shared,
-                    offset: 0,
+                    offset: Default::default(),
                     scanned: 0,
                 }),
                 CacheKind::Shared => None,
@@ -1416,7 +1416,7 @@ fn measure_resumable(
             device: target_metadata.device,
             inode: target_metadata.inode,
             modified_ns: target_metadata.modified_ns,
-            offset: 0,
+            offset: Default::default(),
             bytes: target_metadata.allocated,
             newest: target_metadata.modified_ns,
         }],
@@ -1483,7 +1483,7 @@ fn measure_resumable(
                 device: child_metadata.device,
                 inode: child_metadata.inode,
                 modified_ns: child_metadata.modified_ns,
-                offset: 0,
+                offset: Default::default(),
                 bytes: 0,
                 newest: child_metadata.modified_ns,
             });

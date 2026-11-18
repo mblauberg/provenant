@@ -1,9 +1,13 @@
 //! Filesystem FFI. All descriptors stay behind private File/Directory handles.
 use crate::fs::{FileKind, Metadata};
-use std::ffi::{CStr, CString, OsStr, OsString};
+#[cfg(target_os = "linux")]
+use std::ffi::CStr;
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::IntoRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
@@ -545,28 +549,187 @@ pub fn entropy<const N: usize>() -> io::Result<[u8; N]> {
     status(unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) })?;
     Ok(bytes)
 }
+/// A position that survives reopening an unchanged directory. Darwin's libc
+/// telldir cookies belong to one DIR stream, so retain the kernel block and
+/// record offset instead. Linux exposes a persistent kernel cookie directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectoryPosition {
+    pub block: i64,
+    pub offset: u64,
+}
+
+#[cfg(target_os = "macos")]
+pub struct Entries {
+    file: File,
+    buffer: [u8; 4096],
+    length: usize,
+    offset: usize,
+    block: i64,
+    finished: bool,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    // Darwin's 64-bit directory syscall, also used by libc readdir. The public
+    // getdirentries symbol is the obsolete 32-bit-inode interface.
+    fn __getdirentries64(
+        fd: libc::c_int,
+        buffer: *mut u8,
+        length: usize,
+        base: *mut libc::off_t,
+    ) -> libc::ssize_t;
+}
+
+#[cfg(target_os = "macos")]
+impl Entries {
+    fn fill(&mut self) -> io::Result<()> {
+        let mut base = 0;
+        // SAFETY: file owns a live directory fd; buffer and base are writable
+        // for the declared lengths. The syscall retains neither pointer.
+        let count = unsafe {
+            __getdirentries64(
+                self.file.as_raw_fd(),
+                self.buffer.as_mut_ptr(),
+                self.buffer.len(),
+                &mut base,
+            )
+        };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.block = base;
+        self.length = count as usize;
+        self.offset = 0;
+        self.finished = count == 0;
+        Ok(())
+    }
+
+    pub fn position(&mut self) -> io::Result<DirectoryPosition> {
+        Ok(DirectoryPosition {
+            block: self.block,
+            offset: self.offset as u64,
+        })
+    }
+
+    pub fn seek(&mut self, position: DirectoryPosition) -> io::Result<()> {
+        let offset = usize::try_from(position.offset)
+            .map_err(|_| io::Error::other("invalid directory record offset"))?;
+        if position.block < 0 || offset > self.buffer.len() {
+            return Err(io::Error::other("invalid directory position"));
+        }
+        // SAFETY: file owns a live fd. lseek changes only this iterator's
+        // independent descriptor and retains no pointers.
+        if unsafe { libc::lseek(self.file.as_raw_fd(), position.block, libc::SEEK_SET) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.fill()?;
+        if offset > self.length {
+            return Err(io::Error::other("directory position changed"));
+        }
+        // Verify a record boundary instead of accepting an offset into a name.
+        while self.offset < offset {
+            self.record()?;
+        }
+        if self.offset != offset {
+            return Err(io::Error::other("invalid directory record boundary"));
+        }
+        Ok(())
+    }
+
+    fn record(&mut self) -> io::Result<OsString> {
+        let remaining = &self.buffer[self.offset..self.length];
+        if remaining.len() < 22 {
+            return Err(io::Error::other("truncated directory record"));
+        }
+        let length = usize::from(u16::from_ne_bytes([remaining[16], remaining[17]]));
+        let name_length = usize::from(u16::from_ne_bytes([remaining[18], remaining[19]]));
+        if length < 22
+            || length > remaining.len()
+            || name_length >= length - 21
+            || remaining[21 + name_length] != 0
+        {
+            return Err(io::Error::other("invalid directory record"));
+        }
+        let name = OsString::from_vec(remaining[21..21 + name_length].to_vec());
+        self.offset += length;
+        Ok(name)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Iterator for Entries {
+    type Item = io::Result<OsString>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.finished {
+                return None;
+            }
+            if self.offset == self.length {
+                if let Err(error) = self.fill() {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                if self.finished {
+                    return None;
+                }
+            }
+            match self.record() {
+                Ok(name) if name == "." || name == ".." => continue,
+                Ok(name) => return Some(Ok(name)),
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn entries(dir: &File) -> io::Result<Entries> {
+    let file = open_at(
+        dir.as_raw_fd(),
+        OsStr::new("."),
+        libc::O_RDONLY | libc::O_DIRECTORY,
+        0,
+    )?;
+    Ok(Entries {
+        file,
+        buffer: [0; 4096],
+        length: 0,
+        offset: 0,
+        block: 0,
+        finished: false,
+    })
+}
+
+#[cfg(target_os = "linux")]
 pub struct Entries {
     stream: *mut libc::DIR,
     finished: bool,
 }
+#[cfg(target_os = "linux")]
 impl Entries {
     /// Return the opaque position of the next directory entry. The cookie can
     /// be reused with `seek` while the directory identity and contents remain
     /// unchanged.
-    pub fn position(&mut self) -> io::Result<i64> {
+    pub fn position(&mut self) -> io::Result<DirectoryPosition> {
         // SAFETY: the iterator uniquely owns this live DIR stream.
         let position = unsafe { libc::telldir(self.stream) };
         if position < 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(position as i64)
+            Ok(DirectoryPosition {
+                block: position as i64,
+                offset: 0,
+            })
         }
     }
 
     /// Resume this directory stream from an opaque cookie returned by
     /// `position`. The caller must validate directory identity and mtime.
-    pub fn seek(&mut self, position: i64) -> io::Result<()> {
-        let position = libc::c_long::try_from(position)
+    pub fn seek(&mut self, position: DirectoryPosition) -> io::Result<()> {
+        let position = libc::c_long::try_from(position.block)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid directory cookie"))?;
         // SAFETY: the iterator uniquely owns this live DIR stream. `seekdir`
         // retains no pointers and the cookie came from this filesystem's
@@ -576,6 +739,7 @@ impl Entries {
         Ok(())
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for Entries {
     fn drop(&mut self) {
         // SAFETY: fdopendir transferred unique ownership to this iterator.
@@ -584,6 +748,7 @@ impl Drop for Entries {
         unsafe { libc::closedir(self.stream) };
     }
 }
+#[cfg(target_os = "linux")]
 impl Iterator for Entries {
     type Item = io::Result<OsString>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -624,6 +789,7 @@ impl Iterator for Entries {
         }
     }
 }
+#[cfg(target_os = "linux")]
 pub fn entries(dir: &File) -> io::Result<Entries> {
     // openat(.) gives an independent offset; dup would share enumeration state.
     let fresh = open_at(

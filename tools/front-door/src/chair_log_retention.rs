@@ -48,10 +48,10 @@ impl From<Metadata> for DirectoryStamp {
 struct Cursor {
     version: u8,
     phase: Phase,
-    projects_offset: i64,
+    projects_offset: provenant_os::fs::DirectoryPosition,
     projects_stamp: DirectoryStamp,
     project: Option<String>,
-    sessions_offset: i64,
+    sessions_offset: provenant_os::fs::DirectoryPosition,
     sessions_stamp: Option<DirectoryStamp>,
 }
 
@@ -135,7 +135,7 @@ fn sweep(
             projects_offset: saved.projects_offset,
             projects_stamp: projects_stamp.clone(),
             project: None,
-            sessions_offset: 0,
+            sessions_offset: Default::default(),
             sessions_stamp: None,
         });
     }
@@ -145,7 +145,7 @@ fn sweep(
         .filter(|saved| saved.phase == Phase::Projects)
         .map_or(0, |saved| saved.projects_offset);
     let mut entries = projects.entries()?;
-    if offset != 0 {
+    if offset != Default::default() {
         entries.seek(offset)?;
     }
     loop {
@@ -160,7 +160,7 @@ fn sweep(
                     projects_offset: offset,
                     projects_stamp: projects_stamp.clone(),
                     project: None,
-                    sessions_offset: 0,
+                    sessions_offset: Default::default(),
                     sessions_stamp: None,
                 },
             );
@@ -203,8 +203,8 @@ fn process_sessions(
     root: &StateRoot,
     project: ProjectId,
     project_name: &str,
-    projects_offset: i64,
-    session_offset: i64,
+    projects_offset: provenant_os::fs::DirectoryPosition,
+    session_offset: provenant_os::fs::DirectoryPosition,
     expected_sessions_stamp: Option<DirectoryStamp>,
     projects_stamp: &DirectoryStamp,
     retention: Retention,
@@ -246,7 +246,7 @@ fn process_sessions(
         0
     };
     let mut sessions = logs.entries()?;
-    if session_offset != 0 {
+    if session_offset != Default::default() {
         sessions.seek(session_offset)?;
     }
     loop {
