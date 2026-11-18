@@ -2923,6 +2923,7 @@ mod policy_reporting_tests {
                     warning: None,
                 },
                 backend: None,
+                cargo_target: Default::default(),
             }),
         };
         // Bind a real unavailable backend before the claim is persisted.

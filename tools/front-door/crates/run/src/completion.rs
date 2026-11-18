@@ -307,6 +307,7 @@ pub struct BuildCap {
 pub struct PreambleExtras {
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
+    pub cargo_target: Option<crate::ResolvedCargoTarget>,
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
@@ -366,8 +367,13 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::VerificationResolution::paragraph)
                 .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
+            let cargo_target = extras
+                .cargo_target
+                .as_ref()
+                .map(crate::ResolvedCargoTarget::preamble)
+                .unwrap_or_else(|| crate::ResolvedCargoTarget::default().preamble());
             format!(
-                "{verification}{}{}{budget}",
+                "{verification}{cargo_target}{}{}{budget}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -416,10 +422,12 @@ mod tests {
         assert!(writer.contains("source: default"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
+        assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(!reader.contains("CI scope:"));
+        assert!(!reader.contains("Cargo target"));
         assert!(reader.contains("Progress handoff JSON:"));
         assert!(
             !lane_preamble("Model policy.", &Default::default(), None, None)
