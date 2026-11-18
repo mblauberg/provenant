@@ -339,13 +339,14 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     assert!(value["data"]["domains"]["quota"].is_object());
     let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
-    let text = String::from_utf8_lossy(&human.stdout.bytes);
-    for field in ["profile=balanced", "schema_version=1"] {
-        assert!(
-            text.split_whitespace().any(|value| value == field),
-            "{text}"
-        );
-    }
+    let full: serde_json::Value = serde_json::from_slice(&human.stdout.bytes)?;
+    assert_eq!(full["profile"], "balanced");
+    assert_eq!(full["schema_version"], 1);
+    let compact = rig.command(&["config", "show"])?;
+    assert_eq!(code(&compact), 0);
+    let text = String::from_utf8_lossy(&compact.stdout.bytes);
+    assert!(text.contains("--full"));
+    assert!(text.lines().all(|line| line.len() <= 200), "{text}");
     let removed = rig.command(&["config", "show", "--task-class", "mechanical", "--json"])?;
     assert_eq!(code(&removed), 2);
     assert!(!rig.state.exists());
@@ -515,6 +516,43 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
         "user"
     );
     rig.assert_v1_root_untouched()
+}
+
+#[test]
+// Spec: docs/specs/cli.md#results
+fn config_set_reports_only_the_changed_effective_setting() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let before = rig.command(&["config", "show", "--json"])?;
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout.bytes)?;
+    let key = "config.history_max_bytes";
+    let output = rig.command(&["config", "set", key, "300000", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["key"], key);
+    assert_eq!(result["data"]["previous"], before["data"]["knobs"][key]);
+    assert_eq!(result["data"]["effective"]["value"], 300000);
+    assert!(result["data"]["effective"]["source"].is_string());
+    assert!(result["data"].get("domains").is_none());
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#results
+fn config_set_profile_reports_effective_source() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let human = rig.command(&["config", "set", "profile", "economy"])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8_lossy(&human.stdout.bytes);
+    for expected in ["economy", "source: user", "previous", "balanced"] {
+        assert!(text.contains(expected), "{text}");
+    }
+    let output = rig.command(&["config", "set", "profile", "balanced", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["previous"], "economy");
+    assert_eq!(result["data"]["effective"], "balanced");
+    assert_eq!(result["data"]["source"], "user");
+    Ok(())
 }
 
 #[test]

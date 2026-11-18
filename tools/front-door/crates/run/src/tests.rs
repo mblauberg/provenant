@@ -1261,17 +1261,16 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
         ),
         Err(RunError::NotFound)
     ));
-    assert!(
-        store
-            .read_output(
-                id,
-                ArtifactPart::Result,
-                ByteRange::default(),
-                &context,
-                &call
-            )?
-            .bytes
-            .is_empty()
+    let result = store.read_output(
+        id,
+        ArtifactPart::Result,
+        ByteRange::default(),
+        &context,
+        &call,
+    )?;
+    assert_eq!(
+        String::from_utf8(result.bytes)?,
+        Outcome::Rejected.diagnostic_reason()
     );
     Ok(())
 }

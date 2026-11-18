@@ -805,7 +805,24 @@ impl PrepareError {
     pub(super) fn into_refusal(self) -> Box<run::PrepareRefusal> {
         match self {
             Self::RouteResolution { error, checks } => {
+                let host_message = match &error {
+                    crate::route::DispatchError::Catalogue(
+                        provenant_routing::RoutingError::NoEligiblePoolMember { .. },
+                    ) => Some(error.to_string()),
+                    crate::route::DispatchError::Edge(boxed)
+                        if matches!(
+                            boxed.as_ref(),
+                            crate::route::EdgeError::Routing(
+                                provenant_routing::RoutingError::NoEligiblePoolMember { .. }
+                            )
+                        ) =>
+                    {
+                        Some(error.to_string())
+                    }
+                    _ => None,
+                };
                 let mut refusal = route_resolution_refusal(error).into_refusal();
+                refusal.host_message = host_message;
                 // These checks explain why adapters were denied access; they
                 // do not establish the cause of an unrelated router failure.
                 refusal.skipped_routes = checks;
@@ -822,6 +839,7 @@ impl PrepareError {
                 terminal_cause: cause,
                 terminal_note: note,
                 message,
+                host_message: None,
                 skipped_routes: Vec::new(),
                 fallback_outcome: matches!(
                     cause,
@@ -902,8 +920,8 @@ impl PrepareError {
                         .map(str::to_owned)
                         .or_else(|| policy_code_for_resource(candidate_resource))
                 });
-                let message =
-                    candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
+                let host_message = candidate_refusal_message(&skipped_routes, fallback_outcome);
+                let message = host_message.clone().unwrap_or(message);
                 let mut refusal = Box::new(run::PrepareRefusal {
                     boundary_class,
                     policy_code,
@@ -911,6 +929,7 @@ impl PrepareError {
                     terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
                     terminal_note: None,
                     message,
+                    host_message,
                     skipped_routes,
                     fallback_outcome,
                 });
@@ -982,6 +1001,21 @@ impl PrepareError {
                 PlanCheckError::Permission(error).into_refusal()
             }
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
+            Self::Run(run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+                ref path,
+                ..
+            })) if path.file_name()
+                == Some(std::ffi::OsStr::new(
+                    provenant_confinement::worktrees::REPOSITORY_LOCK,
+                )) =>
+            {
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    "repository lock busy; retry after the current repository operation finishes",
+                );
+                refusal.terminal_note = Some("repository lock busy; run `provenant retry TARGET` after the current repository operation finishes".into());
+                refusal
+            }
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
@@ -1092,6 +1126,22 @@ impl PrepareError {
             ),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
+fn repository_lock_refusal_identifies_cause_and_retry() {
+    let error = run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+        path: std::path::PathBuf::from("/private/repo")
+            .join(provenant_confinement::worktrees::REPOSITORY_LOCK),
+        timeout: std::time::Duration::ZERO,
+    });
+    let refusal = PrepareError::Run(error).into_refusal();
+    let note = refusal.terminal_note.as_deref().unwrap_or_default();
+    assert!(note.contains("repository lock busy"));
+    assert!(note.contains("provenant retry"));
+    assert!(!note.contains("/private"));
 }
 
 #[cfg(test)]
@@ -4841,6 +4891,30 @@ mod receipt_tests {
         Catalogue, Fallback, NamedRoute, RouteChoice, RouteName, RouteRequest, RoutingConfig,
         RoutingContext,
     };
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn routing_exclusion_message_has_host_origin() {
+        let message = "monthly policy=pace constrained";
+        let error = crate::route::DispatchError::Catalogue(
+            provenant_routing::RoutingError::NoEligiblePoolMember {
+                exclusions: vec![message.into()],
+            },
+        );
+        let refusal = PrepareError::RouteResolution {
+            error,
+            checks: Vec::new(),
+        }
+        .into_refusal();
+        assert!(
+            refusal
+                .host_message
+                .as_deref()
+                .is_some_and(|text| text.contains(message))
+        );
+        let provider = PrepareError::Other("PROVIDER_SENTINEL".into()).into_refusal();
+        assert!(provider.host_message.is_none());
+    }
 
     #[test]
     fn alias_effort_reaches_launch_record() -> Result<(), Box<dyn std::error::Error>> {

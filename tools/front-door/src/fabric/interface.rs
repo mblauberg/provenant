@@ -66,6 +66,87 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+// Called only after the existing scanner refuses. Field paths are fixed vocabulary;
+// values and user-controlled map keys never enter the diagnostic.
+fn scanner_refusal(input: &Value) -> Option<FacadeError> {
+    fn scan(value: &Value, field: &str) -> Option<FacadeError> {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        let rule = provenant_redact::known_shape_rule(text.as_bytes()).ok()??;
+        Some(FacadeError::invalid(InvalidInputDetail::ContentScan {
+            field: field.into(),
+            assignment: rule == "credential assignment",
+        }))
+    }
+    if let Some(brief) = input.get("brief")
+        && let Some(error) = scan(brief, "brief")
+    {
+        return Some(error);
+    }
+    if let Some(nodes) = input.pointer("/document/nodes").and_then(Value::as_array) {
+        for (index, node) in nodes.iter().enumerate() {
+            if let Some(prompt) = node.get("prompt")
+                && let Some(error) = scan(prompt, &format!("document.nodes[{index}].prompt"))
+            {
+                return Some(error);
+            }
+        }
+    }
+    for field in [
+        "set",
+        "document",
+        "name",
+        "template",
+        "route",
+        "model",
+        "account",
+        "host",
+        "worktree",
+        "branch",
+        "base",
+        "write_scope",
+        "over",
+    ] {
+        if let Some(value) = input.get(field)
+            && let Some(error) = scan(value, field)
+        {
+            return Some(error);
+        }
+    }
+    scan(input, "input")
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/cli.md#results
+fn scanner_refusal_names_field_and_rule_without_value() -> Result<(), Box<dyn std::error::Error>> {
+    let value = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let error = scanner_refusal(&json!({"brief": value})).ok_or("expected refusal")?;
+    let diagnostic = error.diagnostic();
+    let wire = serde_json::to_string(&diagnostic)?;
+    assert!(wire.contains("brief"));
+    assert!(wire.contains("credential token"));
+    assert!(!wire.contains(value));
+    let text = "test pass: fix";
+    let assignment =
+        scanner_refusal(&json!({"brief": text})).ok_or("expected assignment refusal")?;
+    let wire = serde_json::to_string(&assignment.diagnostic())?;
+    assert!(wire.contains("credential assignment"));
+    assert!(!wire.contains(text));
+    Ok(())
+}
+
+fn submission_patch_error(error: patch::PatchError, input: &Value) -> FacadeError {
+    if (error.code == "secret" || error.message.contains("secret pattern"))
+        && let Some(refusal) = scanner_refusal(input)
+    {
+        return refusal;
+    }
+    graph_patch_error(error)
+}
+
 // Do not expose serde's message: it can contain supplied values. Preserve only
 // a schema path and a bounded reason, both filtered at the diagnostic boundary.
 fn decode_input<T: serde::de::DeserializeOwned>(
@@ -1196,7 +1277,15 @@ impl Factory {
             resolvers: &resolvers,
         }
         .lower(&node)
-        .map_err(compile_error)?;
+        .map_err(|error| {
+            if error.to_string().contains("secret pattern")
+                && let Some(refusal) = scanner_refusal(input)
+            {
+                refusal
+            } else {
+                compile_error(error)
+            }
+        })?;
         if let Some(choice) = input
             .get("route")
             .filter(|value| !value.is_null())
@@ -1763,7 +1852,7 @@ impl Factory {
                     ..Default::default()
                 };
                 patch::compile_submission(id, &patch, &context, raw["integration_branch"].as_str())
-                    .map_err(graph_patch_error)?
+                    .map_err(|error| submission_patch_error(error, input))?
             } else {
                 let mut document = decode_input::<GraphDocument>(raw.clone(), "document")?;
                 document.graph_id = id.to_owned();
@@ -1886,7 +1975,7 @@ impl Factory {
                 &context,
                 integration_branch.as_ref().and_then(Value::as_str),
             )
-            .map_err(graph_patch_error)?
+            .map_err(|error| submission_patch_error(error, input))?
         };
         if review_launch {
             if let Some(base) = resolved_review_base {
@@ -1968,14 +2057,15 @@ impl Factory {
             &self.context.config.graph.limits,
             self.context.port_table.worktree_layout.clone(),
         )
-        .map_err(graph_patch_error)?;
+        .map_err(|error| submission_patch_error(error, input))?;
         // Patch admission scans nodes and parameters. Graph-wide metadata is
         // retained separately, so scan the complete bound record before any
         // preview or publication can expose or persist it.
         let bound_document =
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        patch::scan_for_secrets(&bound_document)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        patch::scan_for_secrets(&bound_document).map_err(|_| {
+            scanner_refusal(input).unwrap_or(FacadeError::InvalidInput { detail: None })
+        })?;
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {

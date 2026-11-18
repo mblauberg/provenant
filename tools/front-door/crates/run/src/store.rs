@@ -1243,6 +1243,20 @@ impl RunStore {
                 ),
             };
         old.preparation_failure = preparation_failure;
+        let safe_state = AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause,
+            terminal_note: terminal_note.clone(),
+            stop: None,
+            outcome,
+            exit_code: None,
+            finished_at,
+            reason: reason.clone(),
+        };
+        let refusal_result = provenant_records::wire::lane::LaneRow::state_and_reason(&safe_state)
+            .1
+            .map(|text| provenant_redact::bounded_line(&text, 256))
+            .unwrap_or_default();
         let publication = TerminalPublication {
             handoff: Ok(None),
             terminal_cause,
@@ -1252,9 +1266,9 @@ impl RunStore {
             started_at: None,
             provider_ms: None,
             reason,
-            result: "",
+            result: &refusal_result,
             complete: true,
-            redacted: false,
+            redacted: true,
             resolved_route: old.resolved_route.clone(),
             applied_route: old.applied_route.clone(),
             observed_route: old.observed_route.clone(),
