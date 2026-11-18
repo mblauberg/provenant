@@ -184,6 +184,7 @@ fn collect_store(
                     report.tightened.append(&mut collected.tightened);
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
+                    report.partial_tmp.append(&mut collected.partial_tmp);
                     report.attempt_logs.append(&mut collected.attempt_logs);
                     report.expired_events += collected.expired_events;
                     report.kept.append(&mut collected.kept);
@@ -211,6 +212,7 @@ fn collect_store(
                     report.tightened.append(&mut collected.tightened);
                     report.removed.append(&mut collected.removed);
                     report.attempt_tmp.append(&mut collected.attempt_tmp);
+                    report.partial_tmp.append(&mut collected.partial_tmp);
                     report.attempt_logs.append(&mut collected.attempt_logs);
                     report.expired_events += collected.expired_events;
                     report.kept.append(&mut collected.kept);

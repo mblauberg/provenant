@@ -315,14 +315,51 @@ impl RunStore {
     }
 
     /// Drop finished rows older than `before` (unix seconds).
-    pub(crate) fn prune_reactions(&self, before: i64, call: &Request<'_>) -> Result<()> {
-        self.write(call, |tx| {
-            tx.execute(
-                "DELETE FROM reactions WHERE pending=0 AND settled_at<?1",
-                [before],
-            )?;
-            Ok(())
-        })
+    pub(crate) fn prune_reactions(
+        &self,
+        before: i64,
+        call: &Request<'_>,
+        scan: &crate::RetentionScan<'_>,
+    ) -> Result<Option<i64>> {
+        let mut after = scan
+            .detail
+            .and_then(|detail| detail.strip_prefix("reactions:"))
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+            .max(0);
+        loop {
+            if !scan.permits(call) {
+                return Ok(Some(after));
+            }
+            let rows: Vec<(i64, bool, i64)> = {
+                let mut query = self.db.prepare("SELECT rowid,pending,settled_at FROM reactions WHERE rowid>?1 ORDER BY rowid LIMIT 64")?;
+                let rows =
+                    query.query_map([after], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
+            let Some(last) = rows.last().map(|row| row.0) else {
+                return Ok(None);
+            };
+            let result = self.write(call, |tx| {
+                for (id, pending, settled_at) in &rows {
+                    if !scan.permits(call) {
+                        return Err(RunError::Cancelled);
+                    }
+                    if !pending && *settled_at < before {
+                        tx.execute(
+                            "DELETE FROM reactions WHERE rowid=?1 AND pending=0 AND settled_at<?2",
+                            rusqlite::params![id, before],
+                        )?;
+                    }
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => after = last,
+                Err(_) if call.cancel.is_cancelled() => return Ok(Some(after)),
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 

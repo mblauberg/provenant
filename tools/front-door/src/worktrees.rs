@@ -588,12 +588,7 @@ impl provenant_config::RetentionMeasurements for GcData {
     }
     fn attempt_scratch(&self) -> provenant_config::ByteObservation {
         provenant_config::ByteObservation::Partial {
-            bytes: self
-                .provider_state
-                .attempt_tmp
-                .iter()
-                .map(|r| r.bytes)
-                .fold(0_u64, u64::saturating_add),
+            bytes: self.provider_state.temporary_bytes(),
         }
     }
     fn graph_checkpoints(&self) -> provenant_config::ByteObservation {
@@ -819,12 +814,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
 }
 
 fn gc_compact_summary(data: &GcData) -> String {
-    let scratch_bytes: u64 = data
-        .provider_state
-        .attempt_tmp
-        .iter()
-        .map(|entry| entry.bytes)
-        .sum();
+    let scratch_bytes = data.provider_state.temporary_bytes();
     let trees: usize = data
         .worktree_cleanup
         .iter()
@@ -928,6 +918,13 @@ fn gc_data_summary(data: &GcData) -> String {
             },
             temporary.path.display(),
             temporary.bytes,
+        ));
+    }
+    for temporary in &data.provider_state.partial_tmp {
+        human.push_str(&format!(
+            "partially collected attempt tmp {} ({} bytes); retry remains\n",
+            temporary.path.display(),
+            temporary.bytes
         ));
     }
     let payload = &data.provider_state.payload;
@@ -1955,6 +1952,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             && data.build_dirs.removed.is_empty()
             && data.provider_state.removed.is_empty()
             && data.provider_state.attempt_tmp.is_empty()
+            && data.provider_state.partial_tmp.is_empty()
             && data.provider_state.attempt_logs.is_empty()
             && data.provider_state.expired_events == 0
             && data.provider_state.errors.is_empty()
@@ -2430,6 +2428,10 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             .provider_state
             .attempt_tmp
             .append(&mut report.attempt_tmp);
+        self.data
+            .provider_state
+            .partial_tmp
+            .append(&mut report.partial_tmp);
         self.data.provider_state.kept.append(&mut report.kept);
         self.data.provider_state.errors.append(&mut report.errors);
         Ok(())

@@ -3108,7 +3108,11 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
     let id = input.attempt_id;
-    store.prune_reactions(i64::MAX, &call)?;
+    assert!(
+        store
+            .prune_reactions(i64::MAX, &call, &crate::RetentionScan::default())?
+            .is_none()
+    );
     assert!(store.reaction(id, &call)?.is_some());
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
@@ -3118,7 +3122,11 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
         reaction.observation_done = true;
         Ok(())
     })?;
-    store.prune_reactions(i64::MAX, &call)?;
+    assert!(
+        store
+            .prune_reactions(i64::MAX, &call, &crate::RetentionScan::default())?
+            .is_none()
+    );
     assert!(store.reaction(id, &call)?.is_none());
     Ok(())
 }

@@ -25,6 +25,7 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
     keep_going: &dyn Fn() -> bool,
+    reclaimed: &mut u64,
 ) -> provenant_os::fs::Result<u64> {
     if !keep_going() {
         return Err(provenant_os::fs::FsError::Cancelled {
@@ -40,6 +41,7 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     };
     if metadata.kind != FileKind::Directory {
         attempt.unlink(name)?;
+        *reclaimed = reclaimed.saturating_add(metadata.allocated);
         return Ok(metadata.allocated);
     }
     attempt.make_owner_accessible_at(name)?;
@@ -47,13 +49,14 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
     let bytes = metadata
         .allocated
-        .saturating_add(remove_payload_contents(&tree, keep_going)?);
+        .saturating_add(remove_payload_contents(&tree, keep_going, reclaimed)?);
     drop(tree);
     if !attempt.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(provenant_os::fs::FsError::PayloadMismatch { name: name.into() });
     }
     // tmp itself is not lock-named, so ordinary removal suffices.
     attempt.rmdir(name)?;
+    *reclaimed = reclaimed.saturating_add(metadata.allocated);
     Ok(bytes)
 }
 
@@ -63,25 +66,25 @@ pub(crate) fn remove_unreserved_terminal_temporary(
 pub(crate) fn remove_payload_contents(
     directory: &PayloadTree,
     keep_going: &dyn Fn() -> bool,
+    reclaimed: &mut u64,
 ) -> provenant_os::fs::Result<u64> {
     struct Frame {
         tree: Option<PayloadTree>,
         name: Option<std::ffi::OsString>,
+        allocated: u64,
         pending: std::collections::VecDeque<std::ffi::OsString>,
     }
     let mut stack = vec![Frame {
         tree: None,
         name: None,
+        allocated: 0,
         pending: Default::default(),
     }];
     let mut bytes = 0_u64;
     if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
         directory.make_writable()?;
     }
-    loop {
-        let Some(frame) = stack.last_mut() else {
-            break;
-        };
+    while let Some(frame) = stack.last_mut() {
         let current = frame.tree.as_ref().unwrap_or(directory);
         if !keep_going() {
             return Err(provenant_os::fs::FsError::Cancelled {
@@ -110,10 +113,12 @@ pub(crate) fn remove_payload_contents(
                 stack.push(Frame {
                     tree: Some(child),
                     name: Some(entry),
+                    allocated: metadata.allocated,
                     pending: Default::default(),
                 });
             } else {
                 current.unlink(&entry)?;
+                *reclaimed = reclaimed.saturating_add(metadata.allocated);
             }
             continue;
         }
@@ -127,6 +132,7 @@ pub(crate) fn remove_payload_contents(
                 .and_then(|frame| frame.tree.as_ref())
                 .unwrap_or(directory);
             parent.rmdir(&name)?;
+            *reclaimed = reclaimed.saturating_add(done.allocated);
         }
     }
     Ok(bytes)

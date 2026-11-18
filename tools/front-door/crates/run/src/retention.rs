@@ -47,6 +47,9 @@ pub struct ProviderStateGc {
     pub removed: Vec<PathBuf>,
     pub tightened: Vec<PathBuf>,
     pub attempt_tmp: Vec<AttemptTmpRemoval>,
+    /// Bytes removed from scratch directories that remain for a later pass.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partial_tmp: Vec<AttemptTmpRemoval>,
     pub attempt_logs: Vec<AttemptLogRemoval>,
     /// Event rows expired (or eligible to expire in a dry run).
     pub expired_events: u64,
@@ -54,6 +57,16 @@ pub struct ProviderStateGc {
     pub errors: Vec<ProviderStateIssue>,
     /// Byte-bounded eviction of bulk payload; see [`RunStore::gc_payloads`].
     pub payload: PayloadReport,
+}
+
+impl ProviderStateGc {
+    pub fn temporary_bytes(&self) -> u64 {
+        self.attempt_tmp
+            .iter()
+            .chain(&self.partial_tmp)
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -102,7 +115,71 @@ pub struct RetentionScan<'a> {
 
 impl RetentionScan<'_> {
     pub fn permits(&self, call: &Request<'_>) -> bool {
-        !call.cancel.is_cancelled() && self.keep_going.is_none_or(|check| check())
+        if call.cancel.is_cancelled() {
+            return false;
+        }
+        if self.keep_going.is_some_and(|check| !check()) {
+            call.cancel.cancel();
+            return false;
+        }
+        true
+    }
+}
+
+/// SQLite's interrupt handle is designed for cross-thread cancellation. The
+/// scoped monitor cannot outlive this scan or interrupt a later store request.
+struct SqlCancellation {
+    stopped: provenant_core::CancelToken,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl SqlCancellation {
+    fn arm(
+        db: &rusqlite::Connection,
+        scan: &RetentionScan<'_>,
+        call: &Request<'_>,
+    ) -> Option<Self> {
+        scan.keep_going?;
+        let stopped = provenant_core::CancelToken::new();
+        let done = stopped.clone();
+        let cancel = call.cancel.clone();
+        let interrupt = db.get_interrupt_handle();
+        let worker = std::thread::Builder::new()
+            .name("gc-sql-cancel".into())
+            .spawn(move || {
+                while !done.is_cancelled() && !cancel.is_cancelled() {
+                    provenant_core::Pause::wait(
+                        &provenant_core::ThreadPause,
+                        provenant_core::DurationMicros::from_micros(10_000),
+                        &done,
+                    );
+                }
+                if cancel.is_cancelled() && !done.is_cancelled() {
+                    interrupt.interrupt();
+                }
+            });
+        match worker {
+            Ok(worker) => Some(Self {
+                stopped,
+                worker: Some(worker),
+            }),
+            Err(error) => {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: cannot monitor retention SQLite cancellation; using bounded batches: {error}"
+                );
+                None
+            }
+        }
+    }
+}
+impl Drop for SqlCancellation {
+    fn drop(&mut self) {
+        self.stopped.cancel();
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
     }
 }
 
@@ -261,6 +338,7 @@ impl RunStore {
         call: &Request<'_>,
         scan: &RetentionScan<'_>,
     ) -> Result<ProviderStateGc> {
+        let _sql_cancellation = SqlCancellation::arm(&self.db, scan, call);
         let keep_going = &|| scan.permits(call);
         if !keep_going() {
             return Ok(ProviderStateGc {
@@ -273,6 +351,7 @@ impl RunStore {
                             .join(format!("attempts/{id}"))
                     },
                 )),
+                continuation: scan.detail.map(str::to_owned),
                 ..Default::default()
             });
         }
@@ -292,12 +371,33 @@ impl RunStore {
         if scratch.is_none() && !(1..=3650).contains(&days) {
             return Err(RunError::Validation("provider_state_days_range"));
         }
-        if !dry_run && let Some(logs_days) = logs_days {
-            // Finished reaction rows age out with the run's logs.
-            self.prune_reactions(
+        if !dry_run
+            && scan.start_at.is_none()
+            && let Some(logs_days) = logs_days
+        {
+            let pruned = self.prune_reactions(
                 now.as_micros().div_euclid(1_000_000) - (logs_days as i64) * 86_400,
                 call,
-            )?;
+                scan,
+            );
+            match pruned {
+                Ok(Some(after)) => {
+                    return Ok(ProviderStateGc {
+                        interrupted_at: Some(self.context.state_root.as_path().join("attempts")),
+                        continuation: Some(format!("reactions:{after}")),
+                        ..Default::default()
+                    });
+                }
+                Err(_) if call.cancel.is_cancelled() => {
+                    return Ok(ProviderStateGc {
+                        interrupted_at: Some(self.context.state_root.as_path().join("attempts")),
+                        continuation: scan.detail.map(str::to_owned),
+                        ..Default::default()
+                    });
+                }
+                Err(error) => return Err(error),
+                Ok(None) => {}
+            }
         }
         let mut after = self.retention_after(scan.start_at)?;
         let mut report = ProviderStateGc::default();
@@ -306,7 +406,8 @@ impl RunStore {
             0,
             10_000,
             std::time::Duration::from_millis(500),
-        );
+        )
+        .with_cancellation(call.cancel.clone());
         #[allow(clippy::disallowed_methods)] // Bound read-only maintenance in real time.
         let preview_started = std::time::Instant::now();
         loop {
@@ -509,13 +610,23 @@ impl RunStore {
                             )?;
                                 u64::try_from(count).unwrap_or(0)
                             } else {
-                                self.write(call, |tx| {
-                                let deleted = tx.execute(
-                                    "DELETE FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
-                                    rusqlite::params![id, record.project_id.to_string()],
-                                )?;
-                                Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
-                            })?
+                                loop {
+                                    if !keep_going() {
+                                        return Err(RunError::Cancelled);
+                                    }
+                                    let count = self.write(call, |tx| {
+                                        Ok(tx.execute(
+                                            "DELETE FROM events WHERE sequence IN (SELECT sequence FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2) ORDER BY sequence LIMIT 64)",
+                                            rusqlite::params![id,record.project_id.to_string()],
+                                        )?)
+                                    })?;
+                                    report.expired_events =
+                                        report.expired_events.saturating_add(count as u64);
+                                    if count < 64 {
+                                        break;
+                                    }
+                                }
+                                0
                             };
                             report.expired_events += expired_events;
                         }
@@ -550,11 +661,12 @@ impl RunStore {
                     *tightened = parent.join(&*tightened);
                 }
                 if let Err(error) = result {
-                    let cancelled = matches!(
-                        error,
-                        RunError::Cancelled
-                            | RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
-                    );
+                    let cancelled = call.cancel.is_cancelled()
+                        || matches!(
+                            error,
+                            RunError::Cancelled
+                                | RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
+                        );
                     if cancelled {
                         report.interrupted_at = Some(attempt_path);
                         return Ok(report);
@@ -886,12 +998,14 @@ fn payload_bytes(
     attempt: &Directory,
     path: &std::path::Path,
     keep_going: &dyn Fn() -> bool,
+    cancel: &provenant_core::CancelToken,
 ) -> u64 {
     if !keep_going() {
         return 0;
     }
 
-    let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
+    let mut measured =
+        provenant_os::disk::DiskReport::new(path.into(), 0).with_cancellation(cancel.clone());
     let mut bytes = 0_u64;
     for name in [STATE, HISTORY, SCRATCH] {
         if !keep_going() {
@@ -942,6 +1056,7 @@ impl RunStore {
         call: &Request<'_>,
         scan: &RetentionScan<'_>,
     ) -> Result<PayloadReport> {
+        let _sql_cancellation = SqlCancellation::arm(&self.db, scan, call);
         let keep_going = &|| scan.permits(call);
         if !keep_going() {
             return Ok(PayloadReport {
@@ -979,6 +1094,19 @@ impl RunStore {
         if measure && scan.detail != Some("evict") {
             self.measure_payloads(&mut ledger, now, &mut report, call, scan)?;
             if report.interrupted_at.is_some() {
+                report.accounted_bytes = ledger
+                    .attempts
+                    .values()
+                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+                report.pinned_bytes = ledger
+                    .attempts
+                    .values()
+                    .filter(|entry| {
+                        entry.pinned
+                            || now.as_micros().saturating_sub(entry.finished_micros) < DAY_MICROS
+                    })
+                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+                report.total_reclaimed_bytes = ledger.reclaimed_bytes;
                 if !dry_run {
                     write_ledger(&self.root, &ledger)?;
                 }
@@ -1143,7 +1271,7 @@ impl RunStore {
                         })) => (None, true),
                         Err(error) => return Err(error),
                     };
-                    let bytes = payload_bytes(&attempt, &path, keep_going);
+                    let bytes = payload_bytes(&attempt, &path, keep_going, call.cancel);
                     if !keep_going() {
                         return Err(RunError::Cancelled);
                     }
@@ -1391,7 +1519,16 @@ fn collect_temporary(
             sum.saturating_add(entry.allocated_bytes)
         })
     } else {
-        let bytes = crate::artifacts::remove_unreserved_terminal_temporary(attempt, keep_going)?;
+        let mut bytes = 0;
+        let result =
+            crate::artifacts::remove_unreserved_terminal_temporary(attempt, keep_going, &mut bytes);
+        if result.is_err() && bytes > 0 {
+            report.partial_tmp.push(AttemptTmpRemoval {
+                path: path.into(),
+                bytes,
+            });
+        }
+        result?;
         attempt.sync()?;
         bytes
     };
@@ -1860,7 +1997,7 @@ fn remove_detached(
     }
     directory.make_private()?;
     let tree = PayloadTree::claim(parent, name, &metadata)?;
-    crate::artifacts::remove_payload_contents(&tree, keep_going)?;
+    crate::artifacts::remove_payload_contents(&tree, keep_going, &mut 0)?;
     if !parent.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
     }
@@ -2329,6 +2466,81 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn event_retention_stops_between_committed_batches_and_keeps_newest() -> TestResult {
+        use provenant_core::{Clock, DurationMicros};
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel, observer_cancel) = (clock(), CancelToken::new(), CancelToken::new());
+        let operation = call(&clock, &cancel);
+        let observer = call(&clock, &observer_cancel);
+        withdraw(&store, &input, &operation)?;
+        let mut record = store.record(input.attempt_id, &operation)?;
+        store.write(&operation, |db| {
+            for _ in 0..256 {
+                record.revision = record.revision.checked_add(1).ok_or(RunError::Conflict)?;
+                crate::store::insert_event(db, &record)?;
+            }
+            Ok(())
+        })?;
+        let original = store.events(0, 1000, Some(input.attempt_id), &observer)?;
+        let newest = original.last().ok_or("latest event")?.sequence;
+        let budget_clock = std::sync::Mutex::new(clock.clone());
+        let deadline = clock
+            .mono_now()
+            .checked_add(DurationMicros::from_micros(1))?;
+        let keep_going = || {
+            let Ok(events) = store.events(0, 1000, Some(input.attempt_id), &observer) else {
+                return false;
+            };
+            let mut clock = budget_clock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if events.len() < original.len() {
+                let _ = clock.advance(DurationMicros::from_micros(1));
+            }
+            clock.mono_now() < deadline
+        };
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let now = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+        let partial = store.gc_provider_state_with_logs(
+            &root,
+            3650,
+            30,
+            now,
+            false,
+            &operation,
+            &RetentionScan {
+                keep_going: Some(&keep_going),
+                ..Default::default()
+            },
+        )?;
+        assert!(partial.interrupted_at.is_some());
+        let remaining = store.events(0, 1000, Some(input.attempt_id), &observer)?;
+        assert!(remaining.len() > 1 && remaining.len() < original.len());
+        let resumed = store.gc_provider_state_with_logs(
+            &root,
+            3650,
+            30,
+            now,
+            false,
+            &observer,
+            &RetentionScan {
+                start_at: Some(input.attempt_id),
+                ..Default::default()
+            },
+        )?;
+        assert!(resumed.interrupted_at.is_none());
+        let retained = store.events(0, 1000, Some(input.attempt_id), &observer)?;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].sequence, newest);
+        assert_eq!(
+            partial.expired_events + resumed.expired_events,
+            (original.len() - 1) as u64
+        );
+        Ok(())
+    }
+
     #[test]
     fn gc_keeps_expired_unacknowledged_settlements_visible() -> TestResult {
         let (_temp, context, store, input, _attempt) = seeded()?;
@@ -2652,13 +2864,23 @@ mod tests {
             store.gc_temporary(&root, &ScratchPolicy::new(0), now, false, &call, &scan)?;
         assert_eq!(partial.interrupted_at.as_ref(), Some(&attempt));
         assert!(partial.errors.is_empty());
+        assert!(
+            partial.attempt_tmp.is_empty(),
+            "a partial directory is not reported removed"
+        );
+        assert!(
+            partial.temporary_bytes() > 0,
+            "partial reclaimed bytes remain observable"
+        );
         let remaining = fs::read_dir(&temporary)?.count();
         assert!(
             remaining > 0 && remaining < 256,
             "bounded pass makes durable progress"
         );
         assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, proof);
-        assert!(store.temporary_retained(input.attempt_id, &call)?);
+        let resume_cancel = CancelToken::new();
+        let resume_call = crate::tests::call(&clock, &resume_cancel);
+        assert!(store.temporary_retained(input.attempt_id, &resume_call)?);
         let custody = Directory::open_anchor(&attempt)?;
         drop(custody.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
         drop(custody.try_lock(OsStr::new("publication.lock"), LockMode::Exclusive)?);
@@ -2667,7 +2889,7 @@ mod tests {
             &ScratchPolicy::new(0),
             now,
             false,
-            &call,
+            &resume_call,
             &RetentionScan {
                 start_at: Some(input.attempt_id),
                 ..Default::default()
@@ -2675,7 +2897,7 @@ mod tests {
         )?;
         assert!(resumed.interrupted_at.is_none());
         assert!(!temporary.exists());
-        assert!(!store.temporary_retained(input.attempt_id, &call)?);
+        assert!(!store.temporary_retained(input.attempt_id, &resume_call)?);
         assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, proof);
         Ok(())
     }
@@ -3546,6 +3768,84 @@ mod tests {
             &call,
             &RetentionScan::default(),
         )
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn interrupted_payload_measurement_preserves_observed_totals_and_resumes() -> TestResult {
+        let pair = pair()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let baseline_call = call(&clock, &cancel);
+        let root = Directory::open_anchor(pair.context.state_root.as_path())?;
+        let now = WallTime::from_micros(200 + 8 * DAY_MICROS)?;
+        let checks = std::cell::Cell::new(0_u64);
+        let count = || {
+            checks.set(checks.get() + 1);
+            true
+        };
+        let baseline = pair.store.gc_payloads(
+            &root,
+            u64::MAX,
+            now,
+            false,
+            true,
+            None,
+            &baseline_call,
+            &RetentionScan {
+                keep_going: Some(&count),
+                ..Default::default()
+            },
+        )?;
+        let cutoff = checks.get() * 3 / 4;
+        checks.set(0);
+        let limited = || {
+            checks.set(checks.get() + 1);
+            checks.get() <= cutoff
+        };
+        let partial = pair.store.gc_payloads(
+            &root,
+            u64::MAX,
+            now,
+            false,
+            true,
+            None,
+            &baseline_call,
+            &RetentionScan {
+                keep_going: Some(&limited),
+                ..Default::default()
+            },
+        )?;
+        let path = partial
+            .interrupted_at
+            .as_ref()
+            .ok_or("budget did not interrupt")?;
+        assert_eq!(partial.interrupted_phase, Some("measure"));
+        assert!(partial.accounted_bytes > 0 && partial.accounted_bytes < baseline.accounted_bytes);
+        let id = AttemptId::parse(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("attempt cursor")?,
+        )?;
+        let resume_cancel = CancelToken::new();
+        let resumed_call = call(&clock, &resume_cancel);
+        let complete = pair.store.gc_payloads(
+            &root,
+            u64::MAX,
+            now,
+            false,
+            true,
+            None,
+            &resumed_call,
+            &RetentionScan {
+                start_at: Some(id),
+                detail: Some("measure"),
+                ..Default::default()
+            },
+        )?;
+        assert!(complete.interrupted_at.is_none());
+        assert_eq!(complete.accounted_bytes, baseline.accounted_bytes);
+        assert!(pair.older.join(STATE).exists() && pair.newer.join(STATE).exists());
+        Ok(())
     }
 
     #[test]

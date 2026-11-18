@@ -11,6 +11,7 @@ use std::{
 };
 
 struct WalkBudget {
+    cancel: Option<provenant_core::CancelToken>,
     remaining: usize,
     started: MonoTime,
     reported: bool,
@@ -33,6 +34,7 @@ impl WalkBudget {
     fn new(remaining: usize, duration: Duration, clock: Arc<dyn Clock + Send + Sync>) -> Self {
         let started = clock.mono_now();
         Self {
+            cancel: None,
             remaining,
             started,
             reported: false,
@@ -42,7 +44,10 @@ impl WalkBudget {
     }
 
     fn exhausted(&self) -> bool {
-        self.remaining == 0
+        self.cancel
+            .as_ref()
+            .is_some_and(provenant_core::CancelToken::is_cancelled)
+            || self.remaining == 0
             || self
                 .clock
                 .mono_now()
@@ -243,6 +248,11 @@ pub struct DiskReport {
 }
 
 impl DiskReport {
+    /// Share an enclosing operation's cancellation across recursive measurements.
+    pub fn with_cancellation(mut self, cancel: provenant_core::CancelToken) -> Self {
+        self.walk_budget.cancel = Some(cancel);
+        self
+    }
     pub fn new(path: PathBuf, available_bytes: u64) -> Self {
         Self {
             schema_version: 1,
@@ -682,6 +692,30 @@ impl DiskReport {
 
 #[cfg(test)]
 mod tests {
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn enclosing_cancellation_stops_all_later_measurements()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        let first = fixture.path().join("first");
+        let second = fixture.path().join("second");
+        std::fs::write(&first, vec![1; 8192])?;
+        std::fs::write(&second, vec![2; 8192])?;
+        let cancel = provenant_core::CancelToken::new();
+        let mut report =
+            super::DiskReport::new(fixture.path().into(), 0).with_cancellation(cancel.clone());
+        assert!(report.measure("sample", &first).is_some());
+        let observed = report.entries[0].allocated_bytes;
+        cancel.cancel();
+        assert!(report.measure("sample", &second).is_none());
+        assert!(report.traversal_exhausted());
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].allocated_bytes, observed);
+        assert!(!report.errors.is_empty());
+        assert_eq!(std::fs::read(second)?, vec![2; 8192]);
+        Ok(())
+    }
+
     #[test]
     fn measurement_budget_is_shared_across_paths() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = tempfile::tempdir()?;
