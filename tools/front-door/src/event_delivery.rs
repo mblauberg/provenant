@@ -728,7 +728,10 @@ fn poll_detail(
         projected_checks.push(json!({"bucket":bucket}));
     }
     let mut projected_status = serde_json::to_value(status)?;
-    if let Some(names) = projected_status["failing_checks"].as_array_mut() {
+    if let Some(names) = projected_status
+        .get_mut("failing_checks")
+        .and_then(Value::as_array_mut)
+    {
         names.truncate(16);
         for name in names {
             if let Some(text) = name.as_str() {
@@ -1477,6 +1480,71 @@ mod tests {
         assert!(
             serde_json::to_vec(&detail).unwrap().len() < provenant_fabric_store::MAX_BODY_BYTES
         );
+    }
+
+    #[test]
+    fn pr_status_journal_round_trip_settles_for_empty_and_large_matrices() {
+        for count in [0, 512] {
+            let (_temp, roots, project) = fixture();
+            let mut journal = Journal::for_project(roots.clone(), project).unwrap();
+            let subscription = Subscription {
+                repository: "owner/repo".into(),
+                number: 7,
+                head: None,
+            };
+            let checks = vec![
+                crate::pr::observer::Check {
+                    head: "abc".into(),
+                    name: "x".repeat(700),
+                    bucket: "fail".into(),
+                    app: None,
+                    app_slug: None,
+                    conclusion: None,
+                    registered: None,
+                    url: None,
+                    excerpt: String::new(),
+                };
+                count
+            ];
+            let status: crate::pr::status::Line = serde_json::from_value(json!({
+                "number":7, "state":"OPEN", "head":"abc", "draft":false,
+                "checks_passed":0, "checks_total":count, "checks_failed":count, "checks_pending":0,
+                "failing_checks":vec!["x".repeat(700); count], "merge":"CLEAN", "review":"APPROVED"
+            }))
+            .unwrap();
+            let detail = poll_detail(&subscription, &status, &checks).unwrap();
+            let projected = detail["status"].clone();
+            append(
+                &roots,
+                project,
+                format!("matrix-{count}"),
+                ObservationKind::CheckRun,
+                detail,
+            )
+            .unwrap();
+            let recovered = journal
+                .next_pr("owner/repo", 7, Duration::ZERO, &CancelToken::new())
+                .unwrap()
+                .unwrap();
+            let round_trip: crate::pr::status::Line =
+                serde_json::from_value(recovered["status"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(round_trip).unwrap(), projected);
+            let reading = crate::status_wait::reading_pr_event(7, recovered);
+            assert_eq!(
+                reading.settle,
+                if count == 0 {
+                    crate::status_wait::Settle::Succeeded
+                } else {
+                    crate::status_wait::Settle::Unsuccessful
+                }
+            );
+            assert!(
+                reading
+                    .line
+                    .contains(if count == 0 { "ready" } else { "failing" })
+            );
+            assert!(!reading.line.contains("warning"));
+        }
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events

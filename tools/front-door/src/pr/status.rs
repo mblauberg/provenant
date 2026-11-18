@@ -49,20 +49,40 @@ pub(crate) struct Line {
     number: u64,
     state: String,
     pub(crate) head: String,
+    #[serde(default, deserialize_with = "display_default")]
     draft: bool,
+    #[serde(default, deserialize_with = "display_default")]
     checks_passed: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_total: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_failed: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_pending: Option<usize>,
     /// Failed or cancelled check names, when checks were readable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "display_default")]
     failing_checks: Vec<String>,
+    #[serde(default, deserialize_with = "display_default")]
     merge: String,
+    #[serde(default, deserialize_with = "display_default")]
     review: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "display_default"
+    )]
     error: Option<String>,
 }
+fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 impl Line {
     /// The state an operator acts on, most urgent first.
     pub(crate) fn class(&self) -> &'static str {

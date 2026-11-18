@@ -35,7 +35,7 @@ impl Source {
 /// Where one target stands for a waiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Settle {
+pub(crate) enum Settle {
     Pending,
     NeedsInput,
     Succeeded,
@@ -88,10 +88,10 @@ fn terminal_data(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Reading {
-    settle: Settle,
+pub(crate) struct Reading {
+    pub(crate) settle: Settle,
     /// `TARGET STATE [cause]`, bounded; equal lines are one observation.
-    line: String,
+    pub(crate) line: String,
     data: Value,
 }
 impl Reading {
@@ -214,16 +214,55 @@ fn read(
     }
 }
 
-fn reading_pr_event(number: u64, detail: Value) -> Reading {
+pub(crate) fn reading_pr_event(number: u64, detail: Value) -> Reading {
     let label = format!("#{number}");
-    match serde_json::from_value::<crate::pr::status::Line>(detail["status"].clone()) {
+    let status = &detail["status"];
+    let malformed: Vec<_> = [
+        "draft",
+        "checks_passed",
+        "checks_total",
+        "checks_failed",
+        "checks_pending",
+        "failing_checks",
+        "merge",
+        "review",
+        "error",
+    ]
+    .into_iter()
+    .filter(|field| {
+        status.get(*field).is_some_and(|value| match *field {
+            "draft" => !value.is_boolean(),
+            "checks_passed" | "checks_total" | "checks_failed" | "checks_pending" => {
+                !value.is_null()
+                    && value
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .is_none()
+            }
+            "failing_checks" => !value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string)),
+            "error" => !value.is_null() && !value.is_string(),
+            _ => !value.is_string(),
+        })
+    })
+    .collect();
+    match serde_json::from_value::<crate::pr::status::Line>(status.clone()) {
         Ok(line) => Reading {
             settle: match line.verdict() {
                 Some(true) => Settle::Succeeded,
                 Some(false) => Settle::Unsuccessful,
                 None => Settle::Pending,
             },
-            line: format!("{label} {}", line.class()),
+            line: if malformed.is_empty() {
+                format!("{label} {}", line.class())
+            } else {
+                format!(
+                    "{label} {} warning: invalid display fields {}",
+                    line.class(),
+                    malformed.join(",")
+                )
+            },
             data: json!(line),
         },
         Err(error) => Reading::unavailable(&label, &format!("invalid PR journal status: {error}")),
@@ -1659,6 +1698,50 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[cfg(test)]
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
+    #[test]
+    fn pr_journal_display_fields_degrade_without_unavailable() {
+        for value in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!([])),
+        ] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc",
+                "checks_total":1,"checks_failed":0,"checks_pending":0,"review":"APPROVED"});
+            if let Some(value) = value {
+                status["failing_checks"] = value;
+            }
+            let reading = super::reading_pr_event(7, serde_json::json!({"status":status}));
+            assert_eq!(reading.settle, super::Settle::Succeeded);
+            assert!(!reading.line.contains("unavailable"));
+        }
+        for field in [
+            "draft",
+            "checks_passed",
+            "checks_total",
+            "checks_failed",
+            "checks_pending",
+            "failing_checks",
+            "merge",
+            "review",
+            "error",
+        ] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
+            status[field] = serde_json::json!({"invalid":true});
+            let reading = super::reading_pr_event(7, serde_json::json!({"status":status}));
+            assert!(!reading.line.contains("unavailable"), "{field}");
+            assert!(reading.line.contains("warning"), "{field}");
+        }
+        for field in ["number", "state", "head"] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
+            status.as_object_mut().unwrap().remove(field);
+            assert!(
+                super::reading_pr_event(7, serde_json::json!({"status":status}))
+                    .line
+                    .contains("unavailable")
+            );
+        }
+    }
+
     use super::*;
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use provenant_core::Clock as _;
