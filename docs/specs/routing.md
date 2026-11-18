@@ -139,7 +139,8 @@ spend the single lineage allowance in [retry owner](retry-owner.md).
 
 ## Unknown never means ready
 
-Unknown or stale quota never causes a refusal, and missing, expired or
+Unknown or stale quota does not establish exhaustion. Monthly allowance pacing
+constrains unobserved cycles as described below. Missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
 limit holds the whole account until its reset. One function,
@@ -159,6 +160,27 @@ providers at the same tier before stopping at the chair.
   no stale evidence may admit a launch.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
   `crates/routing/src/resolve.rs`
+
+## Monthly allowance ledger
+
+`AllowanceLedger` persists timestamped, deduplicated launch reservations per
+account. `monthly_allowance_assessment` makes `pace` monthly eligibility:
+estimated spend including the next launch must fit elapsed cycle fraction plus
+burst, capped at 100%. Defaults are 10 percentage points burst and 100 basis
+points per uncalibrated launch. Positive usage deltas calibrate cost against
+intervening launches, then smooth 75% previous/25% new. Unchanged reports retain
+debt; launches at or after observation remain pending. Rollover retains learned
+cost. Failed launches conservatively retain reservations.
+
+`monthly_window` generalises cycle detection; adapter declarations require
+missing evidence. Missing, stale or incomplete cycles constrain eligibility;
+model-pool scope applies. `reserve_allowance_launch` atomically rechecks and
+records against the account cache. `pacing.monthly` and account profiles override
+settings; `spend`, `max` or monthly `enabled=false` bypass this preference.
+`pacing_preview` reports settings, source, estimate and budget.
+
+[Operating details](../runbooks/routing-and-templates.md#pacing) cover journal
+bounds, calibration and overrides.
 
 ## Revisioned, bounded refresh
 

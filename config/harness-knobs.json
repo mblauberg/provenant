@@ -72,6 +72,15 @@
       "wall_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "default": "55", "effect": "Wall-clock budget for a whole quota tick. Out-of-range values refuse the file"}
     }
   },
+  "host_monthly_pacing_settings": {
+    "path": "domains.routing.pacing.monthly",
+    "account_override": "domains.routing.pacing.accounts.<adapter/key>.monthly",
+    "settings": {
+      "enabled": {"type": "bool", "default": true, "effect": "Under pace, admit monthly-allowance accounts only while estimated spend including the next launch fits elapsed cycle time plus burst_percent. Missing or stale cycle evidence is constrained. false, spend or max bypasses this preference; diagnostics name the effective source and knob."},
+      "burst_percent": {"type": "int", "min": 0, "max": 100, "default": 10, "effect": "Percentage points of monthly allowance available ahead of elapsed cycle time, capped at the full allowance."},
+      "initial_launch_cost_basis_points": {"type": "int", "min": 1, "max": 10000, "default": 100, "effect": "Conservative allowance cost per launch before calibration. Positive provider-reported usage deltas calibrate and smooth the account-local estimate; unchanged reports retain pending launch estimates."}
+    }
+  },
   "host_opencode_go_settings": {
     "path": "domains.routing.opencode_go",
     "settings": {

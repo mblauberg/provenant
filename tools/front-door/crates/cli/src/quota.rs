@@ -300,6 +300,104 @@ pub(crate) fn read_cache_at(state: &Path) -> Result<Vec<AccountRecord>, EdgeErro
 /// Persist only typed quota scope from a provider event; its message stays in
 /// the redacted attempt reason and is never copied into quota state. Without a
 /// pool the refusal holds only the route's model.
+/// Check and reserve a launch in the same account-cache publication. A busy
+/// cache skips this candidate rather than admitting an unrecorded launch.
+pub(crate) fn reserve_allowance_launch(
+    roots: &Roots,
+    route: &provenant_records::ResolvedRoute,
+    launch_id: &str,
+    config: &provenant_routing::RoutingConfig,
+    catalogue: &provenant_routing::Catalogue,
+    policies: &[QuotaPolicy],
+    now: provenant_core::WallTime,
+) -> Result<(), EdgeError> {
+    let Some(key) = &route.account_key else {
+        return Ok(());
+    };
+    let scope = AccountScope {
+        extra: Default::default(),
+        adapter: route.adapter.clone(),
+        account_key: key.clone(),
+        label: key.clone(),
+    };
+    scope.validate()?;
+    let root = private(roots.state.as_path())?;
+    let directory = child(&root, OsStr::new("quota"))?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Err(EdgeError::Display(
+            "monthly allowance ledger busy; retry candidate".into(),
+        ));
+    };
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|r| r.account.adapter == scope.adapter && r.account.account_key == scope.account_key)
+        .cloned();
+    let mut next = current
+        .clone()
+        .unwrap_or_else(|| AccountRecord::empty(scope.clone()));
+    if next
+        .allowance
+        .recent_launches
+        .iter()
+        .any(|launch| launch.id == launch_id)
+    {
+        return Ok(());
+    }
+    if let Some(snapshot) = &next.snapshot {
+        next.allowance.observe(snapshot);
+    }
+    let model = provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+        .map_err(|e| EdgeError::Display(e.to_string()))?;
+    let ttl = schedule::interval(
+        policies,
+        &route.adapter,
+        schedule::Trigger::Timer,
+        schedule::Power::Ac,
+    )
+    .and_then(|ttl| i64::try_from(ttl).ok())
+    .unwrap_or(0);
+    let observation = next
+        .snapshot
+        .as_ref()
+        .map(|snapshot| provenant_routing::QuotaObservation {
+            model: model.clone(),
+            snapshot: snapshot.clone(),
+            allowance: next.allowance.clone(),
+            expires_unix_seconds: snapshot.observed_unix_seconds.saturating_add(ttl),
+        });
+    if let Some(assessment) = provenant_routing::monthly_allowance_assessment(
+        catalogue,
+        config,
+        now,
+        &model,
+        Some(key),
+        observation.as_ref(),
+    ) && assessment.constrained
+    {
+        return Err(EdgeError::Display(assessment.detail));
+    }
+    next.allowance
+        .record_launch(launch_id, now.unix_seconds())?;
+    next.revision = next
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    next.validate()?;
+    write_intent(
+        &directory,
+        roots.state.as_path(),
+        &UpdateIntent {
+            account: scope,
+            expected: current,
+            replacement: Some(next),
+            readiness_probe_result: None,
+            login_probe_expiry: None,
+        },
+        &mut records,
+    )
+}
+
 pub(crate) fn persist_provider_refusal(
     state_root: &Path,
     route: &provenant_records::run::RouteRecord,
@@ -2544,6 +2642,131 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn monthly_launch_reservation_persists_and_rechecks_shared_account_spend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::{
+            ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility,
+            RouteReadiness,
+        };
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let catalogue = provenant_routing::Catalogue::bundled()?;
+        let config = provenant_routing::RoutingConfig::default();
+        let policies = provenant_providers::scheduling_policies(
+            &Settings::default(),
+            provenant_providers::REGISTRY,
+        );
+        let now = provenant_core::WallTime::from_unix_seconds(100)?;
+        let mut route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            model: "composer-2.5".into(),
+            effort: None,
+            catalogue_revision: catalogue.revision().to_owned(),
+            account_key: Some("work".into()),
+            host: "fixture".into(),
+            alternatives: RouteAlternatives::default(),
+            exclusions: vec![],
+            eligibility: RouteEligibility::Eligible,
+            readiness: RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_warning: None,
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 200,
+            },
+            confidentiality: RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        };
+        let scope = AccountScope {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            account_key: "work".into(),
+            label: "Work".into(),
+        };
+        let mut record = AccountRecord::empty(scope.clone());
+        record.revision = 1;
+        record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 80,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![QuotaWindow {
+                extra: Default::default(),
+                pool: "billing_cycle".into(),
+                window_seconds: Some(30 * 86400),
+                resets_unix_seconds: Some(30 * 86400),
+                used_basis_points: 900,
+            }],
+        });
+        let root = private(roots.state.as_path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        write_intent(
+            &directory,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: scope,
+                expected: None,
+                replacement: Some(record),
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut vec![],
+        )?;
+        let reserve =
+            |route: &ResolvedRoute, id: &str, config: &provenant_routing::RoutingConfig| {
+                reserve_allowance_launch(&roots, route, id, config, &catalogue, &policies, now)
+            };
+        reserve(&route, "attempt-a", &config)?;
+        reserve(&route, "attempt-a", &config)?; // Preparation replay.
+        assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
+        assert!(reserve(&route, "attempt-b", &config).is_err());
+        route.model = "grok-4.7".into();
+        assert!(reserve(&route, "attempt-c", &config).is_err()); // Same allowance across models.
+        assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
+        route.account_key = Some("other".into());
+        assert!(reserve(&route, "attempt-d", &config).is_err()); // Missing monthly cycle.
+        let relaxed: provenant_routing::RoutingConfig =
+            serde_json::from_value(serde_json::json!({
+                "pacing":{"accounts":{"cursor/other":{"monthly":{"enabled":false}}}}
+            }))?;
+        reserve(&route, "attempt-d", &relaxed)?;
+        let records = read_cache(&roots)?;
+        assert!(
+            records
+                .iter()
+                .any(|r| r.account.account_key == "other" && r.allowance.launches == 1)
+        );
+        let held = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
+        assert!(reserve(&route, "attempt-e", &relaxed).is_err());
+        drop(held);
+        assert_eq!(
+            read_cache(&roots)?
+                .iter()
+                .find(|r| r.account.account_key == "other")
+                .unwrap()
+                .allowance
+                .launches,
+            1
+        );
+        Ok(())
+    }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]

@@ -23,6 +23,53 @@ settings with `provenant config schema` and the result with
 account. For a temporary change, use `provenant route override --help`; inspect
 and clear the override when it is no longer needed.
 
+Monthly allowance accounts default to a 10 percentage point burst above elapsed
+cycle time. The local launch ledger keeps estimates current while provider
+billing lags; a missing or stale cycle is constrained. Inspect estimates and
+sources with `provenant route list`.
+
+Override the global defaults, or a single account, in the selected config:
+
+```toml
+[domains.routing.pacing.monthly]
+burst_percent = 10
+initial_launch_cost_basis_points = 100
+
+[domains.routing.pacing.accounts."cursor/work".monthly]
+burst_percent = 15
+```
+
+An account monthly table overrides the full global monthly profile; omitted
+fields take shipped defaults. Set `enabled = false` in that table to bypass the
+monthly cap, or set the account pacing `policy = "spend"` to stop pacing all its
+windows. These preferences do not bypass exhausted allowance or authentication.
+
+The account quota cache also persists the launch journal. Preparation reserves a
+launch before returning its specification, under the quota publication lock.
+The most recent 4096 attempt IDs deduplicate replayed preparation. A busy cache
+skips the candidate for retry. Launches made with pacing bypassed are still
+recorded, and failed launches retain their reservation conservatively.
+
+Between reports, estimated spend is the last reported percentage plus launches
+since the anchor times estimated cost. Positive provider-reported usage changes
+calibrate cost by dividing the change by intervening launches, rounded up.
+Subsequent samples blend 75% previous cost with 25% new cost. Before calibration,
+the configured initial launch cost applies. Flat or decreasing readings in the
+same cycle retain pending launch estimates. A new cycle resets spend but retains
+learned cost. Timestamps keep launches at or after a slow probe's observation
+pending even when they were recorded before it completed; insufficient retained
+journal coverage never clears debt.
+
+Monthly windows are recognised by billing-cycle/monthly/thirty-day pool names
+or 28–31 day durations. An adapter's monthly-allowance declaration, account
+monthly profile or remembered monthly ledger also requires evidence when a
+snapshot omits its cycle. Missing, stale, future-dated, reset or incomplete
+cycles are constrained. Other windows retain their existing treatment, and
+monthly windows respect model-pool scope. Profiles can select other windows
+with `windows`. The estimate averages launches across one account's models and
+pools; it cannot measure individual launch costs or external usage before the
+provider reports it.
+
 ## Model policy
 
 Configure policy under `[domains.routing.model_policy]`. Run

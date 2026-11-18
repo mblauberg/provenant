@@ -309,6 +309,7 @@ pub fn complete(
                     }
                 }
             }
+            next.allowance.observe(&snapshot);
             snapshot.revision = next.revision;
             next.snapshot = Some(snapshot);
             next.failures = 0;

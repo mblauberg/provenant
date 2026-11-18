@@ -38,6 +38,7 @@ pub fn validate_availability(
 pub struct QuotaObservation {
     pub model: ModelId,
     pub snapshot: QuotaSnapshot,
+    pub allowance: provenant_quota::AllowanceLedger,
     pub expires_unix_seconds: i64,
 }
 

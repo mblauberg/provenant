@@ -823,6 +823,7 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     };
     let without_reference = factor(vec![])?;
     let fresh_reference = factor(vec![QuotaObservation {
+        allowance: Default::default(),
         model: reference.model.clone(),
         expires_unix_seconds: reference.expires_unix_seconds,
         snapshot: reference.snapshot.clone(),

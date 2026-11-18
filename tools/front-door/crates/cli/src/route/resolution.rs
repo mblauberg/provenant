@@ -300,6 +300,7 @@ pub(super) fn quota_observations(
         }
         for model in models {
             observations.push(QuotaObservation {
+                allowance: record.allowance.clone(),
                 model,
                 snapshot: snapshot.clone(),
                 expires_unix_seconds,

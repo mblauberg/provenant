@@ -17,6 +17,7 @@ pub use provenant_records::route_selection::PacingPolicy;
 pub struct PacingSettings {
     pub accounts: BTreeMap<String, PacingProfile>,
     pub free: BTreeMap<String, PacingProfile>,
+    pub monthly: Option<MonthlyPacingSettings>,
     #[serde(flatten)]
     pub providers: BTreeMap<String, PacingPolicy>,
 }
@@ -53,6 +54,30 @@ pub struct PacingProfile {
     pub reserve: BTreeMap<PacingWindow, u8>,
     pub deadline: Option<PacingDeadline>,
     pub after_deadline: AfterDeadline,
+    pub monthly: Option<MonthlyPacingSettings>,
+}
+
+/// Monthly admission is a sourced preference, overridable globally or per account.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MonthlyPacingSettings {
+    pub enabled: bool,
+    pub burst_percent: u8,
+    pub initial_launch_cost_basis_points: u64,
+}
+impl Default for MonthlyPacingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            burst_percent: 10,
+            initial_launch_cost_basis_points: 100,
+        }
+    }
+}
+impl MonthlyPacingSettings {
+    fn valid(self) -> bool {
+        self.burst_percent <= 100 && (1..=10_000).contains(&self.initial_launch_cost_basis_points)
+    }
 }
 
 /// An expiring preference for an exact model in a known task stratum.
@@ -893,6 +918,13 @@ impl DomainConfig for RoutingConfig {
                 });
             }
         }
+        if self.pacing.monthly.is_some_and(|s| !s.valid()) {
+            errors.push(SectionError {
+                detail: None,
+                field: "pacing.monthly".into(),
+                code: "range",
+            });
+        }
         for (account, profile) in &self.pacing.accounts {
             if !account_identifier(account) {
                 errors.push(SectionError {
@@ -973,6 +1005,13 @@ fn account_identifier(value: &str) -> bool {
 }
 
 fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<SectionError>) {
+    if profile.monthly.is_some_and(|s| !s.valid()) {
+        errors.push(SectionError {
+            detail: None,
+            field: format!("{field}.monthly"),
+            code: "range",
+        });
+    }
     if profile.reserve.values().any(|percent| *percent > 100) {
         errors.push(SectionError {
             detail: None,
@@ -1137,6 +1176,23 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("pacing.monthly.enabled", "bool"),
+    FieldMetadata::int("pacing.monthly.burst_percent", 0, 100),
+    FieldMetadata::int("pacing.monthly.initial_launch_cost_basis_points", 1, 10_000),
+    FieldMetadata::new("pacing.free.{provider}.monthly.enabled", "bool"),
+    FieldMetadata::int("pacing.free.{provider}.monthly.burst_percent", 0, 100),
+    FieldMetadata::int(
+        "pacing.free.{provider}.monthly.initial_launch_cost_basis_points",
+        1,
+        10_000,
+    ),
+    FieldMetadata::new("pacing.accounts.{account}.monthly.enabled", "bool"),
+    FieldMetadata::int("pacing.accounts.{account}.monthly.burst_percent", 0, 100),
+    FieldMetadata::int(
+        "pacing.accounts.{account}.monthly.initial_launch_cost_basis_points",
+        1,
+        10_000,
+    ),
     FieldMetadata::new("outcome_priors.enabled", "bool"),
     FieldMetadata::int("outcome_priors.exploration_percent", 0, 100),
     FieldMetadata::int("capability_preferences.{selector}.{capability}", 1, 100),
