@@ -87,6 +87,72 @@ fn terminal_data(
     })
 }
 
+/// The settle phrase a chair reads in the final line. An unfinished target at
+/// expiry is reported as still running at timeout, never as settled.
+fn settle_phrase(settle: Settle, done: bool) -> &'static str {
+    match settle {
+        Settle::Succeeded => "settled ok",
+        Settle::Unsuccessful => "failed",
+        Settle::NeedsInput => "needs input",
+        Settle::Pending if done => "still running",
+        Settle::Pending => "still running at timeout",
+    }
+}
+
+/// The one next command after a wait. Targets still running at timeout are the
+/// ones a chair resumes; once every target has settled, a status re-read is the
+/// neutral next step. The command is derived only from states just observed.
+fn next_command(sources: &[Source], latest: &[Option<Reading>]) -> String {
+    let pending: Vec<_> = sources
+        .iter()
+        .zip(latest)
+        .filter(|(_, reading)| {
+            reading
+                .as_ref()
+                .is_some_and(|reading| reading.settle == Settle::Pending)
+        })
+        .map(|(source, _)| source.label())
+        .collect();
+    if !pending.is_empty() {
+        return format!("provenant wait {}", pending.join(" "));
+    }
+    let targets: Vec<_> = sources.iter().map(Source::label).collect();
+    if targets.is_empty() {
+        "provenant status".to_owned()
+    } else {
+        format!("provenant status {}", targets.join(" "))
+    }
+}
+
+/// Every target's settle state, in target order. Shared by the full human
+/// line and the compact summary's `next` so both last lines agree.
+fn settle_states(sources: &[Source], latest: &[Option<Reading>], done: bool) -> String {
+    let states: Vec<_> = sources
+        .iter()
+        .zip(latest)
+        .map(|(source, reading)| {
+            let settle = reading
+                .as_ref()
+                .map_or(Settle::Pending, |reading| reading.settle);
+            format!("{} {}", source.label(), settle_phrase(settle, done))
+        })
+        .collect();
+    if states.is_empty() {
+        "nothing to wait for".to_owned()
+    } else {
+        states.join(", ")
+    }
+}
+
+/// The one next command, paired with the states in the summary's `next` line.
+fn final_line(sources: &[Source], latest: &[Option<Reading>], done: bool) -> String {
+    format!(
+        "next: {}; {}\n",
+        settle_states(sources, latest, done),
+        next_command(sources, latest)
+    )
+}
+
 /// The last known check summary and next step that `pr watch` used to print at
 /// a timeout. `wait --pr` keeps them as an extra diagnostic line so the final
 /// line stays owned by the wait final-line format.
@@ -1662,10 +1728,27 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         .lock()
         .map(|value| value.clone())
         .unwrap_or_else(|_| "event source status unavailable".into());
-    if !graph_indices.is_empty() {
+    // The observation method is diagnostic detail, not the answer a chair
+    // reads: it belongs to --full and to the JSON envelope, never to the last
+    // line of default human output.
+    if globals.full && !graph_indices.is_empty() {
         human.push_str(&format!("local observation: {observation}\n"));
     }
-    crate::emit(
+    human.push_str(&final_line(&sources, &latest, done));
+    // Compact output keeps an owner summary, not a head-only truncation, so
+    // the settle states and the next command stay on its last line.
+    let summary = provenant_cli::Summary::new(
+        mode_heading(mode).trim_end().to_owned(),
+        rows.iter()
+            .map(|row| row["line"].as_str().unwrap_or("").to_owned())
+            .collect(),
+        Some(format!(
+            "{}; {}",
+            settle_states(&sources, &latest, done),
+            next_command(&sources, &latest)
+        )),
+    );
+    crate::emit_summarised(
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
@@ -1679,6 +1762,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         globals,
         &human,
         true,
+        Some(&summary),
     )
 }
 
@@ -2108,6 +2192,41 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn final_line_states_every_settle_and_the_next_command() {
+        use Settle::*;
+        let sources = vec![
+            Source::Graph("fixed".parse().expect("target")),
+            Source::Graph("broken".parse().expect("target")),
+            Source::Graph("input".parse().expect("target")),
+            Source::Graph("slow".parse().expect("target")),
+        ];
+        let mixed = vec![
+            Some(reading(Succeeded)),
+            Some(reading(Unsuccessful)),
+            Some(reading(NeedsInput)),
+            Some(reading(Pending)),
+        ];
+        assert_eq!(
+            final_line(&sources, &mixed, false),
+            "next: fixed settled ok, broken failed, input needs input, slow still running at timeout; provenant wait slow\n"
+        );
+        let settled = vec![
+            Some(reading(Succeeded)),
+            Some(reading(Unsuccessful)),
+            Some(reading(NeedsInput)),
+            Some(reading(Succeeded)),
+        ];
+        assert_eq!(
+            final_line(&sources, &settled, true),
+            "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant status fixed broken input slow\n"
+        );
+        assert_eq!(
+            final_line(&[], &[], true),
+            "next: nothing to wait for; provenant status\n"
+        );
     }
 
     fn reading(settle: Settle) -> Reading {
