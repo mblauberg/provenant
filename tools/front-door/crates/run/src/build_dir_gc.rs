@@ -2965,7 +2965,7 @@ mod tests {
                 .env_clear()
                 .envs(provenant_os::fixture::fixture_git_settings())
                 .env("PATH", "/usr/bin:/bin")
-                .env("HOME", root)
+                .env("HOME", &root)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .current_dir(&project)
