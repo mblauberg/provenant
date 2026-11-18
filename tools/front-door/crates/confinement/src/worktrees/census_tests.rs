@@ -2032,6 +2032,58 @@ fn unreadable_cwd_without_candidate_paths_does_not_block_removal() -> Result<(),
         current,
         platform_uids: BTreeMap::new(),
     };
+    struct DeniedDescriptors<'a>(&'a InjectedCensus);
+    impl ProcessObserver for DeniedDescriptors<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.0.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            self.0.observe(pid)
+        }
+        fn census(
+            &self,
+            limit: usize,
+        ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
+        {
+            self.0.census(limit)
+        }
+    }
+    impl CwdObserver for DeniedDescriptors<'_> {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            self.0.cwd(pid)
+        }
+        fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+            self.0.process_uids(pid)
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: false,
+                gap: Some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
+            }
+        }
+        fn unreadable_policy_uids(
+            &self,
+            pid: i64,
+            entries: &[CensusIgnoreEntry],
+        ) -> Result<
+            provenant_os::pid::UnreadablePolicyExcusal,
+            provenant_os::pid::UnreadablePolicyFailure,
+        > {
+            self.0.unreadable_policy_uids(pid, entries)
+        }
+    }
+    impl WorkerObserver for DeniedDescriptors<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            observe_worker_roots(roots, self, self, &self.0.current, true).0
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
+        fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+            observe_worker_roots(roots, self, self, &self.0.current, true)
+        }
+    }
     let created = create(
         &test_context.context(),
         WorktreeCreate {
@@ -2043,6 +2095,26 @@ fn unreadable_cwd_without_candidate_paths_does_not_block_removal() -> Result<(),
     // Complete occupancy finds no path under the worktree, so the EPERM cwd
     // does not retain this candidate.
     fs::set_permissions(&created.path, fs::Permissions::from_mode(0o755))?;
+    let denied = DeniedDescriptors(&observer);
+    assert!(denied.observe_roots(std::slice::from_ref(&created.path))[&created.path].is_unknown());
+    assert!(matches!(
+        remove_with_port(
+            &test_context,
+            &WorktreeContext {
+                workers: &denied,
+                ..test_context.context()
+            },
+            WorktreeRemove::Name {
+                name: "landed".to_owned(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancellation,
+        ),
+        Err(WorktreeError::IncompleteCensus { .. })
+    ));
+    assert!(created.path.exists());
     remove_with_port(
         &test_context,
         &WorktreeContext {
@@ -2377,7 +2449,7 @@ mod writer_cohort {
     }
 
     #[test]
-    fn unreadable_process_without_candidate_path_is_free_but_positive_paths_remain_protected()
+    fn denied_descriptor_observation_remains_unknown_until_occupancy_is_complete()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let root = canonicalize(&fixture.root)?;
@@ -2407,7 +2479,7 @@ mod writer_cohort {
             observation.occupancy = vec![incomplete(OccupancyGap::DescriptorsDenied)];
             let states =
                 Workers(&processes, &observation).observe_roots(std::slice::from_ref(&root));
-            assert!(states[&root].is_available(), "{uids:?}");
+            assert!(states[&root].is_unknown(), "{uids:?}");
         }
         // Even a readable outside cwd cannot excuse an unreadable open file.
         let mut observation = observations(CwdObservation::Path(outside), Some(test_uids(owner)));

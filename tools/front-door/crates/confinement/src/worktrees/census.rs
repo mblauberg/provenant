@@ -1285,49 +1285,46 @@ pub(super) fn observe_worker_holders_while(
             if !within_budget() {
                 return (states, holders, details, taints);
             }
-            // EPERM is a common limit of process listings. When cwd evidence
-            // is either absent or directly placeable, and descriptor evidence
-            // is complete (or only its own EPERM gap remains), preserve only
-            // roots named by positive or unplaceable paths.
+            // EPERM is a common limit of process listings. Place every
+            // positive path first; only a complete descriptor observation can
+            // prove that the other roots are clear.
             let cwd_supported = matches!(
                 &cwd,
                 Ok(CwdObservation::Path(_)
                     | CwdObservation::Gone
                     | CwdObservation::PermissionDenied)
             );
-            let descriptors_supported = occupancy.complete
-                || occupancy.gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied);
-            if cwd_supported && descriptors_supported {
-                let mut under_candidate = false;
-                if let Ok(CwdObservation::Path(path)) = &cwd {
-                    under_candidate |= record_unreadable_path(
-                        &mut states,
-                        &mut holders,
-                        &mut details,
-                        &mut taints,
-                        cwd_observer,
-                        pid,
-                        path.as_path(),
-                        ProcessEvidenceKind::WorkingDirectory,
-                        unplaceable,
-                    );
+            let mut under_candidate = false;
+            if let Ok(CwdObservation::Path(path)) = &cwd {
+                under_candidate |= record_unreadable_path(
+                    &mut states,
+                    &mut holders,
+                    &mut details,
+                    &mut taints,
+                    cwd_observer,
+                    pid,
+                    path.as_path(),
+                    ProcessEvidenceKind::WorkingDirectory,
+                    unplaceable,
+                );
+            }
+            for path in occupancy.paths {
+                if !within_budget() {
+                    return (states, holders, details, taints);
                 }
-                for path in occupancy.paths {
-                    if !within_budget() {
-                        return (states, holders, details, taints);
-                    }
-                    under_candidate |= record_unreadable_path(
-                        &mut states,
-                        &mut holders,
-                        &mut details,
-                        &mut taints,
-                        cwd_observer,
-                        pid,
-                        &path,
-                        ProcessEvidenceKind::OtherHeldPath,
-                        unplaceable,
-                    );
-                }
+                under_candidate |= record_unreadable_path(
+                    &mut states,
+                    &mut holders,
+                    &mut details,
+                    &mut taints,
+                    cwd_observer,
+                    pid,
+                    &path,
+                    ProcessEvidenceKind::OtherHeldPath,
+                    unplaceable,
+                );
+            }
+            if cwd_supported && occupancy.complete {
                 if !under_candidate {
                     unplaceable(Some(pid), Some(UNREADABLE_NO_CANDIDATE_PATH));
                 }
@@ -1385,11 +1382,14 @@ pub(super) fn observe_worker_holders_while(
         let uids_before = cwd_observer.process_uids(pid);
         let mut cwd = observe_same_process(observer, cwd_observer, fact);
         let mut occupancy_gap = None;
+        let mut occupancy_complete = false;
+        let mut foreign_system = false;
         let mut descriptor_roots = BTreeSet::new();
         let mut descriptor_uncertain_roots = BTreeSet::new();
         if !matches!(cwd, NativeCwd::Gone) {
             let before = observer.observe(pid);
             let occupancy = cwd_observer.occupancy_with_retries_while(pid, &within_budget);
+            occupancy_complete = occupancy.complete;
             if !within_budget() {
                 return (states, holders, details, taints);
             }
@@ -1433,7 +1433,7 @@ pub(super) fn observe_worker_holders_while(
                             | NativeCwd::PolicyRejected(_)
                     )
             });
-            let foreign_system = foreign_uids.is_some();
+            foreign_system = foreign_uids.is_some();
             // Still inspect and place every positive path. Only missing evidence
             // is scoped out; a root-owned process inside a worktree is live.
             if let Some(uids) = foreign_uids
@@ -1549,13 +1549,7 @@ pub(super) fn observe_worker_holders_while(
             }
             if !stable {
                 occupancy_gap = Some(provenant_os::pid::OccupancyGap::Churn);
-            } else if !occupancy.complete
-                && !foreign_system
-                && !(matches!(
-                    cwd,
-                    NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_)
-                ) && occupancy.gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied))
-            {
+            } else if !occupancy.complete && !foreign_system {
                 occupancy_gap = Some(
                     occupancy
                         .gap
@@ -1577,9 +1571,7 @@ pub(super) fn observe_worker_holders_while(
                         ),
                     );
                 }
-                let path_evidence_complete = occupancy.complete
-                    || occupancy.gap == Some(provenant_os::pid::OccupancyGap::DescriptorsDenied)
-                    || foreign_system;
+                let path_evidence_complete = occupancy_complete || foreign_system;
                 if occupancy_gap.is_none() && path_evidence_complete {
                     if descriptor_roots.is_empty() && descriptor_uncertain_roots.is_empty() {
                         unplaceable(Some(pid), Some(UNREADABLE_NO_CANDIDATE_PATH));
