@@ -5,7 +5,12 @@
 //! `key=value` credential assignments are scanned byte by byte: keys stream
 //! through unchanged and only the value is withheld, so no replay is needed.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
+use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata};
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";

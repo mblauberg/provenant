@@ -629,6 +629,14 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
         "Run fixture\nAttempt fixture",
     )?;
     assert!(body.len() <= PR_BODY_LIMIT && body.ends_with(PR_BODY_TRUNCATION_NOTE.trim_end()));
+    fixture.commit(&fixture.writer.worktree, &"s".repeat(60_000))?;
+    let body = host.commit_body(
+        &fixture.writer,
+        host.head(&fixture.writer)?,
+        "Run fixture\nAttempt fixture",
+    )?;
+    assert!(body.len() <= PR_BODY_LIMIT && body.ends_with(PR_BODY_TRUNCATION_NOTE.trim_end()));
+    assert!(!body.contains(&"s".repeat(10)));
     Ok(())
 }
 

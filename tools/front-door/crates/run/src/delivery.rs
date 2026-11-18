@@ -1934,7 +1934,7 @@ impl HostDeliveryContext {
             };
             let truncated = match valid.rfind('\n') {
                 Some(pos) if !valid[..pos].trim().is_empty() => valid[..pos].trim_end(),
-                _ => valid.trim_end(),
+                _ => "",
             };
             return Ok(format!("{truncated}{}", PR_BODY_TRUNCATION_NOTE.trim_end()));
         }

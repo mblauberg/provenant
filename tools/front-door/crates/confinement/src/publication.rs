@@ -15,6 +15,33 @@ const LIMIT: usize = 16 * 1024 * 1024;
 const MASK: &str = "[REDACTED]";
 // Short values are too ambiguous for document-wide substring replacement.
 const MIN_EXACT_BYTES: usize = 8;
+const VALUE_FLAGS: &[&str] = &[
+    "--body",
+    "-b",
+    "--title",
+    "-t",
+    "--body-file",
+    "--template",
+    "-T",
+    "--input",
+    "--header",
+    "-H",
+    "--field",
+    "--raw-field",
+    "-f",
+    "-F",
+    "--label",
+    "-l",
+    "--reviewer",
+    "-r",
+    "--jq",
+    "-q",
+    "--milestone",
+    "-m",
+    "--head",
+    "-X",
+    "--method",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -419,8 +446,7 @@ impl Projector {
                 let (flag, inline) = arg
                     .split_once('=')
                     .map_or((arg.as_str(), None), |(flag, value)| (flag, Some(value)));
-                if inline.is_none() && (Self::header_flag(flag) || Self::argument_takes_value(flag))
-                {
+                if inline.is_none() && Self::argument_takes_value(flag) {
                     in_value = true;
                 }
                 args.push(arg);
@@ -447,9 +473,7 @@ impl Projector {
                 secrets.push(value.as_bytes().to_vec());
             }
             // A value that happens to spell a flag is still content, not a declaration.
-            index += if Self::header_flag(flag)
-                || (inline.is_none() && Self::argument_takes_value(flag))
-            {
+            index += if inline.is_none() && Self::argument_takes_value(flag) {
                 2
             } else {
                 1
@@ -472,18 +496,7 @@ impl Projector {
     }
 
     fn argument_takes_value(flag: &str) -> bool {
-        Self::field_flag(flag)
-            || matches!(
-                flag,
-                "--body"
-                    | "-b"
-                    | "--title"
-                    | "-t"
-                    | "--body-file"
-                    | "--template"
-                    | "-T"
-                    | "--input"
-            )
+        VALUE_FLAGS.contains(&flag)
     }
 
     fn project_arguments(
@@ -1205,6 +1218,36 @@ mod tests {
         assert_eq!(
             arguments,
             vec!["pr", "create", "--body", "-fix typo", "-t", "My Title"]
+        );
+    }
+
+    #[test]
+    fn value_flags_protect_joined_flag_values() {
+        let projector = Projector::new([]).unwrap();
+        let arguments = [
+            "pr", "create", "--title", "Title", "--body", "Body", "--label", "-bug",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let operation = projector
+            .forge(
+                ForgeOperation::Cli {
+                    arguments,
+                    input: None,
+                },
+                Path::new("."),
+            )
+            .unwrap();
+        let ForgeOperation::Cli { arguments, .. } = operation else {
+            panic!("expected CLI operation");
+        };
+        let arguments: Vec<_> = arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(
+            arguments,
+            vec![
+                "pr", "create", "--title", "Title", "--body", "Body", "--label", "-bug"
+            ]
         );
     }
 }

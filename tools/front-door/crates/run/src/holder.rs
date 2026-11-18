@@ -164,7 +164,7 @@ fn apply_provider_identity(
             // delimiter-complete frame was oversized, undecodable or
             // unreadable, or capture drain timed out, the terminal owner
             // cannot prove that the provider stayed in the admitted session.
-            Effect::Refuse(_) => unsettle(
+            Effect::Refuse(_) | Effect::Stop(_) => unsettle(
                 decoded,
                 "provider identity evidence was incomplete; continuation refused by policy",
             ),
