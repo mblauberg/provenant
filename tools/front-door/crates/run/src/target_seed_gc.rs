@@ -217,7 +217,7 @@ pub fn collect(
         drop(build_lock);
     }
 
-    let mut cursor = if matches!(
+    let cursor = if matches!(
         phase,
         Some(Phase::Select | Phase::CountNewer | Phase::CandidateTree | Phase::RemoveCandidate)
     ) {
