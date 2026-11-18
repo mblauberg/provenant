@@ -16,6 +16,8 @@ pub enum Destination {
     IssueComment,
     FixtureExport,
     ArtifactExport,
+    GraphPublication,
+    PeerPublication,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,4 +410,54 @@ fn mask_assignments(text: &str) -> String {
         offset = end;
     }
     out.push_str(&text[offset..]); out
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn publication_masks_typed_and_exact_values_and_binds_both_payloads() {
+        let projector = Projector::new([b"known-secret".to_vec()]).unwrap();
+        let raw = br#"{"token":"hidden-value","copy":"hidden-value","message":"known-secret and ordinary text"}"#;
+        let mut projection = projector.json(Destination::PeerPublication, raw).unwrap();
+        let output = std::str::from_utf8(projection.bytes()).unwrap();
+        assert!(!output.contains("hidden-value"));
+        assert!(!output.contains("known-secret"));
+        assert!(output.contains("ordinary text"));
+        assert_eq!(projection.raw, PayloadBinding::of(raw));
+        assert_eq!(projection.published, PayloadBinding::of(projection.bytes()));
+        assert_ne!(projection.raw, projection.published);
+        assert!(projection.matches_source(Destination::PeerPublication, raw));
+        assert!(!projection.matches_source(Destination::GraphPublication, raw));
+        assert!(!projection.matches_source(Destination::PeerPublication, b"different"));
+        projection.bytes.push(b'!');
+        assert!(!projection.matches_source(Destination::PeerPublication, raw));
+    }
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn publication_masks_typed_assignments_and_preserves_unrelated_text() {
+        let projector = Projector::new([b"explicit-value".to_vec()]).unwrap();
+        let raw = b"password=private-value; copy private-value, explicit-value; ordinary ghp_unrelated";
+        let projection = projector.project(Destination::GraphPublication, raw).unwrap();
+        let output = std::str::from_utf8(projection.bytes()).unwrap();
+        assert!(!output.contains("private-value"));
+        assert!(!output.contains("explicit-value"));
+        assert!(output.contains("ordinary ghp_unrelated"));
+        assert_eq!(projection.raw.bytes, raw.len() as u64);
+        assert_eq!(projection.published.bytes, projection.bytes().len() as u64);
+    }
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn publication_failure_withholds_invalid_external_payload() {
+        let projector = Projector::new([]).unwrap();
+        assert!(matches!(projector.project(Destination::PeerPublication, b"\xff"), Err(ProjectionError::Encoding)));
+        assert!(matches!(projector.json(Destination::GraphPublication, b"{invalid"), Err(ProjectionError::Document)));
+        let operation = ForgeOperation::Open { base: "main".into(), head: "branch".into(), title: "title".into(), body: vec![0xff], draft: false };
+        assert!(matches!(projector.forge(operation, Path::new(".")), Err(ProjectionError::Encoding)));
+    }
 }

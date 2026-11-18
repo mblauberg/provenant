@@ -745,8 +745,12 @@ pub fn peer(
                     extra: Default::default(),
                 },
             ),
-            PeerAction::Output { input, .. } => peer_result(
-                owner
+            PeerAction::Output { audience, input, .. } => peer_result(
+                (|| {
+                    if !matches!(audience, provenant_fabric_runtime::hosts::OutputAudience::PeerPublication) {
+                        return Err(FacadeError::ConfinementRefused { resource: None });
+                    }
+                    owner
                     .output_for_peer(input.clone(), budget, &cancel)
                     .and_then(|mut data| {
                         let (OutputResult::Chunk { peer, target, .. }
@@ -755,7 +759,8 @@ pub fn peer(
                         fields.peer_subtree = None;
                         peer.merge(fields);
                         Ok(data)
-                    }),
+                    })
+                })(),
                 |data| PeerResult::Output {
                     data: Box::new(data),
                     extra: Default::default(),

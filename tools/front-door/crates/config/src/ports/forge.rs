@@ -1227,6 +1227,20 @@ esac
         );
     }
 
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn failed_publication_projection_never_invokes_forge_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut forge = ForgePort::new(port(PortBackend::Builtin), "tracker", dir.path(), dir.path(),
+            std::sync::Arc::new(provenant_records::policy::Policy::default())).unwrap();
+        forge.set_publication_projector(|_| Err(PortError::Projection));
+        let result = forge.execute_with(ForgeOperation::Open {
+            base: "main".into(), head: "branch".into(), title: "title".into(),
+            body: b"raw secret".to_vec(), draft: false,
+        }, Duration::from_secs(2), |_, _, _, _| panic!("failed projection reached publisher"));
+        assert!(matches!(result, Err(PortError::Projection)));
+    }
+
     #[test]
     fn every_forge_operation_uses_each_backend_and_preserves_typed_headers() {
         let dir = tempfile::tempdir().unwrap();

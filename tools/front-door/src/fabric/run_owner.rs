@@ -1626,6 +1626,7 @@ impl BinaryRunOwner<'_> {
             &target,
             PeerAction::Output {
                 extra: Default::default(),
+                audience: provenant_fabric_runtime::hosts::OutputAudience::PeerPublication,
                 input: input.clone(),
             },
             budget,
