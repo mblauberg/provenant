@@ -938,7 +938,7 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
         {
-            match owner.cancelled_attempt_settled(attempt) {
+            match owner.attempt_settled(attempt, SettlementPurpose::Cancellation) {
                 Ok(true) => {}
                 observed => {
                     settled = false;

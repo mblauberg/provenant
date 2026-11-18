@@ -401,7 +401,7 @@ fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
         observations: VecDeque::from([AttemptObservation::Queued {
             attempt_ref: Some("host/queued".into()),
         }]),
-        cancelled_attempt_settled: true,
+        attempt_settled: true,
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -604,6 +604,60 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     let stopped = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(owner.calls.len(), 4);
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn settled_queued_attempt_is_observed_before_its_retry_wake() {
+    let document = graph(vec![node("one", route("first"))]);
+    let reference = "host/queued";
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        observations: VecDeque::from([
+            AttemptObservation::Queued {
+                attempt_ref: Some(reference.into()),
+            },
+            AttemptObservation::Queued {
+                attempt_ref: Some(reference.into()),
+            },
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let queued = advance(&document, &mut owner, &mut journal).unwrap();
+    let key = queued.checkpoint.nodes[0].attempts[0].key.clone();
+    assert!(
+        retry_of(&queued.checkpoint)
+            .wake_at
+            .is_some_and(|wake| wake > at(1))
+    );
+    owner.now = Some(at(1));
+    let calls = owner.calls.len();
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        owner.calls.len(),
+        calls,
+        "unsettled preparation keeps its backoff"
+    );
+    assert_eq!(
+        retry_of(&waiting.checkpoint).wake_at,
+        retry_of(&queued.checkpoint).wake_at
+    );
+    owner.attempt_settled = true;
+    owner
+        .observations
+        .push_back(terminal(AttemptOutcome::Succeeded));
+    let settled = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(settled.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(settled.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(settled.checkpoint.nodes[0].attempts[0].key, key);
+    assert_eq!(
+        settled.checkpoint.nodes[0].attempts[0]
+            .attempt_ref
+            .as_deref(),
+        Some(reference)
+    );
+    assert!(settled.checkpoint.nodes[0].launch_retry.is_none());
 }
 
 // Spec: docs/specs/run-launch.md#admission-and-custody

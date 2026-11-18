@@ -722,7 +722,7 @@ fn node_redo_reopens_only_the_selected_node_of_a_cancelled_graph() {
     checkpoint.cancelled = true;
     checkpoint.cancel_reason = Some("chair stopped graph".into());
     let mut cancellation_owner = FakeOwner {
-        cancelled_attempt_settled: true,
+        attempt_settled: true,
         ..Default::default()
     };
     settle_cancelled_nodes(
@@ -854,7 +854,7 @@ fn subtree_stop_clears_a_launch_retry_wake_when_no_process_was_accepted() {
         cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
     assert_eq!(effect.running, vec!["work"]);
     let mut owner = FakeOwner {
-        cancelled_attempt_settled: true,
+        attempt_settled: true,
         ..Default::default()
     };
     let mut journal = MemoryJournal(Some(checkpoint.clone()));
@@ -911,7 +911,7 @@ fn subtree_stop_fences_live_parent_and_children_across_replay_and_preserves_deta
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
     let mut settled_owner = FakeOwner {
-        cancelled_attempt_settled: true,
+        attempt_settled: true,
         ..Default::default()
     };
     settle_stopped_subtrees(&document, &mut checkpoint, &mut settled_owner, &mut journal).unwrap();

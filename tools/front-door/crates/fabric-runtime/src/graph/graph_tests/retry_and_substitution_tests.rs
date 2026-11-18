@@ -28,7 +28,7 @@ fn cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key() {
     );
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(owner.cancellation_stops, 1);
-    owner.cancelled_attempt_settled = true;
+    owner.attempt_settled = true;
     let settled = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(
         settled

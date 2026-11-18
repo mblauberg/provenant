@@ -114,9 +114,10 @@ impl AttemptOwner for Provider {
     ) -> std::result::Result<bool, Crash> {
         Ok(self.accepted == Some(false))
     }
-    fn cancelled_attempt_settled(
+    fn attempt_settled(
         &mut self,
         _: &graph::GraphAttempt,
+        _: graph::SettlementPurpose,
     ) -> std::result::Result<bool, Crash> {
         Ok(self.cancelled_settled)
     }

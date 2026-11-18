@@ -443,10 +443,11 @@ pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
     })
 }
 
-/// Facts are requested lazily: waiting nodes never probe a host or consume a
-/// refusal, and a deadline check precedes fallback evidence exactly as on replay.
+/// Facts are requested lazily: a referenced waiting attempt may prove settlement,
+/// without replaying preparation. A deadline check precedes fallback evidence.
 #[derive(Default)]
 pub(super) struct NextAttemptFacts {
+    pub attempt_settled: Option<bool>,
     pub launch_accepted: Option<bool>,
     pub fallback: Option<PreparationObservation>,
 }
@@ -459,6 +460,7 @@ pub(super) struct PreparationObservation {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum NextAttemptDecision {
+    ObserveSettlement,
     ObserveLaunchAcceptance,
     ObservePreparationFallback,
     Ready(NextAttempt),
@@ -480,7 +482,23 @@ pub(super) fn next_attempt_transition(
         .and_then(|retry| retry.wake_at)
         .is_some_and(|wake| launch_clock.is_some_and(|now| now < wake))
     {
-        return NextAttemptDecision::Ready(NextAttempt::WaitRetryWake);
+        // Backoff defers preparation, not reconciliation of a settled run.
+        // Never call observe_or_start early without positive settlement proof.
+        let settled = if progress
+            .attempts
+            .last()
+            .is_some_and(|attempt| attempt.attempt_ref.is_some())
+        {
+            match facts.attempt_settled {
+                Some(settled) => settled,
+                None => return NextAttemptDecision::ObserveSettlement,
+            }
+        } else {
+            false
+        };
+        if !settled {
+            return NextAttemptDecision::Ready(NextAttempt::WaitRetryWake);
+        }
     }
 
     // 2. Launch retry deadline expiry check.
@@ -635,6 +653,14 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
     loop {
         match next_attempt_transition(node, progress, limits, launch_clock, &facts) {
             NextAttemptDecision::Ready(decision) => return Ok(decision),
+            NextAttemptDecision::ObserveSettlement => {
+                facts.attempt_settled = Some(match progress.attempts.last() {
+                    Some(attempt) => {
+                        owner.attempt_settled(attempt, super::SettlementPurpose::Observation)?
+                    }
+                    None => false,
+                });
+            }
             NextAttemptDecision::ObserveLaunchAcceptance => {
                 facts.launch_accepted = Some(match progress.attempts.last() {
                     Some(attempt) => owner.launch_accepted(attempt)?,

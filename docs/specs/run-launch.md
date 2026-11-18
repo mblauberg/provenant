@@ -1,7 +1,8 @@
 # Run launch and admission
 
-Owner: `crates/run`, `crates/confinement`, `crates/providers`
-Anchor: `crates/run/src/launch.rs`, `crates/run/src/admission.rs`
+Owner: `crates/run`, `crates/confinement`, `crates/providers`, `crates/fabric-runtime`
+Anchor: `crates/run/src/launch.rs`, `crates/run/src/admission.rs`,
+`crates/fabric-runtime/src/graph/next_attempt.rs`
 
 Paths are relative to `tools/front-door/`.
 
@@ -33,6 +34,12 @@ A missing observation reference never erases a previously saved reference. A new
 admitted queued reference is saved before the scheduler completes launch inline.
 If the launch edge still leaves it queued, the owner preserves that observation
 and its bounded wake. A queued observation alone does not charge a launch failure.
+A future wake defers preparation only. `AttemptOwner::attempt_settled` may prove
+that an already-referenced run is terminal and has released custody; that proof
+permits observation before the wake without authorising a new launch.
+`SettlementPurpose` distinguishes ordinary referenced-run observation from the
+cancellation proof for an attached peer subtree; detached work must not make
+one purpose stand in for the other.
 Fixture launch deferral covers both admission and queued relaunch, so sealing
 an attempt never implicitly prepares its provider.
 - Why: one sibling's short repository mutation must not fail another writer or

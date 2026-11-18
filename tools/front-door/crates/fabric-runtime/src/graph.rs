@@ -326,6 +326,15 @@ pub trait CiStatus {
     ) -> CiObservation;
 }
 
+/// Which positive settlement proof an observer needs. Cancellation can settle
+/// an attached subtree independently of detached work; observation requires the
+/// referenced run and its ordinary peer subtree to have finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementPurpose {
+    Observation,
+    Cancellation,
+}
+
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
 /// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
@@ -677,8 +686,14 @@ pub trait AttemptOwner {
         Ok(())
     }
 
-    /// Read-only check: never starts or replays an attempt.
-    fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+    /// Read-only, purpose-specific proof without starting or replaying work.
+    /// Observation requires terminal state and released custody. Cancellation
+    /// may also prove that no operation was accepted or all attached work stopped.
+    fn attempt_settled(
+        &mut self,
+        _attempt: &GraphAttempt,
+        _purpose: SettlementPurpose,
+    ) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -1331,7 +1346,7 @@ pub fn settle_cancelled_nodes<R: AttemptOwner, J: GraphJournal>(
         let mut settled = true;
         for attempt in &node.attempts {
             if attempt.state != AttemptState::Terminal {
-                match owner.cancelled_attempt_settled(attempt) {
+                match owner.attempt_settled(attempt, SettlementPurpose::Cancellation) {
                     Ok(true) => {}
                     Ok(false) => {
                         settled = false;

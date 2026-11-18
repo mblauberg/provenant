@@ -65,6 +65,7 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
                     }))
                     .unwrap();
                     let facts = next_attempt::NextAttemptFacts {
+                        attempt_settled: None,
                         launch_accepted: None,
                         fallback: Some(next_attempt::PreparationObservation {
                             evidence: Some(evidence),

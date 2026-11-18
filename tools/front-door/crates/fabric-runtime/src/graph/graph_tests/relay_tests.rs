@@ -662,7 +662,7 @@ fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
         progress(&failed.checkpoint, "a--keep").state,
         NodeState::Running
     );
-    owner.cancelled_attempt_settled = true;
+    owner.attempt_settled = true;
     owner.observations.push_back(AttemptObservation::Pending {
         attempt_ref: Some("attempt-keep".into()),
     });
@@ -1339,7 +1339,7 @@ fn cancelled_graph_keeps_advancing_its_detached_children() {
     add(&document, &mut checkpoint, "a", &keep).unwrap();
     checkpoint.cancelled = true;
     let mut owner = FakeOwner {
-        cancelled_attempt_settled: true,
+        attempt_settled: true,
         observations: [AttemptObservation::Pending {
             attempt_ref: Some("keep-attempt".into()),
         }]

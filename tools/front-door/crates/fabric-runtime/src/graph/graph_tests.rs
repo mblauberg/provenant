@@ -44,7 +44,7 @@ struct FakeOwner {
     delivery_effects: usize,
     delivery_created: bool,
     delivery_identity: Option<Option<String>>,
-    cancelled_attempt_settled: bool,
+    attempt_settled: bool,
     cancellation_stops: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
     fast_forward_only: Vec<bool>,
@@ -283,8 +283,12 @@ impl AttemptOwner for FakeOwner {
         self.cancellation_stops += 1;
         Ok(())
     }
-    fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
-        Ok(self.cancelled_attempt_settled)
+    fn attempt_settled(
+        &mut self,
+        _attempt: &GraphAttempt,
+        _purpose: SettlementPurpose,
+    ) -> Result<bool, Self::Error> {
+        Ok(self.attempt_settled)
     }
     fn actor(&self) -> String {
         self.actor.clone()
@@ -960,7 +964,7 @@ struct ErrorLauncher {
     admission_seconds: Option<u64>,
     launch_deadline: Option<provenant_core::WallTime>,
     launch_policy: Option<LaunchRetryPolicy>,
-    cancelled_attempt_settled: bool,
+    attempt_settled: bool,
     accepted: bool,
     acceptance_lookup_error: bool,
 }
@@ -1007,8 +1011,12 @@ impl AttemptOwner for ErrorLauncher {
     fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(self.accepted)
     }
-    fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
-        Ok(self.cancelled_attempt_settled)
+    fn attempt_settled(
+        &mut self,
+        _attempt: &GraphAttempt,
+        _purpose: SettlementPurpose,
+    ) -> Result<bool, Self::Error> {
+        Ok(self.attempt_settled)
     }
     fn launch_refused_before_acceptance(
         &mut self,

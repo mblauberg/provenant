@@ -1,3 +1,4 @@
+use provenant_fabric_runtime::graph::SettlementPurpose;
 use super::*;
 use std::io::Write as _;
 
@@ -2303,13 +2304,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .cancel_graph_attempt(&mut owner, attempt, self.budget, self.cancel)
     }
 
-    fn cancelled_attempt_settled(
+    fn attempt_settled(
         &mut self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+        purpose: SettlementPurpose,
     ) -> Result<bool, Self::Error> {
-        if let Some(settled) =
-            self.factory
-                .cancel_peer_submission(attempt, false, self.budget, self.cancel)?
+        if purpose == SettlementPurpose::Cancellation
+            && let Some(settled) =
+                self.factory
+                    .cancel_peer_submission(attempt, false, self.budget, self.cancel)?
         {
             return Ok(settled);
         }
@@ -2346,6 +2349,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 record.state,
                 provenant_records::run::AttemptState::Terminal { .. }
             ) && record.custody_pending == Some(false));
+        }
+        if purpose == SettlementPurpose::Observation {
+            return Ok(false);
         }
         let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
         let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
@@ -4677,7 +4683,7 @@ mod journal_error_tests {
         }))?;
         assert!(!owner.launch_accepted(&attempt)?);
         assert!(owner.launch_refused_before_acceptance(&attempt)?);
-        assert!(owner.cancelled_attempt_settled(&attempt)?);
+        assert!(owner.attempt_settled(&attempt, SettlementPurpose::Cancellation)?);
         assert!(!store.has_runs(&call)?);
         Ok(())
     }

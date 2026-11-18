@@ -1,3 +1,4 @@
+use provenant_fabric_runtime::graph::SettlementPurpose;
 #[allow(unused_imports)]
 use super::*;
 
@@ -782,6 +783,11 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
 #[test]
 fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
 -> Result<(), Box<dyn std::error::Error>> {
+    if host_test(
+        "fabric::peer_tests::peer_graph_lifecycle::accepted_attempt_observes_stable_host_after_alias_is_renamed",
+    )? {
+        return Ok(());
+    }
     use provenant_fabric_runtime::graph::{self, AttemptOwner};
     let rig = crate::worktree_tests::repository()?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
@@ -891,20 +897,22 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
         factory: &renamed,
         ..owner
     };
-    let replayed = owner.observe_or_start(
-        &key,
-        node(),
-        &route,
-        graph::AccessMode::ReadOnly,
-        None,
-        graph::Replay {
-            delivery: None,
-            branch: None,
-            fast_forward_only: false,
-            stored_ref: Some(&reference),
-            launch_actor: &actor,
-        },
-    )?;
+    let replayed = provenant_cli::run::with_deferred_provider_launch(|| {
+        owner.observe_or_start(
+            &key,
+            node(),
+            &route,
+            graph::AccessMode::ReadOnly,
+            None,
+            graph::Replay {
+                delivery: None,
+                branch: None,
+                fast_forward_only: false,
+                stored_ref: Some(&reference),
+                launch_actor: &actor,
+            },
+        )
+    })?;
     let replayed = match replayed {
         graph::AttemptObservation::Queued { attempt_ref }
         | graph::AttemptObservation::Pending { attempt_ref }
@@ -984,7 +992,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
     attempt.placement_host = Some("removed-peer".into());
     assert!(!owner.launch_accepted(&attempt)?);
     assert!(!owner.launch_refused_before_acceptance(&attempt)?);
-    assert!(!owner.cancelled_attempt_settled(&attempt)?);
+    assert!(!owner.attempt_settled(&attempt, SettlementPurpose::Cancellation)?);
     for placement in [
         None,
         Some("local".to_owned()),
@@ -993,7 +1001,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
         attempt.placement_host = placement;
         assert!(!owner.launch_accepted(&attempt)?);
         assert!(owner.launch_refused_before_acceptance(&attempt)?);
-        assert!(owner.cancelled_attempt_settled(&attempt)?);
+        assert!(owner.attempt_settled(&attempt, SettlementPurpose::Cancellation)?);
     }
     attempt.attempt_ref = Some(format!(
         "{}/{}",
