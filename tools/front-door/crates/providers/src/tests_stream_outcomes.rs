@@ -258,7 +258,7 @@ fn failed_chunk_retains_earlier_decoded_events_for_finish() -> Result<(), Provid
     let raw = b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"kept\"}}\ninvalid\n";
     assert!(matches!(
         codex::Codex.observe(&mut stream, raw),
-        Err(ProviderError::Malformed)
+        Err(ProviderError::MalformedFrame { line: 2 })
     ));
     let outcome = codex::Codex.finish(stream, EXIT)?;
     assert_eq!(
@@ -640,6 +640,27 @@ fn expected_continuation_session_is_not_observed_without_a_provider_frame()
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn final_incomplete_and_invalid_frames_keep_their_line_number() -> Result<(), ProviderError> {
+    for eof_hook in [false, true] {
+        for fragment in [b"{\"type\":".as_slice(), b"{broken}".as_slice()] {
+            for width in 1..=fragment.len() {
+                let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
+                codex::Codex.observe(&mut state, b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n")?;
+                for chunk in fragment.chunks(width) { codex::Codex.observe(&mut state, chunk)?; }
+                if eof_hook {
+                    assert!(matches!(state.observe_eof_fragment(&[]), Err(ProviderError::MalformedFrame { line: 3 })));
+                }
+                let outcome = codex::Codex.finish(state, EXIT)?;
+                assert_eq!(outcome.status(), OutcomeStatus::Malformed);
+                assert_eq!(outcome.protocol_error(), Some(ProviderError::MalformedFrame { line: 3 }.to_string().as_str()));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn codex_oversized_command_output_is_skipped_but_other_oversize_fails_closed()
 -> Result<(), ProviderError> {
@@ -666,7 +687,7 @@ fn codex_oversized_command_output_is_skipped_but_other_oversize_fails_closed()
     let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     assert!(matches!(
         codex::Codex.observe(&mut state, answer.as_bytes()),
-        Err(ProviderError::Overflow)
+        Err(ProviderError::MalformedFrame { line: 1 })
     ));
     Ok(())
 }
@@ -683,7 +704,10 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
     ] {
         let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
         let observed = codex::Codex.observe(&mut state, format!("{raw}\n").as_bytes());
-        assert!(matches!(observed, Err(ProviderError::Malformed)));
+        assert!(matches!(
+            observed,
+            Err(ProviderError::MalformedFrame { line: 1 })
+        ));
         assert_eq!(
             codex::Codex.finish(state, EXIT)?.status(),
             OutcomeStatus::Malformed
@@ -693,12 +717,12 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
     assert_eq!(incomplete.1.status(), OutcomeStatus::Malformed);
     assert_eq!(
         incomplete.1.protocol_error(),
-        Some("provider protocol frame ended before the record was complete")
+        Some(ProviderError::MalformedFrame { line: 1 }.to_string().as_str())
     );
     let mut complete_partial = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     assert!(matches!(
         codex::Codex.observe(&mut complete_partial, b"{\n"),
-        Err(ProviderError::Malformed)
+        Err(ProviderError::MalformedFrame { line: 1 })
     ));
     assert_eq!(
         codex::Codex.finish(complete_partial, EXIT)?.status(),
@@ -707,7 +731,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
     let mut state = codex::Codex.stream(None, &provenant_records::policy::Policy::default())?;
     assert!(matches!(
         codex::Codex.observe(&mut state, &vec![b'x'; 1_048_577]),
-        Err(ProviderError::Overflow)
+        Err(ProviderError::MalformedFrame { line: 1 })
     ));
     assert_eq!(
         codex::Codex.finish(state, EXIT)?.status(),

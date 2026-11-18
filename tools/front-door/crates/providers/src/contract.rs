@@ -17,6 +17,8 @@ pub enum ProviderError {
     },
     #[error("provider protocol is malformed")]
     Malformed,
+    #[error("evidence defect: provider protocol frame on line {line} is malformed")]
+    MalformedFrame { line: usize },
     /// The JSON frame ended before the input did. Only actual stream EOF may
     /// classify this as a final fragment; a newline-complete frame is loss.
     #[error("provider protocol frame ended before the record was complete")]
@@ -98,6 +100,7 @@ impl ProviderError {
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
             Self::PromptTooLarge { .. }
             | Self::Malformed
+            | Self::MalformedFrame { .. }
             | Self::IncompleteFrame
             | Self::MalformedResult(_)
             | Self::Overflow

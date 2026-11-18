@@ -306,6 +306,19 @@ from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than
 any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
 after a definite close or the line end.
+
+Structured provider stdout is filtered as bounded JSONL frames. Credential
+masking stays within JSON string contents (or replaces a masked scalar with a
+JSON string marker), preserving frame delimiters so replay
+can reach the final answer and completion event. A retained frame that cannot be
+decoded is an evidence defect naming its one-based line; settlement never
+substitutes a generic task failure for that diagnostic. This does not relax the
+provider-identity or validated, non-empty-result requirements for success. Raw
+command stdout keeps its plain streaming filter. JSONL buffering uses the
+existing provider line bound; oversized and non-JSON lines retain plain-filter
+behaviour. This fix does not change the decoder's oversized command-output policy.
+- Owner: `crates/confinement/src/redact.rs`, `crates/providers/src/stream.rs`
+
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and
