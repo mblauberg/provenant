@@ -13,6 +13,10 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         );
     }
     assert_eq!(
+        provider_preparation_fallback(&ProviderError::CapabilityUnavailable("model or effort")),
+        FallbackOutcome::AdapterUnavailable
+    );
+    assert_eq!(
         provider_preparation_fallback(&ProviderError::RefreshDeferred),
         FallbackOutcome::Other
     );
@@ -22,6 +26,7 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         ProviderError::IdentityMismatch,
         ProviderError::UnknownIdentity,
         ProviderError::InvalidPath,
+        ProviderError::InvalidInvocation("argv"),
         ProviderError::IsolatedKeychainUnavailable("fixture".into()),
         ProviderError::ProbeDirectory("fixture".into()),
         ProviderError::CredentialReadFailed("fixture".into()),

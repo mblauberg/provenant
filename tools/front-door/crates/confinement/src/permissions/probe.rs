@@ -62,10 +62,10 @@ pub trait ConfinementBackend: Send + Sync {
     fn probe(&self, context: &BackendContext<'_>) -> Result<Availability, PermissionError>;
 
     /// Compile immediately before launch while holding writer exclusion over
-    /// every writable root through the child handoff. The pathname sandbox
-    /// denies child-created hard links; compile inspects only the Git control
-    /// files for other names, and cannot stop an external writer from adding
-    /// an alias to one after that check.
+    /// every writable root through the child handoff. Mandatory credential,
+    /// state and Git roots receive targeted protections in the emitted
+    /// profile; ordinary link creation remains available. Compile also checks
+    /// held anchors and existing Git control aliases before handoff.
     fn compile(
         &self,
         plan: &PlanPermissions,
@@ -91,8 +91,10 @@ pub fn system_backend_with_limits(
 }
 
 /// Bind the resolved launch policy to the backend that compiles this launch.
-/// Boundary checks remain immutable; warning thresholds use the sealed source
-/// and strength selected before dispatch.
+/// Missing backend support is returned as a typed availability failure so the
+/// launch resolver can stop any effective profile that needs mandatory
+/// credential, Git and authority protections. Warning thresholds use the
+/// sealed source and strength selected before dispatch.
 pub fn system_backend_with_limits_and_policy(
     context: &BackendContext<'_>,
     limits: ProfileLimits,
@@ -358,7 +360,7 @@ pub(super) fn check_capacity_policy(
     match policy.check(code, facts) {
         Effect::Proceed => Ok(None),
         Effect::Warn(message) => Ok(Some(message)),
-        Effect::Refuse(diagnostic) => {
+        Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
                 report_policy_message(detail);
             }

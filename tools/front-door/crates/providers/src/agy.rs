@@ -581,6 +581,9 @@ fn prepare(
         session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
+                confinement:
+                    provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                        .resolve_for(input.confined.permissions()),
                 // The keyring library reads its token through Apple's `security`.
                 process_executables: vec![exact(input.executable), exact(SECURITY)],
                 allow_process_fork: true,

@@ -153,7 +153,7 @@ pub(crate) fn lease_with_policy(
             ) {
                 Effect::Proceed => {}
                 Effect::Warn(message) => warnings.push(message),
-                Effect::Refuse(_) => {
+                Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::LaneCap {
                         active: hit.active,
                         limit: hit.limit,
@@ -314,7 +314,7 @@ impl LaneCaps {
         ] {
             let effect = policy.check(code, Facts::violation("configured lane cap"));
             let applies = match strength {
-                Strength::Refuse => matches!(effect, Effect::Refuse(_)),
+                Strength::Refuse => matches!(effect, Effect::Stop(_) | Effect::Refuse(_)),
                 Strength::Warn => matches!(effect, Effect::Warn(_)),
                 Strength::Off => false,
             };

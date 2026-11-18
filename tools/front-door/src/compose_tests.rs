@@ -7,9 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
 fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
-    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     struct Capture;
     impl super::Process for Capture {
         fn supervise(
@@ -18,6 +18,8 @@ fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
             hooks: provenant_supervisor::GuardianHooks<'_>,
         ) -> provenant_supervisor::custody::Result<()> {
             use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
+            assert!(hooks.stdout_filter.is_none());
+            assert!(hooks.stderr_filter.is_none());
             let frames = [
                 serde_json::json!({"type":"item.completed", "item":{
                     "type":"command_execution", "aggregated_output":
