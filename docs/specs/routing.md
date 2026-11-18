@@ -73,7 +73,9 @@ second reserved for reporting. Failed or overdue probes retain their previous
 snapshots. Advisory family selectors resolve independently, retaining bundled advice
 for a family absent from a partial listing. Discovery messages are transient command
 output, not part of the persisted quota report. Route listings name the source of
-model, valid pair, named route and pool entries in human and JSON output.
+model, valid pair, named route and pool entries, and the configuration layer that
+set each pool weight (bundled, host config or project config), in human and JSON
+output.
 
 ## Provider model scope
 
