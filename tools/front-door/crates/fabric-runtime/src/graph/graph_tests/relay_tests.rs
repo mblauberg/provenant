@@ -49,7 +49,7 @@ fn add(
         journal: None,
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
+
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -383,7 +383,7 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         journal: None,
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
+
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -394,9 +394,7 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         ("a", child("child", "depth-limit"), "child_depth"),
         (
             "a",
-            {
-                child("AKIAIOSFODNN7EXAMPLE", "secret-child")
-            },
+            { child("AKIAIOSFODNN7EXAMPLE", "secret-child") },
             "invalid",
         ),
     ] {
@@ -581,7 +579,6 @@ fn detached_children_do_not_gate_their_parents_dependants() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
@@ -798,7 +795,7 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
+
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -890,7 +887,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
+
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -970,7 +967,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
+
         journal: Some(&journal),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1004,7 +1001,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
+
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1285,7 +1282,6 @@ fn successful_final_patch_producer_leaves_its_planned_work_pending() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
-        scan: &|_| Ok(()),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
@@ -1461,7 +1457,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
+
         journal: None,
         limits: &limits,
         worktree_layout: ports.worktree_layout.clone(),
@@ -1507,7 +1503,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     let changed_context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &patch::scan_for_secrets,
+
         journal: None,
         limits: &limits,
         worktree_layout: ports.worktree_layout,
@@ -1685,7 +1681,7 @@ fn bound_direct_and_planned_child_preserves_explicit_worktree_and_upstream_sourc
             journal: None,
             library: &library,
             resolvers: &resolvers,
-            scan: &|_| Ok(()),
+
             limits: &limits,
             worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         };
@@ -1910,7 +1906,7 @@ nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]
         journal: None,
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
+
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

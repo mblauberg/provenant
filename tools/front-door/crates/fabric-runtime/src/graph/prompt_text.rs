@@ -3,7 +3,7 @@
 //! Storage only moves these bytes; it must never rewrite digested content.
 use super::*;
 
-/// Redact known credential shapes before graph text is planned or persisted.
+/// Retain exact prompt bytes; content inspection is advisory.
 pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
     #[cfg(test)]
     NORMALISATION_TRACE.with_borrow_mut(|trace| {
@@ -11,9 +11,8 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
             trace.push(text.to_owned());
         }
     });
-    let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
-        .map_err(|_| "graph text redaction failed")?;
-    String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
+    super::patch::warn_for_secrets("graph.text", text);
+    Ok(text.to_owned())
 }
 
 #[cfg(test)]
@@ -44,12 +43,6 @@ pub(super) fn trace<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
 #[cfg(test)]
 pub(super) fn assert_once(trace: &[String], original: &str) {
     assert_eq!(trace.iter().filter(|text| *text == original).count(), 1);
-    let normal = normalise_prompt_text(original).unwrap();
-    assert_ne!(normal, original, "fixture must exercise normalisation");
-    assert!(
-        !trace.contains(&normal),
-        "already normalised text re-entered ingress"
-    );
 }
 
 /// A schema position, never inferred from user-defined keys or object shape.
@@ -155,8 +148,8 @@ pub(super) fn validate_identities(
     context: Context,
 ) -> Result<(), &'static str> {
     let scan = |text: &str| {
-        provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
-            .map_err(|_| "credential in structured output identity or object key")
+        super::patch::warn_for_secrets("graph.identity_or_key", text);
+        Ok(())
     };
     match value {
         serde_json::Value::String(text)
@@ -219,7 +212,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
     validate_identities(&value, context)?;
     visit(&mut value, context)?;
     let text = serde_json::to_string(&value).map_err(|_| "cannot encode graph text")?;
-    super::patch::scan_for_secrets(&text).map_err(|_| "graph text matches a secret pattern")?;
+    super::patch::warn_for_secrets("graph.document", &text);
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 
@@ -274,7 +267,7 @@ mod tests {
         ] {
             assert_eq!(safe.pointer(pointer).unwrap(), identity);
         }
-        assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
+        assert_eq!(safe, value);
         assert_eq!(safe, normalise(&safe, Context::Document).unwrap());
     }
 
@@ -308,7 +301,7 @@ mod tests {
         });
         assert_once(&calls, &note);
         assert!(
-            !input
+            input
                 .handoff
                 .as_ref()
                 .unwrap()
@@ -321,22 +314,22 @@ mod tests {
         assert_once(&calls, &comment);
         assert_eq!(safe.repair_items.as_ref().unwrap()[0].id, "F1");
         assert!(
-            !safe.repair_items.as_ref().unwrap()[0].extra["comment"]
+            safe.repair_items.as_ref().unwrap()[0].extra["comment"]
                 .as_str()
                 .unwrap()
                 .contains(secret)
         );
         assert_eq!(safe.result.as_ref().unwrap().digest, input.digest);
-        assert!(!safe.verdict.as_deref().unwrap().contains(secret));
-        assert!(!safe.result.as_ref().unwrap().excerpt.contains(secret));
+        assert!(safe.verdict.as_deref().unwrap().contains(secret));
+        assert!(safe.result.as_ref().unwrap().excerpt.contains(secret));
         assert_eq!(safe.findings[0].id, "F1");
         assert_eq!(safe.findings[0].file, "src/lib.rs");
         assert_eq!(safe.findings[0].propagates.as_deref(), Some("upstream:F1"));
-        assert!(!safe.findings[0].summary.contains(secret));
+        assert!(safe.findings[0].summary.contains(secret));
     }
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn captured_credentials_in_identities_or_keys_refuse_the_whole_block() {
+    fn structured_text_retains_credential_shaped_identities_and_keys() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let base = serde_json::json!({
             "schema_version": 1,
@@ -366,24 +359,11 @@ mod tests {
         keyed_identity["findings"]["F1"]["file"] = secret.into();
         cases.push(keyed_identity);
         for value in cases {
-            let original = value.clone();
-            let mut input = crate::result_capture::ResultCapture::new(None);
-            input.push(format!("VERDICT: PASS\n```findings\n{value}\n```\n").as_bytes());
-            let input = input.finish();
-            let outputs =
-                captured_outputs(outputs::make_outputs(Some(&input), None, None, None, None))
-                    .unwrap();
-            assert_eq!(outputs.findings_available, Some(false));
-            assert!(outputs.findings.is_empty());
-            assert!(outputs.repair_items.is_none());
-            assert!(
-                outputs
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.starts_with(outputs::FINDINGS_INVALID))
+            let retained: serde_json::Value = normalise(&value, Context::Findings).unwrap();
+            assert_eq!(
+                retained, value,
+                "content scanning never rewrites keys or identities"
             );
-            assert!(!serde_json::to_string(&outputs).unwrap().contains(secret));
-            assert_eq!(value, original, "refusal must not rewrite identities");
         }
     }
 }

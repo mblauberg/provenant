@@ -1175,7 +1175,7 @@ fn fragment(
     let context = super::patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &super::patch::scan_for_secrets,
+
         journal: None,
         limits,
         worktree_layout: worktree_layout.clone(),
@@ -1860,10 +1860,9 @@ pub(super) fn settle(
             match final_patch.unwrap_or(Ok(None)) {
                 Ok(Some(json)) => {
                     safe_reason = PlanFailureFact::InvalidFragment;
-                    normalise_fragment(&json).and_then(|json| {
-                        super::patch::scan_for_secrets(&json)?;
+                    normalise_fragment(&json).inspect(|json| {
+                        super::patch::warn_for_secrets("graph.fragment", json);
                         checkpoint.nodes[index].fragment = Some(json.clone());
-                        Ok(json)
                     })
                 }
                 Ok(None) => {
@@ -1966,21 +1965,7 @@ pub(super) fn settle(
             Some((preview, plan, positions))
         }
         Err(reason) => {
-            let reason = if super::patch::scan_for_secrets(&reason).is_err() {
-                "patch diagnostic contains a secret; inspect the captured result".to_owned()
-            } else {
-                reason
-                    .chars()
-                    .flat_map(|character| {
-                        if character.is_control() {
-                            character.escape_default().collect::<Vec<_>>()
-                        } else {
-                            vec![character]
-                        }
-                    })
-                    .take(MAX_ADVANCE_ERROR_BYTES)
-                    .collect()
-            };
+            let reason = provenant_records::diagnostic::safe_text(&reason);
             if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                 let warning = bounded(&format!("patch refused: {reason}"), WARNING_BYTES);
                 if !outputs.warnings.contains(&warning) {
