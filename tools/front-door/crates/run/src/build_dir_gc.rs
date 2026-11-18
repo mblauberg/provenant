@@ -257,7 +257,9 @@ pub fn target_protection_for_launch_while(
         return protection;
     }
     let started = Instant::now();
-    let mut keep_going = || !should_stop() && started.elapsed() < PROTECTION_SCAN_BUDGET;
+    let should_stop = std::cell::RefCell::new(should_stop);
+    let keep_going =
+        || !(*should_stop.borrow_mut())() && started.elapsed() < PROTECTION_SCAN_BUDGET;
     let git = match provenant_os::git::git_executable() {
         Some(git) => git,
         None => {
