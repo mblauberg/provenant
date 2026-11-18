@@ -2089,6 +2089,15 @@ impl Factory {
             override_launch(node, input)?;
             self.validate_host_placement(node)?;
         }
+        if let Err(reason) =
+            provenant_cli::route::validate_graph_exclusions(&document.exclude, &self.context.roots)
+        {
+            return Err(FacadeError::DispatchRefused {
+                reason,
+                disk: None,
+                fact: None,
+            });
+        }
         if let Some(head) = &resolved_head {
             for node in &mut document.nodes {
                 bind_submission_subject(node, head);
@@ -2575,6 +2584,38 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+        // The cancel flag alone restores nothing: only nodes cancelled out of a
+        // live state (Skipped with the cancel reason) are resumable.
+        let has_resumable_work = checkpoint.pause.is_some()
+            || checkpoint.nodes.iter().any(|node| {
+                node.expansion_pause.is_some()
+                    || node.loop_pause.is_some()
+                    || (node.state == provenant_fabric_runtime::graph::NodeState::Skipped
+                        && node.skip_reason.as_deref() == Some("graph cancelled"))
+                    || matches!(
+                        node.state,
+                        provenant_fabric_runtime::graph::NodeState::Pending
+                            | provenant_fabric_runtime::graph::NodeState::Running
+                    )
+            });
+        if target.node.is_none()
+            && !brief_given
+            && extend.is_empty()
+            && !has_resumable_work
+            && checkpoint.nodes.iter().all(|node| node.state.settled())
+        {
+            let node = checkpoint.nodes.iter().find(|node| {
+                matches!(
+                    node.state,
+                    provenant_fabric_runtime::graph::NodeState::Failed
+                        | provenant_fabric_runtime::graph::NodeState::Blocked
+                )
+            });
+            return Err(FacadeError::invalid(InvalidInputDetail::RetryNode {
+                graph: id.clone(),
+                node: node.map_or_else(|| "NODE".into(), |node| node.id.clone()),
+            }));
+        }
         if target.node.is_some() || brief_given {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
