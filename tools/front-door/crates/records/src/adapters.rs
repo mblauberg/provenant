@@ -518,8 +518,16 @@ const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 
+/// Framing declared by the adapter for provider stream decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamContract {
+    ProviderJsonl,
+    Raw,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
+    pub stdout: StreamContract,
     pub id: Harness,
     pub name: &'static str,
     /// Provider family used by declared route constraints.
@@ -807,6 +815,7 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
 adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
+        stdout: StreamContract::ProviderJsonl,
         family: "anthropic",
         binary: "claude",
         install: Some(HarnessInstall {
@@ -905,6 +914,7 @@ adapter_specs! { $;
     },
     Codex [] (codex: 0) {
         name: "codex",
+        stdout: StreamContract::ProviderJsonl,
         family: "openai",
         binary: "codex",
         install: Some(HarnessInstall {
@@ -1010,6 +1020,7 @@ adapter_specs! { $;
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
+        stdout: StreamContract::ProviderJsonl,
         family: "cursor",
         binary: "cursor-agent",
         install: Some(HarnessInstall {
@@ -1120,6 +1131,7 @@ adapter_specs! { $;
     },
     Agy [] (agy: 3) {
         name: "agy",
+        stdout: StreamContract::ProviderJsonl,
         family: "google",
         binary: "agy",
         install: Some(HarnessInstall {
@@ -1231,6 +1243,7 @@ adapter_specs! { $;
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
+        stdout: StreamContract::ProviderJsonl,
         family: "opencode",
         binary: "opencode",
         install: Some(HarnessInstall {
@@ -1340,6 +1353,7 @@ adapter_specs! { $;
     },
     Command [] (command: 5) {
         name: "command",
+        stdout: StreamContract::Raw,
         family: "command",
         binary: "",
         install: None,
@@ -1421,6 +1435,7 @@ adapter_specs! { $;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
+        stdout: StreamContract::ProviderJsonl,
         family: "host-native",
         binary: "",
         install: None,
@@ -1501,6 +1516,7 @@ adapter_specs! { $;
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
+        stdout: StreamContract::ProviderJsonl,
         family: "fixture",
         binary: "fixture-provider",
         install: None,

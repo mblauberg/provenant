@@ -1,12 +1,13 @@
 use super::*;
 
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
-fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
+fn holder_seals_raw_results_and_digests_the_stored_bytes() -> TestResult {
     for (answer, expected) in [
         ("plain answer", "plain answer"),
         (
             "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-            "credential [REDACTED]",
+            "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         ),
     ] {
         let temp = tempfile::tempdir()?;
@@ -41,10 +42,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
             artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
             Some(expected.as_bytes())
         );
-        assert!(
-            artifact.redacted,
-            "redacted means the filter was applied, including clean results"
-        );
+        assert!(!artifact.redacted);
         assert_eq!(
             artifact.digest,
             CanonicalV1::file_digest(expected.as_bytes())
@@ -56,8 +54,9 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
     }
     Ok(())
 }
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
-fn settlement_scrubs_provider_session_history() -> TestResult {
+fn settlement_preserves_provider_session_history() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -98,13 +97,25 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     for tree in [&cursor, &opencode] {
         std::fs::create_dir_all(tree)?;
         std::fs::write(tree.join("text.log"), format!("{token}\n"))?;
-        // Force a streaming filter refusal in each relocated store. Settlement
-        // still succeeds and scrubs the other text in that store.
+        // Long session text remains private continuation state as well.
         std::fs::write(
             tree.join("overlong.log"),
             format!("https://{}\n", "a".repeat(128 * 1024)),
         )?;
     }
+    let binary = claude.join("session.db");
+    std::fs::write(&binary, b"\0private\xff")?;
+    let paths = [
+        &rollout,
+        &session,
+        &cursor.join("text.log"),
+        &opencode.join("text.log"),
+        &binary,
+    ];
+    let before = paths
+        .iter()
+        .map(std::fs::read)
+        .collect::<std::io::Result<Vec<_>>>()?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
@@ -123,18 +134,12 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
             ..
         }
     ));
-    for path in [
-        &rollout,
-        &session,
-        &cursor.join("text.log"),
-        &opencode.join("text.log"),
-    ] {
-        let text = std::fs::read_to_string(path)?;
-        assert!(
-            !text.contains(token),
-            "session plaintext survived settlement in {path:?}"
+    for (path, expected) in paths.iter().zip(before) {
+        assert_eq!(
+            std::fs::read(path)?,
+            expected,
+            "session changed at {path:?}"
         );
-        assert!(text.contains("[REDACTED]"));
     }
     Ok(())
 }
@@ -349,8 +354,9 @@ fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
     ));
     Ok(())
 }
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
-fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
+fn long_raw_result_settles_successfully() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -375,7 +381,7 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     let answer = format!("http://{}", "a".repeat(provenant_os::exec::FRAME_LIMIT + 1));
     let fake = Fake {
         observed: Some(route()),
-        answer: Some(answer),
+        answer: Some(answer.clone()),
         ..Fake::default()
     };
 
@@ -386,13 +392,13 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     else {
         return Err("not terminal".into());
     };
-    assert_eq!(*outcome, Outcome::Failed);
-    assert_eq!(reason.as_deref(), Some("redaction failed; result withheld"));
+    assert_eq!(*outcome, Outcome::Succeeded);
+    assert_eq!(reason.as_deref(), None);
     assert_eq!(
         artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
-        Some(b"[result withheld: redaction failed]".as_slice())
+        Some(answer.as_bytes())
     );
-    assert!(record.result.ok_or("result")?.redacted);
+    assert!(!record.result.as_ref().ok_or("result")?.redacted);
     // A repeat settlement returns the same terminal record instead of looping.
     let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
     assert_eq!(repeat.revision, record.revision);
@@ -453,8 +459,9 @@ fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult 
         Ok(())
     })
 }
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
-fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> TestResult {
+fn cancelled_lane_preserves_outcome_and_session_bytes() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -473,8 +480,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
-    // The operator cancelled before the provider spawned. An over-long `://`
-    // run makes the session scrub refuse a transcript.
+    // The operator cancelled before the provider spawned. Retain the session unchanged.
     // The scoped stop-intent reader (b290fda595) accepts only a complete
     // record; a bare reason fragment no longer names a cancellation.
     artifacts::seal(
@@ -484,7 +490,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
             "schema_version": 1,
             "scope": RunStore::scope(&store.record(id, &call)?),
             "requester": store.context.actor_id,
-            "request_id": "scrub-cancel",
+            "request_id": "session-cancel",
             "reason": "explicit_cancellation",
         }))?,
         RECORD_LIMIT,
@@ -500,7 +506,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
         "https://{}\n",
         "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
     );
-    std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
+    std::fs::write(sessions.join("overlong.jsonl"), &overlong)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     observed.never_spawned = true;
@@ -522,12 +528,14 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Cancelled);
+    assert_eq!(reason.as_deref(), Some("cancelled: explicit_cancellation"));
     assert_eq!(
-        reason.as_deref(),
-        Some("cancelled: explicit_cancellation; redaction failed; result withheld")
+        std::fs::read_to_string(sessions.join("overlong.jsonl"))?,
+        overlong
     );
     Ok(())
 }
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
 fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -555,8 +563,7 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
-        // The recomputed rendering cannot be filtered; the sealed orphan is
-        // still preserved with an honest redaction flag rather than rewritten.
+        // The sealed orphan wins over a different recomputed rendering.
         answer: Some(format!(
             "http://{}",
             "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
@@ -568,7 +575,7 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     assert!(matches!(
         record.state,
         AttemptState::Terminal {
-            outcome: Outcome::Failed,
+            outcome: Outcome::Succeeded,
             ..
         }
     ));

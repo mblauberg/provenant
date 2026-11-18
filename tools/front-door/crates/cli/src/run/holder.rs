@@ -111,7 +111,7 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
                         stream_identity_conflict = true;
                         Vec::new()
                     }
-                    Err(provenant_providers::ProviderError::IncompleteFrame) if eof_fragment => {
+                    Err(_) if eof_fragment && capture.stream.incomplete_eof_fragment() => {
                         self.identity_eof_fragment_observed
                             .store(true, std::sync::atomic::Ordering::Release);
                         Vec::new()
@@ -1009,7 +1009,7 @@ mod tests {
         )?;
         assert_eq!(
             decoded.reason.as_deref(),
-            Some("provider protocol is malformed")
+            Some("evidence defect: provider protocol frame on line 2 is malformed")
         );
 
         let valid_tail = make_frames()?;

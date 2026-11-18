@@ -93,7 +93,7 @@ pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_o
 }
 
 impl RunStore {
-    /// Verify the original artifact before returning bounded, redacted evidence.
+    /// Verify the original artifact before returning bounded raw evidence.
     /// The returned digest identifies the original artifact.
     pub fn stream_result(
         &self,
@@ -113,7 +113,6 @@ impl RunStore {
         required_verdict: Option<&str>,
         mut observing: impl FnMut(),
     ) -> Result<provenant_records::result_capture::CapturedResult> {
-        use provenant_os::exec::CaptureFilter;
         use sha2::{Digest as _, Sha256};
 
         let record = self.record(id, call)?;
@@ -144,8 +143,6 @@ impl RunStore {
             ));
         }
         let mut hash = Sha256::new();
-        let mut redactor = provenant_confinement::redact::Redactor::new([])
-            .map_err(|_| RunError::Validation("output redaction failed"))?;
         let mut capture = provenant_records::result_capture::ResultCapture::new(required_verdict);
         let mut buffer = [0u8; 8192];
         let mut total = 0u64;
@@ -164,9 +161,7 @@ impl RunStore {
                 ));
             }
             hash.update(&buffer[..count]);
-            redactor
-                .filter(&buffer[..count], &mut |frame| capture.push(frame))
-                .map_err(|_| RunError::Validation("output redaction failed"))?;
+            capture.push(&buffer[..count]);
         }
         let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
         if total != artifact.bytes {
@@ -196,11 +191,8 @@ impl RunStore {
                 grew.then_some(ArtifactValue::Length(after.size)),
             ));
         }
-        redactor
-            .finish(&mut |frame| capture.push(frame))
-            .map_err(|_| RunError::Validation("output redaction failed"))?;
         let mut result = capture.finish();
-        // One handoff rule: the settled attempt's sealed, sanitised snapshot,
+        // One handoff rule: the settled attempt's sealed snapshot,
         // not a re-reading of the text.
         result.handoff = self.handoff(&record).unwrap_or_else(|_| {
             Err(provenant_records::handoff::HandoffError::new(

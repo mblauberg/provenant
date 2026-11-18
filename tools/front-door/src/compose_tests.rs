@@ -7,8 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
-fn guardian_capture_masks_split_credentials_before_retention() {
+fn guardian_capture_retains_split_output_losslessly() {
     struct Capture;
     impl super::Process for Capture {
         fn supervise(
@@ -17,20 +18,12 @@ fn guardian_capture_masks_split_credentials_before_retention() {
             hooks: provenant_supervisor::GuardianHooks<'_>,
         ) -> provenant_supervisor::custody::Result<()> {
             use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
-            let stdout = hooks
-                .stdout_filter
-                .ok_or_else(|| std::io::Error::other("stdout redaction"))?;
-            let stderr = hooks
-                .stderr_filter
-                .ok_or_else(|| std::io::Error::other("stderr redaction"))?;
-            let mut stdout =
-                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stdout))
-                    .map_err(std::io::Error::other)?;
-            let mut stderr =
-                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stderr))
-                    .map_err(std::io::Error::other)?;
-            // Interleave streams and split the token marker and body. EOF
-            // must flush safe trailing text without leaking pending bytes.
+            assert!(hooks.stdout_filter.is_none());
+            assert!(hooks.stderr_filter.is_none());
+            let mut stdout = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
+                .map_err(std::io::Error::other)?;
+            let mut stderr = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
+                .map_err(std::io::Error::other)?;
             for bytes in [
                 b"credential gh".as_slice(),
                 b"p_abcdefghijklmnop",
@@ -42,7 +35,10 @@ fn guardian_capture_masks_split_credentials_before_retention() {
             stdout.finish();
             stderr.finish();
             for capture in [&stdout, &stderr] {
-                assert_eq!(capture.outcome().bytes, b"credential [REDACTED] end");
+                assert_eq!(
+                    capture.outcome().bytes,
+                    b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end"
+                );
                 assert!(!capture.outcome().filter_failed);
             }
             Ok(())

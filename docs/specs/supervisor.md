@@ -335,8 +335,14 @@ available from `provenant config show`.
 Disclosure is selected by destination, not transport. Authorised execution
 context remains lossless; external publication projects known credential values
 and typed secret fields, and withholds publication if projection fails. Raw and
-exported bytes have separate lengths and digests. Install publication coverage
-before removing existing local filters; the migration is sequenced by #3422.
+exported bytes have separate lengths and digests.
+
+Provider stdout and stderr are retained losslessly within bounded, host-owned
+private capture. Provider JSONL frames are decoded without rewriting their bytes;
+malformed retained frames remain evidence defects. Capture and local settlement
+do not modify provider continuation state.
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`
+
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

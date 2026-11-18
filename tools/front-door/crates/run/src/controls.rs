@@ -572,7 +572,7 @@ pub fn release_progress(
                     }
                     _ => None,
                 })
-                .map(|name| provenant_confinement::redact::bounded_line(name, 128));
+                .map(|name| provenant_core::bounded_line(name, 128));
             name.map_or_else(
                 || format!("pid {pid}"),
                 |name| format!("{name} (pid {pid})"),
