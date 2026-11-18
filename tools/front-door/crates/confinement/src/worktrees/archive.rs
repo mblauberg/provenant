@@ -2,7 +2,8 @@
 use super::*;
 use provenant_config::RetentionIssue;
 use provenant_os::fs::{
-    DirectoryPosition, FileHandle, FileKind, PayloadTree, PublishMode, temporary_name,
+    DirectoryPosition, FileHandle, FileKind, FsError, Metadata, PayloadTree, PublishMode,
+    temporary_name,
 };
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -35,17 +36,90 @@ pub struct ArchiveReport {
     pub continuation: Option<String>,
 }
 
-fn archive_root_cursor(position: DirectoryPosition) -> String {
-    format!("archive-root-v1:{}:{}", position.block, position.offset)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RootStamp {
+    device: u64,
+    inode: u64,
+    modified_ns: i128,
+    changed_ns: i128,
 }
 
-fn archive_root_cursor_position(detail: Option<&str>) -> Option<DirectoryPosition> {
-    let mut components = detail?.strip_prefix("archive-root-v1:")?.split(':');
-    let position = DirectoryPosition {
-        block: components.next()?.parse().ok()?,
-        offset: components.next()?.parse().ok()?,
+impl From<Metadata> for RootStamp {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            device: metadata.device,
+            inode: metadata.inode,
+            modified_ns: metadata.modified_ns,
+            changed_ns: metadata.changed_ns,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CandidateIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl From<Metadata> for CandidateIdentity {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            device: metadata.device,
+            inode: metadata.inode,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RootCursor {
+    position: DirectoryPosition,
+    root: RootStamp,
+    candidate: CandidateIdentity,
+}
+
+fn archive_root_cursor(
+    root: &Directory,
+    position: DirectoryPosition,
+    candidate: &OsStr,
+) -> Result<Option<String>, FsError> {
+    let candidate = match root.metadata_at(candidate, false) {
+        Ok(metadata) => CandidateIdentity::from(metadata),
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
     };
-    components.next().is_none().then_some(position)
+    let root = RootStamp::from(root.metadata()?);
+    Ok(Some(format!(
+        "archive-root-v2:{}:{}:{}:{}:{}:{}:{}:{}",
+        position.block,
+        position.offset,
+        root.device,
+        root.inode,
+        root.modified_ns,
+        root.changed_ns,
+        candidate.device,
+        candidate.inode
+    )))
+}
+
+fn archive_root_cursor_position(detail: Option<&str>) -> Option<RootCursor> {
+    let mut components = detail?.strip_prefix("archive-root-v2:")?.split(':');
+    let cursor = RootCursor {
+        position: DirectoryPosition {
+            block: components.next()?.parse().ok()?,
+            offset: components.next()?.parse().ok()?,
+        },
+        root: RootStamp {
+            device: components.next()?.parse().ok()?,
+            inode: components.next()?.parse().ok()?,
+            modified_ns: components.next()?.parse().ok()?,
+            changed_ns: components.next()?.parse().ok()?,
+        },
+        candidate: CandidateIdentity {
+            device: components.next()?.parse().ok()?,
+            inode: components.next()?.parse().ok()?,
+        },
+    };
+    components.next().is_none().then_some(cursor)
 }
 
 fn failure(operation: &'static str, path: &Path, cause: impl std::fmt::Display) -> ArchiveError {
@@ -403,21 +477,30 @@ pub fn collect_archives(
     let collect = (|| -> Result<(), FsError> {
         let mut entries = root.entries()?;
         let mut pending = None;
-        if let (Some(start), Some(position)) = (start_at, archive_root_cursor_position(detail)) {
-            if entries.seek(position).is_ok() {
+        let mut resumed_cursor = None;
+        if let (Some(start), Some(cursor)) = (start_at, archive_root_cursor_position(detail)) {
+            if RootStamp::from(root.metadata()?) == cursor.root
+                && entries.seek(cursor.position).is_ok()
+            {
                 let entry_offset = entries.position()?;
                 if let Some(entry) = entries.next() {
                     let name = entry?;
-                    if root.current_path()?.join(&name) == start {
+                    let metadata = root.metadata_at(&name, false);
+                    if root.current_path()?.join(&name) == start
+                        && metadata.is_ok_and(|metadata| {
+                            CandidateIdentity::from(metadata) == cursor.candidate
+                        })
+                    {
                         pending = Some((name, entry_offset));
-                    } else {
-                        entries = root.entries()?;
+                        resumed_cursor = Some(cursor);
                     }
-                } else {
-                    entries = root.entries()?;
                 }
             }
+            if resumed_cursor.is_none() {
+                entries = root.entries()?;
+            }
         }
+        let resume_path = resumed_cursor.and(start_at);
         loop {
             let (name, entry_offset) = match pending.take() {
                 Some(pending) => pending,
@@ -432,7 +515,7 @@ pub fn collect_archives(
             let path = root.current_path()?.join(&name);
             if cancel.is_cancelled() || should_stop() {
                 report.interrupted_at = Some(path);
-                report.continuation = Some(archive_root_cursor(entry_offset));
+                report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
                 break;
             }
             if !name.as_bytes().starts_with(b"archive-") && !name.as_bytes().starts_with(b".stage-")
@@ -443,7 +526,10 @@ pub fn collect_archives(
             if metadata.kind != FileKind::Directory {
                 continue;
             }
-            if metadata.modified_ns >= before_ns && start_at != Some(path.as_path()) {
+            let is_resumed_candidate = resume_path == Some(path.as_path())
+                && resumed_cursor
+                    .is_some_and(|cursor| CandidateIdentity::from(metadata) == cursor.candidate);
+            if metadata.modified_ns >= before_ns && !is_resumed_candidate {
                 continue;
             }
             let tree = PayloadTree::claim(&root, &name, &metadata)?;
@@ -489,7 +575,7 @@ pub fn collect_archives(
                     };
                     if cancel.is_cancelled() || should_stop() {
                         report.interrupted_at = Some(path);
-                        report.continuation = Some(archive_root_cursor(entry_offset));
+                        report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
                         break;
                     }
                     match super::ref_tip(context, &reference, cancel) {
@@ -497,7 +583,8 @@ pub fn collect_archives(
                         Ok(Some(actual)) if actual == tip => {
                             if cancel.is_cancelled() || should_stop() {
                                 report.interrupted_at = Some(path);
-                                report.continuation = Some(archive_root_cursor(entry_offset));
+                                report.continuation =
+                                    archive_root_cursor(&root, entry_offset, &name)?;
                                 break;
                             }
                             if let Err(error) = execute_mutation(
@@ -568,13 +655,13 @@ pub fn collect_archives(
             }
             let Some(visited_bytes) = visit(&tree, dry_run, cancel, should_stop)? else {
                 report.interrupted_at = Some(path);
-                report.continuation = Some(archive_root_cursor(entry_offset));
+                report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
                 break;
             };
             let bytes = metadata.allocated.saturating_add(visited_bytes);
             if cancel.is_cancelled() || should_stop() {
                 report.interrupted_at = Some(path);
-                report.continuation = Some(archive_root_cursor(entry_offset));
+                report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
                 break;
             }
             if !dry_run {
