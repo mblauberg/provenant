@@ -24,6 +24,7 @@ mod canonical;
 pub mod control;
 pub mod custody;
 pub mod diagnostic;
+mod extra_de;
 mod finding;
 pub mod handoff;
 mod input;

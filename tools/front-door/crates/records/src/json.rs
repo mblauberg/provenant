@@ -1,7 +1,4 @@
-use serde::{
-    Deserialize, Deserializer, Serialize,
-    de::{DeserializeOwned, Error as _},
-};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -79,22 +76,46 @@ impl<'de> Deserialize<'de> for RecordHeader {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct WireHeader {
-            schema_version: u64,
-            #[serde(flatten)]
-            extra: crate::ExtraFields,
+        // Walk the map once instead of buffering it into a content tree via
+        // `#[serde(flatten)]`: RecordHeader is flattened into several stored
+        // types, so an inner flatten would nest and multiply debug frames.
+        struct HeaderVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for HeaderVisitor {
+            type Value = RecordHeader;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "a schema-versioned record header")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                use serde::de::Error as _;
+
+                let mut schema_version = None;
+                let mut extra = crate::ExtraFields::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "schema_version" {
+                        schema_version = Some(map.next_value::<u64>()?);
+                    } else {
+                        extra.insert(key, map.next_value::<serde_json::Value>()?);
+                    }
+                }
+                let schema_version =
+                    schema_version.ok_or_else(|| M::Error::missing_field("schema_version"))?;
+                if schema_version != RecordHeader::V1.schema_version() {
+                    return Err(M::Error::custom("unsupported schema version"));
+                }
+                Ok(RecordHeader {
+                    schema_version,
+                    extra,
+                })
+            }
         }
 
-        let header = WireHeader::deserialize(deserializer)?;
-        if header.schema_version == Self::V1.schema_version {
-            Ok(Self {
-                schema_version: header.schema_version,
-                extra: header.extra,
-            })
-        } else {
-            Err(D::Error::custom("unsupported schema version"))
-        }
+        deserializer.deserialize_map(HeaderVisitor)
     }
 }
 
@@ -856,5 +877,29 @@ mod stored_context_tests {
         let message = error.to_string();
         assert!(message.contains("/state/attempts/example/launch.json"));
         assert!(message.contains("record type LaunchRecord"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn header_reads_known_fields_and_keeps_unknown_ones_without_a_flatten_chain() {
+        let wire = json!({"schema_version": 1, "from_a_newer_writer": {"kept": true}});
+        let header: RecordHeader = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(header.schema_version(), 1);
+        assert_eq!(
+            serde_json::to_value(&header).unwrap(),
+            wire,
+            "unknown fields survive the round trip"
+        );
+    }
+
+    #[test]
+    fn header_refuses_missing_and_unsupported_versions() {
+        assert!(serde_json::from_value::<RecordHeader>(json!({})).is_err());
+        assert!(serde_json::from_value::<RecordHeader>(json!({"schema_version": 2})).is_err());
     }
 }

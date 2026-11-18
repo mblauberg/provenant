@@ -469,6 +469,16 @@ mod tests {
     }
 
     #[test]
+    fn flattened_header_keeps_unknown_fields_from_a_newer_writer() {
+        let mut wire = serde_json::json!({"schema_version": 1, "tokens": 10, "budget": 5});
+        wire["from_a_newer_writer"] = serde_json::json!(true);
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let decoded: BudgetOverrun =
+            crate::json::decode(bytes.as_slice(), crate::json::Limits::default()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+    }
+
+    #[test]
     fn the_nearest_source_wins_and_a_ceiling_cannot_be_raised() {
         let layers = [
             (LimitSource::Default, 500),
