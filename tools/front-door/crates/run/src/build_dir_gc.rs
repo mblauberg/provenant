@@ -354,8 +354,8 @@ pub fn target_protection_for_launch_while(
         protection.unobserved = true;
         return protection;
     }
-    let projects = selection.projects;
-    if projects.len() > MAX_PROTECTION_PROJECTS {
+    let project_ids = selection.project_ids;
+    if project_ids.len() > MAX_PROTECTION_PROJECTS {
         protection.unobserved = true;
         return protection;
     }
@@ -388,11 +388,22 @@ pub fn target_protection_for_launch_while(
         cancel: &cancel,
     };
     let mut records_observed = 0_usize;
-    for binding in projects {
+    for project_id in project_ids {
         if !keep_going() {
             protection.unobserved = true;
             return protection;
         }
+        let binding = match provenant_config::lookup_gc_project(roots, project_id) {
+            Ok(provenant_config::GcProjectStatus::Git(binding)) => binding,
+            Ok(
+                provenant_config::GcProjectStatus::Transient(_)
+                | provenant_config::GcProjectStatus::Excluded,
+            )
+            | Err(_) => {
+                protection.unobserved = true;
+                return protection;
+            }
+        };
         let checkout = binding
             .primary_checkout_hint()
             .map(Path::to_path_buf)
@@ -3135,15 +3146,18 @@ mod tests {
     }
 
     #[test]
-    fn one_sweep_prunes_across_bounded_lru_batches() {
+    fn refreshed_recent_candidate_does_not_skip_the_next_lru_batch() {
         let fixture = Fixture::new();
         let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        const CACHE_KEYS: usize = MAX_LRU_BATCH + 1;
+        const CACHE_KEYS: usize = MAX_LRU_BATCH + 2;
         let root = cache_root(fixture.home.path());
         let mut targets = Vec::with_capacity(CACHE_KEYS);
-        for index in 0..CACHE_KEYS {
-            let cache = root.join(format!("{index:064x}"));
+        let target_a = fixture.profile('a', "debug", 128, 3000);
+        let payload_a = target_a.join("deps/payload");
+        targets.push(target_a);
+        for index in 0..(CACHE_KEYS - 1) {
+            let cache = root.join(format!("{:064x}", index + 1));
             fs::create_dir(&cache).unwrap();
             fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
             let mut owner = b"provenant-lane-cargo-owner-v2\n".to_vec();
@@ -3163,6 +3177,8 @@ mod tests {
             fs::write(target.join("deps/payload"), vec![1_u8; 128]).unwrap();
             targets.push(target);
         }
+        let root_directory = Directory::open_anchor(&root).unwrap();
+        let root_before = root_directory.metadata().unwrap().modified_ns;
 
         let budget = provenant_config::CargoCacheBudget {
             bytes: 0,
@@ -3170,7 +3186,24 @@ mod tests {
             source: provenant_records::LimitSource::Default,
         };
         let mut continue_scan = || false;
-        let mut refresh = TargetProtection::default;
+        let mut refresh_called = false;
+        let mut refresh = || {
+            assert!(
+                !refresh_called,
+                "custody refresh runs once after the census"
+            );
+            refresh_called = true;
+            fs::File::open(&payload_a)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now())
+                .unwrap();
+            assert_eq!(
+                root_before,
+                root_directory.metadata().unwrap().modified_ns,
+                "the in-place write leaves the cache root stamp unchanged"
+            );
+            TargetProtection::default()
+        };
         let report = collect_with_progress(
             state.path(),
             fixture.home.path(),
@@ -3185,6 +3218,7 @@ mod tests {
         )
         .unwrap();
 
+        assert!(refresh_called);
         assert_eq!(report.removed.len(), CACHE_KEYS);
         assert_eq!(report.cache_bytes, 0);
         assert!(targets.iter().all(|target| !target.exists()));
