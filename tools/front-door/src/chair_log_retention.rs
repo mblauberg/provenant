@@ -1,6 +1,6 @@
 //! Age collection for every session, including sessions of abandoned projects.
 use provenant_core::{ProjectId, StateRoot, SweepControl};
-use provenant_os::fs::{Directory, FsError, Metadata};
+use provenant_os::fs::{Directory, DirectoryPosition, FsError, Metadata};
 use provenant_workflow::{
     log::{LogStore, Retention},
     session::HostSessionId,
@@ -48,11 +48,12 @@ impl From<Metadata> for DirectoryStamp {
 struct Cursor {
     version: u8,
     phase: Phase,
-    projects_offset: provenant_os::fs::DirectoryPosition,
+    projects_offset: DirectoryPosition,
     projects_stamp: DirectoryStamp,
     project: Option<String>,
-    sessions_offset: provenant_os::fs::DirectoryPosition,
+    sessions_offset: DirectoryPosition,
     sessions_stamp: Option<DirectoryStamp>,
+    log_continuation: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -116,18 +117,23 @@ fn sweep(
             saved.projects_offset,
             saved.sessions_offset,
             saved.sessions_stamp,
+            saved.log_continuation,
             &projects_stamp,
             retention,
             now,
             dry_run,
             control,
             report,
-        )? {
-            Some((path, cursor)) => {
+        ) {
+            Ok(Some((path, cursor))) => {
                 stop(report, path, cursor);
                 return Ok(());
             }
-            None => {}
+            Ok(None) => {}
+            Err(error) => report.errors.push(Issue {
+                path: projects_path.join(project_name),
+                reason: error.to_string(),
+            }),
         }
         cursor = Some(Cursor {
             version: 1,
@@ -135,19 +141,18 @@ fn sweep(
             projects_offset: saved.projects_offset,
             projects_stamp: projects_stamp.clone(),
             project: None,
-            sessions_offset: Default::default(),
+            sessions_offset: DirectoryPosition::default(),
             sessions_stamp: None,
+            log_continuation: None,
         });
     }
 
     let offset = cursor
         .as_ref()
         .filter(|saved| saved.phase == Phase::Projects)
-        .map_or(0, |saved| saved.projects_offset);
+        .map_or_else(DirectoryPosition::default, |saved| saved.projects_offset);
     let mut entries = projects.entries()?;
-    if offset != Default::default() {
-        entries.seek(offset)?;
-    }
+    entries.seek(offset)?;
     loop {
         if !control.should_continue() {
             let offset = entries.position()?;
@@ -160,15 +165,25 @@ fn sweep(
                     projects_offset: offset,
                     projects_stamp: projects_stamp.clone(),
                     project: None,
-                    sessions_offset: Default::default(),
+                    sessions_offset: DirectoryPosition::default(),
                     sessions_stamp: None,
+                    log_continuation: None,
                 },
             );
             return Ok(());
         }
         let project_offset = entries.position()?;
         let Some(name) = entries.next() else { break };
-        let name = name?;
+        let name = match name {
+            Ok(name) => name,
+            Err(error) => {
+                report.errors.push(Issue {
+                    path: projects_path.clone(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
         let Some(project) = name.to_str().and_then(|s| ProjectId::parse(s).ok()) else {
             continue;
         };
@@ -177,7 +192,8 @@ fn sweep(
             project,
             &name.to_string_lossy(),
             entries.position()?,
-            0,
+            DirectoryPosition::default(),
+            None,
             None,
             &projects_stamp,
             retention,
@@ -185,14 +201,18 @@ fn sweep(
             dry_run,
             control,
             report,
-        )? {
-            Some((path, cursor)) => {
+        ) {
+            Ok(Some((path, cursor))) => {
                 let mut cursor = cursor;
                 cursor.projects_offset = entries.position().unwrap_or(project_offset);
                 stop(report, path, cursor);
                 return Ok(());
             }
-            None => {}
+            Ok(None) => {}
+            Err(error) => report.errors.push(Issue {
+                path: projects_path.join(name),
+                reason: error.to_string(),
+            }),
         }
     }
     Ok(())
@@ -203,9 +223,10 @@ fn process_sessions(
     root: &StateRoot,
     project: ProjectId,
     project_name: &str,
-    projects_offset: provenant_os::fs::DirectoryPosition,
-    session_offset: provenant_os::fs::DirectoryPosition,
+    projects_offset: DirectoryPosition,
+    session_offset: DirectoryPosition,
     expected_sessions_stamp: Option<DirectoryStamp>,
+    log_continuation: Option<String>,
     projects_stamp: &DirectoryStamp,
     retention: Retention,
     now: i64,
@@ -220,8 +241,13 @@ fn process_sessions(
         .and_then(|projects| projects.open_verified_directory(OsStr::new(project_name)))
     {
         Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error),
+        Err(error) => {
+            report.errors.push(Issue {
+                path: project_path,
+                reason: error.to_string(),
+            });
+            return Ok(None);
+        }
     };
     let logs = match project_dir.open_verified_directory(OsStr::new("chair-logs")) {
         Ok(dir) => dir,
@@ -243,12 +269,20 @@ fn process_sessions(
     let session_offset = if expected_sessions_stamp.as_ref() == Some(&logs_stamp) {
         session_offset
     } else {
-        0
+        DirectoryPosition::default()
     };
-    let mut sessions = logs.entries()?;
-    if session_offset != Default::default() {
-        sessions.seek(session_offset)?;
-    }
+    let mut sessions = match logs.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.errors.push(Issue {
+                path: logs_path,
+                reason: error.to_string(),
+            });
+            return Ok(None);
+        }
+    };
+    sessions.seek(session_offset)?;
+    let mut log_continuation = log_continuation;
     loop {
         if !control.should_continue() {
             let offset = sessions.position()?;
@@ -262,6 +296,7 @@ fn process_sessions(
                     project: Some(project_name.to_owned()),
                     sessions_offset: offset,
                     sessions_stamp: Some(logs_stamp.clone()),
+                    log_continuation: log_continuation.clone(),
                 },
             )));
         }
@@ -269,14 +304,37 @@ fn process_sessions(
         let Some(session_name) = sessions.next() else {
             break;
         };
-        let session_name = session_name?;
+        let continuation = log_continuation.take();
+        let session_name = match session_name {
+            Ok(name) => name,
+            Err(error) => {
+                report.errors.push(Issue {
+                    path: logs_path.clone(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
         let Some(session) = session_name
             .to_str()
             .and_then(|s| HostSessionId::parse(s).ok())
         else {
             continue;
         };
-        match LogStore::new(root.clone(), project, session).gc(retention, now, dry_run, control) {
+        let session_path = logs_path.join(&session_name);
+        let database_path = session_path.join("log.sqlite3");
+        let log_control = SweepControl {
+            start_at: Some(&database_path),
+            detail: continuation.as_deref(),
+            cancel: control.cancel.clone(),
+            keep_going: control.keep_going,
+        };
+        match LogStore::new(root.clone(), project, session).gc(
+            retention,
+            now,
+            dry_run,
+            &log_control,
+        ) {
             Ok(result) => {
                 report.expired = report.expired.saturating_add(result.pruned);
                 if result.interrupted {
@@ -290,6 +348,7 @@ fn process_sessions(
                             project: Some(project_name.to_owned()),
                             sessions_offset: session_offset,
                             sessions_stamp: Some(logs_stamp),
+                            log_continuation: result.continuation,
                         },
                     )));
                 }
@@ -437,6 +496,23 @@ mod tests {
         assert!(second.interrupted_at.is_none());
         assert_eq!(first.expired + second.expired, 3);
         assert!(second.errors.is_empty());
+        Ok(())
+    }
+
+    /// Spec: docs/specs/workflow.md#chair-logs
+    #[test]
+    fn unreadable_project_is_reported_without_blocking_other_projects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_tmp, root, retention) = fixture()?;
+        let blocked = root
+            .as_path()
+            .join("workflow/projects")
+            .join(ProjectId::from_bytes([9; 16]).to_string());
+        std::fs::write(blocked, b"not a project directory")?;
+        let report = collect(&root, retention, 100, false, &SweepControl::default());
+        assert_eq!(report.expired, 3);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.interrupted_at.is_none());
         Ok(())
     }
 }

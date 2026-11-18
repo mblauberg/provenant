@@ -7,7 +7,10 @@ use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, LockMode};
 use provenant_records::{CanonicalV1, ExtraFields, Limits, decode_v1};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, path::PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 pub const ENTRY_LIMIT: usize = 16 * 1024;
 pub const PAGE_LIMIT: usize = 100;
@@ -84,6 +87,52 @@ pub struct Page {
 pub struct GcProgress {
     pub pruned: u64,
     pub interrupted: bool,
+    pub continuation: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct GcPolicy {
+    max_age_seconds: u64,
+    max_entries: u64,
+    max_bytes: u64,
+    replay_horizon_seconds: u64,
+    dry_run: bool,
+}
+
+impl From<(Retention, bool)> for GcPolicy {
+    fn from((retention, dry_run): (Retention, bool)) -> Self {
+        Self {
+            max_age_seconds: retention.max_age_seconds,
+            max_entries: retention.max_entries,
+            max_bytes: retention.max_bytes,
+            replay_horizon_seconds: retention.replay_horizon_seconds,
+            dry_run,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GcPhase {
+    Measure,
+    Delete,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GcCursor {
+    version: u8,
+    phase: GcPhase,
+    policy: GcPolicy,
+    as_of: i64,
+    highwater: i64,
+    observed_total_pruned: i64,
+    db_device: u64,
+    db_inode: u64,
+    measure_before: Option<i64>,
+    kept_count: u64,
+    kept_bytes: u64,
+    first_kept: Option<i64>,
+    delete_after: i64,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -320,76 +369,143 @@ impl LogStore {
         )?;
         Ok(removed as u64)
     }
+    fn gc_measure_page(
+        db: &Connection,
+        highwater: i64,
+        before: Option<i64>,
+    ) -> Result<Vec<(i64, i64, i64)>, Error> {
+        let rows = if let Some(before) = before {
+            let mut statement = db.prepare(
+                "SELECT sequence, created_at, bytes FROM entries
+                 WHERE sequence <= ?1 AND sequence < ?2
+                 ORDER BY sequence DESC LIMIT 64",
+            )?;
+            statement
+                .query_map(params![highwater, before], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut statement = db.prepare(
+                "SELECT sequence, created_at, bytes FROM entries
+                 WHERE sequence <= ?1 ORDER BY sequence DESC LIMIT 64",
+            )?;
+            statement
+                .query_map([highwater], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
+    }
+
+    fn gc_delete_page(
+        db: &Connection,
+        highwater: i64,
+        after: i64,
+    ) -> Result<Vec<(i64, i64)>, Error> {
+        let mut statement = db.prepare(
+            "SELECT sequence, created_at FROM entries
+             WHERE sequence > ?1 AND sequence <= ?2
+             ORDER BY sequence LIMIT 64",
+        )?;
+        Ok(statement
+            .query_map(params![after, highwater], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn interrupted(cursor: &GcCursor, pruned: u64) -> GcProgress {
+        GcProgress {
+            pruned,
+            interrupted: true,
+            continuation: serde_json::to_string(cursor).ok(),
+            ..GcProgress::default()
+        }
+    }
+
     fn prune_for_gc(
         db: &mut Connection,
         retention: Retention,
-        now: i64,
         control: &SweepControl<'_>,
+        cursor: &mut GcCursor,
     ) -> Result<GcProgress, Error> {
         let mut progress = GcProgress::default();
-        if !control.should_continue() {
-            progress.interrupted = true;
-            return Ok(progress);
-        }
-        let cutoff = Self::cutoff(now, retention.replay_horizon_seconds);
-        {
-            let tx = db.transaction()?;
-            tx.execute(
-                "UPDATE meta SET expiry_cutoff=max(expiry_cutoff, ?1) WHERE id=1",
-                [cutoff],
-            )?;
-            tx.commit()?;
-        }
-        loop {
+        let age_cutoff = Self::cutoff(cursor.as_of, retention.max_age_seconds);
+        while cursor.phase == GcPhase::Measure {
             if !control.should_continue() {
-                progress.interrupted = true;
-                return Ok(progress);
+                return Ok(Self::interrupted(cursor, progress.pruned));
             }
-            let tx = db.transaction()?;
-            let removed = tx.execute(
-                "DELETE FROM receipts WHERE operation_id IN (
-                    SELECT operation_id FROM receipts
-                    WHERE issued_at < (SELECT expiry_cutoff FROM meta WHERE id=1)
-                    ORDER BY issued_at LIMIT 64
-                 )",
-                [],
-            )?;
-            tx.commit()?;
-            if removed == 0 {
+            let rows = Self::gc_measure_page(db, cursor.highwater, cursor.measure_before)?;
+            if !control.should_continue() {
+                return Ok(Self::interrupted(cursor, progress.pruned));
+            }
+            if rows.is_empty() {
+                cursor.phase = GcPhase::Delete;
                 break;
             }
+            let page_finished = rows.len() < 64;
+            for (sequence, created_at, bytes) in rows {
+                let bytes = u64::try_from(bytes)
+                    .map_err(|_| Error::Invalid("invalid chair log entry byte count"))?;
+                cursor.measure_before = Some(sequence);
+                if created_at < age_cutoff {
+                    continue;
+                }
+                if cursor.kept_count >= retention.max_entries
+                    || cursor.kept_bytes.saturating_add(bytes) > retention.max_bytes
+                {
+                    cursor.phase = GcPhase::Delete;
+                    break;
+                }
+                cursor.kept_count = cursor.kept_count.saturating_add(1);
+                cursor.kept_bytes = cursor.kept_bytes.saturating_add(bytes);
+                cursor.first_kept = Some(sequence);
+            }
+            if cursor.phase == GcPhase::Measure && page_finished {
+                cursor.phase = GcPhase::Delete;
+            }
         }
-        if !control.should_continue() {
-            progress.interrupted = true;
+
+        let (total_appended, total_pruned): (i64, i64) = db.query_row(
+            "SELECT total_appended, total_pruned FROM meta WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let remaining = Self::positive(total_appended.saturating_sub(total_pruned))?;
+        if retention.max_entries == 0 || retention.max_bytes == 0 {
+            return Err(Error::Invalid("invalid chair log retention"));
+        }
+        if cursor.policy.dry_run {
+            progress.pruned = remaining.saturating_sub(cursor.kept_count);
             return Ok(progress);
         }
-        let cancel = control.cancel.clone();
-        db.progress_handler(100, Some(move || cancel.is_cancelled()))?;
-        let retention = Self::retention_view(db, retention, now);
-        db.progress_handler(0, None::<fn() -> bool>)?;
-        let (first, _) = match retention {
-            Ok(view) => view,
-            Err(_) if !control.should_continue() => {
-                progress.interrupted = true;
-                return Ok(progress);
-            }
-            Err(error) => return Err(error),
-        };
-        let age_cutoff = Self::cutoff(now, retention.max_age_seconds);
+
         loop {
             if !control.should_continue() {
-                progress.interrupted = true;
-                return Ok(progress);
+                return Ok(Self::interrupted(cursor, progress.pruned));
             }
+            let rows = Self::gc_delete_page(db, cursor.highwater, cursor.delete_after)?;
+            if !control.should_continue() {
+                return Ok(Self::interrupted(cursor, progress.pruned));
+            }
+            if rows.is_empty() {
+                break;
+            }
+            let page_finished = rows.len() < 64;
             let tx = db.transaction()?;
-            let removed = tx.execute(
-                "DELETE FROM entries WHERE sequence IN (
-                    SELECT sequence FROM entries
-                    WHERE created_at < ?1 OR ?2 IS NULL OR sequence < ?2
-                    ORDER BY sequence LIMIT 64
-                 )",
-                params![age_cutoff, first],
-            )?;
+            let mut removed = 0u64;
+            for (sequence, created_at) in rows {
+                let delete = created_at < age_cutoff
+                    || cursor.first_kept.is_none_or(|first| sequence < first);
+                if delete {
+                    removed = removed.saturating_add(
+                        tx.execute("DELETE FROM entries WHERE sequence=?1", [sequence])? as u64,
+                    );
+                }
+                cursor.delete_after = sequence;
+            }
             if removed > 0 {
                 tx.execute(
                     "UPDATE meta SET total_pruned=total_pruned+?1 WHERE id=1",
@@ -397,10 +513,13 @@ impl LogStore {
                 )?;
             }
             tx.commit()?;
-            if removed == 0 {
+            progress.pruned = progress.pruned.saturating_add(removed);
+            cursor.observed_total_pruned = cursor
+                .observed_total_pruned
+                .saturating_add(removed.min(i64::MAX as u64) as i64);
+            if page_finished {
                 break;
             }
-            progress.pruned = progress.pruned.saturating_add(removed as u64);
         }
         Ok(progress)
     }
@@ -447,33 +566,75 @@ impl LogStore {
                 ..GcProgress::default()
             });
         }
-        if dry_run {
-            if !control.should_continue() {
-                return Ok(GcProgress {
-                    interrupted: true,
-                    ..GcProgress::default()
-                });
-            }
-            let cancel = control.cancel.clone();
-            db.progress_handler(100, Some(move || cancel.is_cancelled()))?;
-            let result = Self::retention_view(&db, retention, now);
-            db.progress_handler(0, None::<fn() -> bool>)?;
-            let count = match result {
-                Ok(view) => view.1,
-                Err(_) if !control.should_continue() => {
-                    return Ok(GcProgress {
-                        interrupted: true,
-                        ..GcProgress::default()
-                    });
-                }
-                Err(error) => return Err(error),
-            };
-            return Ok(GcProgress {
-                pruned: count,
-                interrupted: !control.should_continue(),
-            });
+        let metadata = dir.metadata_at(OsStr::new("log.sqlite3"), false)?;
+        let (total_appended, total_pruned): (i64, i64) = db.query_row(
+            "SELECT total_appended, total_pruned FROM meta WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if total_appended < 0 || total_pruned < 0 || total_pruned > total_appended {
+            return Err(Error::Invalid("invalid chair log database counter"));
         }
-        let progress = Self::prune_for_gc(&mut db, retention, now, control)?;
+        let policy = GcPolicy::from((retention, dry_run));
+        let db_path = self.path();
+        let resumed = control
+            .start_at
+            .filter(|start| *start == db_path.as_path())
+            .and_then(|_| control.detail)
+            .and_then(|detail| serde_json::from_str::<GcCursor>(detail).ok())
+            .filter(|cursor| {
+                cursor.version == 1
+                    && cursor.policy == policy
+                    && cursor.highwater == total_appended
+                    && cursor.observed_total_pruned == total_pruned
+                    && cursor.db_device == metadata.device
+                    && cursor.db_inode == metadata.inode
+            });
+        let mut cursor = resumed.unwrap_or(GcCursor {
+            version: 1,
+            phase: GcPhase::Measure,
+            policy,
+            as_of: now,
+            highwater: total_appended,
+            observed_total_pruned: total_pruned,
+            db_device: metadata.device,
+            db_inode: metadata.inode,
+            measure_before: None,
+            kept_count: 0,
+            kept_bytes: 0,
+            first_kept: None,
+            delete_after: 0,
+        });
+        if !dry_run {
+            if !control.should_continue() {
+                return Ok(Self::interrupted(&cursor, 0));
+            }
+            let tx = db.transaction()?;
+            tx.execute(
+                "UPDATE meta SET expiry_cutoff=max(expiry_cutoff, ?1) WHERE id=1",
+                [Self::cutoff(cursor.as_of, retention.replay_horizon_seconds)],
+            )?;
+            tx.commit()?;
+            loop {
+                if !control.should_continue() {
+                    return Ok(Self::interrupted(&cursor, 0));
+                }
+                let tx = db.transaction()?;
+                let removed = tx.execute(
+                    "DELETE FROM receipts WHERE operation_id IN (
+                        SELECT operation_id FROM receipts
+                        WHERE issued_at < (SELECT expiry_cutoff FROM meta WHERE id=1)
+                        ORDER BY issued_at LIMIT 64
+                     )",
+                    [],
+                )?;
+                tx.commit()?;
+                if removed == 0 {
+                    break;
+                }
+            }
+        }
+        let progress = Self::prune_for_gc(&mut db, retention, control, &mut cursor)?;
         if progress.pruned > 0 {
             provenant_os::changes::hint(
                 self.root.as_path(),
@@ -1207,9 +1368,16 @@ mod tests {
                 .append(update(&format!("op-{index}"), 1, "payload"), policy, 1)
                 .unwrap();
         }
-        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed = checks.clone();
-        let keep_going = move || observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8;
+        let db_path = store.path();
+        let observed_path = db_path.clone();
+        let keep_going = move || {
+            let db = Connection::open(&observed_path).unwrap();
+            db.query_row("SELECT count(*) FROM entries", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+                > 66
+        };
         let first = store
             .gc(
                 policy,
@@ -1223,14 +1391,26 @@ mod tests {
             .unwrap();
         assert!(first.interrupted);
         assert_eq!(first.pruned, 64);
+        let detail = first
+            .continuation
+            .expect("partial sweep stores its page cursor");
         let resumed = store
-            .gc(policy, 100, false, &SweepControl::default())
+            .gc(
+                policy,
+                100,
+                false,
+                &SweepControl {
+                    start_at: Some(&db_path),
+                    detail: Some(&detail),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(!resumed.interrupted);
         assert_eq!(resumed.pruned, 66);
         assert!(
             store
-                .page(None, 200, policy, 100)
+                .page(None, PAGE_LIMIT, policy, 100)
                 .unwrap()
                 .entries
                 .is_empty()
