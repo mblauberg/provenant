@@ -2415,8 +2415,11 @@ fn no_work_stop_is_never_saved_without_its_restart() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
-    // A new handoff is normalised before storage or continuation. Known
-    // credential shapes cannot poison the next writer's prompt.
+    // Registered credentials are masked before continuation; unregistered
+    // credential-shaped examples remain intact.
+    let _scope = provenant_confinement::redact::publication_scope([
+        b"ghp_abcdefghijklmnopqrstuvwxyz0123456789".to_vec(),
+    ]).unwrap();
     let mut work = node("work", route("first"));
     work.route = None;
     work.routes = Some(vec![route("first"), route("second")]);
@@ -2424,7 +2427,7 @@ fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let mut stop = no_work_stop(Some(&"a".repeat(40)));
-    let note = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"token ghp_abcdefghijklmnopqrstuvwxyz0123456789\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";
+    let note = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"token ghp_abcdefghijklmnopqrstuvwxyz0123456789 example AKIAIOSFODNN7EXAMPLE\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";
     if let AttemptObservation::Terminal { result, .. } = &mut stop {
         *result = Some(Box::new(capture(note)));
     }
@@ -2438,6 +2441,7 @@ fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
     assert_eq!(owner.calls.len(), 2);
     assert!(owner.prompts[1].contains("Finish renderer"));
     assert!(!owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(owner.prompts[1].contains("AKIAIOSFODNN7EXAMPLE"));
     assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
     assert_eq!(
         run.checkpoint.nodes[0].previous_attempts[0].outcome,

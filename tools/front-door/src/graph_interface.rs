@@ -1186,8 +1186,7 @@ mod tests {
     fn compact_run_prints_field_only_policy_warnings() {
         let input = json!({"brief":"password=example-compact-3391"});
         let warnings =
-            provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default())
-                .unwrap();
+            provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
         let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":warnings});
         for announced in [false, true] {
             let output = run_human(&data, &json!({"op":"run"}), announced);

@@ -99,7 +99,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
         ),
         (
             "unregistered sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"",
-            "unregistered [REDACTED] password=\"[REDACTED]\"",
+            "unregistered sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"",
         ),
     ] {
         let temp = tempfile::tempdir()?;
@@ -192,8 +192,8 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     for tree in [&cursor, &opencode] {
         std::fs::create_dir_all(tree)?;
         std::fs::write(tree.join("text.log"), format!("{token}\n"))?;
-        // Force a streaming filter refusal in each relocated store. Settlement
-        // still succeeds and scrubs the other text in that store.
+        // Long unregistered URLs remain intact while registered values in
+        // the other text in each relocated store are masked.
         std::fs::write(
             tree.join("overlong.log"),
             format!("https://{}\n", "a".repeat(128 * 1024)),
@@ -444,7 +444,7 @@ fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
     Ok(())
 }
 #[test]
-fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
+fn long_unregistered_url_result_settles_without_shape_refusal() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -469,7 +469,7 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     let answer = format!("http://{}", "a".repeat(provenant_os::exec::FRAME_LIMIT + 1));
     let fake = Fake {
         observed: Some(route()),
-        answer: Some(answer),
+        answer: Some(answer.clone()),
         ..Fake::default()
     };
 
@@ -480,11 +480,11 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     else {
         return Err("not terminal".into());
     };
-    assert_eq!(*outcome, Outcome::Failed);
-    assert_eq!(reason.as_deref(), Some("redaction failed; result withheld"));
+    assert_eq!(*outcome, Outcome::Succeeded);
+    assert_eq!(reason.as_deref(), None);
     assert_eq!(
         artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
-        Some(b"[result withheld: redaction failed]".as_slice())
+        Some(answer.as_bytes())
     );
     assert!(record.result.ok_or("result")?.redacted);
     // A repeat settlement returns the same terminal record instead of looping.
@@ -567,8 +567,8 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
-    // The operator cancelled before the provider spawned. An over-long `://`
-    // run makes the session scrub refuse a transcript.
+    // The operator cancelled before the provider spawned. A session tree
+    // beyond the traversal bound makes the scrub fail independently of content.
     // The scoped stop-intent reader (b290fda595) accepts only a complete
     // record; a bare reason fragment no longer names a cancellation.
     artifacts::seal(
@@ -590,11 +590,9 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
         .join(format!("attempts/{id}"));
     let sessions = attempt.join("provider-state/candidate-0/sessions");
     std::fs::create_dir_all(&sessions)?;
-    let overlong = format!(
-        "https://{}\n",
-        "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
-    );
-    std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
+    let deep = sessions.join("d/".repeat(32));
+    std::fs::create_dir_all(&deep)?;
+    std::fs::write(deep.join("deep.jsonl"), "session text")?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     observed.never_spawned = true;
@@ -643,14 +641,23 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let _scope = provenant_confinement::redact::publication_scope([token.as_bytes().to_vec()])?;
     artifacts::seal(&dir, "result.md", token.as_bytes(), RESULT_LIMIT)?;
+    // An independent session traversal failure must not rewrite an orphan.
+    let deep = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{id}/provider-state/candidate-0/sessions"))
+        .join("d/".repeat(32));
+    std::fs::create_dir_all(&deep)?;
+    std::fs::write(deep.join("deep.jsonl"), "session text")?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
-        // The recomputed rendering cannot be filtered; the sealed orphan is
-        // still preserved with an honest redaction flag rather than rewritten.
+        // The sealed orphan remains intact even when session scrubbing fails.
         answer: Some(format!(
             "http://{}",
             "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)

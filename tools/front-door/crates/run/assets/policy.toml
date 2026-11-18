@@ -1298,9 +1298,9 @@ code = "SECRET_SHAPED_INPUT"
 site = "fabric-runtime/src/graph/refusal.rs#input_warnings"
 boundary = "none"
 strength = "warn"
-refusable = true
+refusable = false
 knob = "policy.SECRET_SHAPED_INPUT"
-justification = "Secret-shaped input warns with its schema path and proceeds; real known credential values are masked at publication boundaries."
+justification = "Secret-shaped input warns with its schema path and proceeds; scanner matches never refuse, and real known credential values are masked or refused only at their owning boundary."
 
 [[rule]]
 code = "DIRTY_WRITER"

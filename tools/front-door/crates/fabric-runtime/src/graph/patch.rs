@@ -195,7 +195,7 @@ pub struct LadderChoice {
 #[error("{message}")]
 pub struct PatchError {
     /// Stable cause: `stale_revision`, `idempotency_conflict`, `cycle`,
-    /// `conflict`, `started`, `edit_scope`, `journal` or `invalid`.
+    /// `conflict`, `started`, `edit_scope`, `journal`, `credential_value` or `invalid`.
     pub code: &'static str,
     pub message: String,
     /// Closed diagnostic fact retained when a planner uses this admission path.
@@ -525,6 +525,16 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
+    if let Some(brief) = brief {
+        let safe = provenant_confinement::redact::publication_text(brief.as_bytes(), [])
+            .map_err(|_| PatchError::invalid("retry brief credential check failed"))?;
+        if safe != brief.as_bytes() {
+            return Err(PatchError::new(
+                "credential_value",
+                "retry brief matches a declared credential value",
+            ));
+        }
+    }
     let normalised_brief = brief
         .map(prompt_text::normalise_prompt_text)
         .transpose()

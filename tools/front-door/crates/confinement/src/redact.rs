@@ -1,7 +1,7 @@
-//! Streaming redaction for bytes retained by supervisor capture.
+//! Streaming redaction for publication and disclosure boundaries.
 //!
 //! Exact literal prefixes and incomplete token markers stay buffered across
-//! chunks. The capture filter's EOF hook releases any unmatched tail.
+//! chunks. The streaming filter's EOF hook releases any unmatched tail.
 //! `key=value` credential assignments are scanned byte by byte: keys stream
 //! through unchanged and only the value is withheld, so no replay is needed.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
@@ -1362,7 +1362,7 @@ impl Redactor {
         Ok(Self::with_secrets(secrets, false))
     }
 
-    /// Filter for authored input. Masks registered typed and ambient
+    /// Filter for published text. Masks registered typed and ambient
     /// literal values, including JSON-escaped spellings, without rewriting
     /// merely secret-shaped examples.
     pub fn for_publication(
@@ -1372,18 +1372,6 @@ impl Redactor {
         secrets.extend(scoped_values());
         secrets.extend(typed_values);
         Ok(Self::with_secrets(publication_secrets(secrets)?, true))
-    }
-
-    /// Filter for captured or retained output. Masks known credential shapes and
-    /// quoted assignments in addition to registered typed, ambient and scoped
-    /// literal values.
-    pub fn for_capture(
-        typed_values: impl IntoIterator<Item = Vec<u8>>,
-    ) -> Result<Self, RedactorError> {
-        let mut secrets = ambient_values()?;
-        secrets.extend(scoped_values());
-        secrets.extend(typed_values);
-        Ok(Self::with_secrets(publication_secrets(secrets)?, false))
     }
 
     fn with_secrets(secrets: Vec<Vec<u8>>, literal_only: bool) -> Self {
@@ -1414,14 +1402,10 @@ impl Redactor {
     }
 
     fn bind_publication_context(&mut self) -> Result<(), FilterError> {
-        if !self.context_bound {
+        if self.literal_only && !self.context_bound {
             let mut values = self.literal_values.clone();
             values.extend(scoped_values());
-            let literal_only = self.literal_only;
-            *self = Self::with_secrets(
-                publication_secrets(values).map_err(|_| FilterError)?,
-                literal_only,
-            );
+            *self = Self::with_secrets(publication_secrets(values).map_err(|_| FilterError)?, true);
             self.context_bound = true;
         }
         Ok(())
@@ -1813,10 +1797,17 @@ fn credential_variable_name(name: &[u8]) -> bool {
     })
 }
 
-/// Filter retained or captured output using known shapes and assignments in
-/// addition to typed, ambient and scoped credential values.
+/// Filter a diagnostic using known literals and credential shapes. Input
+/// policy uses the shape-only disclosure scanner; content uses publication_text.
 pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
-    let mut redactor = Redactor::for_capture([]).map_err(|_| FilterError)?;
+    let secrets = publication_secrets(
+        ambient_values()
+            .map_err(|_| FilterError)?
+            .into_iter()
+            .chain(scoped_values()),
+    )
+    .map_err(|_| FilterError)?;
+    let mut redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
     let mut safe = Vec::new();
     let mut sink = |frame: &[u8]| {
         safe.extend_from_slice(frame);
@@ -2089,7 +2080,7 @@ fn filter_pass(
     if !before.unchanged(&opened) {
         return Err(FilterError);
     }
-    let mut redactor = Redactor::for_capture([]).map_err(|_| FilterError)?;
+    let mut redactor = Redactor::for_publication([]).map_err(|_| FilterError)?;
     let mut utf8_tail = Vec::new();
     let mut buffer = [0_u8; SESSION_CHUNK];
     loop {
@@ -2302,29 +2293,6 @@ mod tests {
                 b"example=sk-example-value actual=\"[REDACTED]\""
             );
         }
-    }
-
-    #[test]
-    fn capture_filter_masks_shapes_assignments_and_registered_values() {
-        let secret = b"descriptor-credential-3391";
-        let _scope = publication_scope([secret.to_vec()]).unwrap();
-        let mut filter = Redactor::for_capture([]).unwrap();
-        let input = b"descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"assigned-value\"";
-        assert_eq!(
-            checked_frames(&mut filter, &[input]),
-            b"[REDACTED] [REDACTED] password=\"[REDACTED]\""
-        );
-    }
-
-    #[test]
-    fn known_shapes_masks_shapes_assignments_and_scoped_credentials() {
-        let secret = b"descriptor-credential-3391";
-        let _scope = publication_scope([secret.to_vec()]).unwrap();
-        let input = b"descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"assigned-value\" clean text";
-        assert_eq!(
-            known_shapes(input).unwrap(),
-            b"[REDACTED] [REDACTED] password=\"[REDACTED]\" clean text"
-        );
     }
 
     #[test]
@@ -3174,7 +3142,7 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn scoped_descriptor_value_and_shape_tokens_are_masked_in_session_history()
+    fn scoped_descriptor_value_is_masked_in_session_history()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -3191,7 +3159,7 @@ mod tests {
         assert_eq!(scrub_session_history(root)?, 1);
         assert_eq!(
             std::fs::read(&history)?,
-            b"[REDACTED] [REDACTED]"
+            b"[REDACTED] sk-unregistered-example-3391"
         );
         Ok(())
     }
@@ -3314,23 +3282,27 @@ mod tests {
     }
 
     #[test]
-    fn session_scrub_keeps_going_after_an_overlong_authority()
+    fn session_scrub_keeps_long_examples_and_masks_registered_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        // A `://` run longer than the frame bound cannot be filtered, so the file is refused.
+        let _scope = publication_scope([token.as_bytes().to_vec()])?;
+        // An unregistered URL example does not impose a shape-scanner frame limit.
         let sessions = root.join("candidate-0/sessions");
         std::fs::create_dir_all(&sessions)?;
         let overlong = format!("https://{}\n", "a".repeat(FRAME_LIMIT + 1));
-        std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
-        // Layout order scrubs `sessions` before `claude-config`, so the good
-        // file comes after the refused one.
+        std::fs::write(sessions.join("overlong.jsonl"), &overlong)?;
+        // A later file still masks its explicitly registered credential.
         let good = root.join("candidate-0/claude-config/projects/key/session.jsonl");
         std::fs::create_dir_all(good.parent().ok_or("parent")?)?;
         std::fs::write(&good, format!("{{\"message\":\"{token}\"}}\n"))?;
 
-        assert!(scrub_session_history(root).is_err());
+        assert_eq!(scrub_session_history(root)?, 1);
+        assert_eq!(
+            std::fs::read_to_string(sessions.join("overlong.jsonl"))?,
+            overlong
+        );
         assert!(!std::fs::read_to_string(&good)?.contains(token));
         assert!(std::fs::read_to_string(&good)?.contains("[REDACTED]"));
         Ok(())

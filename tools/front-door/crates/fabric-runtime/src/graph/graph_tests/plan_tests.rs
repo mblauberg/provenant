@@ -3389,6 +3389,7 @@ fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
+    let _scope = provenant_confinement::redact::publication_scope([b"AKIAIOSFODNN7EXAMPLE".to_vec()]).unwrap();
     let prompt = "captured patch prompt AKIAIOSFODNN7EXAMPLE";
     let doc = "captured template doc AKIAIOSFODNN7EXAMPLE";
     let patch = json!({"schema_version":1,
@@ -3873,6 +3874,7 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
 #[test]
 fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() {
     let secret = "sk-abcdefghijklmnopqrstuvwx";
+    let _scope = provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
     for payload in [
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
         json!({"schema_version":secret, "nodes":[{"id":"child", "use":"task"}]}),

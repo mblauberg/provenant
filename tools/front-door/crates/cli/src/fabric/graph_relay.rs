@@ -128,15 +128,8 @@ pub fn serve_with_read(
     } else {
         Default::default()
     };
-    let policy_error = |diagnostic: Box<provenant_records::diagnostic::Diagnostic>| {
-        ServiceError::Facade(FacadeError::RecordedRefusal {
-            refusal_code: diagnostic.code.clone(),
-            diagnostic,
-        })
-    };
     let mut warnings = if mutating_input {
         provenant_fabric_runtime::graph::refusal::input_warnings(&arguments, &policy)
-            .map_err(policy_error)?
     } else {
         Vec::new()
     };
@@ -427,13 +420,10 @@ pub fn serve_with_read(
             )
             .map_err(patch_refused)?;
             if let Some(expansion) = checkpoint.expansions.last() {
-                warnings.extend(
-                    provenant_fabric_runtime::graph::refusal::input_warnings(
-                        &serde_json::to_value(expansion)?,
-                        &policy,
-                    )
-                    .map_err(policy_error)?,
-                );
+                warnings.extend(provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &serde_json::to_value(expansion)?,
+                    &policy,
+                ));
             }
             if let Some(request) = &run_request {
                 retain_run_request(&mut checkpoint, &receipt, request)?;
@@ -540,13 +530,10 @@ pub fn serve_with_read(
             )
             .map_err(patch_refused)?;
             if let Some(expansion) = checkpoint.expansions.last() {
-                warnings.extend(
-                    provenant_fabric_runtime::graph::refusal::input_warnings(
-                        &serde_json::to_value(expansion)?,
-                        &policy,
-                    )
-                    .map_err(policy_error)?,
-                );
+                warnings.extend(provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &serde_json::to_value(expansion)?,
+                    &policy,
+                ));
             }
             // Leave time to persist a refusal and deliver it to the caller.
             // The relay's transport reserve alone does not cover journal I/O.

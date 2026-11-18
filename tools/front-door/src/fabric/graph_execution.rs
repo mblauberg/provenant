@@ -632,6 +632,18 @@ impl Factory {
                     )
                     .map_err(graph_journal_error)?;
                     let admitted = checkpoint.is_some();
+                    if !admitted
+                        && let Err(reason) = provenant_cli::route::validate_graph_exclusions(
+                            &document.exclude,
+                            &self.context.roots,
+                        )
+                    {
+                        return Err(FacadeError::DispatchRefused {
+                            reason,
+                            disk: None,
+                            fact: None,
+                        });
+                    }
                     // Preflight checks topology only. Capture and admit the requester
                     // PATH after the journal-locked submission replay decision below.
                     let extensions = match &input {

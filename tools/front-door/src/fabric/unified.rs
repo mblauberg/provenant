@@ -267,6 +267,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         // never launched an attempt (blocked, skipped and admission failures).
         for field in [
             "attempt_number",
+            "warnings",
             "work_key",
             "branch",
             "head",
@@ -301,6 +302,9 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         let current =
             row["kind"] == "node" || attempt.zip(latest).is_some_and(|(a, b)| std::ptr::eq(a, b));
         if current {
+            if row["kind"] == "node" {
+                row["warnings"] = json!(node.map(|node| &node.warnings));
+            }
             row["branch"] = json!(
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.branch.as_ref())
@@ -498,6 +502,7 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
         {
             human.push_str(&digest.line);
             human.push('\n');
+            append_status_warnings(&mut human, node);
             continue;
         }
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
@@ -583,7 +588,19 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
     }
     let mut line = provenant_cli::bounded_text(&line, provenant_cli::limits::SUMMARY_ROW_BYTES);
     line.push('\n');
+    append_status_warnings(&mut line, row);
     line
+}
+
+fn append_status_warnings(line: &mut String, row: &Value) {
+    if let Some(warnings) = row["warnings"].as_array() {
+        for warning in warnings.iter().filter_map(Value::as_str) {
+            line.push_str(&format!(
+                "  warning: {}\n",
+                provenant_cli::bounded_text(warning, 2048)
+            ));
+        }
+    }
 }
 
 fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_records::DecodeError) {
@@ -3500,6 +3517,7 @@ mod tests {
         assert!(line.contains("cause=budget_exhausted"), "{line}");
     }
 
+    // Spec: docs/specs/cli.md#status-selection
     #[test]
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     fn result_renders_retained_head_and_checks_after_collection()
@@ -3560,6 +3578,7 @@ mod tests {
         // resolve to the WorkKey and reference that produced it.
         let mut projected = checkpoint("g");
         projected.nodes[0].attempts[0].key.attempt = 7;
+        projected.nodes[0].warnings.push("retry warning".into());
         let run = graph_snapshot(projected);
         let graph = GraphTarget {
             graph: "g".into(),
@@ -3572,6 +3591,13 @@ mod tests {
             rows.iter()
                 .all(|row| row.as_object().unwrap().keys().collect::<Vec<_>>() == keys)
         );
+        for row in &rows {
+            if row["kind"] == "node" && row["node_id"] == "parent" {
+                assert_eq!(row["warnings"], json!(["retry warning"]));
+            } else if row["kind"] != "node" {
+                assert!(row["warnings"].is_null());
+            }
+        }
         assert_eq!(rows[0]["kind"], "graph");
         assert_eq!(rows[1]["id"], "g/parent");
         for row in rows.iter().filter(|row| row["kind"] == "attempt") {

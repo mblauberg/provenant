@@ -217,8 +217,9 @@ refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbit
 map keys become `[<key>]`; array positions may use indices. Secret-shaped input
 produces a `SECRET_SHAPED_INPUT` warning naming the field and saying it looks
 like a credential, without echoing the value. The compiled default is Warn;
-`policy.SECRET_SHAPED_INPUT` can select Off or Refuse, with source and knob
-named in each warning. Policy refusal occurs before any mutation or reservation.
+`policy.SECRET_SHAPED_INPUT` can suppress the warning; shape-only matches never
+refuse, including when a retained policy requests Refuse. Warnings name their source
+and knob. Exact declared credential refusals occur before any mutation or reservation.
 Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
 kind and rule; limit causes name the host limit, never the supplied value.
 CLI stderr, diagnostic JSON and relay wire details project the same cause.
@@ -468,7 +469,7 @@ from the provider environment. A thread-bound, memory-only publication scope
 also supplies descriptor credentials through capture and settlement, then clears
 on every exit. Literal and JSON-escaped
 spellings are masked in stored prompts, checkpoints, events, captured outputs
-and diagnostics. Stored authored content preserves unregistered secret-shaped examples.
+and diagnostics. Stored content preserves unregistered secret-shaped examples.
 Warning projections retain schema paths and policy facts only.
 
 Admission bounds the worst-case checkpoint before saving the plan.
@@ -485,12 +486,13 @@ enumerates identity positions (review_base, worktree, branch, route fields, find
 IDs, files and propagation markers, repair item IDs, node references, template names,
 work provenance, attempt placement and new-worktree branch/base fields, and sources).
 Identity fields and all object keys are scanned across each new
-structured capture, including fields omitted by typed projections. A credential-shaped
-identity or key refuses that capture as invalid output; it is never rewritten. Only
+structured capture, including fields omitted by typed projections. An exact registered credential
+in an identity or key refuses that capture as invalid output; it is never rewritten. Shape-only
+matches preserve their bytes. Only
 declared scalar identity fields retain their bytes: a route or source object does not
 exempt its extension values. Content fields in captured output, including handoff fields,
-repair item extensions and findings summaries, filter known credential shapes and
-quoted assignments in addition to exact registered values. Captured findings are parsed
+repair item extensions and findings summaries, mask exact registered values while
+preserving unregistered credential-shaped examples and assignments. Captured findings are parsed
 and normalised before merging stored upstream evidence; the remaining fresh capture
 projection is normalised once before becoming graph outputs. Stored fragments are
 replayed without rewriting their digested bytes. Typed handoffs are normalised at capture

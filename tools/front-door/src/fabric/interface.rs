@@ -133,15 +133,6 @@ fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause))
 }
 
-pub(super) fn policy_refusal(
-    diagnostic: Box<provenant_records::diagnostic::Diagnostic>,
-) -> FacadeError {
-    FacadeError::RecordedRefusal {
-        refusal_code: diagnostic.code.clone(),
-        diagnostic,
-    }
-}
-
 /// A refused template parameter keeps its typed refusal; any other compile
 /// failure stays a redacted graph-input reason.
 fn compile_error(error: provenant_fabric_runtime::graph::template::CompileError) -> FacadeError {
@@ -169,6 +160,7 @@ pub(super) fn graph_patch_error(error: patch::PatchError) -> FacadeError {
         return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));
     }
     let cause = match error.code {
+        "credential_value" => Some(GraphRelayCause::CredentialValue),
         "cycle" => Some(GraphRelayCause::Cycle),
         "conflict" | "stale_revision" | "idempotency_conflict" => Some(GraphRelayCause::Conflict),
         "started" => Some(GraphRelayCause::StartedNode),
@@ -884,8 +876,9 @@ impl Factory {
             &config.knobs,
             &Default::default(),
         );
-        provenant_fabric_runtime::graph::refusal::input_warnings(value, &policy)
-            .map_err(policy_refusal)
+        Ok(provenant_fabric_runtime::graph::refusal::input_warnings(
+            value, &policy,
+        ))
     }
 
     fn validate_host_placement(
@@ -2048,6 +2041,15 @@ impl Factory {
             override_launch(node, input)?;
             self.validate_host_placement(node)?;
         }
+        if let Err(reason) =
+            provenant_cli::route::validate_graph_exclusions(&document.exclude, &self.context.roots)
+        {
+            return Err(FacadeError::DispatchRefused {
+                reason,
+                disk: None,
+                fact: None,
+            });
+        }
         if let Some(head) = &resolved_head {
             for node in &mut document.nodes {
                 bind_submission_subject(node, head);
@@ -2546,7 +2548,45 @@ impl Factory {
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), FacadeError> {
+        let id = target.graph.clone();
         let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
+        // Keep the no-op guard under the retry journal lock, alongside the
+        // staged retry mutation.
+        let extensions_empty = input
+            .get("extend")
+            .is_none_or(|extensions| extensions.as_array().is_some_and(Vec::is_empty));
+        // The cancel flag alone restores nothing: only nodes cancelled out of a
+        // live state (Skipped with the cancel reason) are resumable.
+        let has_resumable_work = checkpoint.pause.is_some()
+            || checkpoint.nodes.iter().any(|node| {
+                node.expansion_pause.is_some()
+                    || node.loop_pause.is_some()
+                    || (node.state == provenant_fabric_runtime::graph::NodeState::Skipped
+                        && node.skip_reason.as_deref() == Some("graph cancelled"))
+                    || matches!(
+                        node.state,
+                        provenant_fabric_runtime::graph::NodeState::Pending
+                            | provenant_fabric_runtime::graph::NodeState::Running
+                    )
+            });
+        if target.node.is_none()
+            && !brief_given
+            && extensions_empty
+            && !has_resumable_work
+            && checkpoint.nodes.iter().all(|node| node.state.settled())
+        {
+            let node = checkpoint.nodes.iter().find(|node| {
+                matches!(
+                    node.state,
+                    provenant_fabric_runtime::graph::NodeState::Failed
+                        | provenant_fabric_runtime::graph::NodeState::Blocked
+                )
+            });
+            return Err(FacadeError::invalid(InvalidInputDetail::RetryNode {
+                graph: id.clone(),
+                node: node.map_or_else(|| "NODE".into(), |node| node.id.clone()),
+            }));
+        }
         if target.node.is_some() || brief_given {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
@@ -3530,8 +3570,21 @@ mod tests {
         }
     }
 
+    fn bind_fixture_project(roots: &provenant_core::Roots, path: &Path) -> Result {
+        let project = std::fs::canonicalize(path)?;
+        let common_dir = std::fs::canonicalize(project.join(".git"))?;
+        let location = provenant_config::ProjectLocation::from_verified_primary_checkout(
+            common_dir, &project,
+        )?;
+        provenant_config::bind_project(roots, location)?;
+        Ok(())
+    }
+
     fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        // Library unit tests inherit the lane environment, where Context::open
+        // requires a project binding instead of creating one as a CLI would.
+        bind_fixture_project(&roots, &rig.project)?;
         Ok(Factory {
             context: Context::open(roots, &rig.home, &rig.project)?,
             project_attribution: false,
@@ -3685,8 +3738,10 @@ mod tests {
         ))?;
         let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(fixture["checkpoint"].clone())?;
-        let execution: GraphDocument =
-            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let mut execution_value = fixture["execution"]["document"].clone();
+        execution_value["schema_version"] =
+            json!(crate::worktree_tests::support::GRAPH_DOCUMENT_SCHEMA_VERSION);
+        let execution: GraphDocument = serde_json::from_value(execution_value)?;
         let directory: PathBuf = factory
             .context
             .roots
@@ -3719,6 +3774,8 @@ mod tests {
 
         let marker = "REFUSAL_MARKER_3391";
         let secret = format!("sk-abcdefghijklmnopqrstuvwx {marker}");
+        let _scope =
+            provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()])?;
         let mut keyed = json!({"id":"reader", "prompt":"safe", "route":{"alias":"senior"}});
         keyed[marker] = json!(secret);
         // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
@@ -3726,7 +3783,7 @@ mod tests {
             (
                 "launch",
                 json!({"op":"run", "document":{
-                    "schema_version":2, "graph_id":"refused-launch",
+                    "schema_version":99, "graph_id":"refused-launch",
                     "context":{marker:secret},
                     "nodes":[{"id":"inspect", "prompt":"safe", "access":"read_only", "route":{"alias":"senior"}}]
                 }}),
@@ -3737,7 +3794,7 @@ mod tests {
             ),
             (
                 "edit",
-                json!({"op":"edit", "id":"g-test", "patch":{"schema_version":1, "replace":[keyed]}}),
+                json!({"op":"edit", "id":"g-test", "patch":{"schema_version":99, "replace":[keyed]}}),
             ),
             (
                 "extension",
@@ -3771,7 +3828,10 @@ mod tests {
                 );
             }
             if path_name == "extension" {
-                assert!(error.to_string().contains("per_graph.tokens"));
+                assert!(
+                    error.to_string().contains("per_graph.tokens"),
+                    "unexpected extension refusal cause: {error}"
+                );
             }
             if path_name == "limit" {
                 assert!(error.to_string().contains("limits.nodes"));
@@ -3814,10 +3874,12 @@ mod tests {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
         ))?;
-        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(fixture["checkpoint"].clone())?;
-        let document: GraphDocument =
-            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let mut document_value = fixture["execution"]["document"].clone();
+        document_value["schema_version"] =
+            json!(crate::worktree_tests::support::GRAPH_DOCUMENT_SCHEMA_VERSION);
+        let document: GraphDocument = serde_json::from_value(document_value)?;
         let mut journal = FileJournal::open(
             &factory.context.roots.state,
             project,
@@ -3835,6 +3897,7 @@ mod tests {
             directory: factory.cwd.clone(),
             document: document.clone(),
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         drop(journal);
         let path = factory
@@ -3870,7 +3933,10 @@ mod tests {
                 &cancel,
             )
             .expect_err("tightened limit must refuse");
-        assert!(error.to_string().contains("node_prompt_bytes"));
+        assert!(
+            error.to_string().contains("node_prompt_bytes"),
+            "unexpected tightened-limit refusal cause: {error}"
+        );
         assert_eq!(std::fs::read(path)?, before);
         Ok(())
     }
@@ -5791,6 +5857,7 @@ mod tests {
                 .output()?;
             assert!(result.status.success());
             source = String::from_utf8(result.stdout)?.trim().to_owned();
+            bind_fixture_project(&factory.context.roots, &selected)?;
             let selected_context =
                 Context::open(factory.context.roots.clone(), &rig.home, &selected)?;
             provenant_cli::fabric::graph_relay::provision_child(

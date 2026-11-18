@@ -2982,7 +2982,7 @@ impl RunStore {
         // A filter failure withholds the result instead of blocking settlement
         // forever: the lane fails with a fixed placeholder and stays terminal.
         let (mut result, result_redaction_failed) =
-            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
+            match provenant_confinement::redact::publication_text(decoded.result.as_bytes(), []) {
                 Ok(safe) => match String::from_utf8(safe) {
                     Ok(text) => (text, false),
                     Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),

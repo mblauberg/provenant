@@ -159,7 +159,7 @@ impl RunStore {
 /// Redact decoded handoff values before a graph consumes local or peer output.
 pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
-        let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+        let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
@@ -277,7 +277,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
         Err(error) => {
             let mut value = serde_json::json!(error);
             let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+                let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
                     .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
                 String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
             });
@@ -735,10 +735,10 @@ mod tests {
     #[test]
     fn captured_handoff_credential_keys_refuse_without_rewriting() -> TestResult {
         let registered = "registered-handoff-key-3391";
-        let _scope = provenant_confinement::redact::publication_scope([
-            registered.as_bytes().to_vec(),
-        ])?;
-        for key in ["AKIAIOSFODNN7EXAMPLE", registered] {
+        let _scope =
+            provenant_confinement::redact::publication_scope([registered.as_bytes().to_vec()])?;
+        let embedded = format!("prefix-{registered}-suffix");
+        for key in [registered, embedded.as_str()] {
             let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
             value["future"] = serde_json::json!({"nested": {key: "value"}});
             let handoff: Handoff = serde_json::from_value(value)?;
@@ -748,11 +748,19 @@ mod tests {
             let error = sanitise_handoff_result(Ok(Some(handoff))).unwrap_err();
             assert!(!serde_json::to_string(&error)?.contains(key));
         }
+        let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
+        value["future"] = serde_json::json!({"AKIAIOSFODNN7EXAMPLE": "password=\"example\""});
+        let handoff: Handoff = serde_json::from_value(value)?;
+        assert_eq!(sanitise_handoff(&handoff)?, handoff);
         Ok(())
     }
 
     #[test]
     fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
+        let _scope = provenant_confinement::redact::publication_scope([
+            b"sk-abcdefghijklmnopqrstuvwx".to_vec(),
+            b"a:b".to_vec(),
+        ])?;
         for prefix in ["\n", "\t"] {
             for field in ["note", "remaining", "decisions", "verify", "future"] {
                 let temp = tempfile::tempdir()?;
@@ -769,7 +777,7 @@ mod tests {
                 value[field] = match field {
                     "note" => serde_json::json!(secret),
                     "future" => {
-                        serde_json::json!({secret.clone():[secret.clone(),{"value":secret}]})
+                        serde_json::json!({"extension":[secret.clone(),{"value":secret}]})
                     }
                     _ => serde_json::json!([secret]),
                 };
@@ -795,7 +803,7 @@ mod tests {
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
         handoff.note = note;
         let redact = |text: &str| {
-            let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+            let safe = provenant_confinement::redact::publication_text(text.as_bytes(), [])
                 .map_err(|_| RunError::Validation("redaction"))?;
             String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
         };
@@ -1020,6 +1028,8 @@ mod tests {
                 HANDOFF_BYTES as u64,
             )?;
             let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+            let _scope =
+                provenant_confinement::redact::publication_scope([secret.as_bytes().to_vec()])?;
             let value = serde_json::json!({"schema_version":2,"status":"done","note":format!("New note {secret}"),"remaining":["Unfinished work"],"decisions":[],"verify":[false]});
             let mut result = decoded();
             result.complete = complete;

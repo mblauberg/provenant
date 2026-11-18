@@ -152,12 +152,12 @@ impl fmt::Display for SchemaPath {
     }
 }
 
-/// Find secret-shaped text for a configurable, non-boundary policy rule.
+/// Find secret-shaped text for an advisory policy rule.
 /// Warnings disclose only a schema path and the reason, never the value.
 pub fn input_warnings(
     value: &serde_json::Value,
     policy: &provenant_records::policy::Policy,
-) -> Result<Vec<String>, Box<provenant_records::diagnostic::Diagnostic>> {
+) -> Vec<String> {
     use provenant_records::policy::{Effect, Facts};
 
     fn check(
@@ -165,18 +165,28 @@ pub fn input_warnings(
         text: &str,
         policy: &provenant_records::policy::Policy,
         warnings: &mut Vec<String>,
-    ) -> Result<(), Box<provenant_records::diagnostic::Diagnostic>> {
+    ) {
         if super::patch::scan_for_secrets(text).is_ok() {
-            return Ok(());
+            return;
         }
         let fact = Facts::violation(format!("{path} looks like a credential"));
         match policy.check("SECRET_SHAPED_INPUT", fact) {
-            Effect::Proceed => Ok(()),
+            Effect::Proceed => {}
             Effect::Warn(message) => {
                 warnings.push(message);
-                Ok(())
             }
-            Effect::Refuse(diagnostic) => Err(diagnostic),
+            // Keep the input scanner advisory even if a caller constructs a
+            // stale or otherwise unsupported strict policy directly. Exact
+            // credential matches are handled by their owning publication
+            // boundary before any mutation.
+            Effect::Refuse(_) => {
+                let rule = policy.rule("SECRET_SHAPED_INPUT");
+                warnings.push(format!(
+                    "[SECRET_SHAPED_INPUT] {path} looks like a credential (strength=Warn, source={:?}, knob={})",
+                    rule.source,
+                    rule.rule.knob.as_deref().unwrap_or("unknown")
+                ));
+            }
         }
     }
 
@@ -187,17 +197,17 @@ pub fn input_warnings(
         seen: &mut HashSet<String>,
         warnings: &mut Vec<String>,
         matched: &mut bool,
-    ) -> Result<(), Box<provenant_records::diagnostic::Diagnostic>> {
+    ) {
         match value {
             serde_json::Value::String(text) => {
                 if seen.insert(text.clone()) && super::patch::scan_for_secrets(text).is_err() {
                     *matched = true;
-                    check(path, text, policy, warnings)?;
+                    check(path, text, policy, warnings);
                 }
             }
             serde_json::Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    walk(item, &path.index(index), policy, seen, warnings, matched)?;
+                    walk(item, &path.index(index), policy, seen, warnings, matched);
                 }
             }
             serde_json::Value::Object(fields) => {
@@ -205,14 +215,13 @@ pub fn input_warnings(
                     let child = path.key(key);
                     if seen.insert(key.clone()) && super::patch::scan_for_secrets(key).is_err() {
                         *matched = true;
-                        check(&child, key, policy, warnings)?;
+                        check(&child, key, policy, warnings);
                     }
-                    walk(value, &child, policy, seen, warnings, matched)?;
+                    walk(value, &child, policy, seen, warnings, matched);
                 }
             }
             _ => {}
         }
-        Ok(())
     }
 
     let mut warnings = Vec::new();
@@ -224,7 +233,7 @@ pub fn input_warnings(
         &mut HashSet::new(),
         &mut warnings,
         &mut matched,
-    )?;
+    );
     // Preserve coverage for credentials assembled across adjacent fragments.
     // Leaf matches already have better paths, so this is only reported when
     // none of the decoded fields matched individually.
@@ -232,9 +241,9 @@ pub fn input_warnings(
         && let Ok(encoded) = serde_json::to_string(value)
         && super::patch::scan_for_secrets(&encoded).is_err()
     {
-        check(&SchemaPath::default(), &encoded, policy, &mut warnings)?;
+        check(&SchemaPath::default(), &encoded, policy, &mut warnings);
     }
-    Ok(warnings)
+    warnings
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,7 +478,7 @@ mod tests {
             serde_json::json!({"context":{"brief":{"prompt":"password=fixture-secret-3391"}}}),
         ] {
             let policy = provenant_records::policy::Policy::default();
-            let warnings = input_warnings(&value, &policy).unwrap();
+            let warnings = input_warnings(&value, &policy);
             assert_eq!(warnings.len(), 1);
             let text = &warnings[0];
             assert!(text.contains("[<key>][<key>]"), "{text}");
@@ -479,13 +488,13 @@ mod tests {
     }
 
     #[test]
-    fn secret_shaped_inputs_warn_without_disclosing_values_and_policy_can_refuse() {
+    fn secret_shaped_inputs_warn_without_disclosing_values_under_every_policy() {
         use provenant_records::policy::{Policy, Source, Strength};
         use std::collections::BTreeMap;
 
         let marker = "fixture-secret-3391";
         let input = serde_json::json!({"nodes":[{"prompt":format!("password={marker}")}]});
-        let warnings = input_warnings(&input, &Policy::default()).unwrap();
+        let warnings = input_warnings(&input, &Policy::default());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("nodes[0].prompt"));
         assert!(warnings[0].contains("looks like a credential"));
@@ -496,21 +505,29 @@ mod tests {
             &BTreeMap::from([("SECRET_SHAPED_INPUT".into(), Strength::Refuse)]),
             Source::Project,
         );
-        let refusal = input_warnings(&input, &strict).unwrap_err();
-        assert_eq!(refusal.code, "SECRET_SHAPED_INPUT");
-        assert!(
-            refusal
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("nodes[0].prompt")
+        assert_eq!(
+            strict.rule("SECRET_SHAPED_INPUT").rule.strength,
+            Strength::Warn
         );
-        assert!(
-            !refusal
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains(marker)
-        );
+        let warnings = input_warnings(&input, &strict);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("nodes[0].prompt"));
+        assert!(warnings[0].contains("looks like a credential"));
+        assert!(!warnings[0].contains(marker));
+
+        // A directly constructed legacy policy can still say Refuse. The
+        // scanner itself remains advisory even in that unsupported state.
+        let mut legacy = Policy::default();
+        let rule = legacy
+            .rules
+            .iter_mut()
+            .find(|rule| rule.rule.code == "SECRET_SHAPED_INPUT")
+            .expect("compiled scanner policy");
+        rule.rule.refusable = true;
+        rule.rule.strength = Strength::Refuse;
+        let warnings = input_warnings(&input, &legacy);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("strength=Warn"));
+        assert!(!warnings[0].contains(marker));
     }
 }

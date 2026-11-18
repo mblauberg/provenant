@@ -422,8 +422,7 @@ fn block<'a>(
 fn normalise_fragment(json: &str) -> Result<String, String> {
     let raw: serde_json::Value =
         serde_json::from_str(json).map_err(|_| "patch JSON is invalid".to_owned())?;
-    prompt_text::validate_identities(&raw, prompt_text::Context::Patch)
-        .map_err(str::to_owned)?;
+    prompt_text::validate_identities(&raw, prompt_text::Context::Patch).map_err(str::to_owned)?;
     let value = super::patch::Patch::from_fragment(json)?;
     let value = prompt_text::normalise_capture(&value, prompt_text::Context::Patch)
         .map_err(str::to_owned)?;
@@ -1910,8 +1909,7 @@ pub(super) fn settle(
                     serde_json::from_str::<serde_json::Value>(&json)
                         .map_err(|_| "patch JSON is invalid".to_owned())
                         .and_then(|value| {
-                            let warnings = super::refusal::input_warnings(&value, policy)
-                                .map_err(|error| error.detail.unwrap_or(error.code))?;
+                            let warnings = super::refusal::input_warnings(&value, policy);
                             checkpoint.nodes[index].warnings.extend(warnings);
                             normalise_fragment(&json).inspect(|json| {
                                 checkpoint.nodes[index].fragment = Some(json.clone());
