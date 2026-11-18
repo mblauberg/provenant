@@ -35,12 +35,14 @@ enum Phase {
     RemoveCandidate,
 }
 
+/// A directory inventory stamp deliberately excludes ctime: acquiring the
+/// store lock reapplies private permissions to the generations root, changing
+/// ctime without changing the entries being surveyed.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct DirectoryStamp {
     device: u64,
     inode: u64,
     modified_ns: i128,
-    changed_ns: i128,
 }
 
 impl From<Metadata> for DirectoryStamp {
@@ -49,7 +51,6 @@ impl From<Metadata> for DirectoryStamp {
             device: metadata.device,
             inode: metadata.inode,
             modified_ns: metadata.modified_ns,
-            changed_ns: metadata.changed_ns,
         }
     }
 }
@@ -1077,8 +1078,8 @@ mod tests {
     #[test]
     fn budget_stop_resumes_generation_inventory_and_eviction() {
         use std::sync::{
-            Arc,
             atomic::{AtomicUsize, Ordering},
+            Arc,
         };
         let state = tempfile::tempdir().unwrap();
         let old = generation(state.path(), "001", 3);
