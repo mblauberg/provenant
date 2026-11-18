@@ -1583,7 +1583,14 @@ pub(super) fn node_action<'a>(
                 checkpoint.nodes[index].wait_reason = Some("after".into());
                 changed = true;
             }
-        } else if changed
+        } else if state.settled() {
+            // A node settled by its dependencies (skipped by a passing gate,
+            // say) no longer waits, exactly as a replay records it.
+            checkpoint.nodes[index].wait_reason = None;
+        }
+        if state != NodeState::Blocked
+            && state != NodeState::Pending
+            && changed
             && checkpoint.nodes[index].advance_error_code.as_deref() == Some("upstream_blocked")
         {
             checkpoint.nodes[index].advance_error = None;
