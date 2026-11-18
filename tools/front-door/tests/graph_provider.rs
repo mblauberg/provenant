@@ -5779,6 +5779,92 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+/// Issue #3531: an exact model present in the cached discovered layer must
+/// resolve through the same effective catalogue `route list` uses, so launch
+/// emits no "not in the catalogue" warning. A genuinely unknown model still
+/// warns.
+fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    register_opencode_plans(&rig)?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+
+    // Publish a discovery snapshot for an exact model absent from the bundled
+    // catalogue, using the same private layout the discovery refresh writes.
+    let directory = rig.state.join("model-discovery");
+    fs::create_dir_all(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let snapshot = provenant_routing::DiscoverySnapshot {
+        adapter: "opencode".into(),
+        observed_at: 1_700_000_000,
+        models: vec![provenant_routing::DiscoveredModel {
+            model: provenant_routing::ModelId::parse("opencode/opencode/hy4-flash-free")?,
+            efforts: Vec::new(),
+            controls_known: false,
+            effort_suffix: false,
+            service_tiers: Vec::new(),
+        }],
+    };
+    let path = directory.join("opencode.json");
+    fs::write(&path, serde_json::to_vec(&snapshot)?)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+    let run_one = |name: &str, model: &str| -> Result<support::Settled> {
+        let document = rig.root.join(format!("{name}.json"));
+        fs::write(
+            &document,
+            serde_json::to_vec(&json!({
+                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+                "graph_id":name,
+                "nodes":[{
+                    "id":"provider", "prompt":"exact discovered model", "access":"read_only",
+                    "route":{"adapter":"opencode","model":model}
+                }]
+            }))?,
+        )?;
+        rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], "30s")
+    };
+
+    let discovered = run_one("discovered-exact", "opencode/opencode/hy4-flash-free")?;
+    assert_eq!(
+        discovered.launch_value["error"],
+        Value::Null,
+        "{:?}",
+        discovered.launch_value
+    );
+    let stderr = String::from_utf8_lossy(&discovered.launch.stderr.bytes);
+    assert!(
+        !stderr.contains("not in the catalogue"),
+        "discovered exact model warned: {stderr}"
+    );
+
+    let unknown = run_one("unknown-exact", "opencode/opencode/uncatalogued-3531")?;
+    assert_eq!(
+        unknown.launch_value["error"],
+        Value::Null,
+        "{:?}",
+        unknown.launch_value
+    );
+    let stderr = String::from_utf8_lossy(&unknown.launch.stderr.bytes);
+    assert!(
+        stderr.contains("not in the catalogue"),
+        "unknown model did not warn: {stderr}"
+    );
+
+    cleanup.disarm();
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]
@@ -6019,6 +6105,10 @@ fn main() -> ExitCode {
             (
                 "public_implement_steers_and_resumes_the_same_local_codex_session",
                 public_implement_steers_and_resumes_the_same_local_codex_session,
+            ),
+            (
+                "discovered_exact_model_launch_has_no_catalogue_warning",
+                discovered_exact_model_launch_has_no_catalogue_warning,
             ),
         ];
         let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();
