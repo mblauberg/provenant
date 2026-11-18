@@ -117,6 +117,16 @@ pub enum CustodyError {
     },
 }
 
+impl CustodyError {
+    /// A stored record that is present but does not decode, whether or not the
+    /// decoder kept its path and type. Callers that classify a malformed
+    /// record (as an invalid stop intent, a replaceable stale record or an
+    /// authority boundary) match this rather than one variant.
+    pub fn is_invalid_record(&self) -> bool {
+        matches!(self, Self::InvalidRecord | Self::Decode(_))
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("boot identity unavailable")]
 struct BootIdentityUnavailable(#[source] CensusError);
@@ -1374,7 +1384,7 @@ pub fn read_stop_intent(directory: &Directory, scope: Scope) -> Result<StopInten
         let request = match read_record::<StopIntent>(directory, file, RECORD_LIMIT) {
             Ok(request) => request,
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
-            Err(CustodyError::InvalidRecord) => return Ok(StopIntentState::Invalid),
+            Err(error) if error.is_invalid_record() => return Ok(StopIntentState::Invalid),
             Err(error) => return Err(error),
         };
         if request.schema_version != 1
@@ -1462,7 +1472,8 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
                 {
                     return Err(CustodyError::InvalidRecord);
                 }
-                Ok(_) | Err(CustodyError::InvalidRecord) => {}
+                Ok(_) => {}
+                Err(error) if error.is_invalid_record() => {}
                 // A symlink, FIFO or oversize entry is replaced too: rename
                 // swaps the entry without following or opening it. A
                 // directory still refuses the rename.

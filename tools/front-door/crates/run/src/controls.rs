@@ -3911,7 +3911,7 @@ impl RunStore {
                 {
                     return Ok(None);
                 }
-                Err(CustodyError::InvalidRecord) if expected_slot => {
+                Err(error) if error.is_invalid_record() && expected_slot => {
                     #[cfg(test)]
                     let recovered = provenant_supervisor::fixture::acquire_reboot_recovery_with(
                         directory,
