@@ -543,7 +543,7 @@ pub fn registered_gc_project_selection_with_progress(
             checkpoint_gc_selection(
                 &mut selection,
                 &mut snapshot,
-                tick.as_deref(),
+                tick.as_ref(),
                 persist,
                 epoch,
                 registry_path.join(&entry),
@@ -590,7 +590,7 @@ pub fn registered_gc_project_selection_with_progress(
         checkpoint_gc_selection(
             &mut selection,
             &mut snapshot,
-            tick.as_deref(),
+            tick.as_ref(),
             persist,
             epoch,
             registry_path,
