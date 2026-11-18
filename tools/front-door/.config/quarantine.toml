@@ -168,10 +168,3 @@ name = "lane_prepare_isolates_nested_claude_state"
 issue = "#3299"
 owner = "chair"
 expires = 2026-12-14
-
-[[test]]
-package = "provenant-confinement"
-name = "worktrees::lifecycle_tests::ownership::dozen_writer_worktrees_claim_concurrently_without_registry_exclusion"
-issue = "#3306"
-owner = "chair"
-expires = 2026-12-14
