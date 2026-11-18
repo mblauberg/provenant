@@ -159,6 +159,21 @@ pub(crate) fn tick_graphs(
                 };
                 match std::fs::metadata(&execution.directory) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        if graph_auto_settle::settle_removed_worktree(
+                            &resolved.roots.state,
+                            project,
+                            &id,
+                            &mut checkpoint,
+                            &mut journal,
+                            &clock,
+                            &cancel,
+                        )? {
+                            report.warnings.push(format!(
+                                "graph {id}: settled: {}",
+                                graph_auto_settle::AUTO_SETTLE_REASON
+                            ));
+                            return Ok(false);
+                        }
                         let reason = format!(
                             "graph {id}: worktree is missing; restore it or cancel this graph"
                         );

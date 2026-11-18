@@ -1866,10 +1866,13 @@ pub(crate) fn graph_listing(
             }
         }
         let now = factory.clock.wall_now()?.as_micros();
+        // Settled-but-open graphs are counted in one summary line and hidden
+        // from the default listing; --full (like --all) includes their rows.
+        let settled_count = graphs.iter().filter(|graph| graph.settled).count();
         let mut listing = select_listing(
             graphs,
             now,
-            command.all,
+            command.all || globals.full,
             usize::try_from(command.limit).unwrap_or(usize::MAX),
             command.cursor,
         );
@@ -1907,7 +1910,7 @@ pub(crate) fn graph_listing(
             }
             graph.digests = super::graph_status::node_digests(&rows);
         }
-        Ok(listing)
+        Ok(finish_listing(listing, settled_count, globals.full))
     })();
     match result {
         Ok(listing) => {
@@ -1964,9 +1967,14 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
+            let more = if globals.full {
+                "--all --cursor"
+            } else {
+                "--full"
+            };
             for (state, count) in &listing.omitted {
                 human.push_str(&format!(
-                    "{count} {state} graphs not shown; --all lists them\n"
+                    "{count} {state} graph(s) not shown; use {more} to list them\n"
                 ));
             }
             if let Some(cursor) = listing.next {
@@ -2016,6 +2024,26 @@ fn graph_age(now_micros: i64, graph: &ListedGraph) -> String {
     graph
         .created_micros
         .map_or_else(|| "-".to_owned(), |created| age_text(now_micros - created))
+}
+
+/// Order a page with live lanes first and, outside `--full`, hide settled rows
+/// behind one count. `select_listing` has already ordered each group by age.
+pub(crate) fn finish_listing(mut listing: Listing, settled_count: usize, full: bool) -> Listing {
+    listing.rows.sort_by_key(|graph| {
+        !graph
+            .digests
+            .iter()
+            .any(|digest| digest.attempt_presence.as_deref() == Some("live"))
+    });
+    if !full {
+        listing.rows.retain(|graph| !graph.settled);
+        listing.omitted.clear();
+        listing.next = None;
+        if settled_count > 0 {
+            listing.omitted.insert("settled".to_owned(), settled_count);
+        }
+    }
+    listing
 }
 
 /// Read the retained graph journal without consulting live providers. A
@@ -3498,6 +3526,86 @@ mod tests {
         assert_eq!(first.rows[0].name, "s4");
         let second = select_listing(graphs, 3 * day, true, 2, first.next);
         assert_eq!(second.rows[0].name, "s2");
+    }
+
+    fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
+        super::super::graph_status::NodeDigest {
+            key: provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([7; 16]),
+                "g",
+                "n",
+                1,
+            )
+            .expect("valid work key"),
+            outcome: "running".into(),
+            cause: None,
+            branch: None,
+            pr: json!({"state":"unknown","reference":null}),
+            ci: json!({"state":"unavailable"}),
+            result_path: None,
+            provider_error: None,
+            review_verdict: None,
+            findings_count: None,
+            findings_available: None,
+            review_partial: None,
+            attempt_state: Some("running".into()),
+            attempt_presence: presence.map(str::to_owned),
+            line: "  n: running".into(),
+            state: "running".into(),
+            settled: false,
+            handoff_status: None,
+            open_asks: Vec::new(),
+            evidence_error: None,
+        }
+    }
+
+    #[test]
+    fn listing_leads_with_live_lanes_and_counts_settled_graphs() {
+        let now = 1_000_000_000;
+        let mut live = listed("live", false, now - 3);
+        live.digests.push(digest(Some("live")));
+        let idle = listed("idle", false, now - 2);
+        let settled = listed("settled", true, now - 1);
+        let mut graphs = vec![settled, idle, live];
+        graphs.reverse(); // oldest first; finish_listing owns presentation order
+        let settling = finish_listing(
+            Listing {
+                rows: graphs.clone(),
+                omitted: Default::default(),
+                next: None,
+            },
+            1,
+            false,
+        );
+        assert_eq!(
+            settling
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live", "idle"],
+            "live lanes lead and settled graphs are not listed"
+        );
+        assert_eq!(settling.omitted.get("settled"), Some(&1));
+
+        let full = finish_listing(
+            Listing {
+                rows: graphs,
+                omitted: Default::default(),
+                next: None,
+            },
+            1,
+            true,
+        );
+        assert_eq!(
+            full.rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live", "idle", "settled"],
+            "--full lists settled graphs after live lanes"
+        );
+        assert!(full.omitted.is_empty());
     }
 
     #[test]
