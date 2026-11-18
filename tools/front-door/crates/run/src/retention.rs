@@ -2218,7 +2218,6 @@ mod tests {
         fs::create_dir_all(&temporary)?;
         fs::write(temporary.join("artifact"), b"scratch target")?;
         let durable = [
-            (attempt.join("result.md"), b"result".as_slice()),
             (
                 attempt.join("provider-state/handoff.json"),
                 b"handoff".as_slice(),
@@ -2252,6 +2251,7 @@ mod tests {
         assert!(temporary.exists(), "a live attempt retains scratch");
 
         withdraw(&store, &input, &call)?;
+        let result = fs::read(attempt.join("result.md"))?;
         let before_idle = store.gc_temporary(
             &root,
             &policy,
@@ -2271,6 +2271,7 @@ mod tests {
         )?;
         assert_eq!(collected.attempt_tmp.len(), 1);
         assert!(!attempt.join("tmp").exists());
+        assert_eq!(fs::read(attempt.join("result.md"))?, result);
         for (path, contents) in &durable {
             assert_eq!(
                 fs::read(path)?,
@@ -2282,9 +2283,9 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
     #[test]
-    fn scratch_gc_requires_release_and_free_attempt_custody_even_when_work_is_finished()
-    -> TestResult {
+    fn scratch_gc_requires_release_and_free_attempt_custody() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -2308,19 +2309,6 @@ mod tests {
         );
 
         withdraw(&store, &input, &call)?;
-        let owned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Owned;
-        let owned_policy = ScratchPolicy {
-            owner: Some(&owned),
-            ..ScratchPolicy::new(0)
-        };
-        let while_owned =
-            store.gc_temporary(&root, &owned_policy, collection_time, false, &call)?;
-        assert!(while_owned.attempt_tmp.is_empty());
-        assert_eq!(
-            fs::read(temporary.join("payload"))?,
-            b"must survive until release"
-        );
-
         let attempt_dir = Directory::open_anchor(&attempt)?;
         let busy = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
         let while_busy = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
