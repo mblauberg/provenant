@@ -178,6 +178,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
     for cause in [
         crate::run::TerminalCause::Steered,
         crate::run::TerminalCause::EmptyWriterResult,
+        crate::run::TerminalCause::ProviderCaptureDefect { line: 52 },
     ] {
         full.terminal_cause = Some(cause);
         accepted(&schema, &full);
