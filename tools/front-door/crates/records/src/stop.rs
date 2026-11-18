@@ -557,6 +557,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
             T::HandoffRefused => Self::LaunchHandoffRefused,
+            T::WriterPinMismatch { .. } => Self::LaunchHandoffRefused,
             T::RetainedWriterImport => Self::RetainedWriterImport,
             T::UnsupportedPlatform => Self::UnsupportedPlatform,
             T::UnknownPacingAccount => Self::UnknownPacingAccount,

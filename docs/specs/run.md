@@ -140,6 +140,27 @@ off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 
+## Writer pin and re-pin
+
+A graph pins its source commit at submission. A retry keeps that pin and the
+predecessor's terminal head. Before any plan node spends tokens, the host
+preflights the writer worktree: a dirty tree is refused at submission, naming
+the dirty paths and the setting `lanes.writer_dirty` with the layer that set it.
+That one overridable setting chooses `refuse` (the default), `wip_commit` (a
+local WIP commit whose id is recorded in the graph events before launch), or
+`continue_in_place` (a warning that names the retained paths). Credential and
+Git-internal roots are a hard refusal under every value.
+
+On a manual retry, when the worktree head descends from the pinned commit — the
+writer's own commits are the only difference — the retry re-pins to that head
+and warns with both ids. When the head is not a descendant it refuses, naming
+the pinned commit and the current head. A pin mismatch never uses the launch
+handoff refusal text; its cause names the pin and the head and says what to do.
+- Why: a refusal the host could predict must not waste a plan node's tokens, and
+  an opaque "host configuration" cause sends the operator to the wrong place.
+- Owner: `crates/run/src/writer_dirty.rs`, `crates/run/src/writer.rs`,
+  `src/fabric/graph_execution.rs`, `src/fabric/owner.rs`.
+
 ## PR contributions JSON reference
 
 The [attribution contract](run-attribution.md) governs contribution records.

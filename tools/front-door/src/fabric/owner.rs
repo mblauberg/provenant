@@ -2660,6 +2660,7 @@ impl BoundGraphOwner<'_> {
             // even when both heads agree so preparation checks dirty remnants.
             let mut submission_prompt = node.prompt.to_owned();
             let mut writer_predecessor = None;
+            let mut repin_warning = None;
             let (mut source_head, mut successor_head) = if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && let Some(previous) = key.previous_attempt_ref.as_deref()
@@ -2729,10 +2730,49 @@ impl BoundGraphOwner<'_> {
                     .head
                     .map(|head| head.to_string())
                     .or_else(|| previous_task.head.clone());
-                (original, current)
+                // A manual retry keeps the predecessor pin. When the worktree
+                // head has advanced through the writer's own commits, adopt it
+                // and warn with both ids; any other head is a hard refusal.
+                if let Some(pinned) = current
+                    .as_deref()
+                    .and_then(|head| provenant_core::GitOid::parse(head).ok())
+                {
+                    let git = provenant_os::git::git_executable()
+                        .ok_or_else(|| FacadeError::io("git for retry re-pin"))?;
+                    let launch = provenant_run::prepare_writer_with_facts(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                        &self.repo_facts,
+                    )
+                    .map_err(run_error)?;
+                    match launch.repin_head(&git, pinned).map_err(run_error)? {
+                        provenant_run::RepinOutcome::Unchanged { .. } => (original, current),
+                        outcome @ provenant_run::RepinOutcome::Repinned { head, .. } => {
+                            repin_warning = outcome.warning();
+                            (original, Some(head.to_string()))
+                        }
+                        outcome @ provenant_run::RepinOutcome::NotDescendant { .. } => {
+                            return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
+                                reason: outcome.refusal().unwrap_or_else(|| {
+                                    "writer head does not descend from its pinned commit".into()
+                                }),
+                            });
+                        }
+                    }
+                } else {
+                    (original, current)
+                }
             } else {
                 (None, None)
             };
+            if let Some(warning) = repin_warning.take() {
+                let _ = writeln!(std::io::stderr().lock(), "{warning}");
+                submission_prompt.push_str("\n\n");
+                submission_prompt.push_str(&warning);
+            }
 
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.

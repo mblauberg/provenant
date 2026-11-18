@@ -56,6 +56,7 @@ mod cargo_seed;
 pub mod target_seed;
 pub mod target_seed_gc;
 mod writer;
+pub mod writer_dirty;
 
 pub use admission::{
     AdmissionPolicy, AdmissionTimeoutOrigin, EffectiveAdmissionTimeout, HOST_ACTIVE, HOST_QUEUED,
@@ -94,9 +95,9 @@ pub use retention::{
     payload_totals,
 };
 pub use writer::{
-    BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,
-    prepare_writer, prepare_writer_with_facts, resolve_reader_source, resolve_writer,
-    resolve_writer_proposal, trusted_lane_toolchain_diagnostic,
+    BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,
+    equivalent_writer, prepare_writer, prepare_writer_with_facts, resolve_reader_source,
+    resolve_writer, resolve_writer_proposal, trusted_lane_toolchain_diagnostic,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
