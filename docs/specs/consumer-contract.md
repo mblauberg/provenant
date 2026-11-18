@@ -167,6 +167,7 @@ locations may also differ from `HOME`.
 | `PROVENANT_BUILD_SLOT` | lane | internal | Marks a cargo process that holds a host build slot. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_BUILD_SLOT_STATE` | lane | internal | The host build-slot directory. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_BUILD_SLOTS` | lane | internal | The host build-slot count. | only for the cargo child of the lane's cargo shim |
+| `PROVENANT_BUILD_WAIT_DIR` | lane | internal | The lane scratch directory for the build-slot wait signal. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_LOCAL_CARGO` | lane | internal | The real cargo the shim runs. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_BUILD_DISK_LIMITS` | lane | internal | Encoded build disk limits. | only for the cargo child of the lane's cargo shim |
 

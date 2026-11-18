@@ -143,8 +143,8 @@ pub(crate) struct Gate<'a> {
     pub command: &'a [OsString],
 }
 
-/// Cargo subcommands that compile. Aliases and subcommands not named here run
-/// without a slot. `run` is gated because it compiles first.
+/// Known compiling subcommands, subject to disk refusal and local-Cargo advice.
+/// Every Cargo invocation takes a slot, including aliases and unlisted commands.
 const GATED: &[&str] = &[
     "build", "b", "check", "c", "clippy", "test", "t", "bench", "doc", "d", "run", "r", "rustc",
     "rustdoc", "fix", "install", "package", "publish", "nextest", "llvm-cov", "miri",
@@ -427,6 +427,7 @@ fn run_with(
     }
     let gate_this = gated(args) && !nested;
     if gate_this
+        && subcommand(args).is_some_and(|command| GATED.contains(&command))
         && matches!(&backend, provenant_config::PortBackend::Builtin)
         && let Err(message) = check_disk(&env)
     {

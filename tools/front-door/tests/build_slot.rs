@@ -483,3 +483,40 @@ fn disk_policy_applies_before_starting_a_new_build() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn disk_refusal_allows_non_build_commands() -> Result {
+    use provenant_records::diagnostic::SettingSource;
+    use provenant_records::policy::{Policy, Source, Strength};
+    let mut policy = Policy::default();
+    policy.overlay(
+        &std::collections::BTreeMap::from([(
+            provenant_config::DISK_FLOOR.to_owned(),
+            Strength::Refuse,
+        )]),
+        Source::Host,
+    );
+    let gate = provenant_config::DiskGate::new(
+        provenant_config::DiskLimits {
+            free_floor: u64::MAX,
+            free_floor_source: SettingSource::Configuration,
+            critical_free: u64::MAX,
+            critical_free_source: SettingSource::Configuration,
+        },
+        &policy,
+    );
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    for command in ["clean", "metadata", "fmt", "--version"] {
+        let mut child = rig
+            .command(1, &[command])?
+            .env("PROVENANT_BUILD_DISK_LIMITS", serde_json::to_string(&gate)?)
+            .spawn()?;
+        assert!(
+            finish(&mut child, Duration::from_secs(10))?,
+            "{command}: {}",
+            stderr_of(&mut child)?
+        );
+    }
+    Ok(())
+}
