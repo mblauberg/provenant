@@ -115,7 +115,7 @@ jobs:
           cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
   # Lint and test builds overlap; tests are built once and split into three
-  # hash partitions. `ci-status` gates on all jobs, and a
+  # slice partitions. `ci-status` gates on all jobs, and a
   # matrix job reports success only when every partition succeeds.
   rust-lint:
     name: Rust lint
@@ -446,8 +446,10 @@ jobs:
           name: linux-tests
           path: ${{ runner.temp }}
       # Extract into the original target layout for tests with compiled-in binary paths.
-      # Hash partitioning is stable per test, and each runner keeps its own
-      # serial-process group, so the serial worktree suites split across the partitions.
+      # Slice partitioning deals tests round-robin, which balances test time
+      # better than hashing (hash shards took 410/663/868 test-s on main), and each
+      # runner keeps its own serial-process group, so the serial worktree suites
+      # split across the partitions.
       - name: Run workspace tests
         working-directory: tools/front-door
         env:
@@ -468,9 +470,9 @@ jobs:
             fi
           fi
           if [ -n "$filter" ]; then
-            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition hash:${{ matrix.partition }}/3 -E "$filter"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition slice:${{ matrix.partition }}/3 -E "$filter"
           else
-            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition hash:${{ matrix.partition }}/3
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition slice:${{ matrix.partition }}/3
           fi
       - name: Report slowest tests
         if: always()
@@ -781,8 +783,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # Pull requests report quarantined tests from Linux only; macOS runners are
+      # the scarce pool, so main runs the native advisory pass.
       - name: Run quarantined macOS tests (advisory)
-        if: ${{ !cancelled() && matrix.group == 'custody' }}
+        if: ${{ !cancelled() && matrix.group == 'custody' && github.event_name != 'pull_request' }}
         continue-on-error: true
         working-directory: tools/front-door
         run: |
