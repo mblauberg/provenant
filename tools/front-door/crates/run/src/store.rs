@@ -2028,8 +2028,16 @@ impl RunStore {
         });
         let identity_conflict =
             live_conflict || identity_evidence.is_some_and(ProviderIdentityEvidence::has_conflict);
+        let strict_identity = self
+            .resume_policy(child.attempt_id, call)?
+            .rule("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE")
+            .rule
+            .strength
+            == provenant_records::policy::Strength::Refuse;
         let evidence_incomplete = terminal_unsettled
-            || identity_evidence.is_none_or(ProviderIdentityEvidence::is_incomplete);
+            || identity_evidence.is_none()
+            || (strict_identity
+                && identity_evidence.is_some_and(ProviderIdentityEvidence::is_incomplete));
         let disposition = self.steer_successor_disposition(
             child.attempt_id,
             child,
