@@ -106,7 +106,7 @@ fn read_failure_reason(error: &FacadeError) -> String {
     ))
 }
 
-/// Page through the same verified raw peer output authorised for graph execution.
+/// Page through the same verified projected peer output authorised for graph execution.
 fn read_remote(
     owner: &mut BinaryRunOwner<'_>,
     target: AttemptTarget,

@@ -147,7 +147,7 @@ pub(super) fn validate_identities(
     value: &serde_json::Value,
     context: Context,
 ) -> Result<(), &'static str> {
-    let scan = |text: &str| {
+    let scan = |text: &str| -> Result<(), &'static str> {
         super::patch::warn_for_secrets("graph.identity_or_key", text);
         Ok(())
     };

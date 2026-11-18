@@ -384,8 +384,14 @@ impl Projector {
         destination: Destination,
     ) -> Result<(Vec<OsString>, Option<Vec<u8>>), ProjectionError> {
         let mut args = Vec::new();
+        let mut in_value = false;
         for arg in arguments {
             let arg = arg.into_string().map_err(|_| ProjectionError::Encoding)?;
+            if in_value {
+                args.push(arg);
+                in_value = false;
+                continue;
+            }
             if [
                 "--editor",
                 "--web",
@@ -410,6 +416,13 @@ impl Projector {
                 args.push(arg[..2].to_owned());
                 args.push(arg[2..].to_owned());
             } else {
+                let (flag, inline) = arg
+                    .split_once('=')
+                    .map_or((arg.as_str(), None), |(flag, value)| (flag, Some(value)));
+                if inline.is_none() && (Self::header_flag(flag) || Self::argument_takes_value(flag))
+                {
+                    in_value = true;
+                }
                 args.push(arg);
             }
         }
@@ -427,12 +440,11 @@ impl Projector {
                     (flag, Some(value))
                 });
             let value = inline.or_else(|| args.get(index + 1).map(String::as_str));
-            if Self::field_flag(flag) {
-                if let Some((key, value)) = value.and_then(|value| value.split_once('=')) {
-                    if secret_field(key) {
-                        secrets.push(value.as_bytes().to_vec());
-                    }
-                }
+            if Self::field_flag(flag)
+                && let Some((key, value)) = value.and_then(|value| value.split_once('='))
+                && secret_field(key)
+            {
+                secrets.push(value.as_bytes().to_vec());
             }
             // A value that happens to spell a flag is still content, not a declaration.
             index += if Self::header_flag(flag)
@@ -717,9 +729,11 @@ fn word(c: char) -> bool {
     }
     // Unicode word continuations include marks, connectors and join controls.
     // https://docs.rs/regex/latest/regex/#perl-character-classes-unicode-friendly
-    static WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let regex = WORD.get_or_init(|| regex::Regex::new(r"^\w$").expect("static word class"));
-    regex.is_match(c.encode_utf8(&mut [0; 4]))
+    static WORD: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    let regex = WORD.get_or_init(|| regex::Regex::new(r"^\w$").ok());
+    regex
+        .as_ref()
+        .is_some_and(|re| re.is_match(c.encode_utf8(&mut [0; 4])))
 }
 
 fn quoted_end(text: &str, start: usize) -> Option<usize> {
@@ -775,14 +789,15 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
             continue;
         }
         let limit = quotes.last().copied().unwrap_or(bytes.len());
-        let c = text[i..].chars().next().expect("in bounds");
+        let Some(c) = text[i..].chars().next() else {
+            break;
+        };
         if c.is_whitespace() || b",;{}[]()=:".contains(&bytes[i]) {
             i += c.len_utf8();
             continue;
         }
         let start = i;
-        let key: std::borrow::Cow<'_, str>;
-        if quote(bytes[i]) {
+        let key = if quote(bytes[i]) {
             let end = quoted_end(&text[..limit], i);
             let mut after = end.unwrap_or(limit);
             while after < limit && matches!(bytes[after], b' ' | b'\t') {
@@ -797,24 +812,30 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
                 i += 1;
                 continue;
             }
-            i = end.expect("quoted key ended");
+            let Some(end_idx) = end else {
+                i += 1;
+                continue;
+            };
+            i = end_idx;
             let raw = &text[start..i];
-            key = std::borrow::Cow::Owned(
+            std::borrow::Cow::Owned(
                 serde_json::from_str::<String>(raw)
                     .unwrap_or_else(|_| raw[1..raw.len() - 1].to_owned()),
-            );
+            )
         } else {
             // Canonicalise the whole bare name; punctuation must not expose
             // a credential-looking suffix. Delimiters require a quoted key.
             while i < limit {
-                let c = text[i..].chars().next().expect("in bounds");
+                let Some(c) = text[i..].chars().next() else {
+                    break;
+                };
                 if c.is_whitespace() || b",;{}[]()=:".contains(&bytes[i]) {
                     break;
                 }
                 i += c.len_utf8();
             }
-            key = std::borrow::Cow::Borrowed(&text[start..i]);
-        }
+            std::borrow::Cow::Borrowed(&text[start..i])
+        };
         if !secret_field(&key) {
             continue;
         }
@@ -833,6 +854,10 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
             i = docs[doc].1;
         } else if i < limit && quote(bytes[i]) {
             i = quoted_end(&text[..limit], i).unwrap_or(limit);
+        } else if crate::redact::is_line_assignment(&key) {
+            while i < limit && !matches!(bytes[i], b'\n' | b'\r') {
+                i += 1;
+            }
         } else {
             while i < limit && !bytes[i].is_ascii_whitespace() && !b",;}".contains(&bytes[i]) {
                 i += 1;
@@ -1126,5 +1151,60 @@ mod tests {
             projector.forge(operation, Path::new(".")),
             Err(ProjectionError::Encoding)
         ));
+    }
+
+    #[test]
+    fn unquoted_authorization_header_value_masks_scheme_and_token() {
+        let projector = Projector::new([]).unwrap();
+        let cases = [
+            (
+                "Authorization: Bearer secret-token\nother: safe\n",
+                "Authorization: [REDACTED]\nother: safe\n",
+            ),
+            (
+                "authorization: Basic dXNlcjpwYXNz\nnext: value\n",
+                "authorization: [REDACTED]\nnext: value\n",
+            ),
+            (
+                "Authorization: Token secret-token",
+                "Authorization: [REDACTED]",
+            ),
+            (
+                "Proxy-Authorization: Negotiate kerberos-token\n",
+                "Proxy-Authorization: [REDACTED]\n",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let projected = projector
+                .project(Destination::GraphPublication, raw.as_bytes())
+                .unwrap();
+            assert_eq!(std::str::from_utf8(projected.bytes()).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn joined_flags_only_split_in_flag_position() {
+        let projector = Projector::new([]).unwrap();
+        let arguments = ["pr", "create", "--body", "-fix typo", "-tMy Title"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let operation = projector
+            .forge(
+                ForgeOperation::Cli {
+                    arguments,
+                    input: None,
+                },
+                Path::new("."),
+            )
+            .unwrap();
+        let ForgeOperation::Cli { arguments, .. } = operation else {
+            panic!("expected CLI operation");
+        };
+        let arguments: Vec<_> = arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(
+            arguments,
+            vec!["pr", "create", "--body", "-fix typo", "-t", "My Title"]
+        );
     }
 }

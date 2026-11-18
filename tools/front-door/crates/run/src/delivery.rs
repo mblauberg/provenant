@@ -1926,15 +1926,17 @@ impl HostDeliveryContext {
             )));
         }
         if commit_log && output.stdout.truncated {
-            // Never publish a capture cut through an exact credential. A
-            // bounded local capture can still be retained privately; this
-            // outgoing summary is unavailable until a complete one is read.
-            return Err(RunError::DeliveryLimit {
-                stage,
-                tool: "git",
-                command: git_subcommand(args),
-                limit,
-            });
+            let valid = match std::str::from_utf8(&output.stdout.bytes) {
+                Ok(s) => s,
+                Err(error) => {
+                    std::str::from_utf8(&output.stdout.bytes[..error.valid_up_to()]).unwrap_or("")
+                }
+            };
+            let truncated = match valid.rfind('\n') {
+                Some(pos) if !valid[..pos].trim().is_empty() => valid[..pos].trim_end(),
+                _ => valid.trim_end(),
+            };
+            return Ok(format!("{truncated}{}", PR_BODY_TRUNCATION_NOTE.trim_end()));
         }
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())

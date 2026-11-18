@@ -518,6 +518,20 @@ const ASSIGNMENT_KEYS: &[(&[u8], bool)] = &[
     (b"auth", false),
     (b"authorization", true),
 ];
+
+/// Whether this credential key takes a line-delimited assignment value rather
+/// than one ending at the first whitespace delimiter (e.g. an Authorization
+/// header whose value includes a scheme word followed by spaces and a token).
+pub(crate) fn is_line_assignment(key: &str) -> bool {
+    let canonical: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect();
+    ASSIGNMENT_KEYS
+        .iter()
+        .any(|(k, line)| *line && canonical.ends_with(std::str::from_utf8(k).unwrap_or("")))
+}
 /// The longest key is 13 bytes; the run keeps enough bytes before it to judge
 /// the separator that precedes it.
 const ASSIGNMENT_RUN: usize = 32;

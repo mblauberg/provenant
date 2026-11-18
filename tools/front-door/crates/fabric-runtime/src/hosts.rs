@@ -1061,12 +1061,11 @@ fn attempt_texts<'a, 's: 'a>(
     {
         route_texts(route, texts);
     }
-    if let Some(delivery) = &mut attempt.delivery {
-        if let provenant_records::run::WriterDeliveryState::Failed { reason, .. } =
+    if let Some(delivery) = &mut attempt.delivery
+        && let provenant_records::run::WriterDeliveryState::Failed { reason, .. } =
             &mut delivery.state
-        {
-            texts.extend(reason.iter_mut());
-        }
+    {
+        texts.extend(reason.iter_mut());
     }
     for skipped in &mut attempt.skipped_routes {
         texts.push(&mut skipped.detail);
@@ -1205,12 +1204,11 @@ pub fn encode_peer_response(
                 for event in &mut page.items {
                     texts.push(&mut event.record.detail);
                 }
-                if let Some(observation) = observation {
-                    if let crate::coordination::EventObservation::PacedReread { reason, .. } =
+                if let Some(observation) = observation
+                    && let crate::coordination::EventObservation::PacedReread { reason, .. } =
                         observation.as_mut()
-                    {
-                        texts.push(reason);
-                    }
+                {
+                    texts.push(reason);
                 }
             }
             _ => {}
