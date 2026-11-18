@@ -169,6 +169,8 @@ eligibility; local logins roll remembered cycles forward or estimate UTC months,
 exposing the source without granting readiness.
 
 `AllowanceLedger` retains booked costs across policy and cycle-estimate changes.
+When a quota tick removes an account absent from provider discovery, it clears
+provider observations but retains any non-empty allowance ledger in the record.
 First samples baseline debt; later deltas confirm only covered, pre-observation
 reservations. Flat/decreasing reports and incomplete journal coverage retain
 debt. Rollover preserves learned cost.

@@ -52,6 +52,8 @@ launch before returning its specification, under the quota publication lock.
 The most recent 4096 attempt IDs deduplicate replayed preparation. A busy cache
 retries briefly, then admits with a warning and a separate reservation receipt.
 Cache reads include that receipt; the next account publication absorbs it.
+When quota ticks remove accounts absent from provider discovery, they retain
+any non-empty ledger while clearing the accounts' provider observations.
 Bypassed accounts avoid the lock and do not book monthly debt. Failed launches
 retain their reservation conservatively.
 

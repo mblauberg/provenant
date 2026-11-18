@@ -403,10 +403,27 @@ pub fn plan_tick_with_settings(
                     })
         });
         if selected(&record.account.adapter) && !retaining && absent_from_detection {
+            // Provider discovery owns observations, not independently booked allowance debt.
+            let replacement = if record.allowance != crate::AllowanceLedger::default() {
+                let mut ledger_only = AccountRecord::empty(record.account.clone());
+                ledger_only.extra = record.extra.clone();
+                ledger_only.allowance = record.allowance.clone();
+                ledger_only.revision = record.revision;
+                if &ledger_only == record {
+                    continue;
+                }
+                ledger_only.revision = record
+                    .revision
+                    .checked_add(1)
+                    .ok_or(QuotaError::NumberOutOfRange)?;
+                Some(ledger_only)
+            } else {
+                None
+            };
             drops.push(UpdateIntent {
                 account: record.account.clone(),
                 expected: Some(record.clone()),
-                replacement: None,
+                replacement,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             });

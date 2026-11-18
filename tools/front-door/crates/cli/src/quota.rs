@@ -2688,6 +2688,98 @@ mod tests {
 
     // Spec: docs/specs/routing.md#monthly-allowance-ledger
     #[test]
+    fn local_login_booking_survives_ordinary_quota_tick() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_records::{
+            ResolvedRoute, RouteAlternatives, RouteConfidentiality, RouteEligibility,
+            RouteReadiness,
+        };
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let catalogue = provenant_routing::Catalogue::bundled()?;
+        let config: provenant_routing::RoutingConfig = serde_json::from_value(serde_json::json!({
+            "pacing":{"accounts":{"cursor/local":{"monthly":{"initial_launch_cost_basis_points":600}}}}
+        }))?;
+        let settings = Settings::default();
+        let policies =
+            provenant_providers::scheduling_policies(&settings, provenant_providers::REGISTRY);
+        let now = provenant_core::WallTime::from_unix_seconds(100)?;
+        let route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            model: "composer-2.5".into(),
+            effort: None,
+            catalogue_revision: catalogue.revision().to_owned(),
+            account_key: Some("local".into()),
+            host: "fixture".into(),
+            alternatives: RouteAlternatives::default(),
+            exclusions: vec![],
+            eligibility: RouteEligibility::Eligible,
+            readiness: RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_warning: None,
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 200,
+            },
+            confidentiality: RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        };
+        let reserve =
+            |id| reserve_allowance_launch(&roots, &route, id, &config, &catalogue, &policies, now);
+        reserve("first")?;
+        let effects = provenant_providers::quota_live::LiveQuota::new(
+            &roots,
+            &temp.path().join("home"),
+            &provenant_providers::accounts::Settings::default(),
+        )?;
+        let tick = Quota::Tick {
+            adapter: Filter { adapter: None },
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        execute(&tick, &roots, provenant_providers::REGISTRY, &effects)?;
+        assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
+        let root = private(roots.state.as_path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        let mut records = read_records(&directory)?;
+        let previous = records[0].clone();
+        let mut observed = previous.clone();
+        observed.revision += 1;
+        observed.last_error = Some(ProbeFailure::Auth);
+        write_intent(
+            &directory,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: observed.account.clone(),
+                expected: Some(previous),
+                replacement: Some(observed),
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut records,
+        )?;
+        execute(&tick, &roots, provenant_providers::REGISTRY, &effects)?;
+        let records = read_cache(&roots)?;
+        assert_eq!(records[0].allowance.launches, 1);
+        assert_eq!(records[0].last_error, None);
+        assert!(
+            reserve("second").is_err(),
+            "the first booking consumes the cycle budget"
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
     fn monthly_launch_reservation_persists_and_rechecks_shared_account_spend()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_records::{
