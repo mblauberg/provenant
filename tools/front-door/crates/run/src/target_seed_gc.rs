@@ -444,7 +444,7 @@ fn clean_candidate(
                 complete: true,
                 bytes: 0,
                 detail: None,
-            })
+            });
         }
         Err(error) => return Err(error.into()),
     };
@@ -472,7 +472,7 @@ fn clean_candidate(
     }
     if dry_run {
         let directory = Directory::open_anchor(path)?;
-        let mut keep_going = || control.should_continue();
+        let keep_going = || control.should_continue();
         let measured = provenant_confinement::cache::measure_tree_with_progress(
             &directory,
             path,
@@ -510,7 +510,7 @@ fn measure_generations(
         };
         if let Some((directory, _)) = generation(generations, &id) {
             let path = generations_path.join(&id);
-            let mut keep_going = || control.should_continue();
+            let keep_going = || control.should_continue();
             match provenant_confinement::cache::measure_tree_with_progress(
                 &directory,
                 &path,
@@ -560,7 +560,7 @@ fn measure_generations(
             continue;
         };
         let path = generations_path.join(&name);
-        let mut keep_going = || control.should_continue();
+        let keep_going = || control.should_continue();
         match provenant_confinement::cache::measure_tree_with_progress(
             &directory,
             &path,
@@ -652,7 +652,7 @@ fn evict_generations(
                 cursor.best = None;
                 continue;
             };
-            let mut keep_going = || control.should_continue();
+            let keep_going = || control.should_continue();
             match provenant_confinement::cache::measure_tree_with_progress(
                 &directory,
                 &path,
@@ -1033,8 +1033,8 @@ mod tests {
     #[test]
     fn budget_stop_resumes_generation_inventory_and_eviction() {
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
         let state = tempfile::tempdir().unwrap();
         let old = generation(state.path(), "001", 3);
