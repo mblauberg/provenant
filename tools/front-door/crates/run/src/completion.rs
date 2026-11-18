@@ -293,7 +293,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// that compile share the host's build cap, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: compiling `cargo` commands share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: compiling `cargo` commands and test runs share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
 
 /// Host build cap stated in the preamble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,7 +302,7 @@ pub struct BuildCap {
     pub source: &'static str,
 }
 
-/// Optional preamble overrides. Default keeps the historical verification paragraph.
+/// Optional preamble overrides. Default uses the targeted verification paragraph.
 #[derive(Clone, Debug, Default)]
 pub struct PreambleExtras {
     pub verification: Option<crate::VerificationResolution>,
@@ -312,7 +312,7 @@ pub struct PreambleExtras {
 fn slot_guidance(cap: Option<BuildCap>) -> String {
     match cap {
         Some(cap) => format!(
-            "Build slots: compiling `cargo` commands share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
+            "Build slots: compiling `cargo` commands and test runs share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
             cap.slots, cap.source
         ),
         None => BUILD_SLOT_GUIDANCE.to_string(),

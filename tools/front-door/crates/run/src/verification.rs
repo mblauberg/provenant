@@ -1,7 +1,5 @@
 //! Local verification a writer is told to run (`lanes.verification`).
-//! Advisory: the preamble states it. The default `check` wording is the
-//! historical paragraph, with no source, so an unset launch stays byte-identical
-//! on that paragraph. A brief line overrides the knob.
+//! Advisory: the preamble names its source. A brief line overrides the knob.
 use provenant_records::{LimitSource, run::HarnessProfile};
 
 /// The registry knob.
@@ -9,12 +7,12 @@ pub const KNOB: &str = "lanes.verification";
 
 /// The default verification paragraph. A launch that does not override it
 /// includes this text unchanged.
-pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints; the CI scope line below says what CI, if any, you wait for. Check your change as cheaply as this host allows: a `cargo check` of the package you changed, or its touched tests when the build is already warm; otherwise leave it to CI. Report what you ran and what you left to CI.\n";
+pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints. When a shared warm CARGO_TARGET_DIR is available, run `cargo check`, clippy on touched crates and the tests that cover your change; otherwise do not build cold: leave it to CI and say so. Report what you ran (source: default; lanes.verification).\n";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VerificationScope {
-    #[default]
     Check,
+    #[default]
     Targeted,
     Full,
 }
@@ -84,7 +82,7 @@ impl VerificationResolution {
             },
             (None, None) => Self {
                 scope: ResolvedVerification {
-                    value: VerificationScope::Check,
+                    value: VerificationScope::Targeted,
                     source: "default",
                 },
                 conflict: None,
@@ -92,21 +90,21 @@ impl VerificationResolution {
         }
     }
 
-    /// The verification paragraph. Default `check` is [`CHECK_PARAGRAPH`].
+    /// The verification paragraph. Default `targeted` is [`CHECK_PARAGRAPH`].
     pub fn paragraph(&self) -> String {
         let scope = &self.scope;
-        if scope.value == VerificationScope::Check && scope.source == "default" {
+        if scope.value == VerificationScope::Targeted && scope.source == "default" {
             return CHECK_PARAGRAPH.to_string();
         }
         let body = match scope.value {
             VerificationScope::Check => {
-                "Verification: run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push. Do not run test suites, clippy or nextest locally."
+                "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run cargo check on the touched crates, then commit and push."
             }
             VerificationScope::Targeted => {
-                "Verification: run the tests that cover the code you changed, then commit and push. Do not run the full local suite unless this scope says so."
+                "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run cargo check, clippy on touched crates and targeted tests for changed code, then commit and push. Leave the whole workspace suite to CI."
             }
             VerificationScope::Full => {
-                "Verification: run the local checks the repository documents for this change, including its tests, then commit and push."
+                "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run the local checks the repository documents for this change, including its tests; leave the whole workspace suite to CI, then commit and push."
             }
         };
         format!("{body} (source: {}; {KNOB}).\n", scope.source)
@@ -156,15 +154,15 @@ mod tests {
         assert!(cause.contains("the brief declares targeted"), "{cause}");
         let text = resolved.paragraph();
         assert!(text.contains("source: brief"));
-        assert!(text.contains("tests that cover"));
+        assert!(text.contains("targeted tests"));
         assert!(!text.contains("at most one cheap compile check"));
     }
 
     #[test]
-    fn the_default_paragraph_is_the_historical_wording() {
+    fn the_default_paragraph_names_its_source() {
         let resolved = VerificationResolution::resolve(&HarnessProfile::default(), "implement it");
         assert_eq!(resolved.paragraph(), CHECK_PARAGRAPH);
-        assert!(!resolved.paragraph().contains("source:"));
+        assert!(resolved.paragraph().contains("source: default"));
     }
 
     #[test]
