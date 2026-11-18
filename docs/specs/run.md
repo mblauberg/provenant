@@ -226,4 +226,4 @@ pauses for the chair. A `blocked` stop always goes to the chair.
 | `unsettled` | `chair` | no | 0 |
 | `quarantined` | `chair` | no | 0 |
 | `steered` | `chair` | yes | 0 |
-| `unclassified` | `new_route` | no | 0 |
+| `unclassified` | `new_route` | no | 1 |

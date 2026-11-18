@@ -348,6 +348,37 @@ fn every_cause_takes_its_default_its_override_and_the_chair_without_custody() {
 }
 
 #[test]
+fn unclassified_retries_once_before_advancing_to_a_new_route() {
+    let rule = StopCause::Unclassified.rule();
+    assert_eq!(rule.retries, 1);
+    assert_eq!(rule.default, NextStep::NewRoute);
+
+    let fresh = NextStep::SameRoute {
+        continuation: Continuation::Fresh,
+    };
+    assert_eq!(
+        StopCause::Unclassified.next_step(
+            &OnStop::default(),
+            StopFacts {
+                retries: 0,
+                custody_released: true,
+            },
+        ),
+        fresh
+    );
+    assert_eq!(
+        StopCause::Unclassified.next_step(
+            &OnStop::default(),
+            StopFacts {
+                retries: 1,
+                custody_released: true,
+            },
+        ),
+        NextStep::NewRoute
+    );
+}
+
+#[test]
 fn on_stop_reads_a_step_object_or_its_name() {
     let on_stop: OnStop = serde_json::from_value(json!({
         "usage_limited": "chair",
