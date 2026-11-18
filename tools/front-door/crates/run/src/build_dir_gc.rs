@@ -251,6 +251,7 @@ struct MeasureBudget {
 }
 
 impl MeasureBudget {
+    #[allow(clippy::disallowed_methods)] // This is the real-time preview ceiling.
     fn new(preview: bool) -> Self {
         Self {
             preview,
@@ -317,6 +318,7 @@ pub fn target_protection_for_launch(
 /// Snapshot every registered Git project's writer slots and process occupancy.
 /// The caller's stop signal and a fixed wall-clock ceiling bound discovery;
 /// incomplete evidence protects all cache targets.
+#[allow(clippy::disallowed_methods)] // The fixed elapsed custody scan ceiling is real-time.
 pub fn target_protection_for_launch_while(
     roots: &provenant_core::Roots,
     current_worktree: Option<&Path>,
@@ -909,10 +911,12 @@ pub fn collect_with_progress(
             survey.free = free().unwrap_or(survey.free);
             let mut current_protection = protection.clone();
             current_protection.merge(&refresh_protection());
-            let mut aggregate = Report::default();
-            aggregate.budget_bytes = budget.bytes;
-            aggregate.budget_setting = budget.setting.clone();
-            aggregate.budget_source = budget.source.as_str().to_owned();
+            let mut aggregate = Report {
+                budget_bytes: budget.bytes,
+                budget_setting: budget.setting.clone(),
+                budget_source: budget.source.as_str().to_owned(),
+                ..Report::default()
+            };
             if protection.unobserved || current_protection.unobserved {
                 aggregate.warnings.push(
                     "live Cargo target custody was not fully observed; preserving cache targets"
@@ -1210,7 +1214,6 @@ fn prune_survey_snapshots(
     should_stop: &mut dyn FnMut() -> bool,
     report: &mut Report,
 ) {
-    let mut scanned = 0;
     let entries = match directory.entries() {
         Ok(entries) => entries,
         Err(error) => {
@@ -1220,14 +1223,13 @@ fn prune_survey_snapshots(
             return;
         }
     };
-    for entry in entries {
+    for (scanned, entry) in entries.enumerate() {
         if should_stop() || scanned >= MAX_SNAPSHOT_FILES_PER_SWEEP {
             report
                 .warnings
                 .push("GC survey sidecar cleanup deferred to the next sweep".into());
             break;
         }
-        scanned += 1;
         let name = match entry {
             Ok(name) => name,
             Err(error) => {
@@ -1865,7 +1867,10 @@ fn measure_resumable(
         let mut entries = directory.directory().entries().map_err(io::Error::other)?;
         entries.seek(frame_offset).map_err(io::Error::other)?;
         let Some(name) = entries.next() else {
-            let completed = progress.stack.pop().expect("current frame");
+            let completed = progress
+                .stack
+                .pop()
+                .ok_or_else(|| io::Error::other("missing current measure frame"))?;
             if let Some(parent) = progress.stack.last_mut() {
                 parent.bytes = parent.bytes.saturating_add(completed.bytes);
                 parent.newest = parent.newest.max(completed.newest);
@@ -1916,11 +1921,15 @@ fn encode_component(component: &OsStr) -> String {
 
 fn decode_component(encoded: &str) -> io::Result<OsString> {
     use std::os::unix::ffi::OsStringExt;
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err(io::Error::other("invalid survey path component"));
     }
-    let mut bytes = Vec::with_capacity(encoded.len() / 2);
-    for pair in encoded.as_bytes().chunks_exact(2) {
+    let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(io::Error::other("invalid survey path component"));
+    }
+    let mut bytes = Vec::with_capacity(pairs.len());
+    for pair in pairs {
         let text = std::str::from_utf8(pair).map_err(io::Error::other)?;
         bytes.push(u8::from_str_radix(text, 16).map_err(io::Error::other)?);
     }
@@ -2942,13 +2951,16 @@ mod tests {
 
         let fixture = Fixture::new();
         let temp = tempfile::tempdir()?;
-        let root = temp.path();
-        let project = root.join("project");
-        let home = root.join("home");
-        let state_path = root.join("state");
-        fs::create_dir(&project)?;
-        fs::create_dir(&home)?;
-        fs::create_dir(&state_path)?;
+        let root = fs::canonicalize(temp.path())?;
+        let project_input = root.join("project");
+        let home_input = root.join("home");
+        let state_input = root.join("state");
+        fs::create_dir(&project_input)?;
+        fs::create_dir(&home_input)?;
+        fs::create_dir(&state_input)?;
+        let project = fs::canonicalize(project_input)?;
+        let home = fs::canonicalize(home_input)?;
+        let state_path = fs::canonicalize(state_input)?;
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
         let git = provenant_os::git::git_executable().ok_or("git executable unavailable")?;
         let run_git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
@@ -2971,7 +2983,7 @@ mod tests {
         run_git(&["config", "user.name", "fixture"])?;
         run_git(&["config", "user.email", "fixture@example.invalid"])?;
         run_git(&["commit", "--allow-empty", "-qm", "initial"])?;
-        let common_dir = project.join(".git");
+        let common_dir = fs::canonicalize(project.join(".git"))?;
         let mut root_inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
         root_inputs.state_dir = Some(state_path.clone());
         let roots = root_inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -2984,13 +2996,24 @@ mod tests {
             )?,
         )?;
 
+        let linked_path = root.join("writer-worktree");
+        run_git(&[
+            "worktree",
+            "add",
+            "-b",
+            "lane",
+            linked_path.to_str().ok_or("linked worktree path")?,
+            "main",
+        ])?;
+        let linked_path = fs::canonicalize(linked_path)?;
+
         let runtime =
             provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
         let utility_budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = runtime.open_repo(&executor, &project, utility_budget, &cancel)?;
-        let worktree = provenant_confinement::verify_worktree(&repo, &project)?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &linked_path)?;
         let inventory = provenant_confinement::worktrees::RepoFacts::default().writer_inventory(
             &repo,
             &executor,
@@ -3007,8 +3030,8 @@ mod tests {
         let (slot, _) = provenant_confinement::worktrees::writer_custody(
             &project_state,
             &worktree,
-            &project,
-            &provenant_confinement::repo::GitRefName::branch("main")?,
+            &linked_path,
+            &provenant_confinement::repo::GitRefName::branch("lane")?,
             base,
             || Ok(inventory.clone()),
         )?;
