@@ -769,6 +769,14 @@ pub(super) fn credential_roots(
             )
         };
         let kind = kind(spec.name, &path);
+        if spec.credential_profile_sibling {
+            roots.add(
+                path.with_extension("json"),
+                CredentialScope::Exact,
+                format!("{source} credential file"),
+                CredentialKind::Store,
+            );
+        }
         roots.add(path, CredentialScope::Subtree, source, kind);
     }
     let host_roots = registry

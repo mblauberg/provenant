@@ -206,6 +206,16 @@ Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
 
+Skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
+resolved link target. The selected skills directory may sit beneath an enclosing
+provider store; that permits ordinary skills only within the selected source.
+Every independently declared nested store and exact endpoint remains excluded,
+including declarations for unselected accounts and their resolved aliases.
+Directories containing declared endpoints may supply ordinary siblings, but
+neither the endpoints nor links to them may enter staged setup bytes. Selecting
+a declared store itself does not exempt it. Provider-declared sibling profile
+files retain exact scope for registered and default account directories.
+
 A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
 their source and proceed. A verified linked worktree is admitted at its real
@@ -225,7 +235,7 @@ project port table from the verified primary checkout in Git's worktree
 inventory; the common Git directory's parent does not establish that owner.
 - Why: one broad grant silently voids the boundary.
 - Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
-  `crates/cli/src/run/provider/confinement.rs`
+  `crates/cli/src/run/provider/confinement.rs`, `crates/providers/src/skill_stage.rs`
 
 ### Shared Git metadata is read-only
 

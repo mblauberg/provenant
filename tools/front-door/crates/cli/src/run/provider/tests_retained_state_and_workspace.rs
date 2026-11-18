@@ -732,6 +732,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
 #[test]
 fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -740,11 +741,17 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
     let home = root.join("home");
     std::fs::create_dir(&home)?;
     std::fs::create_dir(home.join(".agy-unselected"))?;
+    let skills = home.join(".gemini/skills");
+    let nested_account = skills.join("unselected-account");
+    std::fs::create_dir_all(&nested_account)?;
+    let registered_alias = root.join("registered-alias");
+    std::os::unix::fs::symlink(&nested_account, &registered_alias)?;
     let settings: provenant_providers::accounts::Settings = serde_json::from_value(
         serde_json::json!({
             "entries": {
                 "unselected": {"adapter":"codex", "label":"unselected", "key":"unselected", "directory":root.join("registered"), "directories":[root.join("other-registration")]},
-                "claude": {"adapter":"claude", "label":"claude", "key":"claude", "directory":root.join("claude"), "directories":[root.join("other-claude")]}
+                "claude": {"adapter":"claude", "label":"claude", "key":"claude", "directory":root.join("claude"), "directories":[root.join("other-claude")]},
+                "nested": {"adapter":"claude", "label":"nested", "key":"nested", "directory":nested_account, "directories":[registered_alias]}
             }
         }),
     )?;
@@ -767,7 +774,11 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
             kind: provenant_core::CredentialKind::Store,
         },
     ];
-    host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
+    host.default_account_directories = [
+        ("codex".into(), root.join("default-codex")),
+        ("claude".into(), skills.join("default-claude")),
+    ]
+    .into();
     host.provider_path_environment = [(
         "XDG_DATA_HOME".into(),
         root.join("relocated-xdg").into_os_string(),
@@ -781,6 +792,31 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         ..Default::default()
     };
     let inventory = credential_roots(&registry, &home, &settings)?;
+    assert!(
+        inventory
+            .skill_entry_refusal(&skills.join("SKILL.md"), &skills)
+            .is_none()
+    );
+    for path in [
+        registered_alias.join("auth"),
+        nested_account.join("auth"),
+        skills.join("unselected-account.json"),
+        skills.join("default-claude.json"),
+    ] {
+        assert!(
+            inventory.skill_entry_refusal(&path, &skills).is_some(),
+            "unselected credential admitted: {}",
+            path.display()
+        );
+    }
+    for path in [
+        skills.join("unselected-account.json"),
+        skills.join("default-claude.json"),
+    ] {
+        assert!(inventory.entries().iter().any(
+            |entry| entry.path == path && entry.scope == provenant_core::CredentialScope::Exact
+        ));
+    }
     assert!(inventory.entries().iter().any(|entry| {
         entry.path == root.join("agent/socket")
             && entry.scope == provenant_core::CredentialScope::Exact

@@ -451,6 +451,27 @@ impl CredentialRoots {
         &self.entries
     }
 
+    /// Skill snapshots may read ordinary entries beneath an enclosing provider
+    /// store, but never an independently declared endpoint or nested store.
+    /// Check entries individually, so a directory containing a secret can still
+    /// supply its ordinary siblings. Resolved link targets use the same rule.
+    pub fn skill_entry_refusal(&self, path: &Path, source: &Path) -> Option<&CredentialRoot> {
+        self.entries.iter().find(|root| {
+            if root.scope == CredentialScope::Subtree
+                && source != root.path
+                && source.starts_with(&root.path)
+                && path.starts_with(source)
+            {
+                return false;
+            }
+            if root.kind == CredentialKind::CodexHome && codex_standalone_path(path, &root.path) {
+                return false;
+            }
+            root.path == path
+                || (root.scope == CredentialScope::Subtree && path.starts_with(&root.path))
+        })
+    }
+
     /// Any overlap with a declared store is refused, including a grant which
     /// encloses that store. Exact entries protect the file and its enclosing
     /// grants; subtree entries also protect descendants.
@@ -825,6 +846,43 @@ mod tests {
             Err(RootError::Resolution { .. })
         ));
         Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn skill_admission_exempts_only_strict_enclosing_stores() {
+        use CredentialKind::Store;
+        use CredentialScope::{Exact, Subtree};
+        let source = Path::new("/fixture/provider/skills");
+        let mut roots = CredentialRoots::default();
+        roots.add("/fixture/provider", Subtree, "provider store", Store);
+        roots.add(source.join("nested"), Subtree, "account store", Store);
+        roots.add(source.join("ordinary/profile"), Exact, "profile", Store);
+        for (path, refused) in [
+            (source.to_owned(), false),
+            (source.join("SKILL.md"), false),
+            (source.join("ordinary"), false),
+            (source.join("ordinary/SKILL.md"), false),
+            (source.join("ordinary/profile"), true),
+            (source.join("ordinary/profile-other"), false),
+            (source.join("nested"), true),
+            (source.join("nested/auth"), true),
+            (PathBuf::from("/fixture/provider/auth"), true),
+        ] {
+            assert_eq!(
+                roots.skill_entry_refusal(&path, source).is_some(),
+                refused,
+                "{}",
+                path.display()
+            );
+        }
+        roots.add(source, Subtree, "selected source is itself a store", Store);
+        assert!(roots.skill_entry_refusal(source, source).is_some());
+        assert!(
+            roots
+                .skill_entry_refusal(&source.join("SKILL.md"), source)
+                .is_some()
+        );
     }
 
     /// The package exception never absorbs another declaration, whichever
