@@ -27,6 +27,8 @@ pub(crate) fn warn(message: &str) {
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const LIMIT: u64 = 4 * 1024 * 1024;
 const REPLAY_PAGE: u64 = 100;
+const LABEL_BYTES: usize = 128;
+const MAX_PR_ASSOCIATIONS: usize = 128;
 const GAP: Duration = Duration::from_secs(60);
 
 fn directory(roots: &Roots, project: ProjectId) -> Result<Directory> {
@@ -396,13 +398,22 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
             // discovery is cached by the host, never repeated by each chair.
             let mut repository: String = read(&dir, "repository.json")?;
             if repository.is_empty() {
-                repository = crate::pr::status::wait_repository(
+                repository = match crate::pr::status::wait_repository(
                     roots.state.as_path(),
                     &context.project_root,
                     &provenant_config::ports::Request::within(Duration::from_secs(
                         settings.pr_read_timeout_seconds,
                     )),
-                )?;
+                ) {
+                    Ok(repository) => repository,
+                    Err(error) => {
+                        warn(&format!(
+                            "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
+                            origin.describe("domains.wait.forge_source")
+                        ));
+                        return Ok(());
+                    }
+                };
                 if !valid_repository(&repository) {
                     return Err("invalid discovered repository".into());
                 }
@@ -663,7 +674,7 @@ fn poll_detail(
         .take(32)
         .map(|check| {
             json!({
-                "name":provenant_cli::bounded_text(&check.name, 128),"head":check.head,
+                "name":provenant_cli::bounded_text(&check.name, LABEL_BYTES),"head":check.head,
                 "bucket":check.bucket,"app":check.app,"conclusion":check.conclusion
             })
         })
@@ -677,7 +688,7 @@ fn poll_detail(
         names.truncate(16);
         for name in names {
             if let Some(text) = name.as_str() {
-                *name = json!(provenant_cli::bounded_text(text, 128));
+                *name = json!(provenant_cli::bounded_text(text, LABEL_BYTES));
             }
         }
     }
@@ -989,12 +1000,18 @@ fn normalise_webhook(repository: &str, payload: Value) -> Option<(ObservationKin
         ObservationKind::IssueComment => &payload["comment"],
         _ => &payload["pull_request"],
     };
-    let pull_requests: Vec<_> = entity["pull_requests"]
+    let mut pull_requests: Vec<_> = entity["pull_requests"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|pull| pull["number"].as_u64())
+        .take(MAX_PR_ASSOCIATIONS + 1)
         .collect();
+    let pull_requests_truncated = pull_requests.len() > MAX_PR_ASSOCIATIONS;
+    pull_requests.truncate(MAX_PR_ASSOCIATIONS);
+    let name = entity["name"].as_str();
+    let name_truncated = name.is_some_and(|name| name.len() > LABEL_BYTES);
+    let name = name.map(|name| provenant_cli::bounded_text(name, LABEL_BYTES));
     let number = payload["number"]
         .as_u64()
         .or_else(|| payload["issue"]["number"].as_u64())
@@ -1003,7 +1020,8 @@ fn normalise_webhook(repository: &str, payload: Value) -> Option<(ObservationKin
     Some((
         kind,
         json!({"repository":repository,"action":payload["action"],"number":number,
-            "pull_requests":pull_requests,"id":entity["id"],"name":entity["name"],
+            "pull_requests":pull_requests,"pull_requests_truncated":pull_requests_truncated,
+            "id":entity["id"],"name":name,"name_truncated":name_truncated,
             "head":entity["head_sha"].as_str().or_else(||entity["head"]["sha"].as_str()),
             "state":entity["state"],"status":entity["status"],"conclusion":entity["conclusion"],
             "updated_at":entity["updated_at"],"source":"webhook"}),
@@ -1374,6 +1392,27 @@ mod tests {
         progress.schedule(0, true, interval);
         assert_eq!(progress.failures, 0);
         assert_eq!(progress.next_micros, interval.as_micros() as i64);
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn oversized_forge_metadata_is_bounded_with_explicit_truncation() {
+        let payload = json!({"check_run":{"id":1,"head_sha":"abc",
+            "name":"n".repeat(provenant_fabric_store::MAX_BODY_BYTES),
+            "pull_requests":(1..=MAX_PR_ASSOCIATIONS+1).map(|number| json!({"number":number})).collect::<Vec<_>>()}});
+        let (_, detail) = normalise_webhook("owner/repo", payload).unwrap();
+        assert_eq!(detail["name_truncated"], true);
+        assert_eq!(detail["pull_requests_truncated"], true);
+        assert_eq!(
+            detail["pull_requests"].as_array().unwrap().len(),
+            MAX_PR_ASSOCIATIONS
+        );
+        assert!(detail["name"].as_str().unwrap().len() <= LABEL_BYTES);
+        assert_eq!(detail["number"], 1);
+        assert_eq!(detail["id"], 1);
+        assert!(
+            serde_json::to_vec(&detail).unwrap().len() < provenant_fabric_store::MAX_BODY_BYTES
+        );
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events

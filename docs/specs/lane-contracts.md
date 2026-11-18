@@ -49,6 +49,9 @@ shared conditional poller when either is unavailable. The tick starts one
 locked host forwarder per project/repository; chairs never own a listener.
 Conditional ETag responses preserve the cached resource on HTTP 304. Failed
 passes retain progress and back off; a successful pass restores cadence.
+An unavailable forge during initial discovery warns and leaves local journal
+sources running. Normalisation preserves nested PR associations and available
+check names; bounded metadata carries explicit truncation flags.
 
 `event_delivery::Journal` captures a cursor before reconciliation, then wakes
 waiters from replayed records. Named PR interests survive waiter expiry; the
