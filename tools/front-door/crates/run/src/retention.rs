@@ -1860,50 +1860,12 @@ fn remove_detached(
     }
     directory.make_private()?;
     let tree = PayloadTree::claim(parent, name, &metadata)?;
-    remove_contents(&tree, 0, keep_going)?;
+    crate::artifacts::remove_payload_contents(&tree, keep_going)?;
     if !parent.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
     }
     parent.rmdir(name)?;
     parent.sync()?;
-    Ok(())
-}
-
-fn remove_contents(tree: &PayloadTree, depth: usize, keep_going: &dyn Fn() -> bool) -> Result<()> {
-    if !keep_going() {
-        return Err(RunError::Cancelled);
-    }
-
-    if depth > 256 {
-        return Err(RunError::Validation("provider state depth limit"));
-    }
-    tree.make_writable()?;
-    loop {
-        if !keep_going() {
-            return Err(RunError::Cancelled);
-        }
-        let mut entries = Vec::new();
-        for entry in tree.entries()?.take(64) {
-            if !keep_going() {
-                return Err(RunError::Cancelled);
-            }
-            entries.push(entry?);
-        }
-        if entries.is_empty() {
-            break;
-        }
-        for name in entries {
-            if !keep_going() {
-                return Err(RunError::Cancelled);
-            }
-            if tree.metadata_at(&name)?.kind == FileKind::Directory {
-                remove_contents(&tree.child(&name)?, depth + 1, keep_going)?;
-                tree.rmdir(&name)?;
-            } else {
-                tree.unlink(&name)?;
-            }
-        }
-    }
     Ok(())
 }
 

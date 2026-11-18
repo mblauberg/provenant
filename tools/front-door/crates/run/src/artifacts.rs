@@ -47,7 +47,7 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
     let bytes = metadata
         .allocated
-        .saturating_add(remove_payload_contents(&tree, keep_going, 0)?);
+        .saturating_add(remove_payload_contents(&tree, keep_going)?);
     drop(tree);
     if !attempt.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(provenant_os::fs::FsError::PayloadMismatch { name: name.into() });
@@ -57,61 +57,76 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     Ok(bytes)
 }
 
-fn remove_payload_contents(
+/// Dispose only a claimed regenerable payload, checking the caller's budget
+/// between entries. An explicit stack supports deep trees without call-stack
+/// growth; completed unlinks are the resume state for an interrupted pass.
+pub(crate) fn remove_payload_contents(
     directory: &PayloadTree,
     keep_going: &dyn Fn() -> bool,
-    depth: usize,
 ) -> provenant_os::fs::Result<u64> {
-    if depth > 256 {
-        return Err(provenant_os::fs::FsError::Io {
-            operation: "remove temporary payload",
-            path: directory.directory().anchored_path(),
-            source: std::io::Error::other("temporary payload depth limit"),
-        });
+    struct Frame {
+        tree: Option<PayloadTree>,
+        name: Option<std::ffi::OsString>,
+        pending: std::collections::VecDeque<std::ffi::OsString>,
     }
+    let mut stack = vec![Frame {
+        tree: None,
+        name: None,
+        pending: Default::default(),
+    }];
     let mut bytes = 0_u64;
     if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
         directory.make_writable()?;
     }
-    // Remove a bounded batch, then restart enumeration. Removed entries are
-    // durable progress, including when a later sweep retries the same tree.
     loop {
+        let Some(frame) = stack.last_mut() else {
+            break;
+        };
+        let current = frame.tree.as_ref().unwrap_or(directory);
         if !keep_going() {
             return Err(provenant_os::fs::FsError::Cancelled {
-                path: directory.directory().anchored_path(),
+                path: current.directory().anchored_path(),
             });
         }
-        let mut entries = Vec::new();
-        for entry in directory.entries()?.take(64) {
-            if !keep_going() {
-                return Err(provenant_os::fs::FsError::Cancelled {
-                    path: directory.directory().anchored_path(),
-                });
+        if frame.pending.is_empty() {
+            for entry in current.entries()?.take(64) {
+                if !keep_going() {
+                    return Err(provenant_os::fs::FsError::Cancelled {
+                        path: current.directory().anchored_path(),
+                    });
+                }
+                frame.pending.push_back(entry?);
             }
-            entries.push(entry?);
         }
-        if entries.is_empty() {
-            break;
-        }
-        for entry in entries {
-            if !keep_going() {
-                return Err(provenant_os::fs::FsError::Cancelled {
-                    path: directory.directory().anchored_path(),
-                });
-            }
-            let metadata = directory.metadata_at(&entry)?;
+        if let Some(entry) = frame.pending.pop_front() {
+            let metadata = current.metadata_at(&entry)?;
             bytes = bytes.saturating_add(metadata.allocated);
             if metadata.kind == FileKind::Directory {
-                directory.directory().make_owner_accessible_at(&entry)?;
-                bytes = bytes.saturating_add(remove_payload_contents(
-                    &directory.child(&entry)?,
-                    keep_going,
-                    depth + 1,
-                )?);
-                directory.rmdir(&entry)?;
+                current.directory().make_owner_accessible_at(&entry)?;
+                let child = current.child(&entry)?;
+                if child.metadata()?.uid == provenant_os::fs::effective_uid() {
+                    child.make_writable()?;
+                }
+                stack.push(Frame {
+                    tree: Some(child),
+                    name: Some(entry),
+                    pending: Default::default(),
+                });
             } else {
-                directory.unlink(&entry)?;
+                current.unlink(&entry)?;
             }
+            continue;
+        }
+        let Some(done) = stack.pop() else {
+            break;
+        };
+        if let Some(name) = done.name {
+            drop(done.tree);
+            let parent = stack
+                .last()
+                .and_then(|frame| frame.tree.as_ref())
+                .unwrap_or(directory);
+            parent.rmdir(&name)?;
         }
     }
     Ok(bytes)

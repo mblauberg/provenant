@@ -1323,7 +1323,7 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
 }
 
 #[test]
-fn worker_census_audit_scopes_eprem_warning_and_retains_unsupported_cwd_unknown()
+fn worker_census_audit_scopes_eperm_warning_and_retains_unsupported_cwd_unknown()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
     let fixture = Fixture::new()?;

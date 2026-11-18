@@ -1581,6 +1581,7 @@ pub(super) fn observe_worker_holders_while(
                 } else {
                     let detail = match &cwd {
                         NativeCwd::PolicyRejected(failure) => {
+                            unplaceable(Some(pid), failure.builtin_condition);
                             if failure.configurable {
                                 format!(
                                     "cwd unreadable; policy_condition={}; configure confinement.census_ignore_unreadable with this canonical path and team_id",
