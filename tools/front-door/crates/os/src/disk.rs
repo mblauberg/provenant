@@ -854,6 +854,7 @@ mod tests {
             false,
             0,
             &mut budget,
+            &|| true,
         ));
         let partial_bytes = entry.allocated_bytes;
         assert!(partial_bytes > 0);
@@ -866,7 +867,8 @@ mod tests {
             &mut entry,
             false,
             0,
-            &mut budget
+            &mut budget,
+            &|| true,
         ));
         assert!(entry.allocated_bytes >= partial_bytes);
         assert!(
@@ -920,6 +922,7 @@ mod tests {
             false,
             0,
             &mut WalkBudget::default(),
+            &|| true,
         );
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(entry.allocated_bytes, 0);
