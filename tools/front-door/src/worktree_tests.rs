@@ -1022,6 +1022,7 @@ impl provenant_run::Providers for WriterProvider {
                     .unwrap(),
                     cargo_target_seed: false,
                     state_root: self.state.clone(),
+                    roots: None,
                     sandbox: provenant_confinement::run_config::SandboxMode {
                         requested: true,
                         effective: true,
@@ -1029,6 +1030,9 @@ impl provenant_run::Providers for WriterProvider {
                         warning: None,
                     },
                     backend: None,
+                    cargo_target: Default::default(),
+                    cargo_cache_budget: None,
+                    cargo_target_protection: Default::default(),
                 }),
                 observed_head: None,
                 repository: None,

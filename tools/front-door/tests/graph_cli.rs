@@ -2,7 +2,7 @@
     clippy::disallowed_methods,
     reason = "integration tests exercise the CLI process"
 )]
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -1797,6 +1797,99 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
     Ok(id.to_owned())
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn settled_graph_retry_requires_a_node() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    let (output, refusal) = rig.run(&["retry", &id])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("provenant retry {id}/task"))),
+        "{refusal}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn graph_retry_extends_budget_after_advisory_failure() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let rig = GraphProject::new()?;
+    let id = "advisory-budget";
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+        {"id":"advisory","kind":"gate","access":"read_only","advisory":true,"condition":{"type":"budget"}},
+        {"id":"pending","kind":"gate","access":"read_only","depends_on":["advisory"],"condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-advisory-budget.json")
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.nodes[0].state = NodeState::Failed;
+    let gate = checkpoint.nodes[0].gate.as_mut().ok_or("gate result")?;
+    gate.passed = false;
+    gate.reason = Some("advisory failed".into());
+    checkpoint.nodes[0]
+        .outputs
+        .as_mut()
+        .ok_or("gate outputs")?
+        .verdict = Some("FAIL".into());
+    checkpoint.nodes[1].state = NodeState::Pending;
+    checkpoint.nodes[1].gate = None;
+    checkpoint.nodes[1].outputs = None;
+    checkpoint.pause = Some(serde_json::from_value(
+        json!({"cause":{"kind":"budget_exceeded"},"reason":"budget spent"}),
+    )?);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph.budget.per_graph]\ntokens = 10\n",
+    )?;
+
+    let (output, retried) = rig.run(&["retry", id, "--extend", "budget.per_graph.tokens=30"])?;
+    assert!(output.status.success(), "{retried}");
+    let resumed = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert!(
+        resumed
+            .extensions
+            .iter()
+            .any(|extension| extension.contains("per_graph.tokens=30")),
+        "{resumed:?}"
+    );
+    assert_ne!(resumed.nodes[1].state, NodeState::Pending, "{resumed:?}");
+    Ok(())
+}
+
 #[test]
 fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
     for qualified in [true, false] {
@@ -1844,5 +1937,211 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
     assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
     let (_, after) = rig.run(&["status", "two-nodes"])?;
     assert_eq!(after["data"]["rows"], before["data"]["rows"], "{after}");
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn succeeded_graph_retry_suggests_no_succeeded_node() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"all-succeeded","nodes":[
+        {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+    let (output, refusal) = rig.run(&["retry", "all-succeeded"])?;
+    assert!(!output.status.success(), "{refusal}");
+    let message = refusal["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("first"),
+        "must not suggest succeeded node: {message}"
+    );
+    assert!(
+        !message.contains("second"),
+        "must not suggest succeeded node: {message}"
+    );
+    assert!(message.contains("all-succeeded/NODE"), "{message}");
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn cancelled_graph_retry_resumes_without_refusal() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let rig = GraphProject::new()?;
+    let id = "cancelled-retry";
+    let path = rig.document(
+        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+            {"id":"work","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]}),
+    )?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-cancelled-retry.json")
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+    checkpoint.nodes[0].state = NodeState::Skipped;
+    checkpoint.nodes[0].skip_reason = Some("graph cancelled".into());
+    checkpoint.nodes[0].cancelled_from = Some(NodeState::Pending);
+    checkpoint.nodes[0].gate = None;
+    checkpoint.nodes[0].outputs = None;
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", id])?;
+    assert!(
+        output.status.success(),
+        "cancelled graph retry must not be refused: {retried}"
+    );
+    let resumed = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert!(!resumed.cancelled, "cancelled state must be cleared");
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+// A cancel flag on a graph with nothing left to restore resumes nothing, so a
+// retry that does nothing must still be refused (#3456).
+#[test]
+fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        &id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", &id])?;
+    assert!(
+        !output.status.success(),
+        "a retry that restores nothing must not exit 0: {retried}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeDecisionCause};
+
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    checkpoint.nodes[0].expansion_pause = Some("plan expansion limit".into());
+    checkpoint.nodes[0].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
+        active: true,
+        fallback: false,
+        fragment_error: None,
+    });
+    checkpoint.set_pause(
+        provenant_records::pause::PauseCause::InvalidPlanExpansion,
+        "plan expansion limit",
+    );
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        &id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", &id])?;
+    assert!(
+        output.status.success(),
+        "expansion paused retry must not be refused: {retried}"
+    );
+    let resumed = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    assert!(!resumed.nodes.iter().any(|n| matches!(
+        &n.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+    )));
+    assert!(
+        resumed.pause.is_none(),
+        "graph pause must be cleared on resume"
+    );
     Ok(())
 }

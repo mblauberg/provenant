@@ -11,7 +11,7 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
             trace.push(text.to_owned());
         }
     });
-    let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+    let safe = provenant_redact::known_shapes(text.as_bytes())
         .map_err(|_| "graph text redaction failed")?;
     String::from_utf8(safe).map_err(|_| "graph text redaction produced invalid UTF-8")
 }

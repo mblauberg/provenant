@@ -688,9 +688,13 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
             &factory.context.roots.state,
             factory.context.identity.project,
             i128::MAX,
-            &cancel,
+            &provenant_core::SweepControl {
+                cancel: cancel.clone(),
+                ..Default::default()
+            },
             &factory.clock
-        )?,
+        )?
+        .removed,
         1
     );
     assert!(

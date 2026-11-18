@@ -1,5 +1,5 @@
 //! Local catalogue reads and compatibility through the CLI.
-mod support;
+use crate::support;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use support::{Result, TestRig, call, code};

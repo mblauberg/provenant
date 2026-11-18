@@ -327,7 +327,7 @@ impl ParameterRefusal {
     }
 
     pub(crate) fn redacted(&self) -> Self {
-        let clean = |text: &str| provenant_confinement::redact::bounded_line(text, 4096);
+        let clean = |text: &str| provenant_redact::bounded_line(text, 4096);
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
         safe.template = clean(&safe.template);

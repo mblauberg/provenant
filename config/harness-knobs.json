@@ -12,6 +12,8 @@
       "lanes.budget_grace",
       "lanes.publish",
       "lanes.local_cargo",
+      "lanes.cargo_target",
+      "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.verification",
       "lanes.gh_budget",
@@ -35,17 +37,18 @@
       "domains.fabric.lanes.max_concurrent_builds",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
-      "gc.graph_checkpoint_days"
+      "gc.graph_checkpoint_days",
+      "gc.sweep_budget"
   ],
   "host_gc_settings": {
     "path": "gc",
     "settings": {
       "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
-      "idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "6h", "effect": "Idle age for unowned artifacts and standalone caches; finished attempt scratch is immediate, and a busy or unreleased attempt is always kept"},
+      "idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "6h", "effect": "Idle age for released read-only attempt scratch, unowned artifacts and standalone caches; finished writer scratch is immediate, and a busy or unreleased attempt is always kept"},
+      "sweep_budget": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "5m", "effect": "Maximum wall time for one GC pass; the saved retention class and candidate cursor resume on the next pass, and the effective value and source appear in GC output"},
       "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "1% of the state volume, capped at 5 GiB", "effect": "Advisory free-space floor for admission, new builds and pressure collection; below it GC removes further eligible caches oldest first"},
       "critical_free": {"type": "size", "allowed": "same syntax as free_floor; 0B disables the critical decision", "default": "2G", "effect": "Critical free space for dispatch and new builds. Below free_floor, warn and proceed. Both effective thresholds and sources are reported."},
-      "lane_cargo_cache_max": {"type": "size", "allowed": "same syntax as free_floor", "default": "32G", "effect": "Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody"},
       "alert_below": {"type": "size", "allowed": "same syntax as free_floor", "default": "free_floor", "effect": "Free space below which an applied collection emits one gc.low_disk note per dip"},
       "projects.{project}.regenerable": {"type": "string_list", "allowed": "directory names; not .git, .worktrees, absolute or parent paths", "default": "[\"target\"] with a root Cargo.toml, otherwise []", "effect": "Git-ignored directory names collected at any depth in the project's linked worktrees; `.provenant/scratch` is collected in addition without a declaration"},
       "projects.{project}.keep": {"type": "string_list", "allowed": "worktree-relative paths", "default": "[]", "effect": "Paths, their descendants and any matching directory containing them that collection preserves"},
@@ -382,7 +385,6 @@
       "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
       "cargo_source_writes": {"type": "bool", "default": true, "effect": "Allow lanes to download and update sources in the host CARGO_HOME; Cargo runs online with open network access. When false, registry/index, registry/cache, registry/src, git/db and git/checkouts are read-only and Cargo runs offline. Cargo lock/tracking files remain writable; credentials and host Cargo config are never writable. Launch diagnostics show the setting and its source."},
       "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
-      "build_dir_max_bytes": {"type": "int", "allowed": "bytes, 0 or more", "default": "21474836480 (20 GiB)", "effect": "Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, during manual or scheduled GC, in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over."},
       "build_dir_grace_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "900 (15 minutes)", "effect": "A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held."}
     }
   },
@@ -688,6 +690,22 @@
       "reader": "tools/front-door/src/build_slot.rs",
       "effect": "Advisory cargo scope for lanes: all permits every command without a warning; check warns for compiling commands other than cargo check; none warns for every compiling command. Commands continue after a warning. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs].",
       "trade_off": "A narrower setting warns about extra resource use; the host build slot controls cooperative cargo concurrency."
+    },
+    "lanes.cargo_target": {
+      "type": "cargo_target",
+      "default": "shared",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/cargo_target.rs",
+      "effect": "CARGO_TARGET_DIR for lanes: shared (default; one target per project under the host cache), private (today's copy-on-write seed clone per worktree, under ~/Library/Caches/provenant-lane-cargo/<digest>) or an absolute path. The value and its source appear in the lane preamble and in provenant config show.",
+      "trade_off": "shared avoids cold builds across lanes of the same project. private isolates artifacts per worktree at the cost of disk and compile time."
+    },
+    "lanes.cargo_cache_max": {
+      "type": "size",
+      "default": "10%",
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/cache_budget.rs, tools/front-door/crates/run/src/build_dir_gc.rs, tools/front-door/crates/run/src/writer.rs",
+      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs] or per lane with --knob lanes.cargo_cache_max=8G. At launch and during GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them. Effective size and source appear in launch warnings and GC reports.",
+      "trade_off": "A lower cap reclaims warm build output sooner; locked targets stay protected and the launch proceeds with a warning when the cap cannot be met."
     },
     "lanes.ci_scope": {
       "type": "enum",

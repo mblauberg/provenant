@@ -87,9 +87,10 @@ case "$expr" in
 esac
 # Custom harnesses select the binary, including aliases and cross-file dispatch.
 mkdir -p tools/front-door/src tools/front-door/tests/support
-printf 'mod support;\n' > tools/front-door/tests/consumer.rs
+printf 'mod support;\n' > tools/front-door/tests/integration.rs
+printf 'mod support;\n' > tools/front-door/tests/command_adapter.rs
 printf 'fn alias_target() {}\n' > tools/front-door/src/worktree_tests.rs
-git add tools/front-door/src/worktree_tests.rs tools/front-door/tests/consumer.rs
+git add tools/front-door/src/worktree_tests.rs tools/front-door/tests/integration.rs tools/front-door/tests/command_adapter.rs
 git commit -qm harness
 case $("$script" --base "$base") in
   *'binary(=worktrees)'*) ;;
@@ -99,7 +100,7 @@ printf 'fn shared_helper() {}\n' > tools/front-door/tests/support/mod.rs
 git add tools/front-door/tests/support/mod.rs
 git commit -qm support
 case $("$script" --base "$base") in
-  *'binary(=consumer)'*'binary(=worktrees)'*) ;;
+  *'binary(=command_adapter)'*'binary(=integration)'*'binary(=worktrees)'*) ;;
   *) echo 'shared helper did not select its consumers' >&2; exit 1 ;;
 esac
 echo 'find-changed-tests tests passed'

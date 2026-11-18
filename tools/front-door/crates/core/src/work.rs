@@ -23,6 +23,29 @@ impl CancelToken {
     }
 }
 
+/// Caller-owned continuation and cancellation for one maintenance collector.
+/// The item path and opaque detail belong to that collector, never deletion authority.
+#[derive(Default)]
+pub struct SweepControl<'a> {
+    pub start_at: Option<&'a std::path::Path>,
+    pub detail: Option<&'a str>,
+    pub cancel: CancelToken,
+    pub keep_going: Option<&'a dyn Fn() -> bool>,
+}
+
+impl SweepControl<'_> {
+    pub fn should_continue(&self) -> bool {
+        if self.cancel.is_cancelled() {
+            return false;
+        }
+        if self.keep_going.is_some_and(|check| !check()) {
+            self.cancel.cancel();
+            return false;
+        }
+        true
+    }
+}
+
 /// A cancellable pause between observations of a genuine wait. Injected so
 /// simulations can advance their own clock instead of sleeping.
 pub trait Pause {

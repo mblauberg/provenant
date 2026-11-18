@@ -182,6 +182,7 @@ impl Providers for Confined {
             .unwrap(),
             cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
+            roots: None,
             sandbox: provenant_confinement::run_config::SandboxMode {
                 requested: true,
                 effective: true,
@@ -189,6 +190,9 @@ impl Providers for Confined {
                 warning: None,
             },
             backend: None,
+            cargo_target: Default::default(),
+            cargo_cache_budget: None,
+            cargo_target_protection: Default::default(),
         });
         Ok(launch)
     }

@@ -10,27 +10,127 @@ use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 #[cfg(target_os = "macos")]
-fn zombie_is_only_group_member(pid: u32) -> bool {
-    // XNU excludes zombies from killpg and reports EPERM if none remain.
-    // Its process-list census includes zombies under the process-list lock.
-    // Two slots ensure a singleton result is complete, rather than truncated.
-    let mut members = [0_i32; 2];
-    const PROC_PGRP_ONLY: u32 = 2;
-    // SAFETY: this stack buffer is writable for exactly the supplied byte size.
-    // The caller still owns the unreaped leader, reserving this private PGID.
-    let bytes = unsafe {
-        libc::proc_listpids(
-            PROC_PGRP_ONLY,
-            pid,
-            members.as_mut_ptr().cast(),
-            std::mem::size_of_val(&members) as i32,
-        )
-    };
-    // Zero, denial, truncation or unexpected members all preserve the error.
-    bytes == std::mem::size_of::<i32>() as i32 && members[0] == pid as i32
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessCensusState {
+    Zombie,
+    Live,
+    Vanished,
+    Unclassified,
 }
 
-/// Whether a failed group kill only found the zombie leader, so nothing is
+#[cfg(target_os = "macos")]
+fn classify_process(pid: i32) -> ProcessCensusState {
+    // Public Darwin SDK: sys/sysctl.h kinfo_proc begins with kp_proc;
+    // sys/proc.h extern_proc offsetof(p_stat) is 36, offsetof(p_pid) is 40.
+    #[repr(C)]
+    struct KinfoProcStat {
+        _prefix: [u8; 36],
+        p_stat: libc::c_char,
+        _pad: [u8; 3],
+        p_pid: libc::pid_t,
+        _opaque: [u8; 648 - 44],
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    let mut record = std::mem::MaybeUninit::<KinfoProcStat>::zeroed();
+    let mut size = std::mem::size_of_val(&record);
+    // SAFETY: sysctl with KERN_PROC_PID writes a kinfo_proc struct into the
+    // zeroed, suitably aligned record buffer. The 4-element MIB array is valid.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            record.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return ProcessCensusState::Vanished;
+        }
+        return ProcessCensusState::Unclassified;
+    }
+    // On macOS, sysctl returns status 0 with size 0 when the process does not exist.
+    if size == 0 {
+        return ProcessCensusState::Vanished;
+    }
+    if size < 44 {
+        return ProcessCensusState::Unclassified;
+    }
+    // SAFETY: the zeroed record was written up to `size >= 44` bytes by the kernel.
+    let record = unsafe { record.assume_init() };
+    if record.p_pid != pid {
+        return ProcessCensusState::Unclassified;
+    }
+    if record.p_stat == libc::SZOMB as libc::c_char {
+        ProcessCensusState::Zombie
+    } else {
+        ProcessCensusState::Live
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn zombie_is_only_group_member(pid: u32) -> bool {
+    // XNU excludes zombies from killpg and reports EPERM if none remain.
+    // If a member is transitioning through exit or concurrent reap, retry boundedly.
+    const MAX_ATTEMPTS: usize = 10;
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut members = [0_i32; 128];
+        const PROC_PGRP_ONLY: u32 = 2;
+        let buffer_size = std::mem::size_of_val(&members) as i32;
+        // SAFETY: members is stack-allocated, aligned writable memory.
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                pid,
+                members.as_mut_ptr().cast(),
+                buffer_size,
+            )
+        };
+        // Zero, denial, truncation (bytes >= buffer_size) or unaligned bytes preserve the error.
+        if bytes <= 0
+            || bytes >= buffer_size
+            || !(bytes as usize).is_multiple_of(std::mem::size_of::<i32>())
+        {
+            continue;
+        }
+        let count = bytes as usize / std::mem::size_of::<i32>();
+        let slice = &members[..count];
+        if !slice.contains(&(pid as i32)) {
+            continue;
+        }
+
+        let mut all_zombies = true;
+
+        for &member in slice {
+            if member <= 0 {
+                all_zombies = false;
+                break;
+            }
+            match classify_process(member) {
+                ProcessCensusState::Zombie => {}
+                ProcessCensusState::Vanished
+                | ProcessCensusState::Live
+                | ProcessCensusState::Unclassified => {
+                    all_zombies = false;
+                    break;
+                }
+            }
+        }
+
+        if all_zombies {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a failed group kill found only zombie processes, so nothing is
 /// left to signal. Only macOS reports this as EPERM rather than ESRCH.
 fn group_kill_found_only_zombie(error: &io::Error, pid: u32) -> bool {
     #[cfg(target_os = "macos")]
@@ -501,5 +601,79 @@ mod tests {
         let other = io::Error::from_raw_os_error(libc::EACCES);
         assert!(!group_kill_found_only_zombie(&other, pid));
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn group_kill_of_multiple_unreaped_zombies_is_not_an_error() {
+        let mut leader = Command::new("true").process_group(0).spawn().unwrap();
+        let pgid = leader.id();
+        let mut member = Command::new("true")
+            .process_group(pgid as i32)
+            .spawn()
+            .unwrap();
+
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: WNOWAIT leaves both children unreaped so both stay zombies in PGID.
+        let waited_leader = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pgid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited_leader, 0);
+        // SAFETY: WNOWAIT leaves member unreaped in PGID; output is writable siginfo storage.
+        let waited_member = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                member.id() as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited_member, 0);
+
+        // SAFETY: both unreaped zombies keep the PGID reserved; kill borrows nothing.
+        assert_eq!(unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) }, -1);
+        let error = io::Error::last_os_error();
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert!(group_kill_found_only_zombie(&error, pgid));
+
+        let other = io::Error::from_raw_os_error(libc::EACCES);
+        assert!(!group_kill_found_only_zombie(&other, pgid));
+
+        leader.wait().unwrap();
+        member.wait().unwrap();
+    }
+
+    #[test]
+    fn group_kill_refuses_when_live_member_remains() {
+        let mut leader = Command::new("true").process_group(0).spawn().unwrap();
+        let pgid = leader.id();
+        let mut live = Command::new("sleep")
+            .arg("10")
+            .process_group(pgid as i32)
+            .spawn()
+            .unwrap();
+
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: waitid on leader leaves leader as a zombie while member is still running.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pgid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited, 0);
+
+        let eperm = io::Error::from_raw_os_error(libc::EPERM);
+        assert!(!group_kill_found_only_zombie(&eperm, pgid));
+
+        live.kill().unwrap();
+        live.wait().unwrap();
+        leader.wait().unwrap();
     }
 }

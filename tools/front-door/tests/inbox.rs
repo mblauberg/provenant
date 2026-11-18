@@ -1,5 +1,5 @@
 //! Human requests through the app-independent installed command.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, call_with_stdin as call, code};
 

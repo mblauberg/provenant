@@ -39,9 +39,17 @@ const CREDENTIALS: &[&str] = &[
 
 #[derive(Debug, Default, Serialize)]
 pub struct ProviderStateGc {
+    /// Exact attempt to retry after a cooperative sweep stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
     pub removed: Vec<PathBuf>,
     pub tightened: Vec<PathBuf>,
     pub attempt_tmp: Vec<AttemptTmpRemoval>,
+    /// Bytes removed from scratch directories that remain for a later pass.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partial_tmp: Vec<AttemptTmpRemoval>,
     pub attempt_logs: Vec<AttemptLogRemoval>,
     /// Event rows expired (or eligible to expire in a dry run).
     pub expired_events: u64,
@@ -49,6 +57,16 @@ pub struct ProviderStateGc {
     pub errors: Vec<ProviderStateIssue>,
     /// Byte-bounded eviction of bulk payload; see [`RunStore::gc_payloads`].
     pub payload: PayloadReport,
+}
+
+impl ProviderStateGc {
+    pub fn temporary_bytes(&self) -> u64 {
+        self.attempt_tmp
+            .iter()
+            .chain(&self.partial_tmp)
+            .map(|entry| entry.bytes)
+            .fold(0_u64, u64::saturating_add)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +105,84 @@ pub enum ScratchOwner {
 
 pub type ScratchOwnerResolver<'a> = dyn Fn(&AttemptRecord, &CanonicalRequest) -> ScratchOwner + 'a;
 
+/// One retention scan's resume position and cooperative work budget.
+#[derive(Default)]
+pub struct RetentionScan<'a> {
+    pub start_at: Option<AttemptId>,
+    pub detail: Option<&'a str>,
+    pub keep_going: Option<&'a dyn Fn() -> bool>,
+}
+
+impl RetentionScan<'_> {
+    pub fn permits(&self, call: &Request<'_>) -> bool {
+        if call.cancel.is_cancelled() {
+            return false;
+        }
+        if self.keep_going.is_some_and(|check| !check()) {
+            call.cancel.cancel();
+            return false;
+        }
+        true
+    }
+}
+
+/// SQLite's interrupt handle is designed for cross-thread cancellation. The
+/// scoped monitor cannot outlive this scan or interrupt a later store request.
+struct SqlCancellation {
+    stopped: provenant_core::CancelToken,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl SqlCancellation {
+    fn arm(
+        db: &rusqlite::Connection,
+        scan: &RetentionScan<'_>,
+        call: &Request<'_>,
+    ) -> Option<Self> {
+        scan.keep_going?;
+        let stopped = provenant_core::CancelToken::new();
+        let done = stopped.clone();
+        let cancel = call.cancel.clone();
+        let interrupt = db.get_interrupt_handle();
+        let worker = std::thread::Builder::new()
+            .name("gc-sql-cancel".into())
+            .spawn(move || {
+                while !done.is_cancelled() && !cancel.is_cancelled() {
+                    provenant_core::Pause::wait(
+                        &provenant_core::ThreadPause,
+                        provenant_core::DurationMicros::from_micros(10_000),
+                        &done,
+                    );
+                }
+                if cancel.is_cancelled() && !done.is_cancelled() {
+                    interrupt.interrupt();
+                }
+            });
+        match worker {
+            Ok(worker) => Some(Self {
+                stopped,
+                worker: Some(worker),
+            }),
+            Err(error) => {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: cannot monitor retention SQLite cancellation; using bounded batches: {error}"
+                );
+                None
+            }
+        }
+    }
+}
+impl Drop for SqlCancellation {
+    fn drop(&mut self) {
+        self.stopped.cancel();
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
+
 pub struct ScratchPolicy<'a> {
     pub idle_seconds: u64,
     pub projects: Option<&'a [provenant_core::ProjectId]>,
@@ -105,6 +201,12 @@ impl ScratchPolicy<'_> {
 }
 
 pub(crate) fn scratch_owner(record: &AttemptRecord, request: &CanonicalRequest) -> ScratchOwner {
+    // Read-only attempts have no branch or writer checkout to retain. Their
+    // scratch lifetime is solely the configured idle period, even when the
+    // launch was admitted from a graph or names a source checkout.
+    if request.task.writer.is_none() {
+        return ScratchOwner::Unowned;
+    }
     if record.superseded_by.is_some() {
         return ScratchOwner::Finished;
     }
@@ -177,8 +279,9 @@ impl RunStore {
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
+        scan: &RetentionScan<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_provider_state_with_logs(expected, days, 30, now, dry_run, call)
+        self.gc_provider_state_with_logs(expected, days, 30, now, dry_run, call, scan)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -190,6 +293,7 @@ impl RunStore {
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
+        scan: &RetentionScan<'_>,
     ) -> Result<ProviderStateGc> {
         self.gc_retention(
             expected,
@@ -198,6 +302,7 @@ impl RunStore {
             RetentionPass::ProviderState { days, logs_days },
             None,
             call,
+            scan,
         )
     }
 
@@ -209,6 +314,7 @@ impl RunStore {
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
+        scan: &RetentionScan<'_>,
     ) -> Result<ProviderStateGc> {
         self.gc_retention(
             expected,
@@ -217,9 +323,11 @@ impl RunStore {
             RetentionPass::AttemptScratch,
             Some(policy),
             call,
+            scan,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Policy, binding and cooperative scan are independent inputs.
     fn gc_retention(
         &self,
         expected: &Directory,
@@ -228,7 +336,26 @@ impl RunStore {
         pass: RetentionPass,
         scratch: Option<&ScratchPolicy<'_>>,
         call: &Request<'_>,
+        scan: &RetentionScan<'_>,
     ) -> Result<ProviderStateGc> {
+        let _sql_cancellation = SqlCancellation::arm(&self.db, scan, call);
+        let keep_going = &|| scan.permits(call);
+        if !keep_going() {
+            return Ok(ProviderStateGc {
+                interrupted_at: Some(scan.start_at.map_or_else(
+                    || self.context.state_root.as_path().join("attempts"),
+                    |id| {
+                        self.context
+                            .state_root
+                            .as_path()
+                            .join(format!("attempts/{id}"))
+                    },
+                )),
+                continuation: scan.detail.map(str::to_owned),
+                ..Default::default()
+            });
+        }
+
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
             return Err(RunError::unsafe_path(".", PathCheck::Identity));
         }
@@ -244,257 +371,373 @@ impl RunStore {
         if scratch.is_none() && !(1..=3650).contains(&days) {
             return Err(RunError::Validation("provider_state_days_range"));
         }
-        if !dry_run && let Some(logs_days) = logs_days {
-            // Finished reaction rows age out with the run's logs.
-            self.prune_reactions(
+        if !dry_run
+            && scan.start_at.is_none()
+            && let Some(logs_days) = logs_days
+        {
+            let pruned = self.prune_reactions(
                 now.as_micros().div_euclid(1_000_000) - (logs_days as i64) * 86_400,
                 call,
-            )?;
-        }
-        let rows: Vec<(String, String, Vec<u8>)> = if let Some(ids) =
-            scratch.and_then(|policy| policy.attempts)
-        {
-            let mut query = self.db.prepare("SELECT id,project,record FROM attempts WHERE id=?1 AND terminal=1 AND refused=0 AND tmp_retained=1")?;
-            let mut rows = Vec::new();
-            for id in ids {
-                use rusqlite::OptionalExtension;
-                if let Some(row) = query
-                    .query_row([id.to_string()], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })
-                    .optional()?
-                {
-                    rows.push(row);
+                scan,
+            );
+            match pruned {
+                Ok(Some(after)) => {
+                    return Ok(ProviderStateGc {
+                        interrupted_at: Some(self.context.state_root.as_path().join("attempts")),
+                        continuation: Some(format!("reactions:{after}")),
+                        ..Default::default()
+                    });
                 }
+                Err(_) if call.cancel.is_cancelled() => {
+                    return Ok(ProviderStateGc {
+                        interrupted_at: Some(self.context.state_root.as_path().join("attempts")),
+                        continuation: scan.detail.map(str::to_owned),
+                        ..Default::default()
+                    });
+                }
+                Err(error) => return Err(error),
+                Ok(None) => {}
             }
-            rows
-        } else {
-            let mut query = self.db.prepare(if scratch.is_some() {
-                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 AND tmp_retained=1 ORDER BY sequence"
-            } else {
-                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence"
-            })?;
-            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
+        }
+        let mut after = self.retention_after(scan.start_at)?;
         let mut report = ProviderStateGc::default();
         let mut temporary_sizes = provenant_os::disk::DiskReport::with_walk_budget(
             self.context.state_root.as_path().into(),
             0,
             10_000,
             std::time::Duration::from_millis(500),
-        );
+        )
+        .with_cancellation(call.cancel.clone());
         #[allow(clippy::disallowed_methods)] // Bound read-only maintenance in real time.
         let preview_started = std::time::Instant::now();
-        for (id, project, raw) in rows {
-            if dry_run && preview_started.elapsed() >= std::time::Duration::from_secs(1) {
-                report.kept.push(ProviderStateIssue {
-                    path: self.context.state_root.as_path().into(),
-                    reason: "preview budget reached; remaining attempts require an applied GC pass"
-                        .into(),
-                });
+        loop {
+            let rows =
+                self.retention_page(scratch.is_some(), scratch.and_then(|p| p.attempts), after)?;
+            if rows.is_empty() {
                 break;
             }
-            if scratch
-                .and_then(|policy| policy.projects)
-                .is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
-            {
-                continue;
-            }
-            let path = self
-                .context
-                .state_root
-                .as_path()
-                .join(format!("attempts/{id}/provider-state"));
-            let first_removal = report.removed.len();
-            let first_tightened = report.tightened.len();
-            let result = (|| -> Result<()> {
-                let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
-                crate::reader::validate_attempt(&record)?;
-                record.superseded_by = self.same_session_successor(record.attempt_id)?;
-                if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
-                    return Err(RunError::Validation("retention attempt index identity"));
+            for (sequence, id, project, raw) in rows {
+                let attempt_path = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("attempts/{id}"));
+                if !scan.permits(call) {
+                    report.interrupted_at = Some(attempt_path);
+                    return Ok(report);
                 }
-                let AttemptState::Terminal { finished_at, .. } = record.state else {
-                    return Err(RunError::Validation("retention attempt is not terminal"));
-                };
-                if call.cancel.is_cancelled() {
-                    return Err(RunError::Cancelled);
+                after = sequence;
+                if dry_run && preview_started.elapsed() >= std::time::Duration::from_secs(1) {
+                    report.kept.push(ProviderStateIssue {
+                        path: self.context.state_root.as_path().into(),
+                        reason:
+                            "preview budget reached; remaining attempts require an applied GC pass"
+                                .into(),
+                    });
+                    report.interrupted_at = Some(attempt_path);
+                    return Ok(report);
                 }
-                let Some(Held {
-                    attempt,
-                    continuing,
-                    _publication,
-                    _writer,
-                }) = self.hold_attempt(&record)?
-                else {
-                    return Ok(());
-                };
-                let age = now.as_micros().saturating_sub(finished_at.as_micros());
-                let uncertain_loss = matches!(
-                    record.state,
-                    AttemptState::Terminal {
-                        outcome: Outcome::Lost,
-                        exit_code: None,
-                        ..
+                if scratch
+                    .and_then(|policy| policy.projects)
+                    .is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
+                {
+                    continue;
+                }
+                let path = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("attempts/{id}/provider-state"));
+                let first_removal = report.removed.len();
+                let first_tightened = report.tightened.len();
+                let result = (|| -> Result<()> {
+                    let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+                    crate::reader::validate_attempt(&record)?;
+                    record.superseded_by = self.same_session_successor(record.attempt_id)?;
+                    if record.attempt_id.to_string() != id
+                        || record.project_id.to_string() != project
+                    {
+                        return Err(RunError::Validation("retention attempt index identity"));
                     }
-                ) && record.exit_evidence.is_none();
-                let scratch_eligible = if let Some(policy) = scratch {
-                    let raw = crate::artifacts::read_sealed(
-                        &attempt,
-                        "request.json",
-                        crate::RECORD_LIMIT,
-                    )?
-                    .ok_or(RunError::Validation("scratch request unavailable"))?;
-                    let request: CanonicalRequest = crate::db::decode(&raw)?;
-                    let owner = policy.owner.map_or_else(
-                        || scratch_owner(&record, &request),
-                        |owner| owner(&record, &request),
-                    );
-                    !continuing
-                        && match owner {
-                            ScratchOwner::Finished => true,
-                            ScratchOwner::Owned => false,
-                            ScratchOwner::Unowned => {
-                                age >= i64::try_from(policy.idle_seconds)
-                                    .unwrap_or(i64::MAX)
-                                    .saturating_mul(1_000_000)
-                            }
+                    let AttemptState::Terminal { finished_at, .. } = record.state else {
+                        return Err(RunError::Validation("retention attempt is not terminal"));
+                    };
+                    if call.cancel.is_cancelled() {
+                        return Err(RunError::Cancelled);
+                    }
+                    let Some(Held {
+                        attempt,
+                        continuing,
+                        _publication,
+                        _writer,
+                    }) = self.hold_attempt(&record)?
+                    else {
+                        return Ok(());
+                    };
+                    let age = now.as_micros().saturating_sub(finished_at.as_micros());
+                    let uncertain_loss = matches!(
+                        record.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::Lost,
+                            exit_code: None,
+                            ..
                         }
-                } else {
-                    false
-                };
-                if scratch_eligible && !uncertain_loss {
-                    let temporary = path.with_file_name("tmp");
-                    let collection = (|| -> Result<()> {
-                        collect_temporary(
+                    ) && record.exit_evidence.is_none();
+                    let scratch_eligible = if let Some(policy) = scratch {
+                        let raw = crate::artifacts::read_sealed(
                             &attempt,
-                            &temporary,
-                            dry_run,
-                            &mut report,
-                            &mut temporary_sizes,
-                        )?;
-                        let pending_writer_cleanup = if record.provider_launched == Some(false)
-                            && matches!(
-                                record.state,
-                                AttemptState::Terminal {
-                                    outcome: Outcome::Rejected,
-                                    ..
-                                }
+                            "request.json",
+                            crate::RECORD_LIMIT,
+                        )?
+                        .ok_or(RunError::Validation("scratch request unavailable"))?;
+                        let request: CanonicalRequest = crate::db::decode(&raw)?;
+                        let owner = if request.task.writer.is_none() {
+                            // Read-only scratch ages out independently of the
+                            // graph/worktree retention callback used for writers.
+                            ScratchOwner::Unowned
+                        } else {
+                            policy.owner.map_or_else(
+                                || scratch_owner(&record, &request),
+                                |owner| owner(&record, &request),
                             )
-                            && crate::artifacts::read_sealed(
+                        };
+                        !continuing
+                            && match owner {
+                                ScratchOwner::Finished => true,
+                                ScratchOwner::Owned => false,
+                                ScratchOwner::Unowned => {
+                                    age >= i64::try_from(policy.idle_seconds)
+                                        .unwrap_or(i64::MAX)
+                                        .saturating_mul(1_000_000)
+                                }
+                            }
+                    } else {
+                        false
+                    };
+                    if scratch_eligible && !uncertain_loss {
+                        let temporary = path.with_file_name("tmp");
+                        let collection = (|| -> Result<()> {
+                            collect_temporary(
                                 &attempt,
-                                "writer-git-pins.json",
-                                crate::RECORD_LIMIT,
-                            )?
-                            .is_some()
-                        {
-                            let raw: Option<Vec<u8>> = rusqlite::OptionalExtension::optional(
+                                &temporary,
+                                dry_run,
+                                &mut report,
+                                &mut temporary_sizes,
+                                &|| scan.permits(call),
+                            )?;
+                            let pending_writer_cleanup = if record.provider_launched == Some(false)
+                                && matches!(
+                                    record.state,
+                                    AttemptState::Terminal {
+                                        outcome: Outcome::Rejected,
+                                        ..
+                                    }
+                                )
+                                && crate::artifacts::read_sealed(
+                                    &attempt,
+                                    "writer-git-pins.json",
+                                    crate::RECORD_LIMIT,
+                                )?
+                                .is_some()
+                            {
+                                let raw: Option<Vec<u8>> = rusqlite::OptionalExtension::optional(
                                 self.db.query_row(
                                     "SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2",
                                     rusqlite::params![id, crate::db::sql_int(record.generation)?],
                                     |row| row.get(0),
                                 ),
                             )?;
-                            // Without a receipt the cleanup state is unknown: keep the
-                            // attempt for reconciliation rather than failing collection.
-                            match raw {
-                                Some(raw) => {
-                                    let receipts: provenant_records::run::SettlementReceipts =
-                                        crate::db::decode_column(&raw)?;
-                                    !matches!(
-                                        receipts.cleanup_custody_release,
-                                        provenant_records::run::EffectDisposition::Done
-                                    )
+                                // Without a receipt the cleanup state is unknown: keep the
+                                // attempt for reconciliation rather than failing collection.
+                                match raw {
+                                    Some(raw) => {
+                                        let receipts: provenant_records::run::SettlementReceipts =
+                                            crate::db::decode_column(&raw)?;
+                                        !matches!(
+                                            receipts.cleanup_custody_release,
+                                            provenant_records::run::EffectDisposition::Done
+                                        )
+                                    }
+                                    None => true,
                                 }
-                                None => true,
-                            }
-                        } else {
-                            false
-                        };
-                        if !dry_run && !pending_writer_cleanup {
-                            self.write(call, |tx| {
+                            } else {
+                                false
+                            };
+                            if !dry_run && !pending_writer_cleanup {
+                                self.write(call, |tx| {
                                 tx.execute(
                                     "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND project=?2 AND terminal=1",
                                     rusqlite::params![id, record.project_id.to_string()],
                                 )?;
                                 Ok(())
                             })?;
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = collection {
+                            if retention_interrupted(&error) {
+                                return Err(error);
+                            }
+                            record_issue(&mut report, temporary, &error);
                         }
-                        Ok(())
-                    })();
-                    if let Err(error) = collection {
-                        record_issue(&mut report, temporary, &error);
                     }
-                }
-                if matches!(pass, RetentionPass::AttemptScratch) {
-                    return Ok(());
-                }
-                if continuing {
-                    return Err(RunError::Validation(
-                        "a continuation still needs this provider state",
-                    ));
-                }
-                if logs_days.is_some_and(|days| age >= DAY_MICROS.saturating_mul(days as i64)) {
-                    {
-                        collect_logs(
-                            &attempt,
-                            path.parent().ok_or_else(|| {
-                                RunError::unsafe_path(path.clone(), PathCheck::Containment)
-                            })?,
-                            dry_run,
-                            &mut report,
-                        )?;
-                        // Keep the newest event so unseen-settlement cursors and
-                        // last_event_sequence still observe terminal attempts.
-                        let expired_events = if dry_run {
-                            let count = self.db.query_row(
+                    if matches!(pass, RetentionPass::AttemptScratch) {
+                        return Ok(());
+                    }
+                    if continuing {
+                        return Err(RunError::Validation(
+                            "a continuation still needs this provider state",
+                        ));
+                    }
+                    if logs_days.is_some_and(|days| age >= DAY_MICROS.saturating_mul(days as i64)) {
+                        {
+                            collect_logs(
+                                &attempt,
+                                path.parent().ok_or_else(|| {
+                                    RunError::unsafe_path(path.clone(), PathCheck::Containment)
+                                })?,
+                                dry_run,
+                                &mut report,
+                                keep_going,
+                            )?;
+                            // Keep the newest event so unseen-settlement cursors and
+                            // last_event_sequence still observe terminal attempts.
+                            let expired_events = if dry_run {
+                                let count = self.db.query_row(
                                 "SELECT COUNT(*) FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
                                 rusqlite::params![id, record.project_id.to_string()],
                                 |row| row.get::<_, i64>(0),
                             )?;
-                            u64::try_from(count).unwrap_or(0)
-                        } else {
-                            self.write(call, |tx| {
-                                let deleted = tx.execute(
-                                    "DELETE FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
-                                    rusqlite::params![id, record.project_id.to_string()],
-                                )?;
-                                Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
-                            })?
-                        };
-                        report.expired_events += expired_events;
+                                u64::try_from(count).unwrap_or(0)
+                            } else {
+                                loop {
+                                    if !keep_going() {
+                                        return Err(RunError::Cancelled);
+                                    }
+                                    let count = self.write(call, |tx| {
+                                        Ok(tx.execute(
+                                            "DELETE FROM events WHERE sequence IN (SELECT sequence FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2) ORDER BY sequence LIMIT 64)",
+                                            rusqlite::params![id,record.project_id.to_string()],
+                                        )?)
+                                    })?;
+                                    report.expired_events =
+                                        report.expired_events.saturating_add(count as u64);
+                                    if count < 64 {
+                                        break;
+                                    }
+                                }
+                                0
+                            };
+                            report.expired_events += expired_events;
+                        }
                     }
+                    if age >= DAY_MICROS
+                        && let Err(error) =
+                            credentials(&attempt, &path, dry_run, &mut report, keep_going)
+                    {
+                        if retention_interrupted(&error) {
+                            return Err(error);
+                        }
+                        record_issue(&mut report, path.clone(), &error);
+                    }
+                    if let Err(error) =
+                        prune_caches(&attempt, &record, dry_run, &mut report, keep_going)
+                    {
+                        if retention_interrupted(&error) {
+                            return Err(error);
+                        }
+                        record_issue(&mut report, path.clone(), &error);
+                    }
+                    if age >= DAY_MICROS.saturating_mul(days as i64) {
+                        expire(&attempt, dry_run, &mut report, keep_going)?;
+                    }
+                    Ok(())
+                })();
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| RunError::unsafe_path(path.clone(), PathCheck::Containment))?;
+                prefix_removals(&mut report, first_removal, parent);
+                for tightened in &mut report.tightened[first_tightened..] {
+                    *tightened = parent.join(&*tightened);
                 }
-                if age >= DAY_MICROS
-                    && let Err(error) = credentials(&attempt, &path, dry_run, &mut report)
-                {
-                    record_issue(&mut report, path.clone(), &error);
-                }
-                if let Err(error) = prune_caches(&attempt, &record, dry_run, &mut report) {
-                    record_issue(&mut report, path.clone(), &error);
-                }
-                if age >= DAY_MICROS.saturating_mul(days as i64) {
-                    expire(&attempt, dry_run, &mut report)?;
-                }
-                Ok(())
-            })();
-            let parent = path
-                .parent()
-                .ok_or_else(|| RunError::unsafe_path(path.clone(), PathCheck::Containment))?;
-            prefix_removals(&mut report, first_removal, parent);
-            for tightened in &mut report.tightened[first_tightened..] {
-                *tightened = parent.join(&*tightened);
-            }
-            if let Err(error) = result {
-                let cancelled = matches!(error, RunError::Cancelled);
-                record_issue(&mut report, path, &error);
-                if cancelled {
-                    break;
+                if let Err(error) = result {
+                    let cancelled = call.cancel.is_cancelled()
+                        || matches!(
+                            error,
+                            RunError::Cancelled
+                                | RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
+                        );
+                    if cancelled {
+                        report.interrupted_at = Some(attempt_path);
+                        return Ok(report);
+                    }
+                    record_issue(&mut report, path, &error);
                 }
             }
         }
         Ok(report)
+    }
+
+    fn retention_after(&self, start: Option<AttemptId>) -> Result<i64> {
+        use rusqlite::OptionalExtension;
+        Ok(match start {
+            None => 0,
+            Some(id) => self
+                .db
+                .query_row(
+                    "SELECT sequence FROM attempts WHERE id=?1",
+                    [id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(1)
+                .saturating_sub(1),
+        })
+    }
+
+    #[allow(clippy::type_complexity)] // SQLite page rows mirror the indexed attempt columns.
+    fn retention_page(
+        &self,
+        scratch: bool,
+        selected: Option<&[AttemptId]>,
+        after: i64,
+    ) -> Result<Vec<(i64, String, String, Vec<u8>)>> {
+        let filter = if scratch { " AND tmp_retained=1" } else { "" };
+        if let Some(ids) = selected {
+            use rusqlite::OptionalExtension;
+            let sql = format!(
+                "SELECT sequence,id,project,record FROM attempts WHERE sequence>?1 AND id=?2 AND terminal=1 AND refused=0{filter}"
+            );
+            let mut query = self.db.prepare(&sql)?;
+            let mut rows = BTreeMap::new();
+            for id in ids {
+                let row = query
+                    .query_row(rusqlite::params![after, id.to_string()], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Vec<u8>>(3)?,
+                        ))
+                    })
+                    .optional()?;
+                if let Some(row) = row {
+                    rows.insert(row.0, row);
+                    if rows.len() > 64 {
+                        rows.pop_last();
+                    }
+                }
+            }
+            return Ok(rows.into_values().collect());
+        }
+        let sql = format!(
+            "SELECT sequence,id,project,record FROM attempts WHERE sequence>?1 AND terminal=1 AND refused=0{filter} ORDER BY sequence LIMIT 64"
+        );
+        let mut query = self.db.prepare(&sql)?;
+        let rows = query.query_map([after], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 }
 
@@ -648,6 +891,10 @@ pub struct PayloadEviction {
 /// `total_reclaimed_bytes` the store's lifetime figure.
 #[derive(Debug, Default, Serialize)]
 pub struct PayloadReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_phase: Option<&'static str>,
     pub cap_bytes: u64,
     pub low_water_bytes: u64,
     pub accounted_bytes: u64,
@@ -661,6 +908,10 @@ pub struct PayloadReport {
 
 impl PayloadReport {
     pub fn absorb(&mut self, other: Self) {
+        if other.interrupted_at.is_some() {
+            self.interrupted_at = other.interrupted_at;
+            self.interrupted_phase = other.interrupted_phase;
+        }
         self.cap_bytes = self.cap_bytes.max(other.cap_bytes);
         self.low_water_bytes = self.low_water_bytes.max(other.low_water_bytes);
         self.accounted_bytes = self.accounted_bytes.saturating_add(other.accounted_bytes);
@@ -743,25 +994,52 @@ fn pinned_payload(attempt: &Directory, record: &AttemptRecord) -> Result<bool> {
 
 /// Allocated bytes of the evictable payload: provider state and history,
 /// scratch, and capture bytes beyond the retained tail.
-fn payload_bytes(attempt: &Directory, path: &std::path::Path) -> u64 {
-    let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
+fn payload_bytes(
+    attempt: &Directory,
+    path: &std::path::Path,
+    keep_going: &dyn Fn() -> bool,
+    cancel: &provenant_core::CancelToken,
+) -> Result<u64> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
+    let mut measured =
+        provenant_os::disk::DiskReport::new(path.into(), 0).with_cancellation(cancel.clone());
     let mut bytes = 0_u64;
     for name in [STATE, HISTORY, SCRATCH] {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         let name = OsStr::new(name);
         if attempt.metadata_at(name, false).is_ok() {
-            restore_owned_temporary_directories(attempt, name);
-            measured.measure_at("payload", attempt, name, &path.join(name));
+            restore_owned_temporary_directories(attempt, name, keep_going);
+            measured.measure_at_while("payload", attempt, name, &path.join(name), keep_going);
         }
     }
     for entry in &measured.entries {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         bytes = bytes.saturating_add(entry.allocated_bytes);
     }
     for name in [AttemptFile::Stdout.name(), AttemptFile::Stderr.name()] {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         if let Ok(meta) = attempt.metadata_at(OsStr::new(name), false) {
             bytes = bytes.saturating_add(meta.size.saturating_sub(LOG_TAIL));
         }
     }
-    bytes
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+    if !measured.errors.is_empty() || measured.traversal_exhausted() {
+        return Err(RunError::Io(std::io::Error::other(
+            "payload measurement incomplete; observed bytes remain uncertain",
+        )));
+    }
+    Ok(bytes)
 }
 
 impl RunStore {
@@ -784,7 +1062,31 @@ impl RunStore {
         measure: bool,
         projects: Option<&[provenant_core::ProjectId]>,
         call: &Request<'_>,
+        scan: &RetentionScan<'_>,
     ) -> Result<PayloadReport> {
+        let _sql_cancellation = SqlCancellation::arm(&self.db, scan, call);
+        let keep_going = &|| scan.permits(call);
+        if !keep_going() {
+            return Ok(PayloadReport {
+                interrupted_at: Some(scan.start_at.map_or_else(
+                    || self.context.state_root.as_path().join("attempts"),
+                    |id| {
+                        self.context
+                            .state_root
+                            .as_path()
+                            .join(format!("attempts/{id}"))
+                    },
+                )),
+                interrupted_phase: Some(if scan.detail == Some("evict") {
+                    "evict"
+                } else {
+                    "measure"
+                }),
+                cap_bytes,
+                ..Default::default()
+            });
+        }
+
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
             return Err(RunError::unsafe_path(".", PathCheck::Identity));
         }
@@ -797,8 +1099,27 @@ impl RunStore {
             ..Default::default()
         };
         let mut ledger = read_ledger(&self.root);
-        if measure {
-            self.measure_payloads(&mut ledger, now, &mut report, call)?;
+        if measure && scan.detail != Some("evict") {
+            self.measure_payloads(&mut ledger, now, &mut report, call, scan)?;
+            if report.interrupted_at.is_some() || !report.errors.is_empty() {
+                report.accounted_bytes = ledger
+                    .attempts
+                    .values()
+                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+                report.pinned_bytes = ledger
+                    .attempts
+                    .values()
+                    .filter(|entry| {
+                        entry.pinned
+                            || now.as_micros().saturating_sub(entry.finished_micros) < DAY_MICROS
+                    })
+                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+                report.total_reclaimed_bytes = ledger.reclaimed_bytes;
+                if !dry_run {
+                    write_ledger(&self.root, &ledger)?;
+                }
+                return Ok(report);
+            }
         }
         let now_micros = now.as_micros();
         let young =
@@ -813,6 +1134,16 @@ impl RunStore {
             .values()
             .filter(|entry| entry.pinned || young(entry))
             .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+        if ledger.measured_micros == 0 {
+            report.accounted_bytes = total;
+            report.pinned_bytes = ledger.pinned_bytes;
+            report.total_reclaimed_bytes = ledger.reclaimed_bytes;
+            report.errors.push(ProviderStateIssue {
+                path: self.context.state_root.as_path().join(LEDGER),
+                reason: "payload census is incomplete; a complete measurement is required before cap eviction".into(),
+            });
+            return Ok(report);
+        }
         let mut changed = measure;
         if total > cap_bytes {
             let mut order: Vec<(String, LedgerEntry)> = ledger
@@ -833,15 +1164,17 @@ impl RunStore {
                 if total <= low_water {
                     break;
                 }
-                if call.cancel.is_cancelled() {
-                    break;
-                }
                 let path = self
                     .context
                     .state_root
                     .as_path()
                     .join(format!("attempts/{id}"));
-                match self.evict_attempt(&id, &entry, now, dry_run, &path) {
+                if !scan.permits(call) {
+                    report.interrupted_at = Some(path);
+                    report.interrupted_phase = Some("evict");
+                    break;
+                }
+                match self.evict_attempt(&id, &entry, now, dry_run, &path, keep_going) {
                     Ok(true) => {
                         total = total.saturating_sub(entry.bytes);
                         report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(entry.bytes);
@@ -861,6 +1194,11 @@ impl RunStore {
                             stored.pinned = true;
                             changed = true;
                         }
+                    }
+                    Err(RunError::Cancelled) => {
+                        report.interrupted_at = Some(path);
+                        report.interrupted_phase = Some("evict");
+                        break;
                     }
                     Err(error) => issue(&mut report, path, &error),
                 }
@@ -888,80 +1226,115 @@ impl RunStore {
         now: WallTime,
         report: &mut PayloadReport,
         call: &Request<'_>,
+        scan: &RetentionScan<'_>,
     ) -> Result<()> {
-        let rows: Vec<(String, String, Vec<u8>)> = {
-            let mut query = self.db.prepare(
-                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
-            )?;
-            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-            rows.collect::<std::result::Result<_, _>>()?
+        let keep_going = &|| scan.permits(call);
+
+        let mut complete = true;
+        let mut after = self.retention_after(scan.start_at)?;
+        let mut attempts = if scan.start_at.is_some() {
+            ledger.attempts.clone()
+        } else {
+            BTreeMap::new()
         };
-        let mut attempts = BTreeMap::new();
-        for (id, project, raw) in rows {
-            if call.cancel.is_cancelled() {
-                return Err(RunError::Cancelled);
+        loop {
+            let rows = self.retention_page(false, None, after)?;
+            if rows.is_empty() {
+                break;
             }
-            let path = self
-                .context
-                .state_root
-                .as_path()
-                .join(format!("attempts/{id}"));
-            let result = (|| -> Result<Option<LedgerEntry>> {
-                let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
-                crate::reader::validate_attempt(&record)?;
-                if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
-                    return Err(RunError::Validation("retention attempt index identity"));
+            for (sequence, id, project, raw) in rows {
+                let path = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("attempts/{id}"));
+                if !scan.permits(call) {
+                    ledger.attempts = attempts;
+                    ledger.measured_micros = 0;
+                    report.interrupted_at = Some(path);
+                    report.interrupted_phase = Some("measure");
+                    return Ok(());
                 }
-                let AttemptState::Terminal { finished_at, .. } = record.state else {
-                    return Ok(None);
-                };
-                let attempt = match self.attempt_dir(record.attempt_id, false) {
-                    Ok(attempt) => attempt,
-                    Err(error) if missing_directory(&error) => return Ok(None),
-                    Err(error) => return Err(error),
-                };
-                match attempt.metadata_at(OsStr::new(EVICTED), false) {
-                    Ok(_) => return Ok(None),
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(error.into()),
-                }
-                let (held, pinned) = match self.hold_attempt(&record) {
-                    Ok(Some(held)) => {
-                        let pinned = held.continuing || pinned_payload(&held.attempt, &record)?;
-                        (Some(held), pinned)
+                after = sequence;
+                let result = (|| -> Result<Option<LedgerEntry>> {
+                    let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+                    crate::reader::validate_attempt(&record)?;
+                    if record.attempt_id.to_string() != id
+                        || record.project_id.to_string() != project
+                    {
+                        return Err(RunError::Validation("retention attempt index identity"));
                     }
-                    Ok(None) => (None, true),
-                    // Reservations and held locks pin it; the payload still counts.
-                    Err(RunError::Validation(_))
-                    | Err(RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
-                        ..
-                    })) => (None, true),
-                    Err(error) => return Err(error),
-                };
-                let bytes = payload_bytes(&attempt, &path);
-                drop(held);
-                Ok(Some(LedgerEntry {
-                    project: project.clone(),
-                    finished_micros: finished_at.as_micros(),
-                    bytes,
-                    pinned,
-                }))
-            })();
-            match result {
-                Ok(Some(entry)) => {
-                    attempts.insert(id, entry);
+                    let AttemptState::Terminal { finished_at, .. } = record.state else {
+                        return Ok(None);
+                    };
+                    let attempt = match self.attempt_dir(record.attempt_id, false) {
+                        Ok(attempt) => attempt,
+                        Err(error) if missing_directory(&error) => return Ok(None),
+                        Err(error) => return Err(error),
+                    };
+                    match attempt.metadata_at(OsStr::new(EVICTED), false) {
+                        Ok(_) => return Ok(None),
+                        Err(error) if error.is_not_found() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    let (held, pinned) = match self.hold_attempt(&record) {
+                        Ok(Some(held)) => {
+                            let pinned = held.continuing || pinned_payload(&held.attempt, &record)?;
+                            (Some(held), pinned)
+                        }
+                        Ok(None) => (None, true),
+                        // Reservations and held locks pin it; the payload still counts.
+                        Err(RunError::Validation(_))
+                        | Err(RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+                            ..
+                        })) => (None, true),
+                        Err(error) => return Err(error),
+                    };
+                    let bytes = payload_bytes(&attempt, &path, keep_going, call.cancel)?;
+                    if !keep_going() {
+                        return Err(RunError::Cancelled);
+                    }
+                    drop(held);
+                    Ok(Some(LedgerEntry {
+                        project: project.clone(),
+                        finished_micros: finished_at.as_micros(),
+                        bytes,
+                        pinned,
+                    }))
+                })();
+                match result {
+                    Ok(Some(entry)) => {
+                        attempts.insert(id, entry);
+                    }
+                    Ok(None) => {
+                        attempts.remove(&id);
+                    }
+                    Err(RunError::Cancelled) => {
+                        ledger.attempts = attempts;
+                        ledger.measured_micros = 0;
+                        report.interrupted_at = Some(path);
+                        report.interrupted_phase = Some("measure");
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        complete = false;
+                        if let Some(mut prior) = ledger.attempts.get(&id).cloned() {
+                            prior.pinned = true;
+                            attempts.insert(id, prior);
+                        }
+                        issue(report, path, &error);
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => issue(report, path, &error),
             }
         }
         ledger.attempts = attempts;
-        ledger.measured_micros = now.as_micros().max(1);
+        ledger.measured_micros = if complete { now.as_micros().max(1) } else { 0 };
         Ok(())
     }
 
     /// Evict one attempt's payload under its locks. `false` means custody
     /// refused it on recheck and nothing changed.
+    #[allow(clippy::too_many_arguments)] // Revalidated custody and cooperative scan accompany the payload ledger entry.
     fn evict_attempt(
         &self,
         id: &str,
@@ -969,7 +1342,12 @@ impl RunStore {
         now: WallTime,
         dry_run: bool,
         path: &std::path::Path,
+        keep_going: &dyn Fn() -> bool,
     ) -> Result<bool> {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
+
         let raw: Vec<u8> = self.db.query_row(
             "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND terminal=1",
             rusqlite::params![id, entry.project],
@@ -999,10 +1377,13 @@ impl RunStore {
         seal(attempt, EXPIRED, b"{}\n", 64)?;
         let mut removed = ProviderStateGc::default();
         for name in [STATE, HISTORY, SCRATCH] {
-            retry_tombstones(attempt, &[name], false, &mut removed)?;
-            dispose(attempt, OsStr::new(name), false, &mut removed)?;
+            if !keep_going() {
+                return Err(RunError::Cancelled);
+            }
+            retry_tombstones(attempt, &[name], false, &mut removed, keep_going)?;
+            dispose(attempt, OsStr::new(name), false, &mut removed, keep_going)?;
         }
-        collect_logs(attempt, path, false, &mut removed)?;
+        collect_logs(attempt, path, false, &mut removed, keep_going)?;
         if !removed.errors.is_empty() || !removed.kept.is_empty() {
             return Err(RunError::Validation("payload removal incomplete"));
         }
@@ -1012,7 +1393,17 @@ impl RunStore {
     }
 }
 
+fn retention_interrupted(error: &RunError) -> bool {
+    matches!(
+        error,
+        RunError::Cancelled | RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
+    )
+}
+
 fn record_issue(report: &mut ProviderStateGc, path: PathBuf, error: &RunError) {
+    if retention_interrupted(error) {
+        return;
+    }
     let issue = ProviderStateIssue {
         path,
         reason: error.to_string(),
@@ -1036,10 +1427,18 @@ fn collect_logs(
     path: &std::path::Path,
     dry_run: bool,
     report: &mut ProviderStateGc,
+    keep_going: &dyn Fn() -> bool,
 ) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 64 * 1024;
     for name in [AttemptFile::Stdout.name(), AttemptFile::Stderr.name()] {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         let result = (|| -> Result<()> {
             let name_os = OsStr::new(name);
             let before = match attempt.metadata_at(name_os, false) {
@@ -1112,7 +1511,12 @@ fn collect_temporary(
     dry_run: bool,
     report: &mut ProviderStateGc,
     preview_sizes: &mut provenant_os::disk::DiskReport,
+    keep_going: &dyn Fn() -> bool,
 ) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
     let name = OsStr::new("tmp");
     match attempt.metadata_at(name, false) {
         Ok(_) => {}
@@ -1141,7 +1545,16 @@ fn collect_temporary(
             sum.saturating_add(entry.allocated_bytes)
         })
     } else {
-        let bytes = crate::artifacts::remove_unreserved_terminal_temporary(attempt)?;
+        let mut bytes = 0;
+        let result =
+            crate::artifacts::remove_unreserved_terminal_temporary(attempt, keep_going, &mut bytes);
+        if result.is_err() && bytes > 0 {
+            report.partial_tmp.push(AttemptTmpRemoval {
+                path: path.into(),
+                bytes,
+            });
+        }
+        result?;
         attempt.sync()?;
         bytes
     };
@@ -1155,7 +1568,15 @@ fn collect_temporary(
 /// A directory with no owner read/search bits cannot be traversed by the
 /// estimator. Restore owner rwx through each held parent before measuring;
 /// symlinks and foreign-owned directories are deliberately left alone.
-fn restore_owned_temporary_directories(parent: &Directory, name: &OsStr) {
+fn restore_owned_temporary_directories(
+    parent: &Directory,
+    name: &OsStr,
+    keep_going: &dyn Fn() -> bool,
+) {
+    if !keep_going() {
+        return;
+    }
+
     let Ok(metadata) = parent.metadata_at(name, false) else {
         return;
     };
@@ -1171,7 +1592,10 @@ fn restore_owned_temporary_directories(parent: &Directory, name: &OsStr) {
         return;
     };
     for entry in entries.flatten() {
-        restore_owned_temporary_directories(&directory, &entry);
+        if !keep_going() {
+            return;
+        }
+        restore_owned_temporary_directories(&directory, &entry, keep_going);
     }
 }
 
@@ -1180,7 +1604,12 @@ pub(crate) fn prune_caches(
     record: &AttemptRecord,
     dry_run: bool,
     report: &mut ProviderStateGc,
+    keep_going: &dyn Fn() -> bool,
 ) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
     if !matches!(record.state, AttemptState::Terminal { .. }) {
         return Err(RunError::Nonterminal);
     }
@@ -1192,16 +1621,22 @@ pub(crate) fn prune_caches(
     let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
-    let candidates = candidates(&state)?;
+    let candidates = candidates(&state, keep_going)?;
     for name in &candidates {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         let candidate = subdir(&state, name, false)?;
         let provider = candidate_provider(&candidate)?;
         let first = report.removed.len();
         let removal = (|| -> Result<()> {
             if let Some((_, caches)) = PROVIDER_CACHES.iter().find(|(id, _)| *id == provider) {
-                retry_tombstones(&candidate, caches, dry_run, report)?;
+                retry_tombstones(&candidate, caches, dry_run, report, keep_going)?;
                 for cache in *caches {
-                    dispose(&candidate, OsStr::new(cache), dry_run, report)?;
+                    if !keep_going() {
+                        return Err(RunError::Cancelled);
+                    }
+                    dispose(&candidate, OsStr::new(cache), dry_run, report, keep_going)?;
                 }
             }
             Ok(())
@@ -1224,8 +1659,8 @@ fn candidate_provider(candidate: &Directory) -> Result<String> {
     }
 }
 
-fn candidates(state: &Directory) -> Result<Vec<OsString>> {
-    Ok(names(state)?
+fn candidates(state: &Directory, keep_going: &dyn Fn() -> bool) -> Result<Vec<OsString>> {
+    Ok(names(state, keep_going)?
         .into_iter()
         .filter(|name| {
             name.to_str()
@@ -1242,11 +1677,19 @@ fn credentials(
     path: &std::path::Path,
     dry_run: bool,
     report: &mut ProviderStateGc,
+    keep_going: &dyn Fn() -> bool,
 ) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
     let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
-    for name in candidates(&state)? {
+    for name in candidates(&state, keep_going)? {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         let candidate = match subdir(&state, &name, false) {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -1255,14 +1698,17 @@ fn credentials(
             }
         };
         for credential in CREDENTIALS {
+            if !keep_going() {
+                return Err(RunError::Cancelled);
+            }
             let first = report.removed.len();
             let result = (|| -> Result<()> {
                 let mut parent = candidate.try_clone()?;
                 let mut parts = credential.split('/').peekable();
                 while let Some(part) = parts.next() {
                     if parts.peek().is_none() {
-                        retry_tombstones(&parent, &[part], dry_run, report)?;
-                        dispose(&parent, OsStr::new(part), dry_run, report)?;
+                        retry_tombstones(&parent, &[part], dry_run, report, keep_going)?;
+                        dispose(&parent, OsStr::new(part), dry_run, report, keep_going)?;
                     } else if let Some(child) = if part == "claude-config" {
                         existing_config(&parent, &name, dry_run, report)?
                     } else {
@@ -1308,17 +1754,29 @@ fn transcript(name: &str) -> bool {
     })
 }
 
-fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> Result<()> {
-    retry_tombstones(attempt, &[STATE], dry_run, report)?;
+fn expire(
+    attempt: &Directory,
+    dry_run: bool,
+    report: &mut ProviderStateGc,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
+    retry_tombstones(attempt, &[STATE], dry_run, report, keep_going)?;
     let Some(state) = existing(attempt, STATE)? else {
         return Ok(());
     };
     if !dry_run {
         seal(attempt, EXPIRED, b"{}\n", 64)?;
         let history = subdir(attempt, OsStr::new(HISTORY), true)?;
-        let candidate_names = candidates(&state)?;
+        let candidate_names = candidates(&state, keep_going)?;
         // Whole candidates may already be archived by an interrupted sweep.
         for name in &candidate_names {
+            if !keep_going() {
+                return Err(RunError::Cancelled);
+            }
             let candidate = subdir(&state, name, false)?;
             let provider = candidate_provider(&candidate)?;
             if !matches!(
@@ -1333,7 +1791,10 @@ fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> R
                 continue;
             }
             let archive = subdir(&history, name, true)?;
-            for part in names(&candidate)? {
+            for part in names(&candidate, keep_going)? {
+                if !keep_going() {
+                    return Err(RunError::Cancelled);
+                }
                 if part.to_str().is_some_and(transcript) {
                     candidate.rename_noreplace(&part, &archive, &part)?;
                     archive.sync()?;
@@ -1341,6 +1802,9 @@ fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> R
                 }
             }
             for (parent, artifact) in [(".cursor", "chats"), ("data", "opencode")] {
+                if !keep_going() {
+                    return Err(RunError::Cancelled);
+                }
                 if let Some(source) = existing(&candidate, parent)? {
                     match source.metadata_at(OsStr::new(artifact), false) {
                         Ok(_) => {
@@ -1350,7 +1814,7 @@ fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> R
                                 // The launcher places an authentication link here.
                                 // Never archive it if earlier credential cleanup was refused.
                                 let first = report.removed.len();
-                                dispose(&data, OsStr::new("auth.json"), false, report)?;
+                                dispose(&data, OsStr::new("auth.json"), false, report, keep_going)?;
                                 prefix_removals(
                                     report,
                                     first,
@@ -1389,7 +1853,7 @@ fn expire(attempt: &Directory, dry_run: bool, report: &mut ProviderStateGc) -> R
             }
         }
     }
-    dispose(attempt, OsStr::new(STATE), dry_run, report)
+    dispose(attempt, OsStr::new(STATE), dry_run, report, keep_going)
 }
 
 fn prefix_removals(report: &mut ProviderStateGc, first: usize, prefix: &std::path::Path) {
@@ -1398,10 +1862,15 @@ fn prefix_removals(report: &mut ProviderStateGc, first: usize, prefix: &std::pat
     }
 }
 
-fn names(directory: &Directory) -> Result<Vec<OsString>> {
-    Ok(directory
-        .entries()?
-        .collect::<provenant_os::fs::Result<_>>()?)
+fn names(directory: &Directory, keep_going: &dyn Fn() -> bool) -> Result<Vec<OsString>> {
+    let mut names = Vec::new();
+    for entry in directory.entries()? {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
+        names.push(entry?);
+    }
+    Ok(names)
 }
 
 fn existing(parent: &Directory, name: &str) -> Result<Option<Directory>> {
@@ -1452,7 +1921,12 @@ fn dispose(
     name: &OsStr,
     dry_run: bool,
     report: &mut ProviderStateGc,
+    keep_going: &dyn Fn() -> bool,
 ) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
     let metadata = match parent.metadata_at(name, false) {
         Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => return Ok(()),
@@ -1463,7 +1937,13 @@ fn dispose(
             let detached = tombstone_name(metadata.device, metadata.inode, name);
             parent.rename_noreplace(name, parent, &detached)?;
             parent.sync()?;
-            remove_detached(parent, &detached, metadata.device, metadata.inode)?;
+            remove_detached(
+                parent,
+                &detached,
+                metadata.device,
+                metadata.inode,
+                keep_going,
+            )?;
         } else {
             parent.unlink(name)?;
             parent.sync()?;
@@ -1485,8 +1965,16 @@ fn retry_tombstones(
     allowed: &[&str],
     dry_run: bool,
     report: &mut ProviderStateGc,
+    keep_going: &dyn Fn() -> bool,
 ) -> Result<()> {
-    for name in names(parent)? {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
+    for name in names(parent, keep_going)? {
+        if !keep_going() {
+            return Err(RunError::Cancelled);
+        }
         let Some((identity, original)) = name
             .to_str()
             .and_then(|name| name.strip_prefix(TOMBSTONE))
@@ -1507,14 +1995,24 @@ fn retry_tombstones(
             continue;
         };
         if !dry_run {
-            remove_detached(parent, &name, device, inode)?;
+            remove_detached(parent, &name, device, inode, keep_going)?;
         }
         report.removed.push(PathBuf::from(name));
     }
     Ok(())
 }
 
-fn remove_detached(parent: &Directory, name: &OsStr, device: u64, inode: u64) -> Result<()> {
+fn remove_detached(
+    parent: &Directory,
+    name: &OsStr,
+    device: u64,
+    inode: u64,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<()> {
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+
     let metadata = parent.metadata_at(name, false)?;
     if metadata.device != device || metadata.inode != inode {
         return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
@@ -1525,31 +2023,12 @@ fn remove_detached(parent: &Directory, name: &OsStr, device: u64, inode: u64) ->
     }
     directory.make_private()?;
     let tree = PayloadTree::claim(parent, name, &metadata)?;
-    remove_contents(&tree, 0)?;
+    crate::artifacts::remove_payload_contents(&tree, keep_going, &mut 0)?;
     if !parent.metadata_at(name, false)?.same_identity(&metadata) {
         return Err(RunError::unsafe_entry(parent, name, PathCheck::Identity));
     }
     parent.rmdir(name)?;
     parent.sync()?;
-    Ok(())
-}
-
-fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
-    if depth > 256 {
-        return Err(RunError::Validation("provider state depth limit"));
-    }
-    tree.make_writable()?;
-    let entries = tree
-        .entries()?
-        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
-    for name in entries {
-        if tree.metadata_at(&name)?.kind == FileKind::Directory {
-            remove_contents(&tree.child(&name)?, depth + 1)?;
-            tree.rmdir(&name)?;
-        } else {
-            tree.unlink(&name)?;
-        }
-    }
     Ok(())
 }
 
@@ -1737,6 +2216,7 @@ mod tests {
             now,
             dry_run,
             call,
+            &RetentionScan::default(),
         )?;
         // These fixtures exercise age and collection mechanics for unowned work.
         let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
@@ -1744,7 +2224,14 @@ mod tests {
             owner: Some(&unowned),
             ..ScratchPolicy::new(scratch_days.saturating_mul(86_400))
         };
-        let mut scratch = store.gc_temporary(&root, &policy, now, dry_run, call)?;
+        let mut scratch = store.gc_temporary(
+            &root,
+            &policy,
+            now,
+            dry_run,
+            call,
+            &RetentionScan::default(),
+        )?;
         report.removed.append(&mut scratch.removed);
         report.tightened.append(&mut scratch.tightened);
         report.attempt_tmp.append(&mut scratch.attempt_tmp);
@@ -2005,6 +2492,95 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn event_retention_stops_between_committed_batches_and_keeps_newest() -> TestResult {
+        use provenant_core::{Clock, DurationMicros};
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel, observer_cancel) = (clock(), CancelToken::new(), CancelToken::new());
+        let operation = call(&clock, &cancel);
+        let observer = call(&clock, &observer_cancel);
+        withdraw(&store, &input, &operation)?;
+        let record = store.record(input.attempt_id, &operation)?;
+        store.write(&operation, |db| {
+            let mut record = record.clone();
+            for _ in 0..256 {
+                record.revision = record.revision.checked_add(1).ok_or(RunError::Conflict)?;
+                crate::store::insert_event(db, &record)?;
+            }
+            Ok(())
+        })?;
+        let read_events = || -> Result<Vec<crate::RunEvent>> {
+            let mut result = Vec::new();
+            loop {
+                let after = result
+                    .last()
+                    .map_or(0, |event: &crate::RunEvent| event.sequence);
+                let page = store.events(after, 64, Some(input.attempt_id), &observer)?;
+                if page.is_empty() {
+                    return Ok(result);
+                }
+                result.extend(page);
+            }
+        };
+        let original = read_events()?;
+        let newest = original.last().ok_or("latest event")?.sequence;
+        let budget_clock = std::sync::Mutex::new(clock.clone());
+        let deadline = clock
+            .mono_now()
+            .checked_add(DurationMicros::from_micros(1))?;
+        let keep_going = || {
+            let Ok(events) = read_events() else {
+                return false;
+            };
+            let mut clock = budget_clock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if events.len() < original.len() {
+                let _ = clock.advance(DurationMicros::from_micros(1));
+            }
+            clock.mono_now() < deadline
+        };
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let now = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+        let partial = store.gc_provider_state_with_logs(
+            &root,
+            3650,
+            30,
+            now,
+            false,
+            &operation,
+            &RetentionScan {
+                keep_going: Some(&keep_going),
+                ..Default::default()
+            },
+        )?;
+        assert!(partial.interrupted_at.is_some());
+        let remaining = read_events()?;
+        assert!(remaining.len() > 1 && remaining.len() < original.len());
+        let resumed = store.gc_provider_state_with_logs(
+            &root,
+            3650,
+            30,
+            now,
+            false,
+            &observer,
+            &RetentionScan {
+                start_at: Some(input.attempt_id),
+                ..Default::default()
+            },
+        )?;
+        assert!(resumed.interrupted_at.is_none());
+        let retained = read_events()?;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].sequence, newest);
+        assert_eq!(
+            partial.expired_events + resumed.expired_events,
+            (original.len() - 1) as u64
+        );
+        Ok(())
+    }
+
     #[test]
     fn gc_keeps_expired_unacknowledged_settlements_visible() -> TestResult {
         let (_temp, context, store, input, _attempt) = seeded()?;
@@ -2063,6 +2639,7 @@ mod tests {
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,
+            &RetentionScan::default(),
         )?;
         assert!(scoped.attempt_tmp.is_empty());
         assert!(attempt.join("tmp/payload").is_file());
@@ -2077,6 +2654,7 @@ mod tests {
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,
+            &RetentionScan::default(),
         )?;
         assert!(report.errors.is_empty(), "{report:?}");
         assert_eq!(report.attempt_tmp.len(), 1);
@@ -2110,14 +2688,30 @@ mod tests {
         let now = WallTime::from_micros(200 + 2 * DAY_MICROS)?;
         assert!(
             store
-                .gc_provider_state_with_logs(&root, 7, 3, now, false, &call)?
+                .gc_provider_state_with_logs(
+                    &root,
+                    7,
+                    3,
+                    now,
+                    false,
+                    &call,
+                    &RetentionScan::default()
+                )?
                 .attempt_logs
                 .is_empty(),
             "logs younger than the configured age stay"
         );
         assert_eq!(
             store
-                .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
+                .gc_provider_state_with_logs(
+                    &root,
+                    7,
+                    1,
+                    now,
+                    false,
+                    &call,
+                    &RetentionScan::default()
+                )?
                 .attempt_logs
                 .len(),
             1
@@ -2164,6 +2758,7 @@ mod tests {
             WallTime::from_micros(clock.wall_now()?.as_micros() + DAY_MICROS)?,
             false,
             &call,
+            &RetentionScan::default(),
         )?;
         assert!(report.attempt_tmp.is_empty());
         let scratch = store.gc_temporary(
@@ -2172,15 +2767,184 @@ mod tests {
             WallTime::from_micros(clock.wall_now()?.as_micros() + DAY_MICROS)?,
             false,
             &call,
+            &RetentionScan::default(),
         )?;
         assert!(scratch.attempt_tmp.is_empty());
         assert!(temporary.exists());
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
     #[test]
-    fn scratch_gc_requires_release_and_free_attempt_custody_even_when_work_is_finished()
-    -> TestResult {
+    fn released_read_only_scratch_uses_idle_age_independent_of_graph_and_checkout() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let source = temp.path().join("source-checkout");
+        fs::create_dir(&source)?;
+        input.request.task.access.source_root = Some(source.clone());
+        input
+            .request
+            .task
+            .context
+            .as_mut()
+            .ok_or("graph context missing")?
+            .pr = Some(3518);
+        store.create(&input, &call)?;
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempt_id));
+        let temporary = attempt.join("tmp/candidate-0/target/debug");
+        fs::create_dir_all(&temporary)?;
+        fs::write(temporary.join("artifact"), b"scratch target")?;
+        let durable = [
+            (
+                attempt.join("provider-state/handoff.json"),
+                b"handoff".as_slice(),
+            ),
+            (attempt.join("stdout.log"), b"log".as_slice()),
+        ];
+
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let idle = 7 * 86_400;
+        let retained_by_writer_owner =
+            |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Owned;
+        let policy = ScratchPolicy {
+            idle_seconds: idle,
+            owner: Some(&retained_by_writer_owner),
+            ..ScratchPolicy::new(idle)
+        };
+        let before_release = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000)?,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert!(before_release.attempt_tmp.is_empty());
+        assert!(temporary.exists(), "a live attempt retains scratch");
+
+        withdraw(&store, &input, &call)?;
+        let result = fs::read(attempt.join("result.md"))?;
+        for (path, contents) in &durable {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, contents)?;
+        }
+        let before_idle = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000 - 1)?,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert!(before_idle.attempt_tmp.is_empty());
+        assert!(temporary.exists(), "scratch remains until gc.idle");
+
+        let collected = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000)?,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert_eq!(collected.attempt_tmp.len(), 1);
+        assert!(!attempt.join("tmp").exists());
+        assert_eq!(fs::read(attempt.join("result.md"))?, result);
+        for (path, contents) in &durable {
+            assert_eq!(
+                fs::read(path)?,
+                *contents,
+                "{} remains durable",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn scratch_budget_stops_inside_an_attempt_and_resumes_remaining_files() -> TestResult {
+        use provenant_core::{Clock, DurationMicros};
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let temporary = attempt.join("tmp");
+        fs::create_dir(&temporary)?;
+        for n in 0..256 {
+            fs::write(temporary.join(format!("payload-{n}")), b"regenerable")?;
+        }
+        let proof = fs::read(attempt.join("terminal-pending.json"))?;
+        let budget_clock = std::sync::Mutex::new(clock.clone());
+        let deadline = clock
+            .mono_now()
+            .checked_add(DurationMicros::from_micros(120))?;
+        let keep_going = || {
+            let mut clock = budget_clock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clock.advance(DurationMicros::from_micros(1)).is_ok() && clock.mono_now() < deadline
+        };
+        let scan = RetentionScan {
+            keep_going: Some(&keep_going),
+            ..Default::default()
+        };
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let now = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+        let partial =
+            store.gc_temporary(&root, &ScratchPolicy::new(0), now, false, &call, &scan)?;
+        assert_eq!(partial.interrupted_at.as_ref(), Some(&attempt));
+        assert!(partial.errors.is_empty());
+        assert!(
+            partial.attempt_tmp.is_empty(),
+            "a partial directory is not reported removed"
+        );
+        assert!(
+            partial.temporary_bytes() > 0,
+            "partial reclaimed bytes remain observable"
+        );
+        let remaining = fs::read_dir(&temporary)?.count();
+        assert!(
+            remaining > 0 && remaining < 256,
+            "bounded pass makes durable progress"
+        );
+        assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, proof);
+        let resume_cancel = CancelToken::new();
+        let resume_call = crate::tests::call(&clock, &resume_cancel);
+        assert!(store.temporary_retained(input.attempt_id, &resume_call)?);
+        let custody = Directory::open_anchor(&attempt)?;
+        drop(custody.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
+        drop(custody.try_lock(OsStr::new("publication.lock"), LockMode::Exclusive)?);
+        let resumed = store.gc_temporary(
+            &root,
+            &ScratchPolicy::new(0),
+            now,
+            false,
+            &resume_call,
+            &RetentionScan {
+                start_at: Some(input.attempt_id),
+                ..Default::default()
+            },
+        )?;
+        assert!(resumed.interrupted_at.is_none());
+        assert!(!temporary.exists());
+        assert!(!store.temporary_retained(input.attempt_id, &resume_call)?);
+        assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, proof);
+        Ok(())
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn scratch_gc_requires_release_and_free_attempt_custody() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -2196,7 +2960,14 @@ mod tests {
 
         // A queued attempt is never eligible, regardless of the owner callback.
         let collection_time = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
-        let before_release = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
+        let before_release = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
         assert!(before_release.attempt_tmp.is_empty());
         assert_eq!(
             fs::read(temporary.join("payload"))?,
@@ -2204,22 +2975,16 @@ mod tests {
         );
 
         withdraw(&store, &input, &call)?;
-        let owned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Owned;
-        let owned_policy = ScratchPolicy {
-            owner: Some(&owned),
-            ..ScratchPolicy::new(0)
-        };
-        let while_owned =
-            store.gc_temporary(&root, &owned_policy, collection_time, false, &call)?;
-        assert!(while_owned.attempt_tmp.is_empty());
-        assert_eq!(
-            fs::read(temporary.join("payload"))?,
-            b"must survive until release"
-        );
-
         let attempt_dir = Directory::open_anchor(&attempt)?;
         let busy = attempt_dir.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-        let while_busy = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
+        let while_busy = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
         assert!(while_busy.attempt_tmp.is_empty());
         assert_eq!(
             fs::read(temporary.join("payload"))?,
@@ -2228,7 +2993,14 @@ mod tests {
         drop(busy);
 
         let terminal = fs::read(attempt.join("terminal-pending.json"))?;
-        let after_release = store.gc_temporary(&root, &policy, collection_time, false, &call)?;
+        let after_release = store.gc_temporary(
+            &root,
+            &policy,
+            collection_time,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
         assert_eq!(after_release.attempt_tmp.len(), 1);
         assert!(!temporary.exists());
         assert_eq!(fs::read(attempt.join("terminal-pending.json"))?, terminal);
@@ -2297,7 +3069,9 @@ mod tests {
             100,
             std::time::Duration::from_secs(1),
         );
-        collect_temporary(&attempt, &temporary, true, &mut report, &mut sizes)?;
+        collect_temporary(&attempt, &temporary, true, &mut report, &mut sizes, &|| {
+            true
+        })?;
         assert_eq!(
             std::fs::metadata(&temporary)?.permissions().mode() & 0o777,
             0o500
@@ -3032,7 +3806,112 @@ mod tests {
             measure,
             None,
             &call,
+            &RetentionScan::default(),
         )
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn incomplete_payload_census_is_uncertain_and_never_grants_eviction() -> TestResult {
+        let pair = pair()?;
+        let mut path = pair.older.join(STATE).join("deep");
+        for _ in 0..270 {
+            fs::create_dir_all(&path)?;
+            path.push("d");
+        }
+        fs::write(path.with_file_name("payload"), b"unmeasured")?;
+        let report = payload(&pair, 0, 8 * DAY_MICROS, false, true)?;
+        assert!(!report.errors.is_empty(), "partial census is visible");
+        assert!(
+            report.evicted.is_empty(),
+            "an incomplete lower bound cannot authorise cap eviction"
+        );
+        let pressure = payload(&pair, 0, 8 * DAY_MICROS, false, false)?;
+        assert!(
+            !pressure.errors.is_empty(),
+            "ledger-only pressure retains uncertainty"
+        );
+        assert!(pressure.evicted.is_empty());
+        assert!(pair.older.join(STATE).exists() && pair.newer.join(STATE).exists());
+        Ok(())
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn interrupted_payload_measurement_preserves_observed_totals_and_resumes() -> TestResult {
+        let pair = pair()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let baseline_call = call(&clock, &cancel);
+        let root = Directory::open_anchor(pair.context.state_root.as_path())?;
+        let now = WallTime::from_micros(200 + 8 * DAY_MICROS)?;
+        let checks = std::cell::Cell::new(0_u64);
+        let count = || {
+            checks.set(checks.get() + 1);
+            true
+        };
+        let baseline = pair.store.gc_payloads(
+            &root,
+            u64::MAX,
+            now,
+            false,
+            true,
+            None,
+            &baseline_call,
+            &RetentionScan {
+                keep_going: Some(&count),
+                ..Default::default()
+            },
+        )?;
+        let cutoff = checks.get() * 3 / 4;
+        checks.set(0);
+        let limited = || {
+            checks.set(checks.get() + 1);
+            checks.get() <= cutoff
+        };
+        let partial = pair.store.gc_payloads(
+            &root,
+            u64::MAX,
+            now,
+            false,
+            true,
+            None,
+            &baseline_call,
+            &RetentionScan {
+                keep_going: Some(&limited),
+                ..Default::default()
+            },
+        )?;
+        let path = partial
+            .interrupted_at
+            .as_ref()
+            .ok_or("budget did not interrupt")?;
+        assert_eq!(partial.interrupted_phase, Some("measure"));
+        assert!(partial.accounted_bytes > 0 && partial.accounted_bytes < baseline.accounted_bytes);
+        let id = AttemptId::parse(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("attempt cursor")?,
+        )?;
+        let resume_cancel = CancelToken::new();
+        let resumed_call = call(&clock, &resume_cancel);
+        let complete = pair.store.gc_payloads(
+            &root,
+            u64::MAX,
+            now,
+            false,
+            true,
+            None,
+            &resumed_call,
+            &RetentionScan {
+                start_at: Some(id),
+                detail: Some("measure"),
+                ..Default::default()
+            },
+        )?;
+        assert!(complete.interrupted_at.is_none());
+        assert_eq!(complete.accounted_bytes, baseline.accounted_bytes);
+        assert!(pair.older.join(STATE).exists() && pair.newer.join(STATE).exists());
+        Ok(())
     }
 
     #[test]

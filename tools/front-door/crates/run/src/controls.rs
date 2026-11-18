@@ -572,7 +572,7 @@ pub fn release_progress(
                     }
                     _ => None,
                 })
-                .map(|name| provenant_confinement::redact::bounded_line(name, 128));
+                .map(|name| provenant_redact::bounded_line(name, 128));
             name.map_or_else(
                 || format!("pid {pid}"),
                 |name| format!("{name} (pid {pid})"),
@@ -5916,6 +5916,7 @@ impl RunStore {
                 record,
                 false,
                 &mut crate::ProviderStateGc::default(),
+                &|| true,
             );
         }
         if matches!(
@@ -6004,7 +6005,11 @@ impl RunStore {
                 Ok(false) => {}
                 Err(error) => return Err(error.into()),
             }
-            artifacts::remove_unreserved_terminal_temporary(&attempt)?;
+            artifacts::remove_unreserved_terminal_temporary(
+                &attempt,
+                &|| !call.cancel.is_cancelled(),
+                &mut 0,
+            )?;
             Ok(())
         };
         Ok(Some(match remove() {

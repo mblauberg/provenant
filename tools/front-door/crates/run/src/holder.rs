@@ -2217,7 +2217,7 @@ impl RunStore {
         // credential can survive there after capture and result filtering.
         // Scrub before publication so a retry never starts from new plaintext.
         let session_redaction_failed =
-            provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
+            provenant_redact::scrub_session_history(&provider_state).is_err();
         let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
         let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
         let (mut handoff, handoff_error) = match captured_handoff.handoff {
@@ -2982,7 +2982,7 @@ impl RunStore {
         // A filter failure withholds the result instead of blocking settlement
         // forever: the lane fails with a fixed placeholder and stays terminal.
         let (mut result, result_redaction_failed) =
-            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
+            match provenant_redact::known_shapes(decoded.result.as_bytes()) {
                 Ok(safe) => match String::from_utf8(safe) {
                     Ok(text) => (text, false),
                     Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
@@ -3557,7 +3557,7 @@ fn bounded_reason(mut reason: String) -> String {
 
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
-    provenant_confinement::redact::bounded_line(note, 240)
+    provenant_redact::bounded_line(note, 240)
 }
 
 #[cfg(test)]
@@ -4349,6 +4349,7 @@ mod writer_recovery_tests {
                     .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
                 false,
                 &call,
+                &crate::RetentionScan::default(),
             )?;
             assert_eq!(
                 private_git(&["rev-parse", "HEAD"])?,
@@ -7384,6 +7385,7 @@ mod writer_recovery_tests {
                         .checked_add(provenant_core::DurationMicros::from_seconds(90 * 86_400)?)?,
                     false,
                     &call,
+                    &crate::RetentionScan::default(),
                 )?;
                 assert_eq!(&std::fs::read(path)?, bytes);
                 assert_eq!(

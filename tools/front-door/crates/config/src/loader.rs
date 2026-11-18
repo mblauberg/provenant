@@ -628,11 +628,11 @@ fn inspect<T: DeserializeOwned + Serialize>(
     for key in [
         "gc.schedule",
         "gc.idle",
+        "gc.sweep_budget",
         "gc.graph_checkpoint_days",
         "gc.discard_archive_days",
         "gc.free_floor",
         "gc.critical_free",
-        "gc.lane_cargo_cache_max",
         "gc.alert_below",
         "gc.projects",
     ] {

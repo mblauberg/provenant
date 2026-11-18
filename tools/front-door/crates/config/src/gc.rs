@@ -159,7 +159,7 @@ retention_classes! {
         adapter: lane_cargo_caches,
         eligibility: Declared,
         detail: "settled lane; verified cache owner and free writer custody",
-        settings: ["gc.idle", "gc.lane_cargo_cache_max"],
+        settings: ["gc.idle", "lanes.cargo_cache_max"],
         triggers: GC_SETTLEMENT
     },
     ObservationLedgers => {
@@ -223,7 +223,7 @@ retention_classes! {
         adapter: build_directories,
         eligibility: Declared,
         detail: "GC boundary and free Cargo profile locks",
-        settings: ["domains.fabric.lanes.build_dir_max_bytes", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
+        settings: ["lanes.cargo_cache_max", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
         triggers: GC
     },
     GitWorktrees => {
@@ -383,11 +383,6 @@ pub struct LaneBuildSettings {
     pub cargo_debug: Option<String>,
     /// Allow dependency downloads and source updates in the host Cargo home.
     pub cargo_source_writes: Option<bool>,
-    /// Cap on the allocated bytes of all lane Cargo profile directories, idle
-    /// and busy. Collection removes idle ones, least recently used first; when
-    /// busy directories alone exceed the cap it removes every eligible idle
-    /// directory and stays over.
-    pub build_dir_max_bytes: Option<u64>,
     /// Seconds after its newest write during which a profile directory is
     /// never removed, even with its Cargo locks free: test and run binaries
     /// execute after Cargo drops its locks, and Cargo may be opening its lock
@@ -439,8 +434,6 @@ const CARGO_DEBUG_LEVELS: [&str; 10] = [
     "true",
     "false",
 ];
-/// Lane build output cap when `build_dir_max_bytes` is unset.
-pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 /// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
@@ -613,10 +606,6 @@ impl LaneBuildSettings {
     pub fn debug_level(&self) -> &str {
         self.cargo_debug.as_deref().unwrap_or("line-tables-only")
     }
-    pub fn build_dir_cap(&self) -> u64 {
-        self.build_dir_max_bytes
-            .unwrap_or(DEFAULT_BUILD_DIR_MAX_BYTES)
-    }
     pub fn build_dir_grace_seconds(&self) -> u64 {
         self.build_dir_grace_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
@@ -717,13 +706,13 @@ impl StoreSettings {
 pub struct GcSettings {
     pub schedule: bool,
     pub idle: String,
+    /// Maximum wall time for one host-wide collection pass.
+    pub sweep_budget: String,
     pub graph_checkpoint_days: u64,
     pub discard_archive_days: u64,
     pub free_floor: Option<String>,
     /// Only this small critical threshold may stop new builds; free_floor warns.
     pub critical_free: Option<String>,
-    /// Total lane Cargo cache cap; defaults to 32 GiB.
-    pub lane_cargo_cache_max: Option<String>,
     pub alert_below: Option<String>,
     pub projects: BTreeMap<String, ProjectGcSettings>,
 }
@@ -733,11 +722,11 @@ impl Default for GcSettings {
         Self {
             schedule: true,
             idle: "6h".into(),
+            sweep_budget: "5m".into(),
             graph_checkpoint_days: 90,
             discard_archive_days: 90,
             free_floor: None,
             critical_free: None,
-            lane_cargo_cache_max: None,
             alert_below: None,
             projects: BTreeMap::new(),
         }
@@ -837,6 +826,11 @@ impl GcSettings {
         parse_gc_idle_duration(&self.idle)
     }
 
+    /// Resolve the bounded duration for one host-wide sweep.
+    pub fn sweep_budget_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.sweep_budget)
+    }
+
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
         Ok(DiskLimits {
@@ -896,18 +890,9 @@ impl GcSettings {
         }
     }
 
-    /// Total bound includes busy caches, which remain protected even above it.
-    pub fn lane_cargo_cache_max_bytes(&self) -> std::io::Result<u64> {
-        self.lane_cargo_cache_max
-            .as_deref()
-            .map(parse_cache_size)
-            .transpose()
-            .map(|cap| cap.unwrap_or(32 * 1024_u64.pow(3)))
-            .map_err(std::io::Error::other)
-    }
-
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         self.idle_seconds()?;
+        self.sweep_budget_seconds()?;
         if !(1..=3650).contains(&self.discard_archive_days) {
             return Err("discard_archive_days_range");
         }
@@ -918,9 +903,6 @@ impl GcSettings {
             parse_cache_size(size)?;
         }
         if let Some(size) = &self.critical_free {
-            parse_cache_size(size)?;
-        }
-        if let Some(size) = &self.lane_cargo_cache_max {
             parse_cache_size(size)?;
         }
         if let Some(size) = &self.alert_below {
@@ -1083,6 +1065,19 @@ mod tests {
         for input in ["", "-1", "1x", "18446744073709551615w"] {
             assert!(super::parse_gc_idle_duration(input).is_err(), "{input}");
         }
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn sweep_budget_uses_duration_units_and_allows_immediate_checkpoint() {
+        let mut settings = super::GcSettings::default();
+        assert_eq!(settings.sweep_budget_seconds(), Ok(300));
+        settings.sweep_budget = "2m".into();
+        assert_eq!(settings.sweep_budget_seconds(), Ok(120));
+        assert_eq!(settings.validate(), Ok(()));
+        settings.sweep_budget = "0".into();
+        assert_eq!(settings.sweep_budget_seconds(), Ok(0));
+        assert_eq!(settings.validate(), Ok(()));
     }
 
     #[test]
@@ -1351,26 +1346,6 @@ mod tests {
     }
 
     #[test]
-    fn lane_cache_cap_defaults_and_validates() {
-        assert_eq!(
-            super::GcSettings::default()
-                .lane_cargo_cache_max_bytes()
-                .unwrap(),
-            32 * 1024_u64.pow(3)
-        );
-        let configured: super::GcSettings =
-            toml_edit::de::from_str("lane_cargo_cache_max = '8G'").unwrap();
-        assert_eq!(
-            configured.lane_cargo_cache_max_bytes().unwrap(),
-            8 * 1024_u64.pow(3)
-        );
-        assert!(configured.validate().is_ok());
-        let invalid: super::GcSettings =
-            toml_edit::de::from_str("lane_cargo_cache_max = 'invalid'").unwrap();
-        assert!(invalid.validate().is_err());
-    }
-
-    #[test]
     fn cache_sizes_accept_binary_suffixes_and_plain_gib_and_refuse_overflow() {
         for size in ["20", "20G", "20GiB", "20gib"] {
             assert_eq!(super::parse_cache_size(size), Ok(20 * 1024_u64.pow(3)));
@@ -1554,15 +1529,13 @@ mod build_tests {
         let settings = LaneBuildSettings::default();
         assert!(!settings.incremental());
         assert_eq!(settings.debug_level(), "line-tables-only");
-        assert_eq!(settings.build_dir_cap(), 20 * 1024 * 1024 * 1024);
         assert_eq!(settings.build_dir_grace_seconds(), 900);
         let settings: LaneBuildSettings = toml_edit::de::from_str(
-            "cargo_incremental = true\ncargo_debug = \"full\"\nbuild_dir_max_bytes = 5\nbuild_dir_grace_seconds = 0",
+            "cargo_incremental = true\ncargo_debug = \"full\"\nbuild_dir_grace_seconds = 0",
         )
         .unwrap();
         assert!(settings.incremental());
         assert_eq!(settings.debug_level(), "full");
-        assert_eq!(settings.build_dir_cap(), 5);
         assert_eq!(settings.build_dir_grace_seconds(), 0);
         assert!(settings.invalid_keys().is_empty());
         let invalid: LaneBuildSettings = toml_edit::de::from_str("cargo_debug = \"loud\"").unwrap();

@@ -1,5 +1,91 @@
 use super::*;
 
+// Spec: docs/specs/disk.md#bounded-sweeps
+#[test]
+fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let root = test.project_state.current_path()?.join("discard-archives");
+    fs::create_dir(&root)?;
+    let archive = root.join("archive-old");
+    fs::create_dir(&archive)?;
+    for index in 0..128 {
+        fs::write(archive.join(format!("payload-{index:03}")), b"data")?;
+    }
+    fs::File::open(&archive)?.set_modified(std::time::UNIX_EPOCH)?;
+    let before = 1_000_000_000_000_i128;
+    let mut checked = 0;
+    let partial = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        None,
+        None,
+        &mut || {
+            checked += 1;
+            checked <= 12
+        },
+    );
+    assert_eq!(partial.interrupted_at.as_deref(), Some(archive.as_path()));
+    assert!(partial.continuation.is_some());
+    let remaining = fs::read_dir(&archive)?.count();
+    assert!(remaining > 0 && remaining < 128);
+
+    fs::write(root.join("root-noise"), b"changed parent stamp")?;
+    let deferred = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        partial.interrupted_at.as_deref(),
+        partial.continuation.as_deref(),
+        &mut || false,
+    );
+    assert_eq!(deferred.interrupted_at.as_deref(), Some(archive.as_path()));
+    let resumed = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        deferred.interrupted_at.as_deref(),
+        deferred.continuation.as_deref(),
+        &mut || true,
+    );
+    assert!(resumed.interrupted_at.is_none());
+    assert_eq!(resumed.removed, vec![archive]);
+    Ok(())
+}
+
+#[test]
+fn gc_preview_keeps_custody_unknown_when_census_times_out() -> Result<(), Box<dyn Error>> {
+    struct TimedOut;
+    impl WorkerObserver for TimedOut {
+        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            panic!("preview must use the bounded census")
+        }
+        fn observe_roots_while(
+            &self,
+            _: &[PathBuf],
+            _: &dyn Fn() -> bool,
+        ) -> Option<WorkerObservations> {
+            None
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let lane = gc_owned_lane(&test, &context, "census-timeout")?;
+    context.workers = &TimedOut;
+    let observed = list_for_gc_preview(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == lane.path)
+        .ok_or("missing lane")?;
+    assert!(matches!(observed.occupancy, Occupancy::Unknown { .. }));
+    Ok(())
+}
+
 #[test]
 fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,10 +193,11 @@ fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
 #[test]
 fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
     // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let retirement = HostRetirementFixture::new(&test)?;
     for state in ["clean", "untracked", "poisoned-gitlink"] {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let context = test.context();
         let lane = gc_owned_lane(&test, &context, &format!("verdict-{state}"))?;
         let marker = fixture._temp.path().join("verdict-filter-ran");
         let poison = match state {
@@ -125,13 +212,12 @@ fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box
             }
             _ => None,
         };
-        let retirement = HostRetirementFixture::new(&test)?;
         retirement.seed_lane(&context, &lane)?;
         let run = |dry_run: bool| -> Result<WorktreeGcReport, Box<dyn Error>> {
             if let Some(poison) = &poison {
                 poison.arm()?;
             }
-            let lanes = list_for_gc(&context, &cancel())?;
+            let lanes = list_for_gc_matching(&context, &cancel(), |path, _| path == lane.path)?;
             Ok(collect(
                 &context,
                 &lanes,

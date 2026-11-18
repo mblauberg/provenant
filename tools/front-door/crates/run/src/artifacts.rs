@@ -24,7 +24,14 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 /// The exception is rooted at the literal tmp entry, never the attempt itself.
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
+    keep_going: &dyn Fn() -> bool,
+    reclaimed: &mut u64,
 ) -> provenant_os::fs::Result<u64> {
+    if !keep_going() {
+        return Err(provenant_os::fs::FsError::Cancelled {
+            path: attempt.anchored_path().join("tmp"),
+        });
+    }
     crate::short_temporary::remove(attempt);
     let name = OsStr::new("tmp");
     let metadata = match attempt.metadata_at(name, false) {
@@ -34,6 +41,7 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     };
     if metadata.kind != FileKind::Directory {
         attempt.unlink(name)?;
+        *reclaimed = reclaimed.saturating_add(metadata.allocated);
         return Ok(metadata.allocated);
     }
     attempt.make_owner_accessible_at(name)?;
@@ -41,30 +49,90 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
     let bytes = metadata
         .allocated
-        .saturating_add(remove_payload_contents(&tree)?);
+        .saturating_add(remove_payload_contents(&tree, keep_going, reclaimed)?);
     drop(tree);
+    if !attempt.metadata_at(name, false)?.same_identity(&metadata) {
+        return Err(provenant_os::fs::FsError::PayloadMismatch { name: name.into() });
+    }
     // tmp itself is not lock-named, so ordinary removal suffices.
     attempt.rmdir(name)?;
+    *reclaimed = reclaimed.saturating_add(metadata.allocated);
     Ok(bytes)
 }
 
-fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<u64> {
+/// Dispose only a claimed regenerable payload, checking the caller's budget
+/// between entries. An explicit stack supports deep trees without call-stack
+/// growth; completed unlinks are the resume state for an interrupted pass.
+pub(crate) fn remove_payload_contents(
+    directory: &PayloadTree,
+    keep_going: &dyn Fn() -> bool,
+    reclaimed: &mut u64,
+) -> provenant_os::fs::Result<u64> {
+    struct Frame {
+        tree: Option<PayloadTree>,
+        name: Option<std::ffi::OsString>,
+        allocated: u64,
+        pending: std::collections::VecDeque<std::ffi::OsString>,
+    }
+    let mut stack = vec![Frame {
+        tree: None,
+        name: None,
+        allocated: 0,
+        pending: Default::default(),
+    }];
     let mut bytes = 0_u64;
     if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
         directory.make_writable()?;
     }
-    let entries = directory
-        .entries()?
-        .collect::<provenant_os::fs::Result<Vec<_>>>()?;
-    for entry in entries {
-        let metadata = directory.metadata_at(&entry)?;
-        bytes = bytes.saturating_add(metadata.allocated);
-        if metadata.kind == FileKind::Directory {
-            directory.directory().make_owner_accessible_at(&entry)?;
-            bytes = bytes.saturating_add(remove_payload_contents(&directory.child(&entry)?)?);
-            directory.rmdir(&entry)?;
-        } else {
-            directory.unlink(&entry)?;
+    while let Some(frame) = stack.last_mut() {
+        let current = frame.tree.as_ref().unwrap_or(directory);
+        if !keep_going() {
+            return Err(provenant_os::fs::FsError::Cancelled {
+                path: current.directory().anchored_path(),
+            });
+        }
+        if frame.pending.is_empty() {
+            for entry in current.entries()?.take(64) {
+                if !keep_going() {
+                    return Err(provenant_os::fs::FsError::Cancelled {
+                        path: current.directory().anchored_path(),
+                    });
+                }
+                frame.pending.push_back(entry?);
+            }
+        }
+        if let Some(entry) = frame.pending.pop_front() {
+            let metadata = current.metadata_at(&entry)?;
+            bytes = bytes.saturating_add(metadata.allocated);
+            if metadata.kind == FileKind::Directory {
+                current.directory().make_owner_accessible_at(&entry)?;
+                let child = current.child(&entry)?;
+                if child.metadata()?.uid == provenant_os::fs::effective_uid() {
+                    child.make_writable()?;
+                }
+                stack.push(Frame {
+                    tree: Some(child),
+                    name: Some(entry),
+                    allocated: metadata.allocated,
+                    pending: Default::default(),
+                });
+            } else {
+                current.unlink(&entry)?;
+                *reclaimed = reclaimed.saturating_add(metadata.allocated);
+            }
+            continue;
+        }
+        let Some(done) = stack.pop() else {
+            break;
+        };
+        if let Some(name) = done.name {
+            drop(done.tree);
+            let parent = stack
+                .last()
+                .and_then(|frame| frame.tree.as_ref())
+                .unwrap_or(directory);
+            parent.rmdir(&name)?;
+            *reclaimed = reclaimed.saturating_add(done.allocated);
         }
     }
     Ok(bytes)
@@ -145,7 +213,7 @@ impl RunStore {
             ));
         }
         let mut hash = Sha256::new();
-        let mut redactor = provenant_confinement::redact::Redactor::new([])
+        let mut redactor = provenant_redact::Redactor::new([])
             .map_err(|_| RunError::Validation("output redaction failed"))?;
         let mut capture = provenant_records::result_capture::ResultCapture::new(required_verdict);
         let mut buffer = [0u8; 8192];

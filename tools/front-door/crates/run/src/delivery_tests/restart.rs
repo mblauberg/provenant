@@ -737,6 +737,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         collection_time,
         false,
         &call,
+        &crate::RetentionScan::default(),
     )?;
     assert!(gc.errors.is_empty(), "{:?}", gc.errors);
     assert!(
@@ -852,6 +853,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     .unwrap(),
                 cargo_target_seed: false,
                 state_root: self.state.clone(),
+                roots: None,
                 sandbox: provenant_confinement::run_config::SandboxMode {
                     requested: true,
                     effective: true,
@@ -859,6 +861,9 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     warning: None,
                 },
                 backend: None,
+                cargo_target: Default::default(),
+                cargo_cache_budget: None,
+                cargo_target_protection: Default::default(),
             });
             Ok(prepared)
         }

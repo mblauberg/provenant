@@ -27,6 +27,7 @@ mod checkpoint_retention;
 mod event_delivery;
 mod events;
 mod gc_support;
+mod gc_sweep;
 mod handoff;
 mod hook_state;
 mod hook_worktree;

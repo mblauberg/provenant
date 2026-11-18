@@ -468,6 +468,7 @@ dependencies = [
  "provenant-providers",
  "provenant-quota",
  "provenant-records",
+ "provenant-redact",
  "provenant-routing",
  "provenant-run",
  "provenant-sqlite",
@@ -502,6 +503,7 @@ dependencies = [
  "provenant-providers",
  "provenant-quota",
  "provenant-records",
+ "provenant-redact",
  "provenant-routing",
  "provenant-run",
  "provenant-supervisor",
@@ -542,6 +544,7 @@ dependencies = [
  "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
+ "provenant-redact",
  "provenant-supervisor",
  "provenant-test-support",
  "serde",
@@ -573,6 +576,7 @@ dependencies = [
  "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
+ "provenant-redact",
  "provenant-routing",
  "provenant-test-support",
  "rusqlite",
@@ -625,6 +629,7 @@ dependencies = [
  "provenant-os",
  "provenant-quota",
  "provenant-records",
+ "provenant-redact",
  "provenant-test-support",
  "rusqlite",
  "serde",
@@ -663,6 +668,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "provenant-redact"
+version = "2.1.1"
+dependencies = [
+ "provenant-core",
+ "provenant-os",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "provenant-routing"
 version = "2.1.1"
 dependencies = [
@@ -691,6 +707,7 @@ dependencies = [
  "provenant-core",
  "provenant-os",
  "provenant-records",
+ "provenant-redact",
  "provenant-sqlite",
  "provenant-supervisor",
  "provenant-test-support",

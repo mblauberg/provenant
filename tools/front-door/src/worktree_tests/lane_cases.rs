@@ -872,8 +872,10 @@ fn verify_lane_profile(
                 "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
             ),
         )?;
+        // Build the test target once, then execute that same scratch product.
+        // Both SwiftPM subcommands still cross the real confined shim boundary.
         let command = if probe == Some(Probe::SwiftReadOnly) {
-            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build; swift test; test ! -e .build; printf 'lane-swift-read-only: PASS\\n'"
+            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build --build-tests; swift test --skip-build; test ! -e .build; printf 'lane-swift-read-only: PASS\\n'"
         } else {
             "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
         };

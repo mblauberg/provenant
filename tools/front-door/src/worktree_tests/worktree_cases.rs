@@ -71,7 +71,10 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
         &cancel,
     )?;
     assert_eq!(fs::read(&marker_path)?, marker_bytes);
-    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    let inventory = provenant_config::port_command_receipts(
+        &rig.state,
+        &provenant_core::SweepControl::default(),
+    )?;
     assert!(inventory.complete, "{:?}", inventory.issues);
     for (owner, phase) in [("naming", "derive"), ("post_create", "create")] {
         let receipt = &inventory

@@ -23,7 +23,7 @@ pub fn durable_sync_file(file: &File) -> io::Result<()> {
     os::sync_file(file)
 }
 
-pub use os::{DURABILITY_ENV, durability_relaxed};
+pub use os::{DURABILITY_ENV, DirectoryPosition, durability_relaxed};
 
 pub mod ledger;
 
@@ -519,6 +519,12 @@ thread_local! {
     static DIRECTORY_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(any(test, feature = "fixture"))]
+thread_local! {
+    pub(crate) static EXISTING_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Directory enumerations started by this thread, so a caller can show that a
 /// view scans a number of directories bounded by what it displays.
 pub fn directory_scans() -> u64 {
@@ -932,6 +938,10 @@ impl Directory {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(FsError::LockTimeout { path, timeout });
+            }
+            #[cfg(any(test, feature = "fixture"))]
+            if let Some(hook) = EXISTING_LOCK_WAIT_HOOK.with(|hook| hook.borrow_mut().take()) {
+                hook();
             }
             wait(remaining.min(Duration::from_millis(5)));
         }
@@ -1424,6 +1434,20 @@ impl Iterator for Entries {
         self.stream
             .next()
             .map(|result| result.map_err(error("readdir", &self.path)))
+    }
+}
+impl Entries {
+    /// Return an opaque offset for resumable traversal of an unchanged tree.
+    pub fn position(&mut self) -> Result<DirectoryPosition> {
+        self.stream.position().map_err(error("telldir", &self.path))
+    }
+
+    /// Resume from a prior offset after checking that the directory is
+    /// unchanged. Offsets are filesystem cookies, not entry counts.
+    pub fn seek(&mut self, position: DirectoryPosition) -> Result<()> {
+        self.stream
+            .seek(position)
+            .map_err(error("seekdir", &self.path))
     }
 }
 

@@ -1,6 +1,29 @@
 //! Process census and worker observation.
 use super::*;
 
+pub(super) const UNREADABLE_NO_CANDIDATE_PATH: &str =
+    "unreadable process has no path under candidate roots";
+
+pub(super) fn mark_unreadable_process_warning(boot: &str, pid: i64) -> bool {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<BTreeSet<(String, i64)>>> =
+        std::sync::OnceLock::new();
+    let warned = WARNED.get_or_init(|| std::sync::Mutex::new(BTreeSet::new()));
+    let Ok(mut warned) = warned.lock() else {
+        return false;
+    };
+    warned.insert((boot.to_owned(), pid))
+}
+
+fn warn_unreadable_process_once(boot: &str, pid: i64) {
+    if mark_unreadable_process_warning(boot, pid) {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: process {pid} could not be inspected (EPERM); no observed cwd or descriptor is under candidate worktrees"
+        );
+    }
+}
+
 /// A single acquisition supplies both the decision and its refusal evidence.
 #[derive(Clone, Default)]
 pub struct WorkerEvidence {
@@ -1016,15 +1039,25 @@ fn system_worker_evidence_while(
                 .collect(),
         };
     };
+    let mut unreadable_warnings = BTreeSet::new();
     let (states, holders, details, taints) = observe_worker_holders_while(
         roots,
         &SystemProcessObserver,
         &PolicyCwdObserver(entries),
         &current,
         ancestors,
-        &mut |_, _| {},
+        &mut |pid, condition| {
+            if condition == Some(UNREADABLE_NO_CANDIDATE_PATH)
+                && let Some(pid) = pid
+            {
+                unreadable_warnings.insert(pid);
+            }
+        },
         keep_going,
     );
+    for pid in unreadable_warnings {
+        warn_unreadable_process_once(&current.identity.boot, pid);
+    }
     WorkerEvidence {
         states,
         holders,
@@ -1248,6 +1281,58 @@ pub(super) fn observe_worker_holders_while(
         if !within_budget() {
             return (states, holders, details, taints);
         }
+        if issue == provenant_supervisor::census::ObservationIssue::PermissionDenied {
+            let cwd = cwd_observer.cwd(pid);
+            let occupancy = cwd_observer.occupancy_with_retries_while(pid, &within_budget);
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
+            // EPERM is a common limit of process listings. Place every
+            // positive path first; only a complete descriptor observation can
+            // prove that the other roots are clear.
+            let cwd_supported = matches!(
+                &cwd,
+                Ok(CwdObservation::Path(_)
+                    | CwdObservation::Gone
+                    | CwdObservation::PermissionDenied)
+            );
+            let mut under_candidate = false;
+            if let Ok(CwdObservation::Path(path)) = &cwd {
+                under_candidate |= record_unreadable_path(
+                    &mut states,
+                    &mut holders,
+                    &mut details,
+                    &mut taints,
+                    cwd_observer,
+                    pid,
+                    path.as_path(),
+                    ProcessEvidenceKind::WorkingDirectory,
+                    unplaceable,
+                );
+            }
+            for path in occupancy.paths {
+                if !within_budget() {
+                    return (states, holders, details, taints);
+                }
+                under_candidate |= record_unreadable_path(
+                    &mut states,
+                    &mut holders,
+                    &mut details,
+                    &mut taints,
+                    cwd_observer,
+                    pid,
+                    &path,
+                    ProcessEvidenceKind::OtherHeldPath,
+                    unplaceable,
+                );
+            }
+            if cwd_supported && occupancy.complete {
+                if !under_candidate {
+                    unplaceable(Some(pid), Some(UNREADABLE_NO_CANDIDATE_PATH));
+                }
+                continue;
+            }
+        }
         unplaceable(Some(pid), Some("stable process identity unavailable"));
         let detail = process_detail(cwd_observer, pid, &format!("{issue:?}"));
         record_unknown_all_with_taint(
@@ -1299,9 +1384,14 @@ pub(super) fn observe_worker_holders_while(
         let uids_before = cwd_observer.process_uids(pid);
         let mut cwd = observe_same_process(observer, cwd_observer, fact);
         let mut occupancy_gap = None;
+        let mut occupancy_complete = false;
+        let mut foreign_system = false;
+        let mut descriptor_roots = BTreeSet::new();
+        let mut descriptor_uncertain_roots = BTreeSet::new();
         if !matches!(cwd, NativeCwd::Gone) {
             let before = observer.observe(pid);
             let occupancy = cwd_observer.occupancy_with_retries_while(pid, &within_budget);
+            occupancy_complete = occupancy.complete;
             if !within_budget() {
                 return (states, holders, details, taints);
             }
@@ -1345,7 +1435,7 @@ pub(super) fn observe_worker_holders_while(
                             | NativeCwd::PolicyRejected(_)
                     )
             });
-            let foreign_system = foreign_uids.is_some();
+            foreign_system = foreign_uids.is_some();
             // Still inspect and place every positive path. Only missing evidence
             // is scoped out; a root-owned process inside a worktree is live.
             if let Some(uids) = foreign_uids
@@ -1372,6 +1462,7 @@ pub(super) fn observe_worker_holders_while(
                         );
                         for (root, state) in &mut states {
                             if occupancy_path_could_be_under(path, root) && !state.is_observed() {
+                                descriptor_uncertain_roots.insert(root.clone());
                                 *state = Occupancy::census_unknown(
                                     root.clone(),
                                     "process occupancy could not be placed",
@@ -1402,7 +1493,11 @@ pub(super) fn observe_worker_holders_while(
                                 "occupancy path placement required (directory identity placement failed)",
                             ),
                         );
-                        for (root, state) in &states {
+                        for (root, state) in &mut states {
+                            if occupancy_path_could_be_under(location, root) && !state.is_observed()
+                            {
+                                descriptor_uncertain_roots.insert(root.clone());
+                            }
                             if state.is_unknown() {
                                 details.entry(root.clone()).or_insert_with(|| {
                                     process_detail(
@@ -1428,6 +1523,7 @@ pub(super) fn observe_worker_holders_while(
                         ProcessEvidenceKind::OtherHeldPath
                     };
                     for root in placed {
+                        descriptor_roots.insert(root.clone());
                         let holder = holders
                             .entry(root.clone())
                             .and_modify(|h| {
@@ -1465,46 +1561,46 @@ pub(super) fn observe_worker_holders_while(
         }
         match cwd {
             NativeCwd::Gone => {}
-            NativeCwd::PolicyExcluded(excusal) => {
-                // Accepted risk for sealed Apple code, applied per root owner.
-                // All credentials must be system accounts and foreign to every
-                // candidate root, including the real uid of a setuid tool.
-                if !excusal_applies(&excusal, roots) {
+            NativeCwd::PolicyExcluded(_) | NativeCwd::PolicyRejected(_) => {
+                if matches!(
+                    &cwd,
+                    NativeCwd::PolicyExcluded(excusal) if !excusal_applies(excusal, roots)
+                ) {
                     unplaceable(
                         Some(pid),
                         Some(
                             "real/effective/saved system uids foreign to every root owner required",
                         ),
                     );
+                }
+                let path_evidence_complete = occupancy_complete || foreign_system;
+                if occupancy_gap.is_none() && path_evidence_complete {
+                    if descriptor_roots.is_empty() && descriptor_uncertain_roots.is_empty() {
+                        unplaceable(Some(pid), Some(UNREADABLE_NO_CANDIDATE_PATH));
+                    }
+                } else {
+                    let detail = match &cwd {
+                        NativeCwd::PolicyRejected(failure) => {
+                            unplaceable(Some(pid), failure.builtin_condition);
+                            if failure.configurable {
+                                format!(
+                                    "cwd unreadable; policy_condition={}; configure confinement.census_ignore_unreadable with this canonical path and team_id",
+                                    failure.condition
+                                )
+                            } else {
+                                format!("cwd unreadable; policy_condition={}", failure.condition)
+                            }
+                        }
+                        _ => "cwd unreadable".into(),
+                    };
                     record_unknown_all_with_taint(
                         &mut states,
                         &mut details,
                         &mut taints,
-                        &process_detail(cwd_observer, pid, "cwd unreadable"),
+                        &process_detail(cwd_observer, pid, &detail),
                         TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
                     );
                 }
-            }
-            NativeCwd::PolicyRejected(failure) => {
-                unplaceable(Some(pid), failure.builtin_condition);
-                let condition = failure.condition;
-                record_unknown_all_with_taint(
-                    &mut states,
-                    &mut details,
-                    &mut taints,
-                    &process_detail(
-                        cwd_observer,
-                        pid,
-                        &if failure.configurable {
-                            format!(
-                                "cwd unreadable; policy_condition={condition}; configure confinement.census_ignore_unreadable with this canonical path and team_id"
-                            )
-                        } else {
-                            format!("cwd unreadable; policy_condition={condition}")
-                        },
-                    ),
-                    TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
-                );
             }
             NativeCwd::Unknown(category) => {
                 let condition = if category.starts_with("cwd ") {
@@ -1688,6 +1784,90 @@ pub(super) enum NativeCwd {
     PolicyExcluded(provenant_os::pid::UnreadablePolicyExcusal),
     PolicyRejected(provenant_os::pid::UnreadablePolicyFailure),
     Unknown(String),
+}
+
+/// Place positive cwd/descriptor evidence from an EPERM process. Unreadable
+/// process metadata is scoped to roots that its known paths could occupy.
+#[allow(clippy::too_many_arguments)] // The census owns these four correlated evidence maps.
+fn record_unreadable_path(
+    states: &mut BTreeMap<PathBuf, Occupancy>,
+    holders: &mut BTreeMap<PathBuf, ObservedProcess>,
+    details: &mut BTreeMap<PathBuf, String>,
+    taints: &mut BTreeMap<PathBuf, TaintCause>,
+    cwd_observer: &dyn CwdObserver,
+    pid: i64,
+    path: &Path,
+    kind: ProcessEvidenceKind,
+    unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+) -> bool {
+    let Some(canonical) = canonical_cwd(path) else {
+        unplaceable(Some(pid), Some("occupancy path placement required"));
+        let detail = process_detail(
+            cwd_observer,
+            pid,
+            &format!("occupancy path unavailable: {}", path.display()),
+        );
+        let mut possible = false;
+        for (root, state) in states {
+            if occupancy_path_could_be_under(path, root) && !state.is_observed() {
+                possible = true;
+                *state = Occupancy::census_unknown(
+                    root.clone(),
+                    "process occupancy could not be placed",
+                );
+                details
+                    .entry(root.clone())
+                    .or_insert_with(|| detail.clone());
+                taints
+                    .entry(root.clone())
+                    .or_insert_with(|| TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable));
+            }
+        }
+        return possible;
+    };
+    let location = match std::fs::metadata(&canonical) {
+        Ok(metadata) if !metadata.is_dir() => canonical.parent().unwrap_or(&canonical),
+        _ => &canonical,
+    };
+    let mut placement_failed = false;
+    let placed = record_live_path_with_audit(states, location, &mut || placement_failed = true);
+    let mut possible = !placed.is_empty();
+    if placement_failed {
+        unplaceable(Some(pid), Some("occupancy path placement required"));
+        let detail = process_detail(
+            cwd_observer,
+            pid,
+            "occupancy path or root identity unreadable",
+        );
+        for (root, state) in states {
+            if occupancy_path_could_be_under(location, root) && !state.is_observed() {
+                possible = true;
+                *state = Occupancy::census_unknown(
+                    root.clone(),
+                    "process occupancy could not be placed",
+                );
+                details
+                    .entry(root.clone())
+                    .or_insert_with(|| detail.clone());
+                taints
+                    .entry(root.clone())
+                    .or_insert_with(|| TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable));
+            }
+        }
+    }
+    for root in placed {
+        let mut holder = ObservedProcess::new(pid, cwd_observer.process_details(pid), kind);
+        if kind == ProcessEvidenceKind::WorkingDirectory {
+            holder.cwd = Some(location.to_path_buf());
+        }
+        details.insert(
+            root.clone(),
+            format!("process {pid}: {} inside root", holder.kind),
+        );
+        taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
+        holders.entry(root).or_insert(holder);
+    }
+    possible
 }
 
 pub(super) fn process_detail(observer: &dyn CwdObserver, pid: i64, category: &str) -> String {
