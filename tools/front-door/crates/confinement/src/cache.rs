@@ -1372,7 +1372,7 @@ fn prune_worktree_cache(
                 return Ok(());
             }
         }
-        if read_cache_owner(&cache, Path::new(name))? != owner {
+        if read_cache_owner(&cache, Path::new(name))?.as_ref() != Some(owner) {
             return Ok(());
         }
     }
@@ -2908,7 +2908,7 @@ mod tests {
                     ..CacheGcScan::default()
                 };
                 let report =
-                    super::gc_worktree_cargo_caches(home, &CacheGcPolicy::default(), &scan)?;
+                    crate::cache::gc_worktree_cargo_caches(home, &CacheGcPolicy::default(), &scan)?;
                 removed.extend(report.removed);
                 let Some(interrupted_at) = report.interrupted_at else {
                     complete = true;
