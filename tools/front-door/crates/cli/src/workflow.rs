@@ -591,7 +591,7 @@ fn execute(
         }
         Workflow::Session(Session::Show { .. } | Session::Diff { .. }) => unreachable_read(),
         Workflow::Session(Session::Handoff(_)) => Err(invalid(
-            "workflow session handoff is composed by the provenant binary",
+            "workflow session handoff is composed by the Provenant binary",
         )),
     }
 }

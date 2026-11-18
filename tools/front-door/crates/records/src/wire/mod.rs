@@ -157,7 +157,7 @@ pub fn error_envelope_schema() -> Value {
     }
     root(
         &format!("{SCHEMA_ID_BASE}error.schema.json"),
-        "provenant error envelope",
+        "Provenant error envelope",
         schema,
     )
 }
