@@ -2105,7 +2105,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         provenant_config::RetentionTrigger::FullGc
     };
-    let classes = provenant_config::retention_schedule(trigger);
+    let classes = provenant_config::retention_schedule(trigger).collect::<Vec<_>>();
     let resume_index = adapters.resume_cursor.as_ref().and_then(|cursor| {
         if cursor.class == "complete" {
             Some(classes.len())
@@ -2780,7 +2780,6 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let candidate_start = self.resume_candidate().map(Path::to_path_buf);
         let cancel = self.deadline.cancel().clone();
         let sweep_deadline = self.deadline;
-        let sweep_lease = self.lease.as_ref();
         let project_start_index = project_start
             .as_ref()
             .and_then(|path| {
@@ -2821,7 +2820,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 command.dry_run,
                 &cancel,
                 |context, cancel| {
-                    let mut should_continue = || sweep_should_continue(sweep_deadline, sweep_lease);
+                    let mut should_continue =
+                        || sweep_should_continue(sweep_deadline, self.lease.as_ref());
                     Ok(worktrees::collect_archives(
                         context,
                         now_ns
@@ -3209,7 +3209,7 @@ pub(crate) fn with_context_mode_cancel<T>(
     cancel: &CancelToken,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    with_context_mode_with_owner(
+    with_context_mode_with_owner_cancel(
         roots, home, project, mutation, workers, facts, read_only, None, cancel, action,
     )
 }

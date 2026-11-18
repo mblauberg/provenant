@@ -1,5 +1,5 @@
 //! Single-flight ownership and restart position for host-wide GC sweeps.
-use provenant_core::{CancelToken, Clock, WaitBudget, time::DurationMicros};
+use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockGuard, LockMode, PublishMode},
