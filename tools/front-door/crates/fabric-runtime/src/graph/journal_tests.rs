@@ -2119,7 +2119,16 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
             .collect::<Vec<_>>()
     };
     assert_eq!(blobs(&directory).len(), 8);
-    assert!(prompt_store::collect(&directory, "g-test").unwrap());
+    assert!(
+        prompt_store::collect(
+            &directory,
+            "g-test",
+            &provenant_core::SweepControl::default(),
+            None,
+        )
+        .unwrap()
+        .removed
+    );
     assert!(blobs(&directory).is_empty());
     assert!(load_checkpoint(&directory, "g-test").is_err());
 }

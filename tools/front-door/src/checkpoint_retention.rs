@@ -1,7 +1,7 @@
 //! Retention adapter for graph checkpoints and their derived files.
 use provenant_config::ByteObservation;
 use provenant_core::{Clock, ProjectId, StateRoot, SweepControl};
-use provenant_os::fs::Directory;
+use provenant_os::fs::{Directory, DirectoryPosition};
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -212,7 +212,7 @@ fn walk_directory(
     }
     let mut target = cursor.and(start_at);
     loop {
-        let before = entries.position().unwrap_or(0);
+        let before = entries.position().unwrap_or_default();
         let Some(item) = entries.next() else { break };
         let item = item.map_err(|error| error.to_string())?;
         let path = display_root.join(&item);
@@ -331,12 +331,12 @@ struct MeasureCursor {
     phase: String,
     device: u64,
     inode: u64,
-    cookie: i64,
+    cookie: DirectoryPosition,
     bytes: u64,
 }
 
 impl MeasureCursor {
-    fn new(phase: &str, directory: &Directory, cookie: i64, bytes: u64) -> Self {
+    fn new(phase: &str, directory: &Directory, cookie: DirectoryPosition, bytes: u64) -> Self {
         let metadata = directory.metadata().ok();
         Self {
             phase: phase.into(),
@@ -354,8 +354,8 @@ impl MeasureCursor {
     }
     fn encode(&self) -> String {
         format!(
-            "graph-measure-v1|{}|{}|{}|{}|{}",
-            self.phase, self.device, self.inode, self.cookie, self.bytes
+            "graph-measure-v1|{}|{}|{}|{}|{}|{}",
+            self.phase, self.device, self.inode, self.cookie.block, self.cookie.offset, self.bytes
         )
     }
     fn parse(value: Option<&str>) -> Option<Self> {
@@ -367,7 +367,10 @@ impl MeasureCursor {
             phase: fields.next()?.into(),
             device: fields.next()?.parse().ok()?,
             inode: fields.next()?.parse().ok()?,
-            cookie: fields.next()?.parse().ok()?,
+            cookie: DirectoryPosition {
+                block: fields.next()?.parse().ok()?,
+                offset: fields.next()?.parse().ok()?,
+            },
             bytes: fields.next()?.parse().ok()?,
         })
     }

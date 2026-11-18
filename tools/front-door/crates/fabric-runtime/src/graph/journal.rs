@@ -198,37 +198,81 @@ pub struct GraphCollectionReport {
 struct GraphCollectionCursor {
     phase: String,
     id: Option<String>,
-    cookie: i64,
+    cookie: provenant_os::fs::DirectoryPosition,
+    nested: provenant_os::fs::DirectoryPosition,
 }
 
 impl GraphCollectionCursor {
-    fn checkpoints(cookie: i64) -> Self {
+    fn checkpoints(cookie: provenant_os::fs::DirectoryPosition) -> Self {
         Self {
             phase: "checkpoints".into(),
             id: None,
             cookie,
+            nested: Default::default(),
         }
     }
-    fn cleanup(id: &str, cookie: i64) -> Self {
+    fn cleanup(id: &str, cookie: provenant_os::fs::DirectoryPosition) -> Self {
         Self {
             phase: "cleanup".into(),
             id: Some(id.into()),
             cookie,
+            nested: Default::default(),
         }
     }
-    fn orphans(cookie: i64) -> Self {
+    fn orphan_cleanup(
+        id: &str,
+        cookie: provenant_os::fs::DirectoryPosition,
+        pending: bool,
+    ) -> Self {
+        Self {
+            phase: if pending {
+                "pending-cleanup".into()
+            } else {
+                "orphan-cleanup".into()
+            },
+            id: Some(id.into()),
+            cookie,
+            nested: Default::default(),
+        }
+    }
+    fn orphans(cookie: provenant_os::fs::DirectoryPosition) -> Self {
         Self {
             phase: "orphans".into(),
             id: None,
             cookie,
+            nested: Default::default(),
+        }
+    }
+    fn pending(cookie: provenant_os::fs::DirectoryPosition) -> Self {
+        Self {
+            phase: "pending".into(),
+            id: None,
+            cookie,
+            nested: Default::default(),
+        }
+    }
+    fn nested(
+        phase: &str,
+        id: &str,
+        cookie: provenant_os::fs::DirectoryPosition,
+        nested: provenant_os::fs::DirectoryPosition,
+    ) -> Self {
+        Self {
+            phase: phase.into(),
+            id: Some(id.into()),
+            cookie,
+            nested,
         }
     }
     fn encode(&self) -> String {
         format!(
-            "graph-collection-v1|{}|{}|{}",
+            "graph-collection-v1|{}|{}|{}|{}|{}|{}",
             self.phase,
             self.id.as_deref().unwrap_or("-"),
-            self.cookie
+            self.cookie.block,
+            self.cookie.offset,
+            self.nested.block,
+            self.nested.offset,
         )
     }
     fn parse(value: Option<&str>) -> Option<Self> {
@@ -237,18 +281,41 @@ impl GraphCollectionCursor {
             return None;
         }
         let phase = fields.next()?.to_owned();
-        if !matches!(phase.as_str(), "checkpoints" | "cleanup" | "orphans") {
+        if !matches!(
+            phase.as_str(),
+            "checkpoints"
+                | "cleanup"
+                | "orphans"
+                | "pending"
+                | "orphan-cleanup"
+                | "pending-cleanup"
+                | "checkpoint-scratch"
+                | "checkpoint-prompts"
+                | "orphan-prompts"
+                | "pending-prompts"
+        ) {
             return None;
         }
         let id = match fields.next()? {
             "-" => None,
             id => Some(id.to_owned()),
         };
-        let cookie = fields.next()?.parse().ok()?;
+        let block = fields.next()?.parse().ok()?;
+        let offset = fields.next()?.parse().ok()?;
+        let nested_block = fields.next()?.parse().ok()?;
+        let nested_offset = fields.next()?.parse().ok()?;
         if fields.next().is_some() {
             return None;
         }
-        Some(Self { phase, id, cookie })
+        Some(Self {
+            phase,
+            id,
+            cookie: provenant_os::fs::DirectoryPosition { block, offset },
+            nested: provenant_os::fs::DirectoryPosition {
+                block: nested_block,
+                offset: nested_offset,
+            },
+        })
     }
 }
 
@@ -742,70 +809,72 @@ impl FileJournal {
             Err(error) => return Err(error.into()),
         };
         let cursor = GraphCollectionCursor::parse(control.detail);
-        if cursor
-            .as_ref()
-            .is_some_and(|cursor| cursor.phase == "orphans")
-        {
-            if !control.should_continue() {
-                report.interrupted_at = Some(directory.anchored_path());
-                report.continuation = Some(GraphCollectionCursor::orphans(0).encode());
-                return Ok(report);
-            }
-            report.removed =
-                Self::collect_unreferenced_artifacts(root, project, &control.cancel, clock)?;
+        if cursor.as_ref().is_some_and(|cursor| {
+            matches!(
+                cursor.phase.as_str(),
+                "orphans"
+                    | "pending"
+                    | "orphan-cleanup"
+                    | "pending-cleanup"
+                    | "orphan-prompts"
+                    | "pending-prompts"
+            )
+        }) {
+            return Self::collect_unreferenced_artifacts(root, project, control, clock);
         }
         if cursor
             .as_ref()
-            .is_some_and(|cursor| cursor.phase == "cleanup")
+            .is_some_and(|cursor| cursor.phase == "checkpoint-prompts")
         {
-            // A prior pass removed a checkpoint and was interrupted while
-            // retiring its derived files. The journal owner rechecks its
-            // durable reservation and checkpoint before orphan cleanup.
-            report.removed = report
-                .removed
-                .saturating_add(Self::collect_unreferenced_artifacts(
+            if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id.as_deref()) {
+                let candidate = control.start_at.map_or_else(
+                    || directory.anchored_path().join(checkpoint_file_name(id)),
+                    std::path::Path::to_path_buf,
+                );
+                let cleaned = Self::collect_unreferenced_id(
                     root,
                     project,
-                    &control.cancel,
+                    &directory,
+                    id,
+                    &candidate,
+                    control,
                     clock,
-                )?);
-        }
-        if cursor
-            .as_ref()
-            .is_some_and(|cursor| cursor.phase == "orphans")
-        {
-            return Ok(report);
+                    Some(cursor.as_ref().unwrap().nested),
+                )?;
+                report.removed = report
+                    .removed
+                    .saturating_add(usize::from(cleaned.recovered));
+                if let Some(path) = cleaned.interrupted_at {
+                    let next = cleaned.prompt_cookie.map_or_else(
+                        || GraphCollectionCursor::cleanup(id, cursor.as_ref().unwrap().cookie),
+                        |nested| {
+                            GraphCollectionCursor::nested(
+                                "checkpoint-prompts",
+                                id,
+                                cursor.as_ref().unwrap().cookie,
+                                nested,
+                            )
+                        },
+                    );
+                    interrupt_graph_collection(&mut report, path, next);
+                    return Ok(report);
+                }
+            }
         }
         let mut entries = directory.entries()?;
-        if let Some(cursor) = cursor
-            .as_ref()
-            .filter(|cursor| cursor.phase == "checkpoints")
-        {
-            let _ = entries.seek(cursor.cookie);
+        if let Some(cursor) = cursor.as_ref().filter(|cursor| {
+            matches!(
+                cursor.phase.as_str(),
+                "checkpoints" | "cleanup" | "checkpoint-scratch" | "checkpoint-prompts"
+            )
+        }) {
+            entries.seek(cursor.cookie)?;
         }
-        let mut resume_target = cursor
-            .as_ref()
-            .filter(|cursor| cursor.phase == "checkpoints")
-            .and(control.start_at);
         loop {
-            let before = entries.position().unwrap_or(0);
+            let before = entries.position()?;
             let Some(entry) = entries.next() else { break };
             let entry = entry?;
             let path = directory.anchored_path().join(&entry);
-            if let Some(target) = resume_target {
-                if target != path {
-                    if !control.should_continue() {
-                        interrupt_graph_collection(
-                            &mut report,
-                            path,
-                            GraphCollectionCursor::checkpoints(before),
-                        );
-                        return Ok(report);
-                    }
-                    continue;
-                }
-                resume_target = None;
-            }
             if !control.should_continue() {
                 interrupt_graph_collection(
                     &mut report,
@@ -867,12 +936,69 @@ impl FileJournal {
                 );
                 return Ok(report);
             }
+            let scratch_resume = cursor
+                .as_ref()
+                .filter(|cursor| {
+                    cursor.phase == "checkpoint-scratch" && cursor.id.as_deref() == Some(id)
+                })
+                .map(|cursor| cursor.nested);
+            let scratch = collect_scratch_documents(&stored.execution, control, scratch_resume)?;
+            if scratch.interrupted {
+                interrupt_graph_collection(
+                    &mut report,
+                    path,
+                    GraphCollectionCursor::nested(
+                        "checkpoint-scratch",
+                        id,
+                        before,
+                        scratch.cookie.unwrap_or_default(),
+                    ),
+                );
+                return Ok(report);
+            }
+            if !control.should_continue() {
+                interrupt_graph_collection(
+                    &mut report,
+                    path,
+                    GraphCollectionCursor::cleanup(id, before),
+                );
+                return Ok(report);
+            }
             (|| -> Result<(), JournalError> {
-                collect_scratch_documents(&stored.execution)?;
                 journal.reserve_name()?;
+                if !control.should_continue() {
+                    interrupt_graph_collection(
+                        &mut report,
+                        path.clone(),
+                        GraphCollectionCursor::cleanup(id, before),
+                    );
+                    return Ok(());
+                }
                 journal.directory.unlink(&name)?;
-                prompt_store::collect(&journal.directory, &id)?;
+                report.removed = report.removed.saturating_add(1);
+                let prompts = prompt_store::collect(&journal.directory, &id, control, None)?;
+                if prompts.interrupted_at.is_some() {
+                    interrupt_graph_collection(
+                        &mut report,
+                        path.clone(),
+                        GraphCollectionCursor::nested(
+                            "checkpoint-prompts",
+                            &id,
+                            before,
+                            prompts.continuation.unwrap_or_default(),
+                        ),
+                    );
+                    return Ok(());
+                }
                 for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
+                    if !control.should_continue() {
+                        interrupt_graph_collection(
+                            &mut report,
+                            path.clone(),
+                            GraphCollectionCursor::orphan_cleanup(&id, before, false),
+                        );
+                        return Ok(());
+                    }
                     match journal.directory.unlink(&sidecar) {
                         Ok(()) => {}
                         Err(error) if error.is_not_found() => {}
@@ -880,48 +1006,48 @@ impl FileJournal {
                     }
                 }
                 let markers = open_or_create(&journal.directory, OsStr::new("pending"))?;
+                if !control.should_continue() {
+                    interrupt_graph_collection(
+                        &mut report,
+                        path.clone(),
+                        GraphCollectionCursor::orphan_cleanup(&id, before, false),
+                    );
+                    return Ok(());
+                }
                 remove_pending_marker(&markers, &id)?;
                 journal
                     .directory
                     .sync()
                     .map_err(JournalError::DurabilityUnconfirmed)?;
                 // No checkpoint mutation may follow lock retirement.
+                if !control.should_continue() {
+                    interrupt_graph_collection(
+                        &mut report,
+                        path.clone(),
+                        GraphCollectionCursor::orphan_cleanup(&id, before, false),
+                    );
+                    return Ok(());
+                }
                 journal
                     .directory
                     .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
                 Ok(())
             })()
             .map_err(|error| error.for_graph(&id))?;
-            report.removed += 1;
+            if report.interrupted_at.is_some() {
+                return Ok(report);
+            }
         }
-        if resume_target.is_some() {
-            // The saved item was removed by another collector. Orphan cleanup
-            // revalidates the reservation and retries any incomplete suffix.
-            report.removed = report
-                .removed
-                .saturating_add(Self::collect_unreferenced_artifacts(
-                    root,
-                    project,
-                    &control.cancel,
-                    clock,
-                )?);
-        }
-        if !control.should_continue() {
-            interrupt_graph_collection(
-                &mut report,
-                directory.anchored_path(),
-                GraphCollectionCursor::orphans(0),
-            );
-            return Ok(report);
-        }
-        report.removed = report
-            .removed
-            .saturating_add(Self::collect_unreferenced_artifacts(
-                root,
-                project,
-                &control.cancel,
-                clock,
-            )?);
+        let orphan_control = provenant_core::SweepControl {
+            start_at: None,
+            detail: None,
+            cancel: control.cancel.clone(),
+            keep_going: control.keep_going,
+        };
+        let orphan = Self::collect_unreferenced_artifacts(root, project, &orphan_control, clock)?;
+        report.removed = report.removed.saturating_add(orphan.removed);
+        report.interrupted_at = orphan.interrupted_at;
+        report.continuation = orphan.continuation;
         Ok(report)
     }
 
@@ -934,112 +1060,263 @@ impl FileJournal {
     fn collect_unreferenced_artifacts(
         root: &StateRoot,
         project: ProjectId,
-        cancel: &CancelToken,
+        control: &provenant_core::SweepControl<'_>,
         clock: &dyn Clock,
-    ) -> Result<usize, JournalError> {
+    ) -> Result<GraphCollectionReport, JournalError> {
+        let mut report = GraphCollectionReport::default();
         let directory = match graph_directory(root, project) {
             Ok(directory) => directory,
-            Err(error) if error.is_not_found() => return Ok(0),
+            Err(error) if error.is_not_found() => return Ok(report),
             Err(error) => return Err(error.into()),
         };
-        let reserved = Self::reserved_graph_ids(root, project)?
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        let checkpoints = Self::graph_ids(root, project)?
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut candidates = std::collections::BTreeSet::new();
-        for entry in directory.entries()? {
-            let name = entry?;
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Some(rest) = name.strip_prefix("graph-") else {
-                continue;
-            };
-            let id = [".lock", ".unreadable", ".advance-error"]
-                .iter()
-                .find_map(|suffix| rest.strip_suffix(suffix))
-                .or_else(|| {
-                    rest.split_once(".prompt-").and_then(|(id, digest)| {
-                        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                            .then_some(id)
-                    })
-                });
-            if let Some(id) = id.filter(|id| valid_identifier(id)) {
-                candidates.insert(id.to_owned());
+        let cursor = GraphCollectionCursor::parse(control.detail);
+        let phase = cursor
+            .as_ref()
+            .map_or("orphans", |cursor| cursor.phase.as_str());
+        let pending_phase = matches!(phase, "pending" | "pending-cleanup" | "pending-prompts");
+
+        if matches!(
+            phase,
+            "orphan-cleanup" | "pending-cleanup" | "orphan-prompts" | "pending-prompts"
+        ) {
+            if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id.as_deref()) {
+                let outer_path = control
+                    .start_at
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| directory.anchored_path().join(format!("graph-{id}.lock")));
+                let prompt_resume = matches!(phase, "orphan-prompts" | "pending-prompts")
+                    .then(|| cursor.as_ref().expect("cursor exists").nested);
+                let cleaned = Self::collect_unreferenced_id(
+                    root,
+                    project,
+                    &directory,
+                    id,
+                    &outer_path,
+                    control,
+                    clock,
+                    prompt_resume,
+                )?;
+                report.removed = report
+                    .removed
+                    .saturating_add(usize::from(cleaned.recovered));
+                if let Some(path) = cleaned.interrupted_at {
+                    let next = cleaned.prompt_cookie.map_or_else(
+                        || {
+                            GraphCollectionCursor::orphan_cleanup(
+                                id,
+                                cursor.as_ref().unwrap().cookie,
+                                pending_phase,
+                            )
+                        },
+                        |nested| {
+                            GraphCollectionCursor::nested(
+                                if pending_phase {
+                                    "pending-prompts"
+                                } else {
+                                    "orphan-prompts"
+                                },
+                                id,
+                                cursor.as_ref().unwrap().cookie,
+                                nested,
+                            )
+                        },
+                    );
+                    interrupt_graph_collection(&mut report, path, next);
+                    return Ok(report);
+                }
             }
         }
-        match directory.open_verified_directory(OsStr::new("pending")) {
+
+        if !pending_phase {
+            let mut entries = directory.entries()?;
+            if let Some(cursor) = cursor.as_ref().filter(|_| phase.starts_with("orphan")) {
+                entries.seek(cursor.cookie)?;
+            }
+            loop {
+                let before = entries.position()?;
+                let Some(entry) = entries.next() else { break };
+                let entry = entry?;
+                let path = directory.anchored_path().join(&entry);
+                if !control.should_continue() {
+                    interrupt_graph_collection(
+                        &mut report,
+                        path,
+                        GraphCollectionCursor::orphans(before),
+                    );
+                    return Ok(report);
+                }
+                let Some(id) = orphan_artifact_id(&entry) else {
+                    continue;
+                };
+                let cleaned = Self::collect_unreferenced_id(
+                    root, project, &directory, id, &path, control, clock, None,
+                )?;
+                report.removed = report
+                    .removed
+                    .saturating_add(usize::from(cleaned.recovered));
+                if let Some(path) = cleaned.interrupted_at {
+                    let next = cleaned.prompt_cookie.map_or_else(
+                        || GraphCollectionCursor::orphan_cleanup(id, before, false),
+                        |nested| {
+                            GraphCollectionCursor::nested("orphan-prompts", id, before, nested)
+                        },
+                    );
+                    interrupt_graph_collection(&mut report, path, next);
+                    return Ok(report);
+                }
+            }
+            if !control.should_continue() {
+                interrupt_graph_collection(
+                    &mut report,
+                    directory.anchored_path().join("pending"),
+                    GraphCollectionCursor::pending(Default::default()),
+                );
+                return Ok(report);
+            }
+        }
+
+        let markers = match directory.open_verified_directory(OsStr::new("pending")) {
+            Ok(markers) => markers,
+            Err(error) if error.is_not_found() => return Ok(report),
+            Err(error) => return Err(error.into()),
+        };
+        let mut entries = markers.entries()?;
+        if pending_phase {
+            if let Some(cursor) = cursor.as_ref() {
+                entries.seek(cursor.cookie)?;
+            }
+        }
+        loop {
+            let before = entries.position()?;
+            let Some(entry) = entries.next() else { break };
+            let entry = entry?;
+            let path = markers.anchored_path().join(&entry);
+            if !control.should_continue() {
+                interrupt_graph_collection(
+                    &mut report,
+                    path,
+                    GraphCollectionCursor::pending(before),
+                );
+                return Ok(report);
+            }
+            let Some(id) = entry
+                .to_str()
+                .and_then(|name| name.strip_suffix(".pending"))
+                .filter(|id| valid_identifier(id))
+            else {
+                continue;
+            };
+            let cleaned = Self::collect_unreferenced_id(
+                root, project, &directory, id, &path, control, clock, None,
+            )?;
+            report.removed = report
+                .removed
+                .saturating_add(usize::from(cleaned.recovered));
+            if let Some(path) = cleaned.interrupted_at {
+                let next = cleaned.prompt_cookie.map_or_else(
+                    || GraphCollectionCursor::orphan_cleanup(id, before, true),
+                    |nested| GraphCollectionCursor::nested("pending-prompts", id, before, nested),
+                );
+                interrupt_graph_collection(&mut report, path, next);
+                return Ok(report);
+            }
+        }
+        Ok(report)
+    }
+
+    fn collect_unreferenced_id(
+        root: &StateRoot,
+        project: ProjectId,
+        directory: &Directory,
+        id: &str,
+        candidate: &std::path::Path,
+        control: &provenant_core::SweepControl<'_>,
+        clock: &dyn Clock,
+        prompt_resume: Option<provenant_os::fs::DirectoryPosition>,
+    ) -> Result<ArtifactCleanup, JournalError> {
+        let mut result = ArtifactCleanup::default();
+        if !valid_identifier(id) {
+            return Ok(result);
+        }
+        let reserved = entry_exists(directory, &OsStr::new(&format!("graph-{id}.reserved")))?
+            || entry_exists(directory, &events::name(id))?;
+        if !reserved || entry_exists(directory, &checkpoint_file_name(id))? {
+            return Ok(result);
+        }
+        if !control.should_continue() {
+            result.interrupted_at = Some(candidate.to_path_buf());
+            return Ok(result);
+        }
+        let journal = match Self::open(
+            root,
+            project,
+            id,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &control.cancel,
+            clock,
+        ) {
+            Ok(journal) => journal,
+            Err(error) if error.is_lock_timeout() || error.is_unreadable() => return Ok(result),
+            Err(error) => return Err(error),
+        };
+        match journal.directory.open_read(&journal.checkpoint_name()) {
+            Ok(_) => return Ok(result),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(JournalError::from(error).for_graph(id)),
+        }
+        let prompts = prompt_store::collect(&journal.directory, id, control, prompt_resume)?;
+        result.recovered |= prompts.removed;
+        if prompts.interrupted_at.is_some() {
+            result.interrupted_at = prompts.interrupted_at;
+            result.prompt_cookie = prompts.continuation;
+            return Ok(result);
+        }
+        for sidecar in [unreadable_marker_name(id), advance_error_name(id)] {
+            if !control.should_continue() {
+                result.interrupted_at = Some(candidate.to_path_buf());
+                return Ok(result);
+            }
+            match journal.directory.unlink(&sidecar) {
+                Ok(()) => result.recovered = true,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match journal
+            .directory
+            .open_verified_directory(OsStr::new("pending"))
+        {
             Ok(markers) => {
-                for entry in markers.entries()? {
-                    let name = entry?;
-                    if let Some(id) = name
-                        .to_str()
-                        .and_then(|name| name.strip_suffix(".pending"))
-                        .filter(|id| valid_identifier(id))
-                    {
-                        candidates.insert(id.to_owned());
-                    }
+                if !control.should_continue() {
+                    result.interrupted_at = Some(candidate.to_path_buf());
+                    return Ok(result);
+                }
+                let marker = pending_marker_name(id);
+                if entry_exists(&markers, &marker)? {
+                    remove_pending_marker(&markers, id)?;
+                    result.recovered = true;
                 }
             }
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-
-        let mut recovered = 0;
-        for id in candidates
-            .into_iter()
-            .filter(|id| reserved.contains(id) && !checkpoints.contains(id))
-        {
-            let journal = match Self::open(
-                root,
-                project,
-                &id,
-                WaitBudget::nonblocking(clock.mono_now()),
-                cancel,
-                clock,
-            ) {
-                Ok(journal) => journal,
-                Err(error) if error.is_lock_timeout() => continue,
-                Err(error) => return Err(error),
-            };
-            match journal.directory.open_read(&journal.checkpoint_name()) {
-                Ok(_) => continue,
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(JournalError::from(error).for_graph(&id)),
-            }
-
-            (|| -> Result<(), JournalError> {
-                prompt_store::collect(&journal.directory, &id)?;
-                for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
-                    match journal.directory.unlink(&sidecar) {
-                        Ok(()) => {}
-                        Err(error) if error.is_not_found() => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                match journal
-                    .directory
-                    .open_verified_directory(OsStr::new("pending"))
-                {
-                    Ok(markers) => remove_pending_marker(&markers, &id)?,
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(error.into()),
-                }
-                journal
-                    .directory
-                    .sync()
-                    .map_err(JournalError::DurabilityUnconfirmed)?;
-                journal
-                    .directory
-                    .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
-                Ok(())
-            })()
-            .map_err(|error| error.for_graph(&id))?;
-            recovered += 1;
+        if !control.should_continue() {
+            result.interrupted_at = Some(candidate.to_path_buf());
+            return Ok(result);
         }
-        Ok(recovered)
+        journal
+            .directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        if !control.should_continue() {
+            result.interrupted_at = Some(candidate.to_path_buf());
+            return Ok(result);
+        }
+        journal
+            .directory
+            .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
+        result.recovered = true;
+        Ok(result)
     }
 
     fn rebuild_pending_in(
@@ -1499,6 +1776,35 @@ impl FileJournal {
     }
 }
 
+#[derive(Default)]
+struct ArtifactCleanup {
+    recovered: bool,
+    interrupted_at: Option<std::path::PathBuf>,
+    prompt_cookie: Option<provenant_os::fs::DirectoryPosition>,
+}
+
+fn orphan_artifact_id(entry: &OsStr) -> Option<&str> {
+    let name = entry.to_str()?.strip_prefix("graph-")?;
+    let id = [".lock", ".unreadable", ".advance-error"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .or_else(|| {
+            name.split_once(".prompt-").and_then(|(id, digest)| {
+                (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .then_some(id)
+            })
+        })?;
+    valid_identifier(id).then_some(id)
+}
+
+fn entry_exists(directory: &Directory, name: &OsStr) -> Result<bool, JournalError> {
+    match directory.metadata_at(name, false) {
+        Ok(_) => Ok(true),
+        Err(error) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl GraphJournal for FileJournal {
     type Error = JournalError;
 
@@ -1620,17 +1926,35 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
 
 /// Remove scratch documents equal to this graph's retained document. The
 /// execution directory may already have been removed.
-fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalError> {
+struct ScratchCollection {
+    interrupted: bool,
+    cookie: Option<provenant_os::fs::DirectoryPosition>,
+}
+
+impl Default for ScratchCollection {
+    fn default() -> Self {
+        Self {
+            interrupted: false,
+            cookie: None,
+        }
+    }
+}
+
+fn collect_scratch_documents(
+    execution: &GraphExecution,
+    control: &provenant_core::SweepControl<'_>,
+    resume: Option<provenant_os::fs::DirectoryPosition>,
+) -> Result<ScratchCollection, JournalError> {
     let directory = match Directory::open_anchor(&execution.directory) {
         Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) if error.is_not_found() => return Ok(ScratchCollection::default()),
         Err(error) => return Err(error.into()),
     };
     let mut directory = directory;
     for component in [".provenant", "scratch", "graphs"] {
         directory = match directory.open_verified_directory(OsStr::new(component)) {
             Ok(directory) => directory,
-            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) if error.is_not_found() => return Ok(ScratchCollection::default()),
             Err(error) => return Err(error.into()),
         };
     }
@@ -1640,11 +1964,23 @@ fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalEr
         metadata = directory.metadata()?;
     }
     if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o077 != 0 {
-        return Ok(());
+        return Ok(ScratchCollection::default());
     }
     let mut removed = false;
-    for entry in directory.entries()? {
+    let mut entries = directory.entries()?;
+    if let Some(position) = resume {
+        entries.seek(position)?;
+    }
+    let mut report = ScratchCollection::default();
+    loop {
+        let before = entries.position()?;
+        let Some(entry) = entries.next() else { break };
         let name = entry?;
+        if !control.should_continue() {
+            report.interrupted = true;
+            report.cookie = Some(before);
+            break;
+        }
         let Ok(metadata) = directory.metadata_at(&name, false) else {
             continue;
         };
@@ -1670,6 +2006,11 @@ fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalEr
         {
             continue;
         }
+        if !control.should_continue() {
+            report.interrupted = true;
+            report.cookie = Some(before);
+            break;
+        }
         match directory.unlink(&name) {
             Ok(()) => removed = true,
             Err(error) if error.is_not_found() => {}
@@ -1681,7 +2022,7 @@ fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalEr
             .sync()
             .map_err(JournalError::DurabilityUnconfirmed)?;
     }
-    Ok(())
+    Ok(report)
 }
 
 fn pending_marker_name(graph_id: &str) -> OsString {
