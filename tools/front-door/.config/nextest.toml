@@ -90,24 +90,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=command_adapter) & test(=command_lane_reads_its_supervisors_process_tree_through_the_cli)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Four real sandboxed command lanes in turn, each dispatched and settled. That
-# takes 18 to 26 seconds on macOS runners and passes 30 under shared load.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=command_adapter) & test(=command_pass_fail_truncation_and_spawn_failure_settle_without_models)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Two data-home variants each launch four real graph providers against an open
-# WAL. Allow for shared-host contention without dropping session-read cases.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Two rounds of simultaneous real writer launches each settle a fixture
-# provider, which takes about 30 seconds on a developer Mac.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_are_admitted_or_scheduled_for_retry)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # One real writer launch from a fetched remote branch takes about 20 seconds on
 # an idle macOS runner and passes 30 seconds under shared-runner load.
 [[profile.default.overrides]]
