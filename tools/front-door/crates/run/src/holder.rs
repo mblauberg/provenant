@@ -145,10 +145,7 @@ fn apply_provider_identity(
     } else if exit.provider_identity_evidence_incomplete
         && matches!(
             decoded.outcome,
-            Outcome::Succeeded
-                | Outcome::ReviewRequired
-                | Outcome::Uncommitted
-                | Outcome::Cancelled
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         )
     {
         use provenant_records::policy::{Effect, Facts};
