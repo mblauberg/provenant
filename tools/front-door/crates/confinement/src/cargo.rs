@@ -151,15 +151,21 @@ impl CargoHome {
         cache: &Path,
         environment: &mut Vec<(OsString, OsString)>,
     ) {
+        self.lane_cargo_environment_with_target(home, &cache.join("target"), environment)
+    }
+
+    pub fn lane_cargo_environment_with_target(
+        &self,
+        home: &Path,
+        target: &Path,
+        environment: &mut Vec<(OsString, OsString)>,
+    ) {
         let selectors = [
             ("CARGO_HOME", self.path.clone().into_os_string()),
             ("RUSTUP_HOME", home.join(".rustup").into_os_string()),
             ("RUSTUP_AUTO_INSTALL", "0".into()),
-            ("CARGO_TARGET_DIR", cache.join("target").into_os_string()),
-            (
-                "CARGO_BUILD_BUILD_DIR",
-                cache.join("target").into_os_string(),
-            ),
+            ("CARGO_TARGET_DIR", target.as_os_str().to_os_string()),
+            ("CARGO_BUILD_BUILD_DIR", target.as_os_str().to_os_string()),
             ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY", "never".into()),
         ];
         environment.retain(|(key, _)| !selectors.iter().any(|(name, _)| key == *name));

@@ -51,6 +51,18 @@ pub struct LaunchRetry {
     pub reason: Option<String>,
 }
 
+/// Persisted, bounded re-observation of custody after a pre-launch refusal.
+/// The attempt identity prevents a replay from renewing the evidence window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FallbackEvidenceRetry {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub key: AttemptKey,
+    pub attempt_ref: String,
+    pub deadline: provenant_core::WallTime,
+    pub wake_at: provenant_core::WallTime,
+}
+
 /// Canonical encoding length, or `usize::MAX` when the value cannot be encoded.
 pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
     CanonicalV1::bytes(value).map_or(usize::MAX, |bytes| bytes.as_bytes().len())
@@ -1696,7 +1708,7 @@ pub struct GraphCheckpoint {
     /// Actor every ask is raised under, recorded before the first ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_actor: Option<String>,
-    /// Earliest deadline of an open ask or running CI gate, for the host tick.
+    /// Earliest ask, running gate, launch retry or custody re-observation wake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<provenant_core::WallTime>,
     /// Pause asks raised so far, which numbers the next one.
@@ -1921,6 +1933,9 @@ pub struct NodeProgress {
     /// error. Cleared when the attempt is observed again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_retry: Option<LaunchRetry>,
+    /// Brief wait for local custody release after a pre-launch refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_evidence_retry: Option<FallbackEvidenceRetry>,
     /// Final retry budget and cause retained when launch retries are exhausted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_launch_retry: Option<LaunchRetry>,

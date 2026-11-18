@@ -123,6 +123,20 @@ fn apply_provider_identity(
     decoded: &mut Decoded,
     policy: &provenant_records::policy::Policy,
 ) {
+    let unsettle = |decoded: &mut Decoded, reason: &str| {
+        decoded.outcome = Outcome::Unsettled;
+        decoded.complete = false;
+        // Replay identified the precise defect already. Identity uncertainty
+        // must retain that safe typed location, not replace it with a generic
+        // message. Conflicting identity still takes priority below.
+        if !matches!(
+            decoded.terminal_cause,
+            Some(TerminalCause::ProviderCaptureDefect { .. })
+        ) {
+            decoded.terminal_cause = None;
+            decoded.reason = Some(reason.into());
+        }
+    };
     if exit.provider_identity_conflict {
         decoded.outcome = Outcome::Failed;
         decoded.complete = false;
@@ -146,15 +160,14 @@ fn apply_provider_identity(
                     None => warning,
                 });
             }
-            Effect::Refuse(_) => {
-                decoded.outcome = Outcome::Unsettled;
-                decoded.complete = false;
-                decoded.terminal_cause = None;
-                decoded.reason = Some(
-                    "provider identity evidence was incomplete; continuation refused by policy"
-                        .into(),
-                );
-            }
+            // Live identity checks run before retained-tail truncation. If a
+            // delimiter-complete frame was oversized, undecodable or
+            // unreadable, or capture drain timed out, the terminal owner
+            // cannot prove that the provider stayed in the admitted session.
+            Effect::Refuse(_) => unsettle(
+                decoded,
+                "provider identity evidence was incomplete; continuation refused by policy",
+            ),
         }
     }
     if exit.provider_identity_eof_fragment
@@ -168,11 +181,10 @@ fn apply_provider_identity(
         // Only a fragment from an actual EOF is eligible for the
         // intentional-stop exception. Natural completion and uncertain
         // delivery cannot use it to claim a complete provider result.
-        decoded.outcome = Outcome::Unsettled;
-        decoded.complete = false;
-        decoded.terminal_cause = None;
-        decoded.reason =
-            Some("provider ended with an incomplete final frame; continuation refused".into());
+        unsettle(
+            decoded,
+            "provider ended with an incomplete final frame; continuation refused",
+        );
     }
 }
 
@@ -2191,9 +2203,11 @@ impl RunStore {
                 baseline_unknown,
             );
         }
-        // A signal is a crash only when the host sent no stop: a deadline,
+        // Missing capture evidence keeps its precise diagnostic. Otherwise a
+        // signal is a crash only when the host sent no stop: a deadline,
         // budget or handoff kill keeps the stop's own cause (#3078).
         if !cancelled
+            && decoded.outcome != Outcome::Unsettled
             && exit.stop_reason.is_none()
             && matches!(exit.termination, Some(Termination::Signal(_)))
         {
@@ -2203,7 +2217,7 @@ impl RunStore {
         // credential can survive there after capture and result filtering.
         // Scrub before publication so a retry never starts from new plaintext.
         let session_redaction_failed =
-            provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
+            provenant_redact::scrub_session_history(&provider_state).is_err();
         let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
         let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
         let (mut handoff, handoff_error) = match captured_handoff.handoff {
@@ -2248,7 +2262,10 @@ impl RunStore {
                     .and_then(|capture| path_denial_hint(&capture))
             })
         });
-        let clean_budget = exit.stop_reason == Some(StopReason::TokenBudget)
+        // A clean Git point proves the writer's changes, not an unread
+        // provider result. Missing replay evidence remains unsettled.
+        let clean_budget = decoded.outcome != Outcome::Unsettled
+            && exit.stop_reason == Some(StopReason::TokenBudget)
             && read_sealed(
                 attempt,
                 provenant_records::AttemptFile::BudgetCleanPoint.name(),
@@ -2302,7 +2319,7 @@ impl RunStore {
             decoded.reason = Some("token target reached at a clean pushed point; retained the lane's handoff without a budget snapshot".into());
         }
         // Valid natural completion wins over a late stop request.
-        if decoded.outcome != Outcome::Succeeded
+        if !matches!(decoded.outcome, Outcome::Succeeded | Outcome::Unsettled)
             && !clean_budget
             && !(exit.stop_reason == Some(StopReason::TokenBudget) && decoded.complete)
         {
@@ -2367,7 +2384,8 @@ impl RunStore {
         // A writer that passed its token budget was stopped by the host: say
         // so, with the budget and where it came from. Settlement records
         // whether its work could be committed.
-        if exit.stop_reason == Some(StopReason::TokenBudget)
+        if decoded.outcome != Outcome::Unsettled
+            && exit.stop_reason == Some(StopReason::TokenBudget)
             && (decoded.outcome == Outcome::TimedOut
                 || exit.termination != Some(Termination::Exit(0)))
         {
@@ -2959,12 +2977,12 @@ impl RunStore {
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
-        // Decoding can reveal credential markers hidden by JSON escapes in
-        // the already-filtered capture. Seal only a filtered rendering.
+        // Local provider captures remain raw for replay. Seal only a filtered
+        // rendering of the decoded answer at this publication boundary.
         // A filter failure withholds the result instead of blocking settlement
         // forever: the lane fails with a fixed placeholder and stays terminal.
         let (mut result, result_redaction_failed) =
-            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
+            match provenant_redact::known_shapes(decoded.result.as_bytes()) {
                 Ok(safe) => match String::from_utf8(safe) {
                     Ok(text) => (text, false),
                     Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
@@ -3198,7 +3216,11 @@ impl RunStore {
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
         ) && !matches!(
             decoded.terminal_cause,
-            Some(TerminalCause::Steered | TerminalCause::IdentityMismatch)
+            Some(
+                TerminalCause::Steered
+                    | TerminalCause::IdentityMismatch
+                    | TerminalCause::ProviderCaptureDefect { .. }
+            )
         ) {
             decoded.terminal_cause = None;
         }
@@ -3535,7 +3557,7 @@ fn bounded_reason(mut reason: String) -> String {
 
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
-    provenant_confinement::redact::bounded_line(note, 240)
+    provenant_redact::bounded_line(note, 240)
 }
 
 #[cfg(test)]

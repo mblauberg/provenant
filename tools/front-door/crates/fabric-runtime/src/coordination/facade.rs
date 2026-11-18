@@ -309,6 +309,10 @@ pub enum InvalidInputDetail {
     GraphReason(String),
     OperationFailed,
     GraphRelayCause(GraphRelayCause),
+    RetryNode {
+        graph: String,
+        node: String,
+    },
     /// A `--set` or `with` parameter a template refuses; names are disclosable.
     Parameter(Box<crate::graph::template::ParameterRefusal>),
     TemplateInvalid,
@@ -349,6 +353,10 @@ impl InvalidInputDetail {
     fn redacted(&self) -> Self {
         let clean = |field: &String| safe_input_field(field).unwrap_or_default();
         match self {
+            Self::RetryNode { graph, node } => Self::RetryNode {
+                graph: safe_retry_name(graph).unwrap_or("NAME").into(),
+                node: safe_retry_name(node).unwrap_or("NODE").into(),
+            },
             Self::Field(path) => Self::Field(clean(path)),
             Self::FieldDecode { field, missing } => Self::FieldDecode {
                 field: safe_decoded_field(field).unwrap_or_default(),
@@ -384,6 +392,13 @@ impl InvalidInputDetail {
             ),
             Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
+            Self::RetryNode { graph, node } => {
+                if safe_retry_name(graph).is_some() && safe_retry_name(node).is_some() {
+                    Some(format!("select a node to retry with `provenant retry {graph}/{node}`"))
+                } else {
+                    Some("select a node to retry with `provenant retry NAME/NODE`".into())
+                }
+            }
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
@@ -412,6 +427,32 @@ impl InvalidInputDetail {
             Self::ContentScan { field, assignment } => safe_input_field(field).map(|path| format!("input field `{path}` matches the {} rule; remove credential material and retry", if *assignment { "credential assignment" } else { "credential token or URL userinfo" })),
         }
     }
+}
+
+fn safe_retry_name(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+    .then_some(name)
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn retry_node_suggestion_redacts_unsafe_names() -> Result<(), Box<dyn std::error::Error>> {
+    let detail = InvalidInputDetail::RetryNode {
+        graph: "graph".into(),
+        node: "secret\nvalue".into(),
+    };
+    let wire = serde_json::to_string(&detail.redacted())?;
+    assert!(!wire.contains("secret"));
+    assert!(
+        detail
+            .safe_text()
+            .is_some_and(|message| message.contains("NAME/NODE"))
+    );
+    Ok(())
 }
 
 /// Template lookup failures are safe to disclose only in the exact form the
@@ -654,7 +695,7 @@ fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
             disk.reclaimed,
             disk.floor
         ),
-        None => provenant_confinement::redact::bounded_line(reason, 4096),
+        None => provenant_redact::bounded_line(reason, 4096),
     }
 }
 
@@ -694,7 +735,7 @@ fn dispatch_refused_wire<S: serde::Serializer>(
     let mut wire = serializer.serialize_struct("DispatchRefused", 3)?;
     wire.serialize_field(
         "reason",
-        &provenant_confinement::redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
+        &provenant_redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
     )?;
     if let Some(disk) = disk {
         wire.serialize_field("disk", disk)?;
@@ -961,7 +1002,7 @@ impl FacadeError {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
-                let reason = safe_graph_plan_reason(&provenant_confinement::redact::bounded_line(reason, 4096));
+                let reason = safe_graph_plan_reason(&provenant_redact::bounded_line(reason, 4096));
                 let next = if reason.contains("writer worktree") {
                     "provide --worktree PATH, or --branch B --base REF"
                 } else {
@@ -994,7 +1035,7 @@ impl FacadeError {
             }
             Self::DispatchRefused { reason, .. } => {
                 projected = projected
-                    .detail(provenant_confinement::redact::bounded_line(reason, 4096))
+                    .detail(provenant_redact::bounded_line(reason, 4096))
                     .next("resolve the reported launch refusal, then retry");
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),

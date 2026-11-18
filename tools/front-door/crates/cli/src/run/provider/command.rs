@@ -19,6 +19,7 @@ fn executable_unavailable(program: &str) -> PrepareError {
             .detail()
             .into(),
         cause: provenant_records::run::TerminalCause::CommandUnavailable,
+        fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
         note: Some(format!(
             "executable {}",
             provenant_records::diagnostic::safe_text(program)
@@ -426,6 +427,7 @@ pub(super) fn prepare_command(
             state_root: roots.state.as_path().to_owned(),
             sandbox,
             backend: None,
+            cargo_target: Default::default(),
         }),
     })
 }
@@ -844,6 +846,7 @@ mod refusal_tests {
             message,
             cause,
             note,
+            ..
         } = error
         else {
             unreachable!();

@@ -214,6 +214,14 @@
                 &[],
             )
         };
+        // Spec: docs/specs/routing.md#unknown-never-means-ready
+        let unresolved = super::resolve_dispatch(
+            &request, &roots, None, ("fixture", 0), &[], &access,
+            "fixture", None, &[],
+        )?;
+        assert!(matches!(unresolved.readiness, RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::UnknownAvailability, ..
+        }));
         let first = resolve(&[])?;
         let first_id =
             provenant_routing::ModelId::parse(&format!("{}/{}", first.adapter, first.model))?;
@@ -295,6 +303,18 @@
             fallback.readiness,
             provenant_records::RouteReadiness::Ready { .. }
         ));
+        // An unobserved unused family reaches preparation, not a ready launch.
+        let missing = super::resolve_dispatch(
+            &request, &roots, None, ("fixture", 0), &availability[..1],
+            &access, "fixture", Some((&["openai".into()], false, &[])), &[],
+        )?;
+        assert_eq!(missing.adapter, "claude");
+        assert!(matches!(missing.readiness, RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::UnknownAvailability, ..
+        }));
+        let mut stale = availability.clone();
+        stale[1].observed_unix_seconds = now - 10;
+        stale[1].expires_unix_seconds = now - 1;
         // The unused family remains selected when its availability is stale,
         // instead of silently relaxing to the ready, already-used family.
         let deferred = super::resolve_dispatch(
@@ -302,16 +322,19 @@
             &roots,
             None,
             ("fixture", 0),
-            &availability[..1],
+            &stale,
             &access,
             "fixture",
             Some((&["openai".into()], false, &[])),
             &[],
         )?;
         assert_eq!(deferred.adapter, "claude");
+        assert_eq!(deferred.account_key, stale[1].account_key);
+        // Stale executable evidence warns; it does not erase a known identity.
         assert!(matches!(
             deferred.readiness,
-            provenant_records::RouteReadiness::Unavailable { .. }
+            provenant_records::RouteReadiness::Ready { availability_warning: Some(warning), .. }
+                if warning == format!("{:?}", provenant_records::RouteExclusionReason::StaleAvailability)
         ));
         Ok(())
     }
@@ -514,6 +537,19 @@
                 .contains("excluded by flag: provider claude"),
             "{refused}"
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+    #[test]
+    fn stale_graph_exclusions_do_not_refuse_dispatch() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        let overrides = vec![format!("routing.graph_exclude={}", serde_json::json!(["nonesuch", "claude"]))];
+        let profile = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?.dispatch_profile(&overrides)?;
+        let rules = super::task_exclusion_rules(&profile, &roots)?;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].selector, provenant_routing::ExclusionSelector::Provider("claude".into()));
         Ok(())
     }
 

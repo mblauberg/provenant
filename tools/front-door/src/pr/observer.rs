@@ -1071,6 +1071,7 @@ mod tests {
         now_ms: i64,
         requests: Vec<(String, Option<String>)>,
         full_reads: usize,
+        resources: BTreeMap<String, Value>,
         runs: BTreeMap<String, Value>,
         statuses: BTreeMap<String, Value>,
         /// Unix second until which every request is rate limited.
@@ -1181,7 +1182,9 @@ mod tests {
                         .nth(1)
                         .and_then(|rest| rest.split('/').next())
                         .unwrap_or_default();
-                    let body = if path.contains("/check-runs?") {
+                    let body = if !path.contains("/commits/") {
+                        world.resources.get(path).cloned()
+                    } else if path.contains("/check-runs?") {
                         world.runs.get(commit).cloned()
                     } else {
                         world.statuses.get(commit).cloned()
@@ -1429,6 +1432,122 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         shared.with(|world| world.now_ms += 1_000);
         poll(&shared);
         assert_eq!(shared.requests(), read);
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn host_poller_revalidates_metadata_and_checks_with_304() {
+        let shared = Shared::new();
+        shared.with(|world| {
+            world.resources.insert("repos/Owner/Repo/pulls/7".into(), json!({
+                "state":"open", "head":{"sha":HEAD}, "html_url":"https://github.com/Owner/Repo/pull/7"
+            }));
+            world.runs.insert(HEAD.into(), page(vec![run("build", "completed", Some("success"))]));
+        });
+        let dir = state();
+        let mut observer = shared.observer(dir.path());
+        let request = Request::within(Duration::from_secs(60));
+        let first =
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+                .unwrap();
+        let full = shared.with(|world| world.full_reads);
+        let calls = shared.requests();
+        let again =
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+                .unwrap();
+        assert_eq!(first, again);
+        assert_eq!(calls, 3, "PR metadata, check runs, legacy statuses");
+        assert_eq!(shared.requests(), 2 * calls);
+        assert_eq!(
+            shared.with(|world| world.full_reads),
+            full,
+            "all second responses were 304"
+        );
+        assert!(shared.with(|world| world.requests[calls..].iter().all(|(_, tag)| tag.is_some())));
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn pr_watch_forge_call_measurement_before_and_after() {
+        fn measure(indexed: bool) -> (usize, usize) {
+            let shared = Shared::new();
+            shared.with(|world| {
+                world.resources.insert(
+                    REPOSITORY_CONTEXT_PATH.into(),
+                    json!({"full_name":"Owner/Repo"}),
+                );
+                world.resources.insert(
+                    "repos/Owner/Repo/pulls/7".into(),
+                    json!({"head":{"sha":HEAD}}),
+                );
+                world
+                    .runs
+                    .insert(HEAD.into(), page(vec![run("build", "in_progress", None)]));
+            });
+            let dir = state();
+            let mut observer = shared.observer(dir.path());
+            let request = Request::within(Duration::from_secs(60));
+            // Count the command's repository resolution, initial PR head bind,
+            // watch reads and final head validation through the same forge stub.
+            let repository = port::get(&mut shared.clone(), REPOSITORY_CONTEXT_PATH, None).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&repository.body).unwrap()["full_name"],
+                "Owner/Repo"
+            );
+            observer
+                .resource("pulls/7", Duration::ZERO, &request)
+                .unwrap();
+            if indexed {
+                let mut notifications = 0;
+                super::super::indexed_watch(
+                    &mut || observer.checks(HEAD, Duration::ZERO, &request),
+                    &mut |_| {
+                        notifications += 1;
+                        let bucket = if notifications < 3 { "pending" } else { "pass" };
+                        Ok(Some(json!({"head":HEAD,"checks":[{"bucket":bucket}]})))
+                    },
+                    &request,
+                    HEAD,
+                    "7",
+                )
+                .unwrap();
+            } else {
+                let pauses = std::cell::Cell::new(0);
+                super::super::watch_with(
+                    &mut || observer.checks(HEAD, Duration::ZERO, &request),
+                    &|duration| {
+                        shared.sleep(duration);
+                        pauses.set(pauses.get() + 1);
+                        if pauses.get() == 3 {
+                            shared.with(|world| {
+                                world.runs.insert(
+                                    HEAD.into(),
+                                    page(vec![run("build", "completed", Some("success"))]),
+                                );
+                            });
+                        }
+                    },
+                    &|| Duration::from_secs(5),
+                    "7",
+                )
+                .unwrap();
+            }
+            observer
+                .resource("pulls/7", Duration::ZERO, &request)
+                .unwrap();
+            (shared.requests(), shared.with(|world| world.full_reads))
+        }
+        let before = measure(false);
+        let after = measure(true);
+        assert_eq!(
+            before.0, 11,
+            "repository resolution, four two-endpoint check samples and two PR reads"
+        );
+        assert_eq!(
+            after.0, 5,
+            "repository resolution, initial two-endpoint checks and two PR reads; no waiter loop reads"
+        );
+        assert!(after.1 < before.1);
     }
 
     #[test]

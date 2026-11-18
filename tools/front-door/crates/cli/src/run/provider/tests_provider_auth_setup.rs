@@ -174,10 +174,7 @@ fn command_lookup_is_literal_and_preserves_symlink_invocation()
     let worktree = project.join(".worktrees/selected");
     std::fs::create_dir_all(&worktree)?;
     let filtered = run::FilteredLanePath::from_path(root.as_os_str(), &project, &worktree)?;
-    assert_eq!(
-        filtered.resolve("cursor")?,
-        link
-    );
+    assert_eq!(filtered.resolve("cursor")?, link);
     assert_eq!(super::canonical(&link)?, executable);
     assert_eq!(filtered.resolve("cursor")?, link);
     // Model provider lookup keeps its cursor -> cursor-agent alias.
@@ -421,8 +418,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
         "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = token ] || exit 1\n/bin/cat \"$GH_CONFIG_DIR/fixture-token\"\n",
     )?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
-    let mut host =
-        run::HostLaunchContext::from_environment(&home, &project, "/usr/bin/git".into());
+    let mut host = run::HostLaunchContext::from_environment(&home, &project, "/usr/bin/git".into());
     host.executable_search_path = vec![bin];
     host.provider_path_environment
         .insert("GH_CONFIG_DIR".into(), config.clone().into_os_string());
@@ -604,6 +600,68 @@ fn version_probe_reports_outcomes_without_disclosing_output()
                 let record = result?;
                 assert_eq!(record.version, "opencode v2.0.32");
                 assert_eq!(record.last_update, Some(last_update.clone()));
+                // Spec: docs/specs/routing.md#accounts-and-credentials
+                // Provider namespaces, not credential-directory equality, select
+                // the registered Go and Zen accounts.
+                let catalogue = provenant_routing::Catalogue::bundled()?;
+                let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+                    serde_json::json!({"entries": {
+                        "go": {"adapter":"opencode", "label":"go", "key":"opencode-go", "plan":"go", "directory":root},
+                        "zen": {"adapter":"opencode", "label":"zen", "key":"opencode-zen", "plan":"zen", "directory":root}
+                    }}),
+                )?;
+                let records = settings
+                    .unique_accounts()
+                    .entries
+                    .values()
+                    .map(|entry| {
+                        observe_account(
+                            entry,
+                            Path::new("/fixture/opencode"),
+                            &probe,
+                            catalogue.revision(),
+                            100,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(records.len(), settings.entries.len());
+                let access = [provenant_routing::AccessContext {
+                    adapter: "opencode",
+                    disclosure_ref: "fixture",
+                    confinement_ref: "fixture",
+                }];
+                for (model, key) in [
+                    ("opencode/opencode-go/deepseek-v4.1-flash", "opencode-go"),
+                    ("opencode/opencode/deepseek-v4.1-flash-free", "opencode-zen"),
+                ] {
+                    let request = provenant_routing::RouteRequest {
+                        intent: Default::default(),
+                        choice: provenant_routing::RouteChoice::Model(
+                            provenant_routing::ModelId::parse(model)?,
+                        ),
+                        effort: None,
+                        confidential: false,
+                        fallback: provenant_routing::Fallback::None,
+                    };
+                    let route = crate::route::resolve_dispatch_rejecting_family(
+                        &request,
+                        &roots,
+                        provenant_providers::REGISTRY,
+                        None,
+                        ("shared-opencode", 0),
+                        &records,
+                        &access,
+                        "fixture",
+                        None,
+                        &[],
+                        &[],
+                        None,
+                        None,
+                        None,
+                        None,
+                    )?;
+                    assert_eq!(route.account_key.as_deref(), Some(key));
+                }
             }
         }
     }

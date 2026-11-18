@@ -1,12 +1,13 @@
 [package]
 name = "provenant-confinement"
-version = "2.1.0"
+version = "2.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
+provenant-redact = { workspace = true }
 provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 provenant-config = { workspace = true }
@@ -22,6 +23,7 @@ toml_edit = { workspace = true }
 [features]
 fixture = [
     "snapshot",
+    "provenant-redact/fixture",
     "provenant-os/fixture",
     "provenant-core/fixture",
     "provenant-config/fixture",

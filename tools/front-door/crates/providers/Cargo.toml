@@ -1,6 +1,6 @@
 [package]
 name = "provenant-providers"
-version = "2.1.0"
+version = "2.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,6 +19,7 @@ toml_edit = { workspace = true }
 provenant-config = { workspace = true }
 provenant-records = { workspace = true }
 provenant-confinement = { workspace = true }
+provenant-redact = { workspace = true }
 provenant-quota = { workspace = true }
 
 [features]
@@ -29,6 +30,7 @@ fixture = [
     "provenant-config/fixture",
     "provenant-records/fixture",
     "provenant-confinement/fixture",
+    "provenant-redact/fixture",
     "provenant-quota/fixture",
 ]
 # Enables the recorder example for collecting redacted replay fixtures.

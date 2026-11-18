@@ -374,9 +374,39 @@ pub(crate) fn exclusion_rules(
         })
         .collect()
 }
+
+/// Validate graph exclusions at admission time.
+pub fn validate_graph_exclusions(texts: &[String], roots: &Roots) -> Result<(), String> {
+    exclusion_rules(texts, provenant_routing::ExclusionSource::Graph, roots)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Diagnostics for carried graph selectors that routing will discard. The graph
+/// host retains these before detached preparation, whose stderr is not inherited.
+pub fn discarded_graph_exclusion_warnings(texts: &[String], roots: &Roots) -> Vec<String> {
+    texts
+        .iter()
+        .filter(|selector| {
+            matches!(
+                exclusion_rules(
+                    std::slice::from_ref(*selector),
+                    provenant_routing::ExclusionSource::Graph,
+                    roots
+                ),
+                Err(EdgeError::Routing(RoutingError::UnknownExclusion { .. }))
+            )
+        })
+        .map(|selector| format!("dropping unrecognised carried graph exclusion {selector:?}"))
+        .collect()
+}
 /// The exclusions a task carries: the standing `routing.exclude` list from the
 /// configuration, the dispatch's `--exclude` flags and the graph's list, as a
 /// union. Each rule keeps the source it came from.
+#[allow(
+    clippy::print_stderr,
+    reason = "report a discarded carried routing preference"
+)]
 pub(crate) fn task_exclusion_rules(
     profile: &provenant_records::run::HarnessProfile,
     roots: &Roots,
@@ -417,7 +447,21 @@ pub(crate) fn task_exclusion_rules(
             provenant_routing::ExclusionSource::Graph,
         ),
     ] {
-        for rule in exclusion_rules(&texts(knob), source, roots)? {
+        let mut parsed = Vec::new();
+        for selector in texts(knob) {
+            match exclusion_rules(std::slice::from_ref(&selector), source, roots) {
+                Ok(rules) => parsed.extend(rules),
+                Err(EdgeError::Routing(RoutingError::UnknownExclusion { .. }))
+                    if source == provenant_routing::ExclusionSource::Graph =>
+                {
+                    eprintln!(
+                        "warning: dropping unrecognised carried graph exclusion {selector:?}"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        for rule in parsed {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }

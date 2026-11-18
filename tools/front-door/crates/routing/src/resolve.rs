@@ -943,7 +943,7 @@ fn pacing_factor_basis_points(
                 // Calibration is keyed by account; with none resolved there is
                 // nothing to match, so claiming it is missing would mislead.
                 format!(
-                    "{detail}; Go quota source: local-ledger, coverage: partial; no account resolved, so Go calibration was not checked"
+                    "{detail}; Go quota source: local-ledger, coverage: partial; preview has no launch account; Go calibration is account-scoped"
                 )
             } else {
                 format!(
@@ -1261,14 +1261,15 @@ fn availability_reason(
     let Some(record) = record else {
         return Some(RouteExclusionReason::UnknownAvailability);
     };
+    // Identity is required even when executable observations have gone stale.
+    if record.account_key.is_none() {
+        return Some(RouteExclusionReason::UnknownAccount);
+    }
     if record.catalogue_revision != ctx.catalogue.revision
         || record.observed_unix_seconds > ctx.now_seconds()
         || record.expires_unix_seconds <= ctx.now_seconds()
     {
         return Some(RouteExclusionReason::StaleAvailability);
-    }
-    if record.account_key.is_none() {
-        return Some(RouteExclusionReason::UnknownAccount);
     }
     None
 }
@@ -1474,7 +1475,12 @@ fn readiness_reason(
             );
             if read.observed_scope.is_some()
                 && read.observed_unix_seconds.is_some_and(|at| at <= now)
-                && read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+                && (read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+                    || (read.state == provenant_quota::ReadinessState::Unavailable
+                        && read
+                            .observed_scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.route == provenant_quota::ACCOUNT_ROUTE)))
             {
                 match read.reason {
                     Some(provenant_quota::ReadinessReason::SignedOut) => {
@@ -2525,6 +2531,9 @@ fn resolve_inner(
             check_pin_scope(model, context)?;
             if let Some(detail) = excluded_members.family_reason(model) {
                 return Err(RoutingError::NoEligiblePoolMember {
+                    cause: None,
+                    preparation_failure:
+                        provenant_records::run::PreparationFailure::AdapterUnavailable,
                     exclusions: vec![format!("{}: {detail}", model.as_str())],
                 });
             }
@@ -2613,6 +2622,9 @@ fn resolve_inner(
                     .permits_automatic_model(&named.model, AutomaticModelSource::OwnerConfiguration)
                 {
                     return Err(RoutingError::NoEligiblePoolMember {
+                        cause: None,
+                        preparation_failure:
+                            provenant_records::run::PreparationFailure::AdapterUnavailable,
                         exclusions: vec![format!(
                             "{}: outside provider model scope",
                             named.model.as_str()
@@ -2631,6 +2643,9 @@ fn resolve_inner(
                 };
                 if let Some(detail) = single.reason(&named.model, context) {
                     return Err(RoutingError::NoEligiblePoolMember {
+                        cause: None,
+                        preparation_failure:
+                            provenant_records::run::PreparationFailure::AdapterUnavailable,
                         exclusions: vec![format!("{}: {detail}", named.model.as_str())],
                     });
                 }
@@ -2652,6 +2667,8 @@ fn resolve_inner(
         && reason.is_account_block()
     {
         return Err(RoutingError::NoEligiblePoolMember {
+            cause: None,
+            preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
             exclusions: vec![format!(
                 "required family {family} count 1; {}/{}: {}",
                 primary.adapter,
@@ -3131,6 +3148,20 @@ fn classify_pool(
                         detail
                     });
                     readiness = Some(resolved.readiness.clone());
+                    let exclusion = match &resolved.readiness {
+                        RouteReadiness::Unavailable {
+                            reason: RouteExclusionReason::Disabled,
+                            ..
+                        } => Some("disabled".into()),
+                        RouteReadiness::Unavailable {
+                            reason:
+                                reason @ (RouteExclusionReason::UnknownAccount
+                                | RouteExclusionReason::AuthRequired
+                                | RouteExclusionReason::LoginExpired),
+                            ..
+                        } => Some(reason.diagnostic_parts().0.to_owned()),
+                        _ => None,
+                    };
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
                         if is_standby {
                             classified.standby_ready.push(classified.candidates.len());
@@ -3150,37 +3181,38 @@ fn classify_pool(
                                 .push((classified.candidates.len(), weight));
                         }
                     } else if let RouteReadiness::Unavailable { reason, .. } = &resolved.readiness {
-                        match reason {
-                            RouteExclusionReason::Disabled => classified
+                        if let Some(detail) = &exclusion {
+                            classified
                                 .exclusions
-                                .push(format!("{}: disabled", member.model.as_str())),
-                            // Refusals expire and so are recoverable; a mismatch or
-                            // invalid evidence needs repair, so it ranks with the
-                            // other unavailable members. The CLI's relaxation set
-                            // (`is_account_block`) is a different question: whether
-                            // the chosen route can be used at all.
-                            RouteExclusionReason::StaleAvailability
-                            | RouteExclusionReason::AuthRequired
-                            | RouteExclusionReason::LoginExpired
-                            | RouteExclusionReason::Exhausted
-                            | RouteExclusionReason::FreeTierRefused
-                            | RouteExclusionReason::ProviderRefused
-                            | RouteExclusionReason::PacingReserve => {
-                                if classified.first_recoverable_unavailable.is_none() {
-                                    classified.first_recoverable_unavailable =
-                                        Some(classified.candidates.len());
+                                .push(format!("{}: {detail}", member.model.as_str()));
+                        } else {
+                            match reason {
+                                // Refusals expire and so are recoverable; a mismatch or
+                                // invalid evidence needs repair, so it ranks with the
+                                // other unavailable members. The CLI's relaxation set
+                                // (`is_account_block`) is a different question: whether
+                                // the chosen route can be used at all.
+                                RouteExclusionReason::StaleAvailability
+                                | RouteExclusionReason::Exhausted
+                                | RouteExclusionReason::FreeTierRefused
+                                | RouteExclusionReason::ProviderRefused
+                                | RouteExclusionReason::PacingReserve => {
+                                    if classified.first_recoverable_unavailable.is_none() {
+                                        classified.first_recoverable_unavailable =
+                                            Some(classified.candidates.len());
+                                    }
                                 }
-                            }
-                            _ => {
-                                if classified.first_other_unavailable.is_none() {
-                                    classified.first_other_unavailable =
-                                        Some(classified.candidates.len());
+                                _ => {
+                                    if classified.first_other_unavailable.is_none() {
+                                        classified.first_other_unavailable =
+                                            Some(classified.candidates.len());
+                                    }
                                 }
                             }
                         }
                     }
                     option = Some(resolved);
-                    None
+                    exclusion
                 }
                 Err(RoutingError::ReadOnlyPolicy) => {
                     classified
@@ -3270,6 +3302,26 @@ fn draw_pool(
             .or(classified.first_other_unavailable)
     };
     let index = selected_index.ok_or_else(|| RoutingError::NoEligiblePoolMember {
+        preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+        cause: classified.candidates.first().and_then(|first| {
+            let RouteReadiness::Unavailable { reason, .. } = first.readiness.as_ref()? else {
+                return None;
+            };
+            classified
+                .candidates
+                .iter()
+                .all(|candidate| {
+                    let Some(RouteReadiness::Unavailable { reason: other, .. }) =
+                        &candidate.readiness
+                    else {
+                        return false;
+                    };
+                    candidate.exclusion.as_deref() == Some(other.diagnostic_parts().0)
+                        && crate::FallbackOutcome::from_exclusion(other)
+                            == crate::FallbackOutcome::from_exclusion(reason)
+                })
+                .then(|| reason.clone())
+        }),
         exclusions: classified.exclusions.clone(),
     })?;
     Ok(PoolDraw {

@@ -108,6 +108,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 max_depth,
                 max_nodes,
                 detail,
+                subtree,
+                ..
             } => (
                 hosts,
                 provenant_fabric_runtime::hosts::PeerAction::ConsoleTree {
@@ -116,6 +118,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                     max_nodes: *max_nodes,
                     detail: *detail,
                     selected: selected.is_some(),
+                    subtree: subtree.clone(),
                 },
             ),
             _ => return Ok(local),
@@ -160,7 +163,17 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 &CancelToken::new(),
             )
         });
-        compose_peers(local, matches!(command, Console::Board { .. }), results).map_err(Into::into)
+        let requested_subtree = match &command {
+            Console::Tree { subtree, .. } => subtree.as_deref(),
+            _ => None,
+        };
+        compose_peers(
+            local,
+            matches!(command, Console::Board { .. }),
+            requested_subtree,
+            results,
+        )
+        .map_err(Into::into)
     })();
     let result = match result {
         Ok(value) => CommandResult::new(leaf, Outcome::Ok, Some(value)),
@@ -380,6 +393,7 @@ fn compose_detail(
 fn compose_peers(
     local: serde_json::Value,
     board: bool,
+    requested_subtree: Option<&str>,
     results: Vec<(
         provenant_core::HostId,
         Option<
@@ -419,7 +433,17 @@ fn compose_peers(
         } else {
             use provenant_cli::console::tree_peer::{PeerTree, TreeObservation as O};
             let observation = match result {
-                Ok(PeerResult::Console { data: tree, .. }) => O::Tree(tree),
+                Ok(PeerResult::Console { data: mut tree, .. }) => {
+                    if let Some(root) = requested_subtree
+                        && tree["subtree"]["root"] != serde_json::json!(root)
+                    {
+                        tree["coverage"]["nested_runs"] = serde_json::json!("partial");
+                        tree["peer_warning"] = serde_json::json!(
+                            "peer does not support subtree selection; returned whole tree"
+                        );
+                    }
+                    O::Tree(tree)
+                }
                 _ if unsupported => O::Unsupported,
                 _ if unavailable => O::Unreachable,
                 _ => O::Tree(serde_json::Value::Null),
@@ -611,7 +635,7 @@ mod tests {
         });
         released.store(true, Ordering::Release);
         assert!(results.iter().all(|(_, result)| result.is_none()));
-        let composed = super::compose_peers(local.clone(), true, results).unwrap();
+        let composed = super::compose_peers(local.clone(), true, None, results).unwrap();
         assert_eq!(composed["lanes"], local["lanes"]);
         assert_eq!(composed["next_cursor"], local["next_cursor"]);
         for (index, host) in hosts.iter().enumerate() {
@@ -621,6 +645,41 @@ mod tests {
             );
             assert_eq!(composed["coverage"]["peers"][index]["state"], "unreachable");
         }
+    }
+
+    // Spec: docs/specs/lane-contracts.md#shared-notes
+    #[test]
+    fn older_console_tree_peer_keeps_whole_result_with_partial_warning() {
+        use provenant_core::{AttemptId, HostId, ProjectId};
+
+        let remote = HostId::from_bytes([22; 16]);
+        let project = ProjectId::from_bytes([23; 16]);
+        let attempt = AttemptId::from_bytes([24; 16]);
+        let key = provenant_records::WorkKey::new(project, "graph", "node", 1).unwrap();
+        let tree = serde_json::json!({
+            "nodes":[{"lane_id":{"host":remote,"project_id":project,"key":key,"attempt_id":attempt}}],
+            "edges":[],"coverage":{"host":remote,"runs":"complete","nested_runs":"complete"},
+            "truncated":false
+        });
+        let result = super::compose_peers(
+            serde_json::json!({"nodes":[],"edges":[],"coverage":{"nested_runs":"complete"}}),
+            false,
+            Some("requested-root"),
+            vec![(
+                remote,
+                Some(Ok(provenant_fabric_runtime::hosts::PeerResult::Console {
+                    data: tree,
+                    extra: Default::default(),
+                })),
+            )],
+        )
+        .unwrap();
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["coverage"]["peers"][0]["state"], "partial");
+        assert_eq!(
+            result["coverage"]["peers"][0]["warning"],
+            "peer does not support subtree selection; returned whole tree"
+        );
     }
 
     #[test]

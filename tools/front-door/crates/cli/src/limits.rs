@@ -2,7 +2,7 @@
 //! and the help catalogue quote these values rather than repeating them.
 
 /// A whole encoded result; larger results are published as an artifact.
-pub const MAX_RESULT_BYTES: usize = 1024 * 1024;
+pub use provenant_records::COMMAND_RESULT_MAX_BYTES as MAX_RESULT_BYTES;
 
 /// Rows an owner summary shows after its headline.
 pub const SUMMARY_ROWS: usize = 12;

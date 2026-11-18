@@ -604,6 +604,18 @@ impl Factory {
                 )
                 .map_err(graph_journal_error)?;
                 let admitted = checkpoint.is_some();
+                if !admitted
+                    && let Err(reason) = provenant_cli::route::validate_graph_exclusions(
+                        &document.exclude,
+                        &self.context.roots,
+                    )
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        reason,
+                        disk: None,
+                        fact: None,
+                    });
+                }
                 document
                     .admit(&self.context.config.graph.limits)
                     .map_err(FacadeError::graph_admission)?;

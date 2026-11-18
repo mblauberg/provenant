@@ -32,6 +32,7 @@ them as Markdown under the untracked `<repository>/docs/reference/`.
 - [Routing](routing.md): routes, providers, accounts, quota and readiness
 - [Run](run.md): operation IDs, stop handling and the run contracts below
   - [Launch](run-launch.md): admission, confinement and lane environment
+  - [Lane contracts](lane-contracts.md): launch, observations and result projection
   - [Settlement](run-settlement.md): outcomes, continuation and retention
   - [Git and delivery](run-git.md): Git custody, worktrees and publication
   - [Attribution](run-attribution.md): PR contributions and work correlation

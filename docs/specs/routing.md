@@ -184,6 +184,22 @@ renew the refusal. One function,
 `Admission::account_block`, decides account blocks for both resolution and
 the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
+A pool cannot draw a current login-required account, even when every other
+member is unavailable. A missing availability observation reaches preparation
+for its typed cause and cannot itself launch an account. An observed account
+with unknown identity follows the identity policy below.
+Account-wide sign-out and login-expiry failures for adapters with a login check
+remain unavailable after their observation interval. Only a strictly newer
+successful login observation or explicit sign-in clears them. For adapters
+without a login observation, including OpenCode, those failures expire after
+the observation interval: sign in and retry after it expires. An executable-only
+probe does not establish recovery. Identity mismatches still require identity evidence.
+Preparation publishes its first typed login failure through the quota/readiness
+owner, using the same account-scoped store as quota probes. A successful login
+reprobe publishes recovery through that owner too.
+A pool exhausted by pre-launch candidate exclusions carries a typed aggregate
+preparation disposition even when the exclusion reasons differ, so a signed-out
+member beside a disabled or excluded member can advance to a declared fallback.
 A fresh probe failure (`command_failure` or `probe_timeout`) ranks its account
 below ready or untested accounts during its validity window; if only failed-probe
 accounts remain, launch proceeds with a warning unless the `PROBE_FAILURE`
@@ -197,6 +213,7 @@ the chair.
 - Why: one probe outage or model limit must not take a provider offline, and
   no stale evidence may admit a launch.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
+  `AccountRecord::successful_login_observed_at` in `crates/quota/src/state.rs`,
   `crates/routing/src/resolve.rs`
 
 ## Monthly allowance ledger
@@ -271,12 +288,14 @@ registered credential root. Registering HOME explicitly uses its detected
 identity and suppresses the synthetic local entry to avoid routing the same
 login twice. Native launches and account probes set HOME to the selected
 account directory; sandboxed launches retain a private HOME with only the
-selected account's keychain. A pin does not switch accounts. Credential custody
+selected account's keychain. A node-wide account pin does not switch accounts; each fallback candidate may declare its own account when the node is unpinned. Credential custody
 is owned by [supervision](supervisor.md#native-environment-and-sandbox-tool-stores).
 A registered long-lived lane token is not rotated by the host.
 
 OpenCode models are partitioned by the registered plan, independently of account
-keys and labels. Enumeration keeps one row per registered identity and never
+keys, labels and shared credential directories: `opencode-go/` models use the
+Go plan and `opencode/` models use Zen. Enumeration keeps one row per registered
+identity and never
 invents a Zen identity from Go credentials. Plan declarations also own the quota
 source: missing or unrecognised plans retain unknown quota evidence rather than
 using the Go ledger. Free-model pacing and refusals remain

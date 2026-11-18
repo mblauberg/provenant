@@ -1,8 +1,7 @@
 // Integration fixtures use real UTC timestamps in their filesystem records.
 #![allow(clippy::disallowed_methods)]
-mod support;
-#[path = "support/terminal_run.rs"]
-mod terminal_run;
+use crate::support;
+use crate::terminal_run;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;

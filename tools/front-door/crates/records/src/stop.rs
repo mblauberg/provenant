@@ -571,6 +571,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::CommandUnavailable => Self::CommandUnavailable,
             T::HostNativeUnconfigured => Self::HostNativeUnconfigured,
             T::IdentityMismatch => Self::IdentityMismatch,
+            T::ProviderCaptureDefect { .. } => Self::Unsettled,
             T::StoppedNoWork => Self::StoppedEarly,
             T::EmptyWriterResult => Self::EmptyResult,
             T::ContextHandoff => Self::ContextHandoff,

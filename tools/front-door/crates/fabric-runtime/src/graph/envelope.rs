@@ -38,9 +38,28 @@ pub(super) fn admit(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> Result<(), AdmissionError> {
+    admit_with_limit(
+        document,
+        expansions,
+        extensions,
+        plan,
+        MAX_CHECKPOINT_BYTES as usize,
+    )
+    .map_err(|bound| AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
+}
+
+// Return the measured bound; the production caller owns the fixed envelope's
+// diagnostic. Tests can cross this same admission boundary with a small budget.
+pub(super) fn admit_with_limit(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+    byte_limit: usize,
+) -> Result<(), usize> {
     let bound = checkpoint_bound(document, expansions, extensions, plan);
-    if bound > MAX_CHECKPOINT_BYTES as usize {
-        Err(AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
+    if bound > byte_limit {
+        Err(bound)
     } else {
         Ok(())
     }
@@ -404,6 +423,7 @@ fn node_bound(
         previous_attempts: Vec::new(),
         attempts: Vec::new(),
         launch_retry: None,
+        fallback_evidence_retry: None,
         last_launch_retry: None,
     };
     // A refused automatic verdict correction retains its bounded admission error.

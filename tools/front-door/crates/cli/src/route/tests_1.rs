@@ -448,7 +448,8 @@
     }
 
     #[test]
-    fn opencode_unverified_login_allows_selected_account_to_try()
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    fn opencode_version_probe_cannot_clear_recorded_login_failure()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_quota::{
             AccountRecord, AccountScope, LOCAL_HOST, ReadinessFile, ReadinessReason,
@@ -541,7 +542,10 @@
         available.fixture_ref = "installed/opencode/login-unverified".into();
         assert!(matches!(
             resolve(&available)?.readiness,
-            provenant_records::RouteReadiness::Ready { .. }
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
         ));
         // The probe does not erase the recorded failure.
         assert_eq!(

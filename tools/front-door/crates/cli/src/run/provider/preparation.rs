@@ -75,6 +75,7 @@ fn select_account<'a>(
         message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
         cause: provenant_records::run::TerminalCause::UnregisteredAccount,
         note: None,
+                    fallback_outcome: None,
     })?;
     if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
         return Err(PrepareError::Other(
@@ -99,6 +100,7 @@ fn select_retained_account<'a>(
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
             cause: provenant_records::run::TerminalCause::UnregisteredAccount,
             note: None,
+                    fallback_outcome: None,
         })
 }
 
@@ -274,6 +276,48 @@ pub(super) fn provider_preparation_fallback(
     }
 }
 
+fn publish_preparation_login_failure(
+    state: &Path,
+    entry: &provenant_providers::accounts::Registration,
+    reason: provenant_quota::ReadinessReason,
+    now: i64,
+) {
+    let account = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: entry.adapter.clone(),
+        account_key: entry.key.clone(),
+        label: entry.label.clone(),
+    };
+    if let Err(error) =
+        crate::quota::persist_preparation_login_failure(state, &account, reason, now)
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: could not publish preparation login failure: {error}"
+        );
+    }
+}
+
+fn publish_provider_login_failure(
+    state: &Path,
+    entry: Option<&provenant_providers::accounts::Registration>,
+    error: &provenant_providers::ProviderError,
+    now: i64,
+) {
+    use provenant_providers::ProviderError;
+    let reason = match error {
+        ProviderError::LoginRequired | ProviderError::CredentialNotFound => {
+            provenant_quota::ReadinessReason::SignedOut
+        }
+        ProviderError::CredentialExpired => provenant_quota::ReadinessReason::LoginExpired,
+        _ => return,
+    };
+    if let Some(entry) = entry {
+        publish_preparation_login_failure(state, entry, reason, now);
+    }
+}
+
 /// Refresh failures retain login guidance only when the credential owner has
 /// classified the cause. Other provider errors cannot supply diagnostic text.
 pub(super) fn credential_failure_skip(
@@ -424,7 +468,7 @@ pub(super) fn dependency_preparation_event(
     match result {
         Ok(event) => Some(event),
         Err(error) => {
-            let warning = provenant_confinement::redact::bounded_line(
+            let warning = provenant_redact::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
@@ -584,7 +628,7 @@ fn prepare_writer_dependencies_with_policy(
 ) -> Result<serde_json::Value, String> {
     let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
     if let Err(error) = &result {
-        let detail = provenant_confinement::redact::bounded_line(
+        let detail = provenant_redact::bounded_line(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
@@ -680,6 +724,7 @@ pub(super) enum PrepareError {
         cause: provenant_records::run::TerminalCause,
         /// Fixed-form text naming a configured value, never captured output.
         note: Option<String>,
+        fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
@@ -832,6 +877,7 @@ impl PrepareError {
                 message,
                 cause,
                 note,
+                fallback_outcome,
             } => Box::new(run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
@@ -841,13 +887,17 @@ impl PrepareError {
                 message,
                 host_message: None,
                 skipped_routes: Vec::new(),
-                fallback_outcome: matches!(
-                    cause,
+                fallback_outcome: fallback_outcome.or(match cause {
+                    provenant_records::run::TerminalCause::AccountLoginRequired => {
+                        Some(provenant_records::run::PreparationFailure::AuthRequired)
+                    }
                     provenant_records::run::TerminalCause::UnregisteredAccount
-                        | provenant_records::run::TerminalCause::CommandUnavailable
-                        | provenant_records::run::TerminalCause::HostNativeUnconfigured
-                )
-                .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+                    | provenant_records::run::TerminalCause::CommandUnavailable
+                    | provenant_records::run::TerminalCause::HostNativeUnconfigured => {
+                        Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+                    }
+                    _ => None,
+                }),
             }),
             Self::SourceView(error) => {
                 let detail = error.to_string();
@@ -1304,6 +1354,16 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
 fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError {
     use crate::route::{DispatchError, EdgeError};
     use provenant_records::run::TerminalCause;
+    let fallback_outcome = match &error {
+        DispatchError::Edge(edge) => match edge.as_ref() {
+            EdgeError::Routing(provenant_routing::RoutingError::NoEligiblePoolMember {
+                preparation_failure,
+                ..
+            }) => Some(*preparation_failure),
+            _ => None,
+        },
+        _ => None,
+    };
     let message = error.to_string();
     let (cause, code) = match &error {
         DispatchError::Edge(error) => match error.as_ref() {
@@ -1314,7 +1374,25 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
                 TerminalCause::UnknownPacingAccount,
                 "unknown_pacing_account",
             ),
-            EdgeError::Routing(error) => (TerminalCause::RouteResolutionRefused, error.code()),
+            EdgeError::Routing(error) => {
+                let cause = match error {
+                    provenant_routing::RoutingError::NoEligiblePoolMember {
+                        cause: Some(reason),
+                        ..
+                    } => match reason {
+                        provenant_records::RouteExclusionReason::AuthRequired
+                        | provenant_records::RouteExclusionReason::LoginExpired => {
+                            TerminalCause::AccountLoginRequired
+                        }
+                        provenant_records::RouteExclusionReason::UnknownAccount => {
+                            TerminalCause::UnregisteredAccount
+                        }
+                        _ => TerminalCause::RouteResolutionRefused,
+                    },
+                    _ => TerminalCause::RouteResolutionRefused,
+                };
+                (cause, error.code())
+            }
             EdgeError::Unresolved { .. } => {
                 (TerminalCause::RouteResolutionRefused, "unresolved_selector")
             }
@@ -1332,6 +1410,11 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
         message,
         cause,
         note: Some(format!("route resolver classification: {code}")),
+        fallback_outcome: if cause == TerminalCause::AccountLoginRequired {
+            Some(provenant_records::run::PreparationFailure::AuthRequired)
+        } else {
+            fallback_outcome
+        },
     }
 }
 
@@ -1708,6 +1791,7 @@ fn prepare_inner(
                         .into(),
                     cause: provenant_records::run::TerminalCause::HostNativeUnconfigured,
                     note: None,
+                    fallback_outcome: None,
                 })?;
         let provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent {
             model,
@@ -2984,7 +3068,6 @@ pub(super) fn prepare_candidates_inner(
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
-    let mut login_unverified = std::collections::BTreeSet::<(String, String)>::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut reason_boundaries = std::collections::BTreeMap::new();
     let mut reason_resources = std::collections::BTreeMap::new();
@@ -3018,35 +3101,6 @@ pub(super) fn prepare_candidates_inner(
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
-                    // Staleness removes an old auth failure from admission,
-                    // but the executable-only OpenCode probe still cannot
-                    // establish login health. Keep that distinction visible
-                    // as a launch warning instead of silently losing the
-                    // reason when `read_readiness` projects it to `Stale`.
-                    let persisted_auth_failure = crate::quota::recorded_readiness_file(
-                        roots.state.as_path(),
-                        &entry.adapter,
-                        &entry.key,
-                    )
-                    .ok()
-                    .flatten()
-                    .is_some_and(|file| {
-                        file.records.iter().any(|record| {
-                            record.scope.host == provenant_quota::LOCAL_HOST
-                                && record.scope.route == provenant_quota::ACCOUNT_ROUTE
-                                && recorded.reason == Some(provenant_quota::ReadinessReason::Stale)
-                                && recorded.observed_scope.as_ref() == Some(&record.scope)
-                                && recorded.observed_unix_seconds
-                                    == Some(record.observed_unix_seconds)
-                                && matches!(
-                                    record.reason,
-                                    Some(
-                                        provenant_quota::ReadinessReason::SignedOut
-                                            | provenant_quota::ReadinessReason::LoginExpired
-                                    )
-                                )
-                        })
-                    });
                     let mismatch = recorded.reason
                         == Some(provenant_quota::ReadinessReason::AccountMismatch)
                         || diagnostic_records.iter().any(|r| {
@@ -3073,51 +3127,77 @@ pub(super) fn prepare_candidates_inner(
                                 provenant_quota::ReadinessReason::SignedOut
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
-                        )
-                        || persisted_auth_failure;
-                    if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
+                        );
+                    // A version-only probe cannot clear an authentication refusal.
+                    if auth_failure
+                        && login_check_can_clear(&entry.adapter, mismatch)
+                        && strategy != provenant_records::LoginReprobe::ExecutableOnly
+                    {
                         let executable = Path::new(&record.executable);
-                        if strategy == provenant_records::LoginReprobe::ExecutableOnly {
-                            // The version probe established executable availability,
-                            // not login health. Let the selected launch check auth.
-                            record.fixture_ref =
-                                format!("installed/{}/login-unverified", entry.adapter);
-                            login_unverified.insert((entry.adapter.clone(), entry.key.clone()));
-                        } else {
-                            let healthy = match strategy {
-                                provenant_records::LoginReprobe::Codex => {
-                                    codex_login_is_healthy(entry, executable, &probe)
-                                }
-                                provenant_records::LoginReprobe::Cursor => {
-                                    cursor_login_is_healthy(entry, executable, &probe)
-                                }
-                                provenant_records::LoginReprobe::AccountIdentity => {
-                                    provenant_providers::accounts::detect_for_registration(
-                                        &executor,
-                                        &entry.adapter,
-                                        executable,
-                                        &home,
-                                        &user,
-                                        &entry.directory,
-                                        executor.root(),
-                                    )
-                                    .is_ok_and(|(key, _)| {
-                                        key == entry.key || (!mismatch && entry.key == "local")
-                                    })
-                                }
-                                provenant_records::LoginReprobe::None
-                                | provenant_records::LoginReprobe::ExecutableOnly => false,
-                            };
-                            if healthy {
-                                record.fixture_ref =
-                                    format!("installed/{}/login-status", entry.adapter);
+                        // Date recovery before I/O: late publication of an older
+                        // probe must not clear a concurrently recorded failure.
+                        let login_observed_at = clock.unix_seconds();
+                        let healthy = match strategy {
+                            provenant_records::LoginReprobe::Codex => {
+                                codex_login_is_healthy(entry, executable, &probe)
                             }
+                            provenant_records::LoginReprobe::Cursor => {
+                                cursor_login_is_healthy(entry, executable, &probe)
+                            }
+                            provenant_records::LoginReprobe::AccountIdentity => {
+                                provenant_providers::accounts::detect_for_registration(
+                                    &executor,
+                                    &entry.adapter,
+                                    executable,
+                                    &home,
+                                    &user,
+                                    &entry.directory,
+                                    executor.root(),
+                                )
+                                .is_ok_and(|(key, _)| {
+                                    key == entry.key || (!mismatch && entry.key == "local")
+                                })
+                            }
+                            provenant_records::LoginReprobe::None
+                            | provenant_records::LoginReprobe::ExecutableOnly => false,
+                        };
+                        if healthy {
+                            let recovered = run::RouteRecord {
+                                provider: Some(entry.adapter.clone()),
+                                account_key: Some(entry.key.clone()),
+                                account_label: Some(entry.label.clone()),
+                                ..Default::default()
+                            };
+                            if let Err(error) = crate::quota::persist_login_probe_success(
+                                roots.state.as_path(),
+                                &recovered,
+                                login_observed_at,
+                            ) {
+                                let _ = writeln!(
+                                    std::io::stderr().lock(),
+                                    "warning: could not publish login recovery: {error}"
+                                );
+                            }
+                            let interval = record
+                                .expires_unix_seconds
+                                .saturating_sub(record.observed_unix_seconds);
+                            record.observed_unix_seconds = login_observed_at;
+                            record.expires_unix_seconds =
+                                login_observed_at.saturating_add(interval);
+                            record.fixture_ref =
+                                format!("installed/{}/login-status", entry.adapter);
                         }
                     }
                 }
                 availability.push(record)
             }
             Err(AccountObservationError::AuthRequired(detail)) => {
+                publish_preparation_login_failure(
+                    roots.state.as_path(),
+                    entry,
+                    provenant_quota::ReadinessReason::SignedOut,
+                    clock.unix_seconds(),
+                );
                 auth_failures.insert((entry.adapter.clone(), entry.key.clone()), detail.clone());
                 observation_failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
             }
@@ -3888,6 +3968,7 @@ pub(super) fn prepare_candidates_inner(
         );
         let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
         let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
@@ -3897,6 +3978,7 @@ pub(super) fn prepare_candidates_inner(
                 slots: lanes.build_limit(total),
                 source: lanes.build_limit_source(),
             }),
+            cargo_target: Some(cargo_target.clone()),
         };
         let text = format!(
             "{}\n{text}",
@@ -4005,6 +4087,10 @@ pub(super) fn prepare_candidates_inner(
                 Ok(authority) => authority,
                 Err(error) => {
                     previous_outcome = provenant_routing::FallbackOutcome::Other;
+                    reason_boundaries.insert(
+                        reasons.len(),
+                        provenant_records::diagnostic::BoundaryClass::Credentials,
+                    );
                     reasons.push(skip(&label, SkipKind::Refused, error));
                     continue;
                 }
@@ -4026,7 +4112,17 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
+                    publish_provider_login_failure(
+                        roots.state.as_path(),
+                        entry,
+                        &error,
+                        clock.unix_seconds(),
+                    );
                     previous_outcome = provider_preparation_fallback(&error);
+                    let class = error.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
                     reasons.push(credential_failure_skip(
                         &label,
                         &error,
@@ -4087,6 +4183,27 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
+        let common_git_dir = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+            AccessMode::ReadOnly => None,
+        };
+        let private_cache = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
+            AccessMode::ReadOnly => &plan.permissions().scratch.path,
+        };
+        let (cargo_target_dir, cargo_target_lint) =
+            cargo_target.target_paths(&home, common_git_dir, private_cache);
+        // A shared or configured target lies outside the lane cache. Create it
+        // here so a sandboxed lane's grants can anchor to it; Cargo would
+        // create it itself only after the profile is fixed.
+        let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
+            .into_iter()
+            .filter(|path| !path.starts_with(private_cache))
+            .find_map(|path| {
+                std::fs::create_dir_all(path)
+                    .err()
+                    .map(|error| format!("cannot create Cargo target {}: {error}", path.display()))
+            });
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -4107,6 +4224,10 @@ pub(super) fn prepare_candidates_inner(
                         Some(sandbox.env_value().into())
                     } else if key == "PATH" {
                         Some(lane_path.path().to_os_string())
+                    } else if key == "CARGO_TARGET_DIR" || key == "CARGO_BUILD_BUILD_DIR" {
+                        Some(cargo_target_dir.as_os_str().to_os_string())
+                    } else if key == provenant_core::consumer_env::LANE_CARGO_LINT_TARGET {
+                        Some(cargo_target_lint.as_os_str().to_os_string())
                     } else {
                         host_provider_var(registry, key)
                     }
@@ -4131,6 +4252,12 @@ pub(super) fn prepare_candidates_inner(
         let mut spec = match prepare(&provider_route) {
             Ok(spec) => spec,
             Err(error) => {
+                publish_provider_login_failure(
+                    roots.state.as_path(),
+                    entry,
+                    &error,
+                    clock.unix_seconds(),
+                );
                 previous_outcome = provider_preparation_fallback(&error);
                 let class = error.boundary_class();
                 if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -4163,6 +4290,12 @@ pub(super) fn prepare_candidates_inner(
             spec = match prepare(&without_skills) {
                 Ok(spec) => spec,
                 Err(error) => {
+                    publish_provider_login_failure(
+                        roots.state.as_path(),
+                        entry,
+                        &error,
+                        clock.unix_seconds(),
+                    );
                     previous_outcome = provider_preparation_fallback(&error);
                     let class = error.boundary_class();
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -4516,16 +4649,18 @@ pub(super) fn prepare_candidates_inner(
         }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
             spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
-        }) && route.account_key.as_ref().is_some_and(|account_key| {
-            login_unverified.contains(&(route.adapter.clone(), account_key.clone()))
         }) {
-            push_launch_warning(
-                &mut route,
-                "OpenCode login status is unverified; the selected launch will check authentication",
+            let warning = format!(
+                "{} login status is unverified; the selected launch will check authentication",
+                route.adapter
             );
+            push_launch_warning(&mut route, warning);
         }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
+        }
+        if let Some(warning) = &cargo_target_warning {
+            push_launch_warning(&mut route, warning.clone());
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);
@@ -4733,6 +4868,7 @@ pub(super) fn prepare_candidates_inner(
                     message: "provider prepared a resumed invocation without its retained session binding".into(),
                     cause: provenant_records::run::TerminalCause::HandoffRefused,
                     note: None,
+                    fallback_outcome: None,
                 });
             }
             (false, _) => None,
@@ -4789,6 +4925,7 @@ pub(super) fn prepare_candidates_inner(
                 state_root: roots.state.as_path().to_path_buf(),
                 sandbox,
                 backend: None,
+                cargo_target: cargo_target.clone(),
             }),
         });
     }
@@ -4919,6 +5056,8 @@ mod receipt_tests {
         let error = crate::route::DispatchError::Catalogue(
             provenant_routing::RoutingError::NoEligiblePoolMember {
                 exclusions: vec![message.into()],
+                cause: None,
+                preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
             },
         );
         let refusal = PrepareError::RouteResolution {
@@ -5510,6 +5649,49 @@ mod refusal_cause_tests {
             Some("route resolver classification: unsupported_effort")
         );
         assert!(refusal.skipped_routes.is_empty());
+        // Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+        for (reason, expected) in [
+            (
+                provenant_records::RouteExclusionReason::AuthRequired,
+                provenant_records::run::PreparationFailure::AuthRequired,
+            ),
+            (
+                provenant_records::RouteExclusionReason::LoginExpired,
+                provenant_records::run::PreparationFailure::AuthRequired,
+            ),
+            (
+                provenant_records::RouteExclusionReason::UnknownAccount,
+                provenant_records::run::PreparationFailure::AdapterUnavailable,
+            ),
+        ] {
+            let error = crate::route::DispatchError::from(crate::route::EdgeError::Routing(
+                provenant_routing::RoutingError::NoEligiblePoolMember {
+                    exclusions: vec!["PROVIDER_SECRET_SENTINEL".into()],
+                    cause: Some(reason),
+                    preparation_failure:
+                        provenant_records::run::PreparationFailure::AdapterUnavailable,
+                },
+            ));
+            assert_eq!(
+                route_resolution_refusal(error)
+                    .into_refusal()
+                    .fallback_outcome,
+                Some(expected)
+            );
+        }
+        let aggregate = crate::route::DispatchError::from(crate::route::EdgeError::Routing(
+            provenant_routing::RoutingError::NoEligiblePoolMember {
+                exclusions: vec!["signed out".into(), "disabled".into()],
+                cause: None,
+                preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+            },
+        ));
+        assert_eq!(
+            route_resolution_refusal(aggregate)
+                .into_refusal()
+                .fallback_outcome,
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+        );
         assert!(
             !refusal
                 .terminal_note

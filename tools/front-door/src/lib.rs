@@ -17,12 +17,15 @@ mod custody;
 mod disk;
 mod disk_guard;
 mod fabric;
+mod notes;
 mod tick;
 mod tick_agent;
 mod tracker;
 
 mod chair_log_retention;
 mod checkpoint_retention;
+mod event_delivery;
+mod events;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -932,18 +935,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
         let disk = disk_guard::LaneDisk::default();
-        let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
-            provenant_confinement::redact::Redactor::new([]),
-            provenant_confinement::redact::Redactor::new([]),
-        ) else {
-            return fail(
-                "internal supervise",
-                Outcome::Error,
-                "REDACTION",
-                "cannot initialise capture redaction",
-                globals,
-            );
-        };
         let (resource_sample_interval, resource_sample_interval_source) =
             match roots::resolve(globals, Workspace::Project, Product::Optional) {
                 Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
@@ -985,8 +976,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
-            stdout_filter: Some(&mut stdout_filter),
-            stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
         };
         match process.supervise(&descriptors, hooks) {
@@ -1259,6 +1248,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::TickGc) => {
             tick::gc_worker(globals, process.workers())
         }
+        Command::Internal(provenant_cli::Internal::EventListen { repository }) => {
+            event_delivery::listen(&repository, globals)
+        }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
         Command::Internal(provenant_cli::Internal::Launch {
             attempt,
@@ -1434,6 +1426,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             process.workers(),
         ),
         Command::Wait(cmd) => status_wait::run(cmd, globals),
+        Command::Events {
+            from,
+            follow,
+            consumer,
+        } => events::run(from.unwrap_or(0), follow, consumer.as_deref(), globals),
         Command::Land {
             numbers,
             strategy,
@@ -1620,6 +1617,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
+        Command::Notes(cmd) => notes::run(cmd, globals),
         Command::Quota { command } => {
             let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
                 adapter: None,

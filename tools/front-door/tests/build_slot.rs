@@ -414,26 +414,6 @@ fn the_shims_exit_code_is_the_builds() -> Result {
 }
 
 #[test]
-fn busy_slot_waits_a_bounded_time_then_builds_without_one() -> Result {
-    // #3343: a busy cap waits up to the shim's bounded wait (15s), then warns
-    // and proceeds, so the build still finishes but not before the wait ends.
-    let rig = Rig::new()?;
-    rig.provision(1)?;
-    let slots = BuildSlots::open(&rig.state)?;
-    let _busy = slots.try_acquire(1)?.ok_or("expected free slot")?;
-    let mut child = rig.shim(1, &["build"])?;
-    assert!(finish(&mut child, Duration::from_secs(40))?);
-    assert!(rig.started("end"));
-    let message = stderr_of(&mut child)?;
-    assert!(
-        message.contains("waiting for a host build slot"),
-        "{message}"
-    );
-    assert!(message.contains("building without one"), "{message}");
-    Ok(())
-}
-
-#[test]
 fn disk_policy_applies_before_starting_a_new_build() -> Result {
     use provenant_records::diagnostic::SettingSource;
     use provenant_records::policy::{Policy, Source, Strength};

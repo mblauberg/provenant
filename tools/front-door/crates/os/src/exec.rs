@@ -425,12 +425,20 @@ fn check_process_budget(probe: io::Result<ProcessBudget>) -> Result<(), ExecErro
     }
 }
 
-/// Cargo places test executables, and only those, in a profile's `deps`.
+/// Cargo builds test executables, and only those, into an intermediate
+/// directory rather than the profile root it copies binaries to: a profile's
+/// `deps`, or `build/<package>/<hash>/out` in the build-directory layout
+/// Cargo 1.100 adopted.
 fn is_test_harness(program: &Path) -> bool {
-    program
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|directory| directory == "deps")
+    let mut directories = program.ancestors().skip(1).map(Path::file_name);
+    match directories.next().flatten() {
+        Some(parent) if parent == "deps" => true,
+        Some(parent) if parent == "out" => directories
+            .nth(2)
+            .flatten()
+            .is_some_and(|build| build == "build"),
+        _ => false,
+    }
 }
 
 impl Executor for SystemExecutor {

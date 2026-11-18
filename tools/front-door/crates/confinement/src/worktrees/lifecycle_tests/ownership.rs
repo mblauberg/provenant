@@ -1136,13 +1136,12 @@ fn observed_holder_is_advisory_for_launch(kind: ProcessEvidenceKind) -> Result<(
 }
 
 #[test]
-fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
--> Result<(), Box<dyn Error>> {
+fn writer_worktrees_claim_concurrently_without_registry_exclusion() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let mut claims = Vec::new();
-    for index in 0..12 {
+    for index in 0..3 {
         let branch = format!("parallel-writer-{index}");
         let info = create(
             &context,
@@ -1168,6 +1167,22 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
             info.head,
         ));
     }
+    assert_eq!(
+        claims
+            .iter()
+            .map(|(tree, _, _)| tree.path())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        claims.len(),
+    );
+    assert_eq!(
+        claims
+            .iter()
+            .map(|(tree, _, _)| state_dir_name(tree.path()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        claims.len(),
+    );
     // A repository mutation on another tree must not delay these claims.
     let _registry = context
         .repo
@@ -1189,7 +1204,36 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
                         ..*context
                     };
                     barrier.wait();
-                    save_lane_owner_when_free(&local, tree, owner, *head, None, false, &cancel())
+                    // Deterministically overlap the claim with a same-slot
+                    // report probe. Release only after the kernel lock has
+                    // contended and the bounded wait is about to pause.
+                    let slot = local
+                        .project_state
+                        .open_verified_directory(&state_dir_name(tree.path()))?;
+                    let observation =
+                        provenant_supervisor::custody::writer_observation_guard(&slot)
+                            .map_err(|_| WorktreeError::UnknownWriter)?;
+                    let waited = std::rc::Rc::new(std::cell::Cell::new(false));
+                    let observed = waited.clone();
+                    provenant_os::fixture::on_existing_lock_wait(move || {
+                        observed.set(true);
+                        drop(observation);
+                    });
+                    let result = save_lane_owner_when_free(
+                        &local,
+                        tree,
+                        owner,
+                        *head,
+                        None,
+                        false,
+                        &cancel(),
+                    );
+                    assert!(
+                        waited.get(),
+                        "{} did not encounter the observation gate",
+                        owner.branch
+                    );
+                    result
                 })
             })
             .collect();

@@ -68,7 +68,7 @@ not (
         test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
         test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
     )) |
-    (package(=provenant) & binary(=fabric_lane) & test(=lane_run_submits_child_through_parent_relay)) |
+    (package(=provenant) & binary(=integration) & test(=fabric_lane::lane_run_submits_child_through_parent_relay)) |
     (package(=provenant) & binary(=worktrees) & (
         test(=lane_prepare_isolates_nested_claude_state) |
         test(=lane_builds_and_tests_swift_in_a_registered_worktree)
@@ -79,33 +79,15 @@ not (
 [test-groups]
 serial-process = { max-threads = 1 }
 
-# This fixture runs two provider commands, each with its own 30-second wait.
-# Keep the outer limit above their combined budgets so failures reach assertions.
+# Two independent provider commands overlap; each wait still has its own
+# 30-second budget so failures can reach their assertions.
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Three real command lanes in turn, each waiting for a published process sample.
+# Three overlapping real command lanes each wait for a published process sample.
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=command_adapter) & test(=command_lane_reads_its_supervisors_process_tree_through_the_cli)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Four real sandboxed command lanes in turn, each dispatched and settled. That
-# takes 18 to 26 seconds on macOS runners and passes 30 under shared load.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=command_adapter) & test(=command_pass_fail_truncation_and_spawn_failure_settle_without_models)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Two data-home variants each launch four real graph providers against an open
-# WAL. Allow for shared-host contention without dropping session-read cases.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-# Two rounds of simultaneous real writer launches each settle a fixture
-# provider, which takes about 30 seconds on a developer Mac.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_are_admitted_or_scheduled_for_retry)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # One real writer launch from a fetched remote branch takes about 20 seconds on
@@ -166,14 +148,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Catalogue coverage starts two CLI processes per bundled template. Keep every
-# template assertion while allowing for process-start contention in a full run.
-# The oversized peer-frame refusal also reads its boundary-sized frame before
-# contact and exceeds 30 seconds on this host even when run on its own.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_and_compiles_with_its_declared_parameters)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # Three isolated credential layouts each run real writer preparation. Retain
 # every layout and assertion while allowing their combined time on shared hosts.
 [[profile.default.overrides]]
@@ -207,13 +181,13 @@ slow-timeout = { period = "10s", terminate-after = 6 }
 # These Git-history release fixtures crossed 20s while running together.
 # Reserve the full pool while retaining the normal CI deadline.
 [[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=checks) & (test(=release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=release_ranges_check_commit_identity_across_a_shallow_boundary))'
+filter = 'package(=provenant) & binary(=integration) & (test(=checks::release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=checks::release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=checks::release_ranges_check_commit_identity_across_a_shallow_boundary))'
 threads-required = "num-test-threads"
 
 # This bounded-evidence fixture launches six release checks and exceeded 30s
 # on macOS. Its measured aggregate work gets four 30s intervals; no other
 # fixture or product/runtime deadline changes.
 [[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=checks) & test(=release_checks_legal_private_symlink_and_bounded_evidence)'
+filter = 'package(=provenant) & binary(=integration) & test(=checks::release_checks_legal_private_symlink_and_bounded_evidence)'
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 4 }

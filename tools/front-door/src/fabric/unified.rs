@@ -267,6 +267,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         // never launched an attempt (blocked, skipped and admission failures).
         for field in [
             "attempt_number",
+            "warnings",
             "work_key",
             "branch",
             "head",
@@ -301,6 +302,9 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         let current =
             row["kind"] == "node" || attempt.zip(latest).is_some_and(|(a, b)| std::ptr::eq(a, b));
         if current {
+            if row["kind"] == "node" {
+                row["warnings"] = json!(node.map(|node| &node.warnings));
+            }
             row["branch"] = json!(
                 node.and_then(|node| node.outputs.as_ref())
                     .and_then(|out| out.branch.as_ref())
@@ -498,6 +502,7 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
         {
             human.push_str(&digest.line);
             human.push('\n');
+            append_status_warnings(&mut human, node);
             continue;
         }
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
@@ -583,7 +588,19 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
     }
     let mut line = provenant_cli::bounded_text(&line, provenant_cli::limits::SUMMARY_ROW_BYTES);
     line.push('\n');
+    append_status_warnings(&mut line, row);
     line
+}
+
+fn append_status_warnings(line: &mut String, row: &Value) {
+    if let Some(warnings) = row["warnings"].as_array() {
+        for warning in warnings.iter().filter_map(Value::as_str) {
+            line.push_str(&format!(
+                "  warning: {}\n",
+                provenant_cli::bounded_text(warning, 2048)
+            ));
+        }
+    }
 }
 
 fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_records::DecodeError) {
@@ -812,10 +829,22 @@ pub(crate) fn enrich_status_rows_within(
     Ok(())
 }
 
+/// Keep graph cause codes scalar even when a closed terminal cause has data.
+/// Decode the declaration before selecting its tag: arbitrary object keys are
+/// not safe diagnostics.
+fn terminal_cause_code(value: &Value) -> Option<String> {
+    let _: provenant_records::run::TerminalCause = serde_json::from_value(value.clone()).ok()?;
+    match value {
+        Value::String(code) => Some(code.clone()),
+        Value::Object(tagged) => tagged.keys().next().cloned(),
+        _ => None,
+    }
+}
+
 fn project_attempt_failure(row: &mut Value) {
-    if row["terminal_cause"].is_string() {
-        row["cause_code"] = row["terminal_cause"].clone();
-        if row["terminal_cause"] == "handoff_refused" {
+    if let Some(code) = terminal_cause_code(&row["terminal_cause"]) {
+        row["cause_code"] = json!(code);
+        if code == "handoff_refused" {
             if let Some(id) = row["id"].as_str() {
                 row["next"] = json!(format!("provenant retry {id}"));
             }
@@ -855,7 +884,7 @@ fn project_node_failures(rows: &mut [Value]) {
                 ),
                 (
                     row["graph_state"].clone(),
-                    row["terminal_cause"].clone(),
+                    terminal_cause_code(&row["terminal_cause"]).map_or(Value::Null, Value::String),
                     row["reason"].clone(),
                     row["next"].clone(),
                 ),
@@ -3498,6 +3527,7 @@ mod tests {
         assert!(line.contains("cause=budget_exhausted"), "{line}");
     }
 
+    // Spec: docs/specs/cli.md#status-selection
     #[test]
     // Spec: docs/specs/cli.md#output-references-and-bounded-tails
     fn result_renders_retained_head_and_checks_after_collection()
@@ -3558,6 +3588,7 @@ mod tests {
         // resolve to the WorkKey and reference that produced it.
         let mut projected = checkpoint("g");
         projected.nodes[0].attempts[0].key.attempt = 7;
+        projected.nodes[0].warnings.push("retry warning".into());
         let run = graph_snapshot(projected);
         let graph = GraphTarget {
             graph: "g".into(),
@@ -3570,6 +3601,13 @@ mod tests {
             rows.iter()
                 .all(|row| row.as_object().unwrap().keys().collect::<Vec<_>>() == keys)
         );
+        for row in &rows {
+            if row["kind"] == "node" && row["node_id"] == "parent" {
+                assert_eq!(row["warnings"], json!(["retry warning"]));
+            } else if row["kind"] != "node" {
+                assert!(row["warnings"].is_null());
+            }
+        }
         assert_eq!(rows[0]["kind"], "graph");
         assert_eq!(rows[1]["id"], "g/parent");
         for row in rows.iter().filter(|row| row["kind"] == "attempt") {
@@ -3851,28 +3889,43 @@ mod tests {
                 .any(|line| line.contains("op-123"))
         );
 
-        let mut rows = vec![
-            json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
-            json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":"command_unavailable", "reason":"configure the provider command"}),
-        ];
-        project_attempt_failure(&mut rows[1]);
-        assert_eq!(rows[1]["cause_code"], "command_unavailable");
-        assert_eq!(rows[1]["next"], "configure the provider command");
-        project_node_failures(&mut rows);
-        assert_eq!(rows[0]["cause_code"], "command_unavailable");
-        assert_eq!(rows[0]["reason"], "configure the provider command");
-        assert_eq!(rows[0]["next"], "configure the provider command");
-        assert!(render_graph_status(&rows[..1]).contains("configure the provider command"));
+        for (cause, code, reason) in [
+            (
+                json!("command_unavailable"),
+                "command_unavailable",
+                "configure the provider command",
+            ),
+            (
+                json!({"provider_capture_defect":{"line":52}}),
+                "provider_capture_defect",
+                "provider capture evidence defect at stdout.log line 52; replay incomplete",
+            ),
+        ] {
+            let mut rows = vec![
+                json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
+                json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":cause, "reason":reason}),
+            ];
+            project_attempt_failure(&mut rows[1]);
+            assert_eq!(rows[1]["cause_code"], code);
+            assert_eq!(rows[1]["next"], reason);
+            project_node_failures(&mut rows);
+            assert_eq!(rows[0]["cause_code"], code);
+            assert_eq!(rows[0]["reason"], reason);
+            assert_eq!(rows[0]["next"], reason);
+            let status = render_graph_status(&rows[..1]);
+            assert!(status.contains(reason), "{status}");
+            assert!(status.contains(code), "{status}");
 
-        // An older terminal attempt must not supply the cause for a newer
-        // attempt whose state has not settled or whose record was collected.
-        rows[0]["reason"] = Value::Null;
-        rows[0]["cause_code"] = json!("adapter_unavailable");
-        rows[1]["latest_attempt"] = json!(false);
-        rows.push(json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"starting", "latest_attempt":true, "reason":null}));
-        project_node_failures(&mut rows);
-        assert!(rows[0]["reason"].is_null());
-        assert_eq!(rows[0]["cause_code"], "adapter_unavailable");
+            // An older terminal attempt must not supply the cause for a newer
+            // attempt whose state has not settled or whose record was collected.
+            rows[0]["reason"] = Value::Null;
+            rows[0]["cause_code"] = json!("adapter_unavailable");
+            rows[1]["latest_attempt"] = json!(false);
+            rows.push(json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"starting", "latest_attempt":true, "reason":null}));
+            project_node_failures(&mut rows);
+            assert!(rows[0]["reason"].is_null());
+            assert_eq!(rows[0]["cause_code"], "adapter_unavailable");
+        }
     }
 
     #[test]

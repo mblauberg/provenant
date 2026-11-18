@@ -189,6 +189,7 @@ impl Providers for Confined {
                 warning: None,
             },
             backend: None,
+            cargo_target: Default::default(),
         });
         Ok(launch)
     }
@@ -220,6 +221,8 @@ pub(super) struct Fake {
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
     pub(super) terminal_cause: Option<TerminalCause>,
+    /// Evidence diagnostic for outcomes such as `Unsettled` that require one.
+    pub(super) reason: Option<String>,
     /// Provider session the decode reports, for terminal continuation tests.
     pub(super) session: Option<String>,
     /// The answer a decode reports, instead of the captured stdout.
@@ -315,7 +318,7 @@ impl Providers for Fake {
             observed_route: self.observed.clone(),
             usage: self.codex_usage.clone().unwrap_or_default(),
             session: self.session.clone(),
-            reason: None,
+            reason: self.reason.clone(),
             partial_signals: self.partial.clone(),
             turns: self.turns.clone(),
         })

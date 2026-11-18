@@ -1,6 +1,6 @@
 //! `wait` at the binary boundary: targets resolve before any wait, a settled
 //! graph ends the wait with its verdict, and no work means nothing to wait for.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read},
@@ -68,6 +68,7 @@ fn fixture_cli(rig: &TestRig, args: &[&str]) -> Result<Output> {
         .arg(state)
         .args(args)
         .current_dir(&rig.project)
+        .env_clear()
         .envs(rig.env.iter().cloned())
         .output()?)
 }
@@ -301,6 +302,7 @@ fn wait_any_wakes_on_node_settlement_and_wait_reports_early_events() -> Result {
             "--json",
         ])
         .current_dir(&rig.project)
+        .env_clear()
         .envs(rig.env.iter().cloned())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -363,6 +365,7 @@ fn wait_any_wakes_on_node_settlement_and_wait_reports_early_events() -> Result {
         .arg(&rig.state)
         .args(["wait", &fast, &slow, "--timeout", "30s", "--json"])
         .current_dir(&rig.project)
+        .env_clear()
         .envs(rig.env.iter().cloned())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

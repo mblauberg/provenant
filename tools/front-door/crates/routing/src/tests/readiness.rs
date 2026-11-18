@@ -188,7 +188,7 @@ fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
     ];
     let error = trial_picks(&catalogue, &records, &rules).unwrap_err();
     assert_eq!(error.code(), "no_eligible_pool_member");
-    let RoutingError::NoEligiblePoolMember { exclusions } = error else {
+    let RoutingError::NoEligiblePoolMember { exclusions, .. } = error else {
         return Err("pool exclusion must be a typed no-eligible-member refusal".into());
     };
     assert!(!exclusions.is_empty());

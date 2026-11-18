@@ -1,7 +1,11 @@
 //! Supervisor handoff for accepted attempts. The provider seam is minimal and
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
-use crate::{artifacts::read_sealed, db::decode, *};
+use crate::{
+    artifacts::{read_sealed, read_sealed_observed},
+    db::decode,
+    *,
+};
 use provenant_core::{ActorId, AttemptId, OperationId};
 use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
@@ -1081,6 +1085,14 @@ impl RunStore {
     pub fn request(&self, attempt: AttemptId, call: &Request<'_>) -> Result<CanonicalRequest> {
         Ok(self.request_with_digest(attempt, call)?.0)
     }
+    /// An observed request read that does not invoke `F_FULLFSYNC` disk flushes.
+    pub fn request_observed(
+        &self,
+        attempt: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<CanonicalRequest> {
+        Ok(self.request_observed_with_digest(attempt, call)?.0)
+    }
     /// The request and the digest of its stored bytes. Callers compare this
     /// digest, never a reserialised request, because its schema may have
     /// evolved since the run was written.
@@ -1090,6 +1102,29 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
         let raw = read_sealed(
+            &self.attempt_dir(attempt, false)?,
+            "request.json",
+            RECORD_LIMIT,
+        )?
+        .ok_or(RunError::NotFound)?;
+        let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
+        let stored = self.attempt_operation(attempt, call)?.request_digest;
+        if digest != stored {
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::RequestDigest,
+                "request.json",
+                Some(ArtifactValue::digest(stored)),
+                Some(ArtifactValue::digest(digest)),
+            ));
+        }
+        Ok((decode(&raw)?, digest))
+    }
+    pub(crate) fn request_observed_with_digest(
+        &self,
+        attempt: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
+        let raw = read_sealed_observed(
             &self.attempt_dir(attempt, false)?,
             "request.json",
             RECORD_LIMIT,
@@ -2029,7 +2064,7 @@ impl RunStore {
                 if let Err(error) =
                     crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new(child), true)
                 {
-                    staging_failure = Some(provenant_confinement::redact::bounded_line(
+                    staging_failure = Some(provenant_redact::bounded_line(
                         &format!("launch staging failed: {error}"),
                         240,
                     ));
@@ -2131,7 +2166,7 @@ impl RunStore {
                         && let Err(error) =
                             self.record_skipped_routes(id, &refusal.skipped_routes, call)
                     {
-                        let reason = provenant_confinement::redact::bounded_line(
+                        let reason = provenant_redact::bounded_line(
                             &format!("launch preparation failed: {error}"),
                             240,
                         );
@@ -2169,8 +2204,7 @@ impl RunStore {
                     };
                     let terminal_note = if let Some(host_message) = refusal.host_message.as_deref()
                     {
-                        let host_message =
-                            provenant_confinement::redact::bounded_line(host_message, 160);
+                        let host_message = provenant_redact::bounded_line(host_message, 160);
                         Some(match terminal_note {
                             Some(note) => format!("{host_message}; {note}"),
                             None => host_message,
@@ -2232,7 +2266,7 @@ impl RunStore {
                     });
                     continue;
                 }
-                let reason = provenant_confinement::redact::bounded_line(
+                let reason = provenant_redact::bounded_line(
                     &format!("launch preparation failed: {error}"),
                     240,
                 );
@@ -2304,7 +2338,7 @@ impl RunStore {
             if !plan.skipped_routes.is_empty()
                 && let Err(error) = self.record_skipped_routes(id, &plan.skipped_routes, call)
             {
-                let reason = provenant_confinement::redact::bounded_line(
+                let reason = provenant_redact::bounded_line(
                     &format!("launch preparation failed: {error}"),
                     240,
                 );
@@ -2345,7 +2379,7 @@ impl RunStore {
                     continue;
                 }
                 Err(error) => {
-                    let reason = provenant_confinement::redact::bounded_line(
+                    let reason = provenant_redact::bounded_line(
                         &format!("launch preparation failed: {error}"),
                         240,
                     );
@@ -2405,6 +2439,15 @@ impl RunStore {
                         | HandOff::Busy
                         | HandOff::RetainedImport { .. }),
                     ) => {
+                        // These handoff variants are returned only after the
+                        // local lease has been withdrawn. Preserve that typed
+                        // pre-provider failure for graph fallback; a boundary or
+                        // retained import does not establish safe preparation.
+                        let preparation_failure =
+                            matches!(&error, HandOff::Local(_) | HandOff::TypedLocal { .. })
+                                .then_some(
+                                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                                );
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
@@ -2443,8 +2486,8 @@ impl RunStore {
                             ),
                             _ => unreachable!(),
                         };
-                        // Cancellation decides the outcome, but an independent
-                        // preparation failure remains evidence for the chair.
+                        // The terminal cause retains the independent failure,
+                        // but cancellation must not authorise route fallback.
                         let cancelled = self.attempt_dir(id, false).is_ok_and(|attempt| {
                             crate::store::cancel_requested(&attempt, Self::scope(&record))
                         });
@@ -2465,7 +2508,7 @@ impl RunStore {
                                 outcome,
                                 reason: &reason,
                                 finished_at: now()?,
-                                failure: None,
+                                failure: preparation_failure.filter(|_| !cancelled),
                                 terminal_cause,
                                 terminal_note: kind.terminal_note(),
                             },
@@ -2924,6 +2967,7 @@ mod policy_reporting_tests {
                     warning: None,
                 },
                 backend: None,
+                cargo_target: Default::default(),
             }),
         };
         // Bind a real unavailable backend before the claim is persisted.

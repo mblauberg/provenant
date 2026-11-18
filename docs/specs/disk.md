@@ -41,6 +41,9 @@ from attempt release. A busy or unreleased attempt remains protected. After
 merge, background cleanup is scoped to that branch's worktree and attempts;
 automatic full sweeps run only below `gc.free_floor`, under a shared single-flight lock.
 Full sweeps preserve warm shared caches and the newest Cargo seed generation.
+Private lane caches require idle age and unambiguous owner custody; held Cargo
+or owner locks protect them. Dry-run cache measurements are bounded and may
+leave eligibility unknown until apply performs a full observation.
 - Why: space recovery must not interrupt resumable work or evict useful shared
   build state.
 

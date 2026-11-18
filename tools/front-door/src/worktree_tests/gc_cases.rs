@@ -397,9 +397,9 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     // is skipped, and the next oldest goes until the cap is met.
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
     let dirs = &preview["data"]["build_dirs"];
-    // Preview surveys the same candidates without removing them.
-    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
-    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
+    // Preview skips the expensive census and leaves every profile untouched.
+    assert_eq!(dirs["measurement_skipped"], true, "{dirs}");
+    assert!(names(&dirs["removed"]).is_empty(), "{dirs}");
     assert!(stale.join("deps/payload").is_file() && fresh.is_dir());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     let dirs = &applied["data"]["build_dirs"];
@@ -600,6 +600,8 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
         Ok(())
     }
 
+    let rig = repository()?;
+    let mut cases = Vec::new();
     for writer in [
         "live",
         "live_reserved",
@@ -608,19 +610,15 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
         "unsafe",
         "reserved",
     ] {
-        let rig = repository()?;
-        ok(&rig, &["worktree", "create", "idle", "--json"])?;
-        let worktree = rig.project.join(".worktrees/idle");
-        let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
+        let branch = format!("idle-{writer}");
+        ok(&rig, &["worktree", "create", &branch, "--json"])?;
+        let worktree = rig.project.join(".worktrees").join(&branch);
+        let cache = prepare_lane_cache(&rig, &worktree, &branch)?;
         let projects =
             fs::read_dir(rig.state.join("worktrees"))?.collect::<std::io::Result<Vec<_>>>()?;
         let project = projects.first().ok_or("project state")?.path();
-        let states = fs::read_dir(project)?.collect::<std::io::Result<Vec<_>>>()?;
-        let state = states
-            .iter()
-            .find(|entry| entry.path().join("writer.lock").is_file())
-            .ok_or("worktree registration")?
-            .path();
+        let state = project.join(provenant_confinement::worktrees::state_dir_name(&worktree));
+        assert!(state.join("writer.lock").is_file());
         let directory = Directory::open_anchor(&state)?;
         let lock = OsStr::new("writer.lock");
         let held = match writer {
@@ -647,54 +645,68 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
             _ => None,
         };
         if writer == "live" {
-            let refused = command(&rig, &["worktree", "remove", "idle", "--json"])?;
+            let refused = command(&rig, &["worktree", "remove", &branch, "--json"])?;
             let value = json(&refused)?;
             assert_eq!(value["status"], "refused", "{value}");
             assert_eq!(value["error"]["code"], "WORKTREE_LOCK_BUSY", "{value}");
         }
         make_idle(&cache)?;
-        let listed = ok(&rig, &["worktree", "list", "--json"])?;
+        cases.push((writer, branch, state, cache, held));
+    }
+    // One repository with a mixed set of writer states exercises the same
+    // preview/apply contract without rebuilding and resampling it six times.
+    let listed = ok(&rig, &["worktree", "list", "--json"])?;
+    for (writer, branch, _, _, _) in &cases {
         let listed_writer = listed["data"]
             .as_array()
             .ok_or("worktrees")?
             .iter()
-            .find(|info| info["branch"] == "refs/heads/idle")
+            .find(|info| info["branch"] == format!("refs/heads/{branch}"))
             .ok_or("idle worktree")?["writer"]
             .as_str()
             .ok_or("writer state")?;
         assert_eq!(
             listed_writer,
-            match writer {
+            match *writer {
                 "live" | "live_reserved" => "busy",
                 "free" | "missing" | "reserved" => "free",
                 _ => "unknown",
-            }
+            },
+            "{writer}"
         );
-        for dry_run in [true, false] {
-            let mut args = vec!["gc", "--idle", "1d", "--json"];
-            if dry_run {
-                args.push("--dry-run");
-            }
-            let result = ok(&rig, &args)?;
-            assert_eq!(result["data"]["dry_run"], dry_run);
-            if dry_run && writer == "missing" {
+    }
+    for dry_run in [true, false] {
+        let mut args = vec!["gc", "--idle", "1d", "--json"];
+        if dry_run {
+            args.push("--dry-run");
+        }
+        let result = ok(&rig, &args)?;
+        assert_eq!(result["data"]["dry_run"], dry_run);
+        let removed = result["data"]["removed"].as_array().ok_or("removed")?;
+        let kept = result["data"]["kept"].as_array().ok_or("kept")?;
+        for (writer, _, state, cache, _) in &cases {
+            if dry_run && *writer == "missing" {
                 assert!(
-                    !state.join(lock).exists(),
+                    !state.join("writer.lock").exists(),
                     "preview must not create writer state"
                 );
             }
-            if matches!(writer, "free" | "missing" | "reserved") {
-                assert_eq!(result["data"]["removed"][0]["reason"], "idle");
-                assert_eq!(cache.exists(), dry_run);
+            let entry = |entries: &[Value]| {
+                entries
+                    .iter()
+                    .find(|entry| entry["path"].as_str() == cache.to_str())
+                    .cloned()
+            };
+            if matches!(*writer, "free" | "missing" | "reserved") {
+                let removed = entry(removed).ok_or_else(|| format!("{writer}: {result}"))?;
+                assert_eq!(removed["reason"], "idle");
+                assert!(entry(kept).is_none(), "{writer}: {result}");
+                assert_eq!(cache.exists(), dry_run, "{writer}");
             } else {
-                assert!(
-                    result["data"]["removed"]
-                        .as_array()
-                        .ok_or("removed")?
-                        .is_empty()
-                );
+                assert!(entry(removed).is_none(), "{writer}: {result}");
+                let kept = entry(kept).ok_or_else(|| format!("{writer}: {result}"))?;
                 assert_eq!(
-                    result["data"]["kept"][0]["reason"],
+                    kept["reason"],
                     // Kernel contention is busy, independent of old records.
                     if writer.starts_with("live") {
                         "busy"
@@ -702,15 +714,19 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
                         "unobservable"
                     }
                 );
-                assert!(cache.is_dir());
+                assert!(cache.is_dir(), "{writer}");
             }
         }
+    }
+    for (writer, _, state, _, held) in cases {
         drop(held);
         if writer.starts_with("live") {
-            let _released = directory.try_lock_existing(lock, LockMode::Exclusive)?;
+            let directory = Directory::open_anchor(&state)?;
+            let _released =
+                directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?;
         }
-        rig.assert_v1_root_untouched()?;
     }
+    rig.assert_v1_root_untouched()?;
     Ok(())
 }
 

@@ -1,6 +1,5 @@
-mod support;
-#[path = "support/terminal_run.rs"]
-mod terminal_run;
+use crate::support;
+use crate::terminal_run;
 use serde_json::{Value, json};
 use support::{Result, TestRig, code};
 
