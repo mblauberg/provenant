@@ -938,10 +938,10 @@ mod tests {
         );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
-        let idle = field("gc.idle_days");
+        let idle = field("gc.idle");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),
-            ("int", Some(1), Some(3650), &json!(7))
+            ("string", None, None, &json!("6h"))
         );
         let graph_retention = field("gc.graph_checkpoint_days");
         assert_eq!(graph_retention.source, provenant_config::Layer::Default);

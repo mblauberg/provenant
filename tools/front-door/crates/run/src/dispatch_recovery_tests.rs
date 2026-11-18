@@ -190,11 +190,18 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         vec![(id, Reconciled::Finished)]
     );
     let cleanup = controls::REBOOT_TEMPORARY_CLEANUP.with(|result| result.borrow_mut().take());
-    assert_eq!(cleanup, Some(Ok(Some(Reconciled::TemporaryRemoved))));
+    assert_eq!(cleanup, Some(Ok(None)));
     assert!(!path.join("scratch").exists());
     assert!(path.join("release.json").exists());
     assert!(!reservation.exists());
-    assert!(!path.join("tmp").exists());
+    assert!(
+        path.join("tmp").exists(),
+        "released scratch remains available for follow-up"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("tmp/candidate-0/payload.lock"))?,
+        "build output"
+    );
     assert_eq!(store.record(id, &call)?, record);
     Ok(())
 }

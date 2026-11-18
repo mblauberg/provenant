@@ -32,6 +32,7 @@ pub(crate) trait CatalogueArg {
     fn catalog_bounds(self, bounds: (u64, u64)) -> Self;
     fn catalog_u8_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_duration(self) -> Self;
+    fn catalog_gc_idle(self) -> Self;
     fn catalog_observation_wait(self) -> Self;
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self;
     fn catalog_u32_range(self, range: impl RangeBounds<i64>) -> Self;
@@ -83,6 +84,10 @@ impl CatalogueArg for Arg {
         self.value_parser(crate::grammar::duration_seconds)
             .catalog_bounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS))
     }
+    fn catalog_gc_idle(self) -> Self {
+        self.value_parser(provenant_config::parse_gc_idle_duration)
+            .catalog_bounds((0, i64::MAX as u64))
+    }
     fn catalog_observation_wait(self) -> Self {
         self.value_parser(crate::grammar::observation_wait_seconds)
             .catalog_bounds((0, provenant_core::MAX_LANE_RUNTIME_SECONDS))
@@ -117,7 +122,22 @@ impl CatalogueArg for Arg {
         self.required_unless_present(id).add(conditions)
     }
     fn catalog_graph_target(self) -> Self {
-        self.add(TargetGrammar(TargetSyntax::Graph))
+        self.value_parser(|text: &str| -> Result<crate::target::Target, String> {
+            crate::target::Target::parse(text).map_err(|error| {
+                let (name, suffix) = text
+                    .split_once('/')
+                    .map_or((text, ""), |(name, _)| (name, &text[name.len()..]));
+                let suggestion =
+                    provenant_fabric_runtime::graph::template::default_graph_base(name);
+                let candidate = format!("{suggestion}{suffix}");
+                if suggestion != name && crate::target::Target::parse(&candidate).is_ok() {
+                    format!("{error}; try `{candidate}`")
+                } else {
+                    error.to_string()
+                }
+            })
+        })
+        .add(TargetGrammar(TargetSyntax::Graph))
     }
     fn catalog_graph_name(self) -> Self {
         self.add(TargetGrammar(TargetSyntax::GraphName))

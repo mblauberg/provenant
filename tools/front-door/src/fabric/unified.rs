@@ -269,6 +269,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             "attempt_number",
             "work_key",
             "branch",
+            "head",
             "pr",
             "ci",
             "result_path",
@@ -306,6 +307,16 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     .or_else(|| node
                         .and_then(|node| node.land.as_ref())
                         .map(|land| &land.branch))
+            );
+            row["head"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|out| out.commit.as_ref())
+                    .or_else(|| node
+                        .and_then(|node| node.land.as_ref())
+                        .map(|land| &land.head))
+                    .or_else(|| node
+                        .and_then(|node| node.writer_binding.as_ref())
+                        .map(|binding| &binding.head))
             );
             row["pr"] = node
                 .and_then(|node| node.land.as_ref())
@@ -775,9 +786,13 @@ pub(crate) fn enrich_status_rows_within(
         let graph_state = row["state"].clone();
         let attempt_number = row["attempt_number"].clone();
         let result_path = row["result_path"].clone();
+        let retained_head = row["head"].clone();
         row.as_object_mut()
             .ok_or(FacadeError::StateCorrupt)?
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
+        if row["head"].is_null() {
+            row["head"] = retained_head;
+        }
         row["attempt_id"] = reference;
         row["attempt_number"] = attempt_number;
         if row["result_path"].is_null() {
@@ -800,7 +815,11 @@ pub(crate) fn enrich_status_rows_within(
 fn project_attempt_failure(row: &mut Value) {
     if row["terminal_cause"].is_string() {
         row["cause_code"] = row["terminal_cause"].clone();
-        if row["reason"].is_string() {
+        if row["terminal_cause"] == "handoff_refused" {
+            if let Some(id) = row["id"].as_str() {
+                row["next"] = json!(format!("provenant retry {id}"));
+            }
+        } else if row["reason"].is_string() {
             row["next"] = row["reason"].clone();
         }
     }
@@ -838,6 +857,7 @@ fn project_node_failures(rows: &mut [Value]) {
                     row["graph_state"].clone(),
                     row["terminal_cause"].clone(),
                     row["reason"].clone(),
+                    row["next"].clone(),
                 ),
             ))
         })
@@ -850,7 +870,7 @@ fn project_node_failures(rows: &mut [Value]) {
             row["graph_id"].as_str().unwrap_or_default().to_owned(),
             row["node_id"].as_str().unwrap_or_default().to_owned(),
         );
-        if let Some((state, cause, reason)) = failures.get(&key)
+        if let Some((state, cause, reason, next)) = failures.get(&key)
             && state == "terminal"
         {
             if !cause.is_null() {
@@ -858,7 +878,11 @@ fn project_node_failures(rows: &mut [Value]) {
             }
             if !reason.is_null() {
                 row["reason"] = reason.clone();
-                row["next"] = reason.clone();
+                row["next"] = if next.is_null() {
+                    reason.clone()
+                } else {
+                    next.clone()
+                };
             }
         }
     }
@@ -1366,12 +1390,16 @@ pub(crate) fn unified_graph_steer(
         Queued(Value),
         Pending(Value),
         Refused(&'static str),
+        Settled,
         Unsupported(provenant_records::control::ControlReceipt),
     }
     let result = (|| -> Result<SteerResult, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
-        let (resolved, _checkpoint) =
+        let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
+        if super::steer::selected_is_settled(&resolved, &checkpoint) {
+            return Ok(SteerResult::Settled);
+        }
         let project = factory.context.identity.project;
         let work_key = resolved
             .work_key(project)
@@ -1459,6 +1487,7 @@ pub(crate) fn unified_graph_steer(
                 BoundFacade { factory }.inbox_owner(input, Some(host.into()), budget, &cancel)
             };
         match super::steer::verified_target(&factory, &resolved, &current, budget, &cancel) {
+            super::steer::TargetProof::Settled => return Ok(SteerResult::Settled),
             super::steer::TargetProof::Conflict => {
                 return Ok(SteerResult::Refused(
                     "steering requires one verified, accepted, current live attempt",
@@ -1562,6 +1591,20 @@ pub(crate) fn unified_graph_steer(
             globals,
             "steering queued; owner verification will retry\n",
             false,
+        ),
+        Ok(SteerResult::Settled) => crate::fail_with_repair(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_target_refused",
+            &format!(
+                "{} has settled; start a follow-up or retry with an amended brief",
+                args.target
+            ),
+            Some(&format!(
+                "provenant retry {} --brief-file FILE",
+                args.target
+            )),
+            globals,
         ),
         Ok(SteerResult::Refused(message)) => crate::fail(
             "steer",
@@ -2030,6 +2073,146 @@ fn add_cache_share(data: &mut Value) {
                 attempt.insert("cache_read_share".into(), json!(share));
             }
         }
+    }
+}
+
+/// Summarise the latest retained evidence through the same identity-checked status reader.
+#[allow(clippy::disallowed_methods, reason = "bound the CLI read deadline")]
+pub(crate) fn unified_graph_result(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+) -> provenant_cli::run::Reply {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
+    let rows = match read_status_rows(target, edge, &mut None, deadline, &CancelToken::new()) {
+        Ok(rows) => rows,
+        Err(error) => return output_error(error.as_ref()),
+    };
+    result_reply(target, &rows)
+}
+
+fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli::run::Reply {
+    let selected: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row["kind"] == "node"
+                || (row["kind"] == "attempt"
+                    && (target.attempt.is_some()
+                        || !rows.iter().any(|other| {
+                            other["kind"] == "attempt"
+                                && other["node_id"] == row["node_id"]
+                                && other["attempt_number"].as_u64() > row["attempt_number"].as_u64()
+                        })))
+        })
+        .cloned()
+        .collect();
+    let mut human = String::new();
+    let mut compact_rows = Vec::new();
+    for row in &selected {
+        if row["kind"] == "attempt"
+            && selected
+                .iter()
+                .any(|other| other["kind"] == "node" && other["node_id"] == row["node_id"])
+        {
+            continue;
+        }
+        let attempt = selected
+            .iter()
+            .find(|other| other["kind"] == "attempt" && other["node_id"] == row["node_id"]);
+        let field = |name: &str| {
+            row[name]
+                .as_str()
+                .or_else(|| attempt.and_then(|a| a[name].as_str()))
+                .unwrap_or("unknown")
+        };
+        let handoff = row["handoff"]
+            .get("Ok")
+            .filter(|h| !h.is_null())
+            .unwrap_or_else(|| {
+                attempt
+                    .map(|a| a["handoff"].get("Ok").unwrap_or(&a["handoff"]))
+                    .unwrap_or(&row["handoff"])
+            });
+        let checks = handoff["verify"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| provenant_fabric_runtime::hosts::plain_text(s, 100))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none recorded".into());
+        compact_rows.push(format!(
+            "{}: {} | branch: {} | head: {} | verify: {}",
+            provenant_cli::bounded_text(field("id"), 24),
+            provenant_cli::bounded_text(field("state"), 12),
+            provenant_cli::bounded_text(field("branch"), 24),
+            provenant_cli::bounded_text(field("head"), 64),
+            provenant_cli::bounded_text(&checks, 40)
+        ));
+    }
+    for row in &selected {
+        let id = row["id"].as_str().unwrap_or("unknown");
+        let state = row["state"].as_str().unwrap_or("unknown");
+        human.push_str(&format!("{id}: {state}\n"));
+        for (label, value) in [
+            ("branch", &row["branch"]),
+            ("head", &row["head"]),
+            ("result", &row["result_summary"]),
+        ] {
+            if !value.is_null() {
+                human.push_str(&format!(
+                    "  {label}: {}\n",
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string())
+                ));
+            }
+        }
+        let handoff = row["handoff"].get("Ok").unwrap_or(&row["handoff"]);
+        for field in ["status", "note"] {
+            if let Some(text) = handoff[field].as_str() {
+                human.push_str(&format!(
+                    "  {field}: {}\n",
+                    provenant_fabric_runtime::hosts::plain_text(text, 4096)
+                ));
+            }
+        }
+        for field in ["verify", "remaining", "decisions"] {
+            if let Some(items) = handoff[field].as_array() {
+                for item in items.iter().filter_map(Value::as_str) {
+                    human.push_str(&format!(
+                        "  {field}: {}\n",
+                        provenant_fabric_runtime::hosts::plain_text(item, 4096)
+                    ));
+                }
+            }
+        }
+        if let Some(concerns) = handoff["spec_concerns"].as_array() {
+            for concern in concerns {
+                human.push_str(&format!("  spec concern: {concern}\n"));
+            }
+        }
+    }
+    if selected.is_empty() {
+        human.push_str("no lane result yet\n");
+    }
+    provenant_cli::run::Reply {
+        result: provenant_records::CommandResult::new(
+            "result",
+            provenant_records::Outcome::Ok,
+            json!({"rows": selected}),
+        ),
+        human,
+        summary: Some(provenant_cli::Summary::new(
+            "lane results",
+            compact_rows,
+            None,
+        )),
+        read_only: true,
     }
 }
 
@@ -3295,6 +3478,60 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    fn result_renders_retained_head_and_checks_after_collection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(checkpoint("g"))?;
+        let node = &mut value["nodes"][0];
+        node["state"] = json!("succeeded");
+        node["outputs"] = json!({"schema_version":1,"result":{"digest":"sha256:test","excerpt":"result excerpt","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"findings_available":null,"branch":"feat/work","commit":"abc123","warnings":[]});
+        node["handoff"] = json!({"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":["choice"],"verify":["first check","second check"]});
+        let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+        let graph = GraphTarget {
+            graph: "g".into(),
+            node: Some("parent".into()),
+            attempt: None,
+        };
+        let target = "g/parent".parse()?;
+        let rows = status_rows(&graph_snapshot(checkpoint), &graph);
+        for collected in [false, true] {
+            let mut projected = rows.clone();
+            if !collected {
+                let attempt = projected
+                    .iter_mut()
+                    .find(|row| row["kind"] == "attempt")
+                    .unwrap();
+                attempt["head"] = json!("abc123");
+            }
+            let reply = result_reply(&target, &projected);
+            let mut output = Vec::new();
+            provenant_cli::render(
+                &reply.result,
+                provenant_cli::Globals::default().render_mode(
+                    &reply.human,
+                    reply.read_only,
+                    reply.summary.as_ref(),
+                ),
+                &mut output,
+            )?;
+            let output = String::from_utf8(output)?;
+            for expected in [
+                "succeeded",
+                "feat/work",
+                "abc123",
+                "first check",
+                "second check",
+            ] {
+                assert!(output.contains(expected), "{output}");
+            }
+            assert_eq!(output.matches("g/parent:").count(), 1, "{output}");
+            assert_eq!(reply.result.data["rows"][0]["head"], "abc123");
+            assert!(reply.human.contains("head: abc123"));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn unified_status_uses_one_row_contract_and_selects_attempts() {
         // A projection may omit earlier rows; each displayed handle must still
         // resolve to the WorkKey and reference that produced it.
@@ -3615,6 +3852,19 @@ mod tests {
         project_node_failures(&mut rows);
         assert!(rows[0]["reason"].is_null());
         assert_eq!(rows[0]["cause_code"], "adapter_unavailable");
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#results
+    fn launch_refusal_propagates_cause_and_retry_to_node() {
+        let mut rows = vec![
+            json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null}),
+            json!({"kind":"attempt", "id":"g/a#1", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":"handoff_refused", "reason":"repository lock busy"}),
+        ];
+        project_attempt_failure(&mut rows[1]);
+        project_node_failures(&mut rows);
+        assert_eq!(rows[0]["reason"], "repository lock busy");
+        assert_eq!(rows[0]["next"], "provenant retry g/a#1");
     }
 
     #[test]

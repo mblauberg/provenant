@@ -612,7 +612,6 @@ impl run::Providers for Registry<'_> {
             &policy,
             roots.state.as_path(),
             &writer.worktree,
-            &writer.project,
             home,
         )
         .map_err(disk_policy_refusal)
@@ -1634,7 +1633,7 @@ fn attach_freshness(
         .date();
     let freshness = prices.freshness(today);
     if freshness.stale {
-        human.push_str(&format!(
+        human.insert_str(0, &format!(
             "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
             freshness.age_days,
             freshness.reviewed_at,

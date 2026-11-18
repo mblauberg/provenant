@@ -491,17 +491,41 @@ pub(crate) fn run(
             request.over.len()
         );
     }
-    invoke("run", run_input(request), globals, workers)
+    let bare_model = request
+        .model
+        .as_deref()
+        .is_some_and(|model| !model.contains('/'));
+    let catalogue = if bare_model {
+        crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+        .map_err(|error| cli_input_error(&error.to_string()))
+        .and_then(|resolved| {
+            provenant_cli::route::effective_catalogue(&resolved.roots)
+                .map_err(|error| cli_input_error(&error.to_string()))
+        })
+    } else {
+        provenant_routing::Catalogue::bundled().map_err(|error| cli_input_error(&error.to_string()))
+    };
+    invoke(
+        "run",
+        catalogue.and_then(|catalogue| run_input(request, &catalogue)),
+        globals,
+        workers,
+    )
 }
 
 /// A `--model` without an adapter names the one catalogued model that carries
 /// it. `ADAPTER/ID` passes through unchanged for the facade to check.
-fn model_selector(model: String) -> Result<String, Box<provenant_records::diagnostic::Diagnostic>> {
+fn model_selector(
+    model: String,
+    catalogue: &provenant_routing::Catalogue,
+) -> Result<String, Box<provenant_records::diagnostic::Diagnostic>> {
     if model.contains('/') {
         return Ok(model);
     }
-    let catalogue = provenant_routing::Catalogue::bundled()
-        .map_err(|_| cli_input_error("the model catalogue could not be loaded"))?;
     catalogue
         .resolve_bare_model(&model)
         .map(|id| id.as_str().to_owned())
@@ -538,6 +562,7 @@ fn implementation_template(name: &str) -> bool {
 
 fn run_input(
     request: GraphRunArgs,
+    catalogue: &provenant_routing::Catalogue,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
         let plan = request.plan;
@@ -551,7 +576,10 @@ fn run_input(
             request.brief_file.map(BriefSource::file),
         ])
         .map_err(|error| cli_input_error(&error.to_string()))?;
-        let model = request.model.map(model_selector).transpose()?;
+        let model = request
+            .model
+            .map(|model| model_selector(model, catalogue))
+            .transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [
             ("host", request.host),
@@ -713,7 +741,7 @@ pub(crate) fn templates(
 ) -> u8 {
     let input = (|| {
         let mut input = json!({"op":"templates"});
-        if let Some(name) = request.name {
+        if let Some(provenant_cli::TemplatesCommand::Show { name }) = request.command {
             input["name"] = json!(name);
         }
         if let Some(path) = request.file {
@@ -727,10 +755,17 @@ pub(crate) fn templates(
 #[cfg(test)]
 #[allow(
     unused_imports,
+    dead_code,
     reason = "the custom worktree driver includes this module without libtest"
 )]
 mod tests {
     use super::*;
+
+    fn run_input_fixture(
+        request: GraphRunArgs,
+    ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
+        run_input(request, &provenant_routing::Catalogue::bundled().unwrap())
+    }
 
     #[test]
     fn configuration_cause_and_selected_state_survive_projection() {
@@ -822,13 +857,13 @@ mod tests {
         let mut request = run_request();
         request.template = Some("implement".into());
         request.plan = true;
-        let input = run_input(request).unwrap();
+        let input = run_input_fixture(request).unwrap();
         assert_eq!(input["set"]["plan"], true);
 
         let mut task = run_request();
         task.template = Some("task".into());
         task.plan = true;
-        let input = run_input(task).unwrap();
+        let input = run_input_fixture(task).unwrap();
         assert!(input["set"].get("plan").is_none());
     }
 
@@ -842,7 +877,9 @@ mod tests {
         ] {
             let mut request = run_request();
             request.set.push(setting.into());
-            let error = run_input(request).err().ok_or("invalid set was accepted")?;
+            let error = run_input_fixture(request)
+                .err()
+                .ok_or("invalid set was accepted")?;
             let diagnostic = error;
             assert_eq!(diagnostic.code, "invalid_input");
             assert!(
@@ -854,12 +891,12 @@ mod tests {
         }
         let mut request = run_request();
         request.set.push("attempt='PROMPT_SENTINEL".into());
-        let diagnostic = run_input(request).unwrap_err();
+        let diagnostic = run_input_fixture(request).unwrap_err();
         assert!(!serde_json::to_string(&diagnostic)?.contains("PROMPT_SENTINEL"));
         let directory = tempfile::tempdir()?;
         let mut request = run_request();
         request.file = Some(directory.path().join("missing.json"));
-        let error = run_input(request)
+        let error = run_input_fixture(request)
             .err()
             .ok_or("missing file was accepted")?;
         let diagnostic = error;
@@ -903,7 +940,7 @@ mod tests {
         let provenant_cli::Command::Run(request) = invocation.command else {
             panic!("run command");
         };
-        let input = run_input(*request).unwrap();
+        let input = run_input_fixture(*request).unwrap();
         assert_eq!(input["host"], "workshop");
         assert_eq!(input["model"], "codex/gpt-6-luna");
         assert_eq!(input["effort"], "high");
@@ -937,7 +974,7 @@ mod tests {
             let provenant_cli::Command::Run(request) = invocation.command else {
                 panic!("run command");
             };
-            let input = run_input(*request).unwrap();
+            let input = run_input_fixture(*request).unwrap();
             assert_eq!(input["set"]["attempt.sandbox"], value);
         }
         assert!(!matches!(
@@ -951,7 +988,7 @@ mod tests {
         let with_model = |model: &str| {
             let mut request = run_request();
             request.model = Some(model.into());
-            run_input(request)
+            run_input_fixture(request)
         };
         // One provider offers it: the bare name becomes ADAPTER/ID.
         let input = with_model("claude-sonnet-5-5").unwrap();
@@ -968,6 +1005,26 @@ mod tests {
             "{detail}"
         );
         assert!(detail.contains("provider/model form"), "{detail}");
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn bare_model_uses_the_effective_discovery_snapshot() {
+        let snapshot = provenant_routing::parse_codex_models(
+            br#"{"models":[{"slug":"gpt-9-sol","supported_reasoning_levels":[]}]}"#,
+            1,
+        )
+        .unwrap();
+        let catalogue = provenant_routing::Catalogue::bundled()
+            .unwrap()
+            .with_discovery(&[snapshot])
+            .unwrap();
+        let mut request = run_request();
+        request.model = Some("gpt-9-sol".into());
+        assert_eq!(
+            run_input(request, &catalogue).unwrap()["model"],
+            "codex/gpt-9-sol"
+        );
     }
 
     #[test]
@@ -998,7 +1055,8 @@ mod tests {
         ] {
             let mut request = run_request();
             request.set.push(setting.into());
-            let error = run_input(request).expect_err("unsupported launch path must refuse");
+            let error =
+                run_input_fixture(request).expect_err("unsupported launch path must refuse");
             assert!(
                 error
                     .detail
@@ -1019,7 +1077,7 @@ mod tests {
         ] {
             let mut request = run_request();
             request.set.push(setting.clone());
-            let error = run_input(request).expect_err("cloud placement must refuse");
+            let error = run_input_fixture(request).expect_err("cloud placement must refuse");
             assert!(
                 error
                     .detail

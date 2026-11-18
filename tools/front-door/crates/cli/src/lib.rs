@@ -12,6 +12,7 @@ pub mod domains;
 pub mod external_contract;
 pub mod fabric;
 pub mod ignore_files;
+mod model_discovery;
 pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
@@ -830,7 +831,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             {
                 return Err(CliError::invalid_with_repair(
                     "route resolve needs a route or model, such as `route resolve utility`, \
-                     `route resolve codex/gpt-6-luna`, `--route utility` or `--model ADAPTER/ID`",
+                     `route resolve ADAPTER/ID`, `--route utility` or `--model ADAPTER/ID`",
                     "provenant route resolve --model ADAPTER/ID",
                 ));
             }
@@ -1651,6 +1652,32 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/cli.md#targets
+    fn ergonomics_accepts_duration_and_result_targets() {
+        for (input, expected) in [("0", 0), ("6h", 21_600), ("2d", 172_800)] {
+            let Command::Gc(gc) = valid(&["gc", "--idle", input]).command else {
+                panic!("gc")
+            };
+            assert_eq!(gc.idle, Some(expected));
+        }
+        let Command::Gc(gc) = valid(&["gc"]).command else {
+            panic!("gc")
+        };
+        assert_eq!(gc.idle, None);
+        valid(&["result", "fix/task"]);
+        invalid(&["gc", "--idle", "wrong"]);
+        for words in [
+            vec!["run", "task", "work", "--name", "Fix_Login"],
+            vec!["result", "Fix_Login/task"],
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("expected invalid name")
+            };
+            assert!(error.to_string().contains("fix-login"), "{error}");
+        }
+    }
+
+    #[test]
     fn graph_run_and_template_controls_parse() {
         let Command::Run(request) = valid(&[
             "run",
@@ -1750,7 +1777,13 @@ mod tests {
             invalid(&["run", "task", flag, "example"]);
         }
         valid(&["templates"]);
-        valid(&["templates", "review.security", "--file", "inline.toml"]);
+        valid(&[
+            "templates",
+            "show",
+            "review.security",
+            "--file",
+            "inline.toml",
+        ]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
         // --plan is a graph-run flag; non-implementation templates ignore it.
@@ -2361,11 +2394,21 @@ mod tests {
     }
 
     /// Target parsers declared on the command model, with the option that takes one.
-    fn target_commands() -> Vec<(Vec<String>, String, super::metadata::TargetSyntax)> {
+    fn target_commands() -> Vec<(
+        Vec<String>,
+        String,
+        super::metadata::TargetSyntax,
+        clap::builder::ValueParser,
+    )> {
         fn walk(
             command: &clap::Command,
             words: &[String],
-            found: &mut Vec<(Vec<String>, String, super::metadata::TargetSyntax)>,
+            found: &mut Vec<(
+                Vec<String>,
+                String,
+                super::metadata::TargetSyntax,
+                clap::builder::ValueParser,
+            )>,
         ) {
             for argument in command.get_arguments() {
                 if argument.is_hide_set() {
@@ -2378,7 +2421,12 @@ mod tests {
                     .get_long()
                     .map(|long| format!("--{long}"))
                     .unwrap_or_default();
-                found.push((words.to_vec(), flag, grammar.0));
+                found.push((
+                    words.to_vec(),
+                    flag,
+                    grammar.0,
+                    argument.get_value_parser().clone(),
+                ));
             }
             for child in command
                 .get_subcommands()
@@ -2409,6 +2457,7 @@ mod tests {
         }
     }
 
+    /// Spec: docs/specs/cli.md#targets
     #[test]
     fn every_target_verb_parses_the_generated_target_table_alike() {
         let names = ["a", "fix-login", "g-0123abcd", &"n".repeat(48)];
@@ -2452,14 +2501,6 @@ mod tests {
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
-        // The parser covers every spelling above; each command's grammar needs
-        // only a spread of them, since one full CLI parse per value is costly.
-        let graph_sample = graph_targets
-            .iter()
-            .step_by(11)
-            .chain(graph_targets.last())
-            .cloned()
-            .collect::<Vec<_>>();
         let branch_names = ["main", "release/2.0", "feature_x", "@"]
             .map(str::to_owned)
             .to_vec();
@@ -2467,7 +2508,7 @@ mod tests {
         let cases = [
             (
                 super::metadata::TargetSyntax::Graph,
-                graph_sample,
+                graph_targets,
                 graph_refused
                     .iter()
                     .map(|value| (*value).to_owned())
@@ -2492,27 +2533,28 @@ mod tests {
             !commands.is_empty(),
             "command grammar has no target declarations"
         );
-        for (words, flag, syntax) in &commands {
+        for (words, flag, syntax, parser) in &commands {
             let (accepted_values, refused_values) = cases
                 .iter()
                 .find(|(kind, _, _)| kind == syntax)
                 .map(|(_, accepted, refused)| (accepted, refused))
                 .expect("every target declaration has a case table");
-            let extras = required_extras(words, flag);
-            let mut observed = Vec::new();
-            for text in accepted_values
+            // Exercise the actual parser attached to each declared argument without
+            // rebuilding the complete CLI for each boundary value.
+            let observed = accepted_values
                 .iter()
                 .chain(refused_values)
-                .map(String::as_str)
-            {
-                let mut argv: Vec<&str> = words.iter().map(String::as_str).collect();
-                if !flag.is_empty() {
-                    argv.push(flag);
-                }
-                argv.push(text);
-                argv.extend(&extras);
-                observed.push(matches!(parsed(&argv), ParseOutcome::Invocation(_)));
-            }
+                .map(|text| {
+                    clap::Command::new("probe")
+                        .arg(
+                            Arg::new("value")
+                                .allow_hyphen_values(true)
+                                .value_parser(parser.clone()),
+                        )
+                        .try_get_matches_from(["probe", text.as_str()])
+                        .is_ok()
+                })
+                .collect::<Vec<_>>();
             let expected = accepted_values
                 .iter()
                 .map(|text| match syntax {
@@ -2537,6 +2579,23 @@ mod tests {
                 }))
                 .collect::<Vec<_>>();
             assert_eq!(observed, expected, "{words:?} {flag} {syntax:?}");
+
+            // Keep end-to-end acceptance and refusal for every declared verb.
+            let extras = required_extras(words, flag);
+            for (text, should_accept) in [(&accepted_values[0], true), (&refused_values[0], false)]
+            {
+                let mut argv: Vec<&str> = words.iter().map(String::as_str).collect();
+                if !flag.is_empty() {
+                    argv.push(flag);
+                }
+                argv.push(text);
+                argv.extend(&extras);
+                assert_eq!(
+                    matches!(parsed(&argv), ParseOutcome::Invocation(_)),
+                    should_accept,
+                    "{words:?} {flag} {text:?}"
+                );
+            }
         }
     }
 

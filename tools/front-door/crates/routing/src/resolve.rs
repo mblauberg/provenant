@@ -128,10 +128,12 @@ pub struct RouteList {
     pub valid_pairs: Vec<ValidRoutePair>,
     pub catalogue_revision: String,
     pub models: Vec<ModelEntry>,
-    pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
+    pub named_routes: std::collections::BTreeMap<String, NamedRouteView>,
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
     pub account_pacing: Vec<AccountPacingView>,
+    pub monthly: crate::SourcedMonthlySettings,
+    pub monthly_allowances: Vec<MonthlyAccountView>,
     pub configured_accounts: BTreeMap<String, PacingProfile>,
     pub configured_free: BTreeMap<String, PacingProfile>,
     pub active_overrides: Vec<PacingOverride>,
@@ -140,9 +142,22 @@ pub struct RouteList {
     pub exclusion_notes: Vec<String>,
 }
 #[derive(Debug, Serialize)]
+pub struct MonthlyAccountView {
+    pub model: ModelId,
+    pub account: Option<String>,
+    pub assessment: crate::MonthlyAllowanceAssessment,
+}
+#[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
+    pub source: String,
     pub model: ModelId,
     pub effort: Option<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct NamedRouteView {
+    pub model: ModelId,
+    pub effort: Option<String>,
+    pub source: String,
 }
 #[derive(Debug, Serialize)]
 pub struct AccountPacingView {
@@ -156,6 +171,7 @@ pub struct AccountPacingView {
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
     pub model: ModelId,
+    pub source: String,
     pub weight: u8,
     pub effort: Option<String>,
     pub efforts: Vec<String>,
@@ -199,12 +215,18 @@ pub fn list(
             .iter()
             .filter(|member| matches(member.model.adapter()))
         {
-            if context.catalogue.model(&member.model).is_none() {
-                return Err(RoutingError::Catalogue);
-            }
             admissible(&member.model, member.effort.as_deref(), context)?;
             views.push(RoutePoolMemberView {
                 model: member.model.clone(),
+                source: if context.config.pools.contains_key(&name) {
+                    "user".into()
+                } else {
+                    context
+                        .catalogue
+                        .model(&member.model)
+                        .map_or("bundled", |entry| entry.source.as_str())
+                        .into()
+                },
                 weight: member.weight,
                 effort: member.effort.clone(),
                 efforts: member.efforts.clone(),
@@ -231,6 +253,7 @@ pub fn list(
             for effort in efforts {
                 if admissible(&entry.model, effort.as_deref(), context).is_ok() {
                     valid_pairs.push(ValidRoutePair {
+                        source: entry.source.clone(),
                         model: entry.model.clone(),
                         effort,
                     });
@@ -239,7 +262,59 @@ pub fn list(
         }
         pools.clear();
     }
+    let monthly_allowances = context
+        .catalogue
+        .models
+        .iter()
+        .filter(|m| matches(m.model.adapter()))
+        .flat_map(|m| {
+            let accounts: BTreeSet<_> = context
+                .availability
+                .iter()
+                .filter(|a| a.adapter == m.model.adapter())
+                .filter_map(|a| a.account_key.clone())
+                .chain(
+                    context
+                        .quota
+                        .iter()
+                        .filter(|q| q.model == m.model)
+                        .map(|q| q.snapshot.account.account_key.clone()),
+                )
+                .chain(context.config.pacing.accounts.keys().filter_map(|key| {
+                    let (adapter, account) = key.split_once('/')?;
+                    (adapter == m.model.adapter()).then(|| account.to_owned())
+                }))
+                .chain(
+                    provenant_records::AdapterSpec::get(m.model.adapter())
+                        .filter(|s| s.local_login)
+                        .map(|s| s.local_account.1.to_owned()),
+                )
+                .collect();
+            accounts
+                .into_iter()
+                .filter_map(|account| {
+                    crate::monthly_allowance_assessment(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        &m.model,
+                        Some(&account),
+                        context.quota.iter().find(|q| {
+                            q.model == m.model && q.snapshot.account.account_key == account
+                        }),
+                    )
+                    .map(|assessment| MonthlyAccountView {
+                        model: m.model.clone(),
+                        account: Some(account),
+                        assessment,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
     Ok(RouteList {
+        monthly: crate::global_monthly_settings(context.config),
+        monthly_allowances,
         valid_pairs,
         catalogue_revision: context.catalogue.revision.clone(),
         models: context
@@ -254,7 +329,16 @@ pub fn list(
             .routes
             .iter()
             .filter(|(_, r)| !query.valid && matches(r.model.adapter()))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    NamedRouteView {
+                        model: v.model.clone(),
+                        effort: v.effort.clone(),
+                        source: "user".into(),
+                    },
+                )
+            })
             .collect(),
         pools,
         pacing,
@@ -322,8 +406,13 @@ pub fn list(
                     })?
                     .model
                     .clone();
-                let (policy, profile, source, expiry) =
-                    effective_profile(context, &model, Some(account));
+                let (policy, profile, source, expiry) = account_pacing(
+                    context.catalogue,
+                    context.config,
+                    context.now,
+                    &model,
+                    Some(account),
+                );
                 Some(AccountPacingView {
                     adapter: adapter.into(),
                     account: account.into(),
@@ -467,8 +556,10 @@ const PACE_MIN_BASIS_POINTS: u32 = 2_500;
 const PACE_MAX_BASIS_POINTS: u32 = 20_000;
 const NEUTRAL_FACTOR_BASIS_POINTS: u32 = 10_000;
 
-fn effective_profile<'a>(
-    context: &'a RoutingContext<'_>,
+pub fn account_pacing<'a>(
+    catalogue: &Catalogue,
+    config: &'a RoutingConfig,
+    now: provenant_core::WallTime,
     model: &ModelId,
     account: Option<&str>,
 ) -> (
@@ -478,22 +569,20 @@ fn effective_profile<'a>(
     Option<provenant_core::WallTime>,
 ) {
     let account_profile = account.and_then(|a| {
-        context
-            .config
+        config
             .pacing
             .accounts
             .get(&format!("{}/{a}", model.adapter()))
     });
-    let free_profile = context
-        .catalogue
+    let free_profile = catalogue
         .is_free_model(model)
-        .then(|| context.config.pacing.free.get(model.adapter()))
+        .then(|| config.pacing.free.get(model.adapter()))
         .flatten();
     // The account profile governs free models too; the free profile is the
     // provider-level default beneath it.
     let profile = account_profile.or(free_profile);
-    let active = context.config.pacing_overrides.iter().rev().find(|o| {
-        o.schedule.active(context.now)
+    let active = config.pacing_overrides.iter().rev().find(|o| {
+        o.schedule.active(now)
             && o.account.as_deref().is_none_or(|selector| {
                 account.is_some_and(|key| {
                     selector
@@ -516,13 +605,13 @@ fn effective_profile<'a>(
     }
     let source = if profile.is_some() {
         "account"
-    } else if context.config.pacing.contains_key(model.adapter()) {
+    } else if config.pacing.contains_key(model.adapter()) {
         "provider"
     } else {
         "bundled"
     };
     (
-        pacing_policy(context.catalogue, context.config, model),
+        pacing_policy(catalogue, config, model),
         profile,
         source,
         None,
@@ -546,11 +635,7 @@ fn window_matches(
                 || name.ends_with("seven_day")
                 || name.ends_with("weekly")
         }
-        PacingWindow::Monthly => {
-            name.ends_with("monthly")
-                || name.ends_with("thirty_day")
-                || name.ends_with("billing_cycle")
-        }
+        PacingWindow::Monthly => provenant_quota::monthly_window(window),
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
             provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
@@ -816,7 +901,13 @@ fn pacing_factor_basis_points(
     account: Option<&str>,
     context: &RoutingContext<'_>,
 ) -> (u32, String, bool) {
-    let (_, profile, source, expiry) = effective_profile(context, model, account);
+    let (_, profile, source, expiry) = account_pacing(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        account,
+    );
     let detail = format!(
         "source={source} policy={policy:?}{}",
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
@@ -868,6 +959,30 @@ fn pacing_factor_basis_points(
     if policy != PacingPolicy::Pace {
         return (NEUTRAL_FACTOR_BASIS_POINTS, detail, false);
     }
+    let monthly = crate::monthly_allowance_assessment(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        account,
+        context
+            .quota
+            .iter()
+            .filter(|q| {
+                q.model == *model
+                    && q.snapshot.account.adapter == model.adapter()
+                    && Some(q.snapshot.account.account_key.as_str()) == account
+            })
+            .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision)),
+    );
+    if let Some(assessment) = &monthly
+        && assessment.constrained
+    {
+        return (0, format!("{detail}; {}", assessment.detail), true);
+    }
+    let detail = monthly.map_or(detail.clone(), |assessment| {
+        format!("{detail}; {}", assessment.detail)
+    });
     let result = context
         .quota
         .iter()
@@ -1033,7 +1148,13 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
     accounts
         .into_iter()
         .map(|account| {
-            let (policy, _, _, _) = effective_profile(context, model, account.as_deref());
+            let (policy, _, _, _) = account_pacing(
+                context.catalogue,
+                context.config,
+                context.now,
+                model,
+                account.as_deref(),
+            );
             let (factor_basis_points, detail, _) =
                 pacing_factor_basis_points(policy, model, account.as_deref(), context);
             PacingPreview {
@@ -1160,7 +1281,9 @@ fn account_reason<'q>(
     let mut reason = availability_reason(Some(availability), context).filter(|r| {
         !matches!(
             r,
-            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+            RouteExclusionReason::StaleAvailability
+                | RouteExclusionReason::UnknownAvailability
+                | RouteExclusionReason::UnknownAccount
         )
     });
     // Missing access means preparation did not establish confinement. Only an
@@ -1185,8 +1308,8 @@ fn account_reason<'q>(
     {
         reason = Some(RouteExclusionReason::AuthRequired);
     }
-    // Explicit exact IDs use the executable/account preflight too. The provider
-    // owns model availability; named routes and pools require catalogue entries.
+    // Exact IDs, including configured routes, use the executable/account
+    // preflight. The provider owns model availability.
     let quota = latest_reading(model, availability, context, true);
     if reason.is_none()
         && let Some(q) = quota
@@ -1206,8 +1329,26 @@ fn account_reason<'q>(
             None
         };
     }
-    let (policy, profile, _, _) =
-        effective_profile(context, model, availability.account_key.as_deref());
+    let (policy, profile, _, _) = account_pacing(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        availability.account_key.as_deref(),
+    );
+    if reason.is_none()
+        && crate::monthly_allowance_assessment(
+            context.catalogue,
+            context.config,
+            context.now,
+            model,
+            availability.account_key.as_deref(),
+            latest_reading(model, availability, context, false),
+        )
+        .is_some_and(|assessment| assessment.constrained)
+    {
+        reason = Some(RouteExclusionReason::PacingReserve);
+    }
     if reason.is_none() && policy == PacingPolicy::Off {
         reason = Some(RouteExclusionReason::Disabled);
     }
@@ -1257,6 +1398,21 @@ fn account_reason<'q>(
             .blocks()
     {
         reason = Some(RouteExclusionReason::UnknownAvailability);
+    }
+    // Identity uncertainty is advisory by default, but must not mask an
+    // independent credential, confinement or authority refusal.
+    if reason.is_none()
+        && availability.account_key.is_none()
+        && context
+            .config
+            .launch_policy
+            .check(
+                "QUOTA_IDENTITY_UNKNOWN",
+                provenant_records::policy::Facts::violation("account identity unknown"),
+            )
+            .blocks()
+    {
+        reason = Some(RouteExclusionReason::UnknownAccount);
     }
     (reason, quota)
 }
@@ -1587,6 +1743,32 @@ fn admissible<'c>(
             support: format!("{} takes no effort control", spec.name),
         });
     }
+    if entry.is_none()
+        && let Some(effort) = effort
+    {
+        context.config.launch_policy.warn_or(
+            "ROUTING_EFFORT_UNCATALOGUED",
+            provenant_records::policy::Facts::violation(
+                "effort unverifiable for uncatalogued model; passed through",
+            ),
+            |_| {
+                let nearest = context.catalogue.nearest_models(model);
+                let support = if nearest.is_empty() {
+                    "model is not in the catalogue; no effort controls are recorded".to_owned()
+                } else {
+                    format!(
+                        "model is not in the catalogue; nearest catalogued IDs: {}",
+                        nearest.join(", ")
+                    )
+                };
+                RoutingError::UnsupportedEffort {
+                    model: model.as_str().to_owned(),
+                    effort: effort.to_owned(),
+                    support,
+                }
+            },
+        )?;
+    }
     if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
             || entry.is_some_and(|row| !row.efforts.iter().any(|v| v == e))
@@ -1631,7 +1813,8 @@ fn account_load(
     context: &RoutingContext<'_>,
 ) -> AccountLoad {
     let key = availability.account_key.as_deref();
-    let (policy, profile, pacing_source, _) = effective_profile(context, model, key);
+    let (policy, profile, pacing_source, _) =
+        account_pacing(context.catalogue, context.config, context.now, model, key);
     let (pacing_factor, _, _) = pacing_factor_basis_points(policy, model, key, context);
     let quota = latest_reading(model, availability, context, true);
     let limiting = quota
@@ -1836,6 +2019,7 @@ fn candidate(
                 .config
                 .model_policy
                 .effective(
+                    context.catalogue,
                     model,
                     a.account_key.as_deref().or(context.policy_account_hint),
                     context.now,
@@ -1847,7 +2031,13 @@ fn candidate(
         })
         .map(|a| {
             let (reason, _) = account_reason(model, a, access, context);
-            let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
+            let (policy, _, _, _) = account_pacing(
+                context.catalogue,
+                context.config,
+                context.now,
+                model,
+                a.account_key.as_deref(),
+            );
             let (_, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
             let load = account_load(model, a, context);
@@ -1921,6 +2111,9 @@ fn candidate(
         },
     };
     let mut diagnostics = RouteDiagnostics::default();
+    if context.catalogue.model(model).is_none() {
+        diagnostics.launch_warnings.push(format!("model {} is absent from the bundled and discovered catalogue; source=user, provider availability is unverified", model.as_str()));
+    }
     if let Some(a) = availability
         && matches!(readiness, RouteReadiness::Ready { .. })
         && let Some(reason_text) = account_probe_failure_reason(model, a, context)
@@ -1955,15 +2148,26 @@ fn candidate(
         });
     }
     if let Some(availability) = availability
-        && effective_profile(context, model, availability.account_key.as_deref()).0
-            == PacingPolicy::Pace
+        && account_pacing(
+            context.catalogue,
+            context.config,
+            context.now,
+            model,
+            availability.account_key.as_deref(),
+        )
+        .0 == PacingPolicy::Pace
         && let Some(quota) = latest_reading(model, availability, context, true)
     {
         use provenant_records::diagnostic::{
             PacingReserveSetting, PacingSettingSource, ResourceFact,
         };
-        let (_, profile, _, _) =
-            effective_profile(context, model, availability.account_key.as_deref());
+        let (_, profile, _, _) = account_pacing(
+            context.catalogue,
+            context.config,
+            context.now,
+            model,
+            availability.account_key.as_deref(),
+        );
         let reserve = context
             .config
             .pacing_reserve
@@ -2017,10 +2221,22 @@ fn candidate(
             .iter()
             .filter_map(|(account, reason, _)| {
                 reason.as_ref().map(|reason| {
+                    let monthly = crate::monthly_allowance_assessment(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        model,
+                        account.account_key.as_deref(),
+                        latest_reading(model, account, context, false),
+                    )
+                    .filter(|assessment| assessment.constrained);
                     format!(
-                        "{}: {}; inspect `provenant quota --full`",
+                        "{}: {}; inspect `provenant quota --full`{}",
                         account.account_key.as_deref().unwrap_or("unknown account"),
-                        exclusion_detail(reason)
+                        exclusion_detail(reason),
+                        monthly
+                            .map(|assessment| format!("; {}", assessment.detail))
+                            .unwrap_or_default(),
                     )
                 })
             })
@@ -2348,7 +2564,7 @@ fn resolve_inner(
                             context.config.permits_automatic_model(
                                 &route.model,
                                 AutomaticModelSource::OwnerConfiguration,
-                            ) && context.catalogue.model(&route.model).is_some()
+                            )
                         })
                         .map(|route| {
                             vec![RoutePoolMember {
@@ -2403,9 +2619,6 @@ fn resolve_inner(
                         )],
                     });
                 }
-                if context.catalogue.model(&named.model).is_none() {
-                    return Err(RoutingError::Catalogue);
-                }
                 if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
                     return Err(RoutingError::ConfidentialModel);
                 }
@@ -2435,12 +2648,15 @@ fn resolve_inner(
         }
     };
     if let Some(family) = excluded_members.required_family
-        && matches!(&primary.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+        && let RouteReadiness::Unavailable { reason, .. } = &primary.readiness
+        && reason.is_account_block()
     {
         return Err(RoutingError::NoEligiblePoolMember {
             exclusions: vec![format!(
-                "required family {family} count 1; {}/{}: {:?}",
-                primary.adapter, primary.model, primary.readiness
+                "required family {family} count 1; {}/{}: {}",
+                primary.adapter,
+                primary.model,
+                exclusion_detail(reason)
             )],
         });
     }
@@ -2454,6 +2670,7 @@ fn resolve_inner(
             .config
             .model_policy
             .effective(
+                context.catalogue,
                 &primary_model,
                 primary
                     .account_key
@@ -2464,11 +2681,19 @@ fn resolve_inner(
             .policy,
         request.intent,
     )?;
-    if models.contains(&primary_model) {
-        return Err(RoutingError::Alternatives);
-    }
+    let drop_primary = if models.contains(&primary_model) {
+        context.config.launch_policy.warn_or(
+            "ROUTING_ALTERNATIVES",
+            provenant_records::policy::Facts::violation("alternative equals primary; dropped"),
+            |_| RoutingError::Alternatives,
+        )?;
+        true
+    } else {
+        false
+    };
     let alternatives = models
         .iter()
+        .filter(|model| !drop_primary || *model != &primary_model)
         .filter(|model| excluded_members.family_reason(model).is_none())
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         // Fallbacks are automatic alternatives even when attached to a model
@@ -2791,11 +3016,12 @@ fn classify_pool(
                     effort = resolved.effort.clone();
                     ranking.effort_warning = resolved.diagnostics.effort_warning.clone();
                     if let Some(family) = excluded_members.required_family
-                        && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+                        && let RouteReadiness::Unavailable { reason, .. } = &resolved.readiness
+                        && reason.is_account_block()
                     {
                         let detail = format!(
-                            "required family {family} count 1; unavailable: {:?}",
-                            resolved.readiness
+                            "required family {family} count 1; unavailable: {}",
+                            self::exclusion_detail(reason)
                         );
                         classified
                             .exclusions
@@ -2818,6 +3044,7 @@ fn classify_pool(
                         .config
                         .model_policy
                         .effective(
+                            context.catalogue,
                             &member.model,
                             resolved
                                 .account_key
@@ -2844,8 +3071,13 @@ fn classify_pool(
                         classified.routes.push(None);
                         continue;
                     }
-                    let (policy, _, _, _) =
-                        effective_profile(context, &member.model, resolved.account_key.as_deref());
+                    let (policy, _, _, _) = account_pacing(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        &member.model,
+                        resolved.account_key.as_deref(),
+                    );
                     let (factor, detail, is_standby) = pacing_factor_basis_points(
                         policy,
                         &member.model,

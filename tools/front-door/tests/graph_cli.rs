@@ -66,6 +66,37 @@ fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
+fn graph_metadata_warns_and_masks_known_values_before_preview() -> Result {
+    let rig = GraphProject::new()?;
+    let credential = "plain-registered-metadata-3391";
+    let example = "password=fixture-metadata-example-3391";
+    let path = rig.document(&json!({"schema_version":2,"graph_id":"metadata-test",
+        "metadata_note":format!("{example} {credential}"),
+        "nodes":[{"id":"task","prompt":"do the task","access":"read_only","route":{"alias":"junior"}}]}))?;
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--explain")
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{reply}");
+    let wire = reply.to_string();
+    assert!(!wire.contains(credential), "{reply}");
+    assert!(wire.contains("[REDACTED]"), "{reply}");
+    assert!(wire.contains(example), "{reply}");
+    assert!(
+        reply["data"]["warnings"]
+            .to_string()
+            .contains("SECRET_SHAPED_INPUT"),
+        "{reply}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
 fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
     let rig = GraphProject::new()?;
     let credential = "plain-registered-credential-3391";
@@ -109,6 +140,24 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
         masked |= text.contains("[REDACTED]");
     }
     assert!(masked, "checkpoint/prompt store retains the masked brief");
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#results
+fn scanner_refusal_names_rule_without_echoing_brief() -> Result {
+    let rig = GraphProject::new()?;
+    prepare_state(&rig)?;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (output, value) = rig.run(&["run", "task", "--brief", secret, "--explain"])?;
+    assert!(output.status.success(), "{value}");
+    let warnings = value["data"]["warnings"].to_string();
+    assert!(
+        warnings.contains("brief") && warnings.contains("looks like a credential"),
+        "{warnings}"
+    );
+    assert!(!warnings.contains(secret), "warning echoed the brief");
+    assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], secret);
     Ok(())
 }
 
@@ -662,13 +711,13 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     std::fs::create_dir_all(&user)?;
     std::fs::create_dir_all(&repo)?;
     std::fs::write(user.join("task.toml"), "brief='user'\ntier='junior'\n")?;
-    let (_, value) = rig.run(&["templates", "task"])?;
+    let (_, value) = rig.run(&["templates", "show", "task"])?;
     assert_eq!(value["data"]["templates"][0]["template"]["brief"], "user");
     std::fs::write(
         repo.join("task.toml"),
         "brief='repository'\ntier='senior'\n",
     )?;
-    let (_, value) = rig.run(&["templates", "task"])?;
+    let (_, value) = rig.run(&["templates", "show", "task"])?;
     assert_eq!(
         value["data"]["templates"][0]["template"]["brief"],
         "repository"
@@ -680,7 +729,7 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     )?;
     let output = rig
         .command()
-        .args(["templates", "task", "--file"])
+        .args(["templates", "show", "task", "--file"])
         .arg(inline)
         .output()?;
     let value: Value = serde_json::from_slice(&output.stdout)?;
@@ -690,7 +739,10 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
 }
 
 #[test]
-fn every_bundled_template_is_listed_shown_and_explained() -> Result {
+fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() -> Result {
+    // Spec: docs/specs/fabric.md#bundled-template-declarations
+    use provenant_fabric_runtime::graph::template::{Compiler, TemplateLibrary};
+
     let rig = GraphProject::new()?;
     let (output, value) = rig.run(&["templates"])?;
     assert!(output.status.success(), "{value}");
@@ -699,7 +751,7 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         .iter()
         .filter_map(|entry| entry["name"].as_str())
         .collect();
-    let library = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
+    let library = TemplateLibrary::bundled();
     assert_eq!(names, library.names().collect::<Vec<_>>());
     let directory =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/fabric-runtime/assets/templates");
@@ -728,16 +780,37 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
             .collect::<std::collections::BTreeSet<_>>(),
         expected.iter().map(String::as_str).collect()
     );
+
+    let (output, shown) = rig.run(&["templates", "show", "task"])?;
+    assert!(output.status.success(), "{shown}");
+    assert_eq!(
+        &shown["data"]["templates"][0],
+        listed
+            .iter()
+            .find(|entry| entry["name"] == "task")
+            .ok_or("task template")?
+    );
+
+    // Keep one representative CLI show; exercise every declaration and its
+    // parameter bindings through the in-process compiler.
+    let resolvers = [
+        ("review-frame".to_owned(), vec!["true".to_owned()]),
+        ("review-verify".to_owned(), vec!["true".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["true".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
+        ("review-panel".to_owned(), vec!["correctness".to_owned()]),
+        ("review-advice-correctness".to_owned(), vec![String::new()]),
+    ]
+    .into_iter()
+    .collect();
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
     for entry in listed {
         let name = entry["name"].as_str().ok_or("template name")?;
-        let (output, shown) = rig.run(&["templates", name])?;
-        assert!(output.status.success(), "{name}: {shown}");
-        assert_eq!(shown["data"]["templates"][0], *entry, "{name}");
         let template = &entry["template"];
         let mut node = json!({"id":"exercise", "use":name});
-        if name == "repair" {
-            node["repeat"] = json!({"until":"accepted", "max_rounds":1, "review_repair":true});
-        }
         let mut parameters = json!({});
         if template["parameters"].get("worktree").is_some() {
             parameters["worktree"] = json!(rig.project);
@@ -765,6 +838,35 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
             };
         }
         nodes.push(node);
+        let compiled = compiler
+            .compile_all(&nodes)
+            .map_err(|error| format!("{name}: {error}"))?;
+        assert!(!compiled.is_empty(), "{name}");
+    }
+
+    // These CLI paths exercise behaviour specific to repair loops,
+    // synthesis inputs, and worktree parameter binding.
+    for (name, nodes) in [
+        (
+            "repair",
+            vec![
+                json!({"id":"exercise", "use":"repair", "with":{"worktree":rig.project, "write_scope":["."]}, "repeat":{"until":"accepted", "max_rounds":1, "review_repair":true}}),
+            ],
+        ),
+        (
+            "synthesise",
+            vec![
+                json!({"id":"source", "use":"task"}),
+                json!({"id":"exercise", "use":"synthesise", "after":["source"], "inputs":[{"node":"source", "outputs":["result"]}]}),
+            ],
+        ),
+        (
+            "implement",
+            vec![
+                json!({"id":"exercise", "use":"implement", "worktree":rig.project, "write_scope":["."]}),
+            ],
+        ),
+    ] {
         let path =
             rig.document(&json!({"nodes":nodes, "integration_branch":"batch/integration"}))?;
         let output = rig
@@ -983,7 +1085,7 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
         repo.join("broken.toml"),
         "brief='leaf'\nnodes=[{id='child',use='task'}]\n",
     )?;
-    for args in [vec!["templates"], vec!["templates", "broken"]] {
+    for args in [vec!["templates"], vec!["templates", "show", "broken"]] {
         let (output, _) = rig.run(&args)?;
         assert!(!output.status.success());
     }
@@ -1507,6 +1609,31 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
     }
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-ambiguous",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (output, value) =
+        rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("settled"), "{message}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|next| next.contains("retry steer-ambiguous/accept --brief-file")),
+        "{value}"
+    );
     Ok(())
 }
 
@@ -1764,7 +1891,18 @@ fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
             id.clone()
         };
         let brief = "line one\npassword=fixture-example-retry-3391\n";
-        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
+        let brief_path = rig.project.join("amended-brief.txt");
+        std::fs::write(&brief_path, brief)?;
+        let (output, retried) = if qualified {
+            rig.run(&[
+                "retry",
+                &target,
+                "--brief-file",
+                brief_path.to_str().ok_or("brief path")?,
+            ])?
+        } else {
+            rig.run(&["retry", &target, "--brief", brief])?
+        };
         assert!(output.status.success(), "{target}: {retried}");
         let warnings = retried["data"]["warnings"]
             .as_array()

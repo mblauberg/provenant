@@ -619,6 +619,9 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
             efforts: vec![],
             effort_suffix: false,
             evidence_ref: "synthetic-controls".into(),
+            source: "fixture".into(),
+            service_tiers: Vec::new(),
+            policy_rules: Vec::new(),
             family: None,
             trains_on_prompts: None,
             monthly_allowance_usd: None,
@@ -823,6 +826,7 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     };
     let without_reference = factor(vec![])?;
     let fresh_reference = factor(vec![QuotaObservation {
+        allowance: Default::default(),
         model: reference.model.clone(),
         expires_unix_seconds: reference.expires_unix_seconds,
         snapshot: reference.snapshot.clone(),

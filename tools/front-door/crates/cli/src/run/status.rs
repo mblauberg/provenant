@@ -316,6 +316,17 @@ fn project_lane_inner(
             ..Default::default()
         },
     );
+    if let run::AttemptState::Terminal {
+        terminal_cause: Some(run::TerminalCause::HandoffRefused),
+        reason: Some(reason),
+        ..
+    } = &lane.state
+    {
+        projected.reason = Some(format!(
+            "{}; inspect the cause and retry the lane",
+            provenant_confinement::redact::bounded_line(reason, 256)
+        ));
+    }
     if host_artifacts
         && let Some(releasing) =
             run::release_progress(root, lane, census.and_then(|census| census.ok()))

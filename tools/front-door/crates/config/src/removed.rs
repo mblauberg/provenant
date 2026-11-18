@@ -40,6 +40,7 @@ pub const REMOVED: &[Removed] = &[
         "prompt-stdin",
         "provenant run TEMPLATE --brief-file -",
     ),
+    flag(&["gc"], "idle-days", "provenant gc --idle DURATION"),
     flag(&["resume"], "no-fallback", "provenant retry NAME/NODE#N"),
     flag(
         &["run"],

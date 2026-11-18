@@ -90,31 +90,51 @@ fn invalid_json_is_an_envelope() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+// Spec: docs/specs/cli.md#parsing
 #[test]
-fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Result {
+fn catalogue_commands_resolve_to_scoped_help_in_process() -> Result {
+    use provenant_cli::{ParseOutcome, parse};
+    use std::ffi::OsString;
+
+    for args in [&["help", "--json"][..], &["help", "--all", "--json"][..]] {
+        let ParseOutcome::Help { catalog, .. } = parse(args.iter().map(OsString::from)) else {
+            panic!("expected catalogue help for {args:?}");
+        };
+        assert!(!catalog.commands.is_empty(), "empty catalogue for {args:?}");
+        for command in catalog.commands {
+            let name = command.command;
+            let argv = name
+                .split_whitespace()
+                .skip(1)
+                .chain(std::iter::once("--help"))
+                .map(OsString::from);
+            let ParseOutcome::Help { catalog, .. } = parse(argv) else {
+                panic!("expected help for {name}");
+            };
+            assert!(
+                catalog.commands.iter().any(|entry| entry.command == name),
+                "scoped help omits metadata for {name}"
+            );
+        }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#parsing
+#[test]
+fn help_and_version_need_no_roots_or_state() -> Result {
     let mut rig = TestRig::new()?.without_state()?;
     rig.env.retain(|(key, _)| {
         key != "HOME" && key != "PROVENANT_ROOT" && key != "PROVENANT_STATE_DIR"
     });
-    for args in [&["help", "--json"][..], &["help", "--all", "--json"][..]] {
+    for args in [
+        &["help", "--json"][..],
+        &["help", "--all", "--json"][..],
+        &["status", "--help"][..],
+        &["config", "check", "--help"][..],
+    ] {
         let help = rig.command(args)?;
-        assert_eq!(code(&help), 0);
-        let catalog: serde_json::Value = serde_json::from_slice(&help.stdout.bytes)?;
-        for command in catalog["data"]["commands"]
-            .as_array()
-            .ok_or("missing catalogue")?
-        {
-            let name = command["command"].as_str().ok_or("missing command")?;
-            let mut argv: Vec<_> = name.split_whitespace().skip(1).collect();
-            argv.push("--help");
-            let out = rig.command(&argv)?;
-            assert_eq!(
-                code(&out),
-                0,
-                "{name}: {}",
-                String::from_utf8_lossy(&out.stdout.bytes)
-            );
-        }
+        assert_eq!(code(&help), 0, "{args:?}: {help:?}");
     }
     let version = rig.command(&["--json", "--version"])?;
     assert_eq!(code(&version), 0);
@@ -316,13 +336,14 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     assert!(value["data"]["domains"]["quota"].is_object());
     let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
-    let text = String::from_utf8_lossy(&human.stdout.bytes);
-    for field in ["profile=balanced", "schema_version=1"] {
-        assert!(
-            text.split_whitespace().any(|value| value == field),
-            "{text}"
-        );
-    }
+    let full: serde_json::Value = serde_json::from_slice(&human.stdout.bytes)?;
+    assert_eq!(full["profile"], "balanced");
+    assert_eq!(full["schema_version"], 1);
+    let compact = rig.command(&["config", "show"])?;
+    assert_eq!(code(&compact), 0);
+    let text = String::from_utf8_lossy(&compact.stdout.bytes);
+    assert!(text.contains("--full"));
+    assert!(text.lines().all(|line| line.len() <= 200), "{text}");
     let removed = rig.command(&["config", "show", "--task-class", "mechanical", "--json"])?;
     assert_eq!(code(&removed), 2);
     assert!(!rig.state.exists());
@@ -492,6 +513,43 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
         "user"
     );
     rig.assert_v1_root_untouched()
+}
+
+#[test]
+// Spec: docs/specs/cli.md#results
+fn config_set_reports_only_the_changed_effective_setting() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let before = rig.command(&["config", "show", "--json"])?;
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout.bytes)?;
+    let key = "config.history_max_bytes";
+    let output = rig.command(&["config", "set", key, "300000", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["key"], key);
+    assert_eq!(result["data"]["previous"], before["data"]["knobs"][key]);
+    assert_eq!(result["data"]["effective"]["value"], 300000);
+    assert!(result["data"]["effective"]["source"].is_string());
+    assert!(result["data"].get("domains").is_none());
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#results
+fn config_set_profile_reports_effective_source() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let human = rig.command(&["config", "set", "profile", "economy"])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8_lossy(&human.stdout.bytes);
+    for expected in ["economy", "source: user", "previous", "balanced"] {
+        assert!(text.contains(expected), "{text}");
+    }
+    let output = rig.command(&["config", "set", "profile", "balanced", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["previous"], "economy");
+    assert_eq!(result["data"]["effective"], "balanced");
+    assert_eq!(result["data"]["source"], "user");
+    Ok(())
 }
 
 #[test]

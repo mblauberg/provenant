@@ -12,7 +12,7 @@ the [Fabric spec](../specs/fabric.md#peer-hosts); running work is
 Install the same release on both hosts, reachable by non-interactive SSH, and
 run `provenant fabric identity` on each to get its host ID. In each host's
 state-root `<state>/config.toml` (`--state-dir` or `PROVENANT_STATE_DIR`; check with
-`provenant config show`) name the other:
+`provenant config show --full`) name the other:
 
 ```toml
 [domains.fabric.peers.workshop]

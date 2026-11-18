@@ -39,6 +39,7 @@ procedure.
 | `provenant pr land` | provenant land NUMBER --wait |
 | `provenant fabric claim` | provenant adopt KIND:ID or provenant release KIND:ID |
 | `provenant land --batch` | provenant land NUMBER [NUMBER ...] |
+| `provenant gc --idle-days` | provenant gc --idle DURATION |
 | `provenant fabric graph` | provenant status NAME |
 | `provenant fabric mcp` | provenant fabric |
 | `provenant fabric_graph` | provenant run TEMPLATE BRIEF |
@@ -118,7 +119,7 @@ it does not list with the `worktree_layout` port (`default` and `roots` in
 
 ```sh
 provenant config ports
-provenant config show
+provenant config show --full
 ```
 
 ## Opt into ports

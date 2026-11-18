@@ -36,6 +36,7 @@ fn fabric_and_quota_load_one_domain_config() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/routing.md#provider-model-discovery
 fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let rig = quota_rig()?;
     let shown = rig.command(&["quota", "show", "--json"])?;
@@ -68,12 +69,21 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     }
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
-    assert_eq!(disk, tick["data"]);
+    let mut published = tick["data"].clone();
+    assert!(
+        published
+            .as_object_mut()
+            .unwrap()
+            .remove("model_discovery")
+            .unwrap()
+            .is_array()
+    );
+    assert_eq!(disk, published);
     rig.assert_v1_root_untouched()
 }
 
 #[test]
-fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> Result {
+fn compact_view_bounds_rows_and_full_view_shows_all_configured_accounts() -> Result {
     use std::os::unix::fs::PermissionsExt;
 
     let rig = quota_rig()?;
@@ -129,10 +139,15 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     let compact = String::from_utf8(output.stdout.bytes)?;
+    assert!(compact.contains("work-0 [claude]: exhausted"), "{compact}");
+    assert!(compact.contains("more not shown; use --full"), "{compact}");
+    let full = rig.command(&["quota", "--full"])?;
+    assert_eq!(code(&full), 0, "{full:?}");
+    let full = String::from_utf8(full.stdout.bytes)?;
     for (label, _) in &accounts {
         assert!(
-            compact.contains(&format!("{label} [claude]")),
-            "missing {label} row in {compact}"
+            full.contains(&format!("{label} [claude]:")),
+            "missing {label} in {full}"
         );
     }
     let structured = rig.command(&["quota", "--json"])?;
@@ -216,6 +231,7 @@ fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/routing.md#provider-model-discovery
 fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = quota_rig()?;
@@ -255,7 +271,14 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     }
     fs::write(&config, text)?;
     for tool in [
-        "curl", "security", "claude", "codex", "cursor", "agy", "opencode",
+        "curl",
+        "security",
+        "claude",
+        "codex",
+        "cursor",
+        "cursor-agent",
+        "agy",
+        "opencode",
     ] {
         let path = bin.join(tool);
         fs::write(
@@ -1071,7 +1094,16 @@ fn show_carries_display_blocks_and_display_command_persists() -> Result {
     let tick = json(&rig.command(&["quota", "tick", "--json"])?)?;
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
-    assert_eq!(disk, tick["data"]);
+    let mut published = tick["data"].clone();
+    assert!(
+        published
+            .as_object_mut()
+            .unwrap()
+            .remove("model_discovery")
+            .unwrap()
+            .is_array()
+    );
+    assert_eq!(disk, published);
     assert_eq!(disk["accounts"][0]["display"]["name"], "Work");
     rig.assert_v1_root_untouched()
 }
@@ -1252,4 +1284,86 @@ fn configured_polling_intervals_reach_show_and_tick() -> Result {
         "missing_cli"
     );
     rig.assert_v1_root_untouched()
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test the command's real-time deadline"
+)]
+fn discovery_tick_respects_eligibility_knob_and_deadline() -> Result {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        time::{Duration, Instant},
+    };
+    let mut rig = quota_rig()?;
+    let bin = rig.root.join("discovery-bin");
+    fs::create_dir(&bin)?;
+    let marker = rig.root.join("discovery-marker");
+    let codex = bin.join("codex");
+    fs::write(
+        &codex,
+        "#!/bin/sh\nif [ \"$1\" = debug ]; then printf invoked >> \"$DISCOVERY_MARKER\"; printf '%s' '{\"models\":[{\"slug\":\"gpt-6.2-sol\"}]}'; fi\n",
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        "#!/bin/sh\nprintf forbidden >> \"$DISCOVERY_MARKER\"\n",
+    )?;
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push(("PATH".into(), bin.into_os_string()));
+    rig.env
+        .push(("DISCOVERY_MARKER".into(), marker.as_os_str().to_owned()));
+    let config = rig.state.join("config.toml");
+    let original = fs::read_to_string(&config)?;
+    fs::write(
+        &config,
+        format!("{original}\n[knobs]\n\"quota.model_discovery\" = false\n"),
+    )?;
+    let shown = rig.command(&["config", "show", "--json"])?;
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    assert_eq!(
+        shown["data"]["knobs"]["quota.model_discovery"]["value"],
+        false
+    );
+    assert_eq!(
+        shown["data"]["knobs"]["quota.model_discovery"]["source"],
+        "override"
+    );
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),
+        0
+    );
+    assert!(!marker.exists());
+    fs::write(&config, &original)?;
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),
+        0
+    );
+    assert_eq!(fs::read_to_string(&marker)?, "invoked");
+    fs::remove_file(&codex)?;
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--power", "ac", "--json"])?),
+        0
+    );
+    assert_eq!(fs::read_to_string(&marker)?, "invoked");
+    fs::write(
+        &codex,
+        "#!/bin/sh\nif [ \"$1\" = debug ]; then /bin/sleep 5; fi\n",
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        &config,
+        format!("{original}\n[domains.quota]\nwall_budget_seconds = 2\n"),
+    )?;
+    let start = Instant::now();
+    let out = rig.command(&["quota", "tick", "--power", "ac", "--json"])?;
+    assert_eq!(code(&out), 0);
+    assert!(start.elapsed() < Duration::from_secs(4));
+    assert!(String::from_utf8_lossy(&out.stdout.bytes).contains("retaining previous snapshot"));
+    Ok(())
 }
