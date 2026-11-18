@@ -1759,6 +1759,7 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
 }
 
 #[test]
+// Spec: docs/specs/run-settlement.md#settlement
 fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResult {
     use provenant_records::policy::{Policy, Source, Strength};
     let fixture = Fixture::new("sha1")?;
@@ -1769,13 +1770,54 @@ fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResul
         None,
         &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
     )?)?;
+    let prior = child_of(&fixture, fixture.base, "unique prior branch work")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", "refs/heads/lane", &prior.to_string()],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "update-ref",
+            "refs/provenant/lane-base/test",
+            &prior.to_string(),
+        ],
+    )?;
+    fs::write(fixture.project.join("file"), "different orphan contents\n")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["add", "file"],
+    )?;
+    let orphan_tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["write-tree"],
+    )?)?;
+    assert_ne!(tree, orphan_tree);
     let orphan = oid(git(
         &fixture.git,
         &fixture.home,
         &fixture.project,
         None,
-        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+        &["commit-tree", &orphan_tree.to_string(), "-m", "orphan"],
     )?)?;
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&Directory::open_anchor(&fixture.source)?),
+        orphan,
+    )?;
     let mut strict = Policy::default();
     strict.overlay(
         &std::collections::BTreeMap::from([("LANE_TIP_UNROOTED".into(), Strength::Refuse)]),
@@ -1786,23 +1828,23 @@ fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResul
             &fixture.git,
             fixture.worktree.repo(),
             "refs/heads/lane",
-            fixture.base,
+            prior,
             None,
             orphan,
             &strict,
         ),
         Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
-            if tip == orphan && base == fixture.base
+            if tip == orphan && base == prior
     ));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
-        fixture.base
+        prior
     );
     let ancestor = super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
         "refs/heads/lane",
-        fixture.base,
+        prior,
         None,
         orphan,
         &Policy::default(),
@@ -1812,6 +1854,42 @@ fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResul
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         orphan
     );
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", "-d", "refs/provenant/lane-base/test"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["reflog", "expire", "--expire=now", "--all"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["gc", "--prune=now"],
+    )?;
+    assert_eq!(
+        super::resolve_ref(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &format!("refs/provenant/recovery/{prior}")
+        )?,
+        prior
+    );
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["cat-file", "-e", &format!("{prior}^{{commit}}")],
+    )?;
     Ok(())
 }
 

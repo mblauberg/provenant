@@ -690,6 +690,7 @@ mod admission_tests {
         record
     }
     #[test]
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
     fn stale_availability_warning_does_not_bypass_exhaustion() {
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
@@ -721,7 +722,19 @@ mod admission_tests {
             availability_ref: "fixture".into(),
             expires_unix_seconds: 950,
         };
-        assert!(admission(&[]).check(&route).is_err());
+        assert!(admission(&[]).check(&route).is_ok());
+        assert!(admission(&exhausted).check(&route).is_err());
+        assert!(admission(&auth).check(&route).is_err());
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(
+            &[(
+                "QUOTA_READINESS_STALE".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into(),
+            provenant_records::policy::Source::Project,
+        );
+        assert!(admission(&[]).check_with_policy(&route, &strict).is_err());
     }
     #[test]
     fn account_mismatch_blocks_until_identity_verifies_again() {

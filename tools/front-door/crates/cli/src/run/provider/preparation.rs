@@ -2473,6 +2473,36 @@ pub(super) fn prepare_candidates(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    prepare_candidates_inner(
+        registry,
+        provider_registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        locate_override,
+        fixture_token,
+        wait,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_candidates_inner(
+    registry: &Registry<'_>,
+    provider_registry: &[provenant_providers::Registration],
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate_override: Option<&ExecutableLocator<'_>>,
+    fixture_token: Option<&provenant_providers::claude::OauthToken>,
+    wait: Option<u64>,
+    #[cfg(test)] alter_availability: Option<
+        &dyn Fn(&mut Vec<provenant_providers::AvailabilityRecord>),
+    >,
+) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(
             registry,
@@ -3039,6 +3069,10 @@ pub(super) fn prepare_candidates(
                 );
             }
         }
+    }
+    #[cfg(test)]
+    if let Some(alter) = alter_availability {
+        alter(&mut availability);
     }
     // Availability is diagnostic evidence; admission uses the in-memory records.
     // A failed publication must not prevent a correctly prepared lane launching.

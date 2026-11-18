@@ -180,7 +180,10 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. A continuation retains the applied provider and optional account key
+refused. An availability record without an account key may proceed with a
+warning by default; strict `QUOTA_IDENTITY_UNKNOWN` policy excludes it.
+Independent credential, confinement and authority refusals still apply.
+A continuation retains the applied provider and optional account key
 as a pair. A missing provider, or a retained key without an account for that
 provider, is refused; a same-key account from another provider is never
 substituted. An absent applied account key remains absent. Credential roots

@@ -1160,7 +1160,9 @@ fn account_reason<'q>(
     let mut reason = availability_reason(Some(availability), context).filter(|r| {
         !matches!(
             r,
-            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+            RouteExclusionReason::StaleAvailability
+                | RouteExclusionReason::UnknownAvailability
+                | RouteExclusionReason::UnknownAccount
         )
     });
     // Missing access means preparation did not establish confinement. Only an
@@ -1257,6 +1259,21 @@ fn account_reason<'q>(
             .blocks()
     {
         reason = Some(RouteExclusionReason::UnknownAvailability);
+    }
+    // Identity uncertainty is advisory by default, but must not mask an
+    // independent credential, confinement or authority refusal.
+    if reason.is_none()
+        && availability.account_key.is_none()
+        && context
+            .config
+            .launch_policy
+            .check(
+                "QUOTA_IDENTITY_UNKNOWN",
+                provenant_records::policy::Facts::violation("account identity unknown"),
+            )
+            .blocks()
+    {
+        reason = Some(RouteExclusionReason::UnknownAccount);
     }
     (reason, quota)
 }

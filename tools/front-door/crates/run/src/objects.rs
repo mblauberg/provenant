@@ -450,20 +450,30 @@ pub(crate) fn publish_branch(
                 format!("provenant: verified lane objects (descends from {reference} {oid})")
             }
         };
-        command(
+        // Retain any history displaced by a rewrite in the same ref transaction
+        // as the branch CAS. The content-addressed ref is stable on retry.
+        let recovery = format!("refs/provenant/recovery/{current}");
+        let preserve = target != current && !is_ancestor(git, repo, current, target);
+        let transaction = if preserve {
+            let retain = match resolve_ref(git, repo, &recovery) {
+                Ok(existing) if existing == current => format!("verify {recovery} {current}"),
+                Ok(_) => return Err(invalid()),
+                Err(_) => format!("create {recovery} {current}"),
+            };
+            format!("{retain}\nupdate {branch} {target} {current}\n")
+        } else {
+            format!("update {branch} {target} {current}\n")
+        };
+        execute_bounded(
             git,
             repo.common_git_dir(),
             repo.root_path(),
-            &args(&[
-                "update-ref",
-                "--no-deref",
-                "-m",
-                &message,
-                branch,
-                &target.to_string(),
-                &current.to_string(),
-            ]),
+            &args(&["update-ref", "--no-deref", "-m", &message, "--stdin"]),
             None,
+            Execution {
+                input: Some(transaction.as_bytes()),
+                ..Execution::default()
+            },
         )?;
     }
     command(
