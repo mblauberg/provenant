@@ -99,7 +99,8 @@ pub use project_binding::{
 };
 pub use provenant_records::Finding;
 pub use schema::{
-    DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums, probe_field, schema,
+    DEDICATED_COMMANDS, DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums,
+    dedicated_command, probe_field, schema,
 };
 
 use serde::{Deserialize, Serialize, Serializer};

@@ -443,14 +443,14 @@ pub enum ChairSummary {
 }
 #[derive(Debug, Subcommand)]
 pub enum ChairLog {
-    /// Append an update from a JSON file, or standard input with `-`.
+    /// Append an update from a markdown or JSON file, or standard input with `-`.
     Append {
-        /// Chair session ID
+        /// Chair session ID; defaults to the active host chair session
         #[arg(long)]
-        session: String,
-        /// JSON containing markdown, kind, channel and optional links
+        session: Option<String>,
+        /// Markdown or JSON file; standard input when omitted or `-`
         #[arg(long)]
-        file: String,
+        file: Option<String>,
         /// Stable retry key; generated when omitted
         #[arg(long, catalog_requires = "issued_at", value_parser = explicit_operation_id)]
         operation_id: Option<OperationId>,
@@ -460,9 +460,9 @@ pub enum ChairLog {
     },
     /// List a bounded page of updates in sequence order.
     List {
-        /// Chair session ID
+        /// Chair session ID; defaults to the active host chair session
         #[arg(long)]
-        session: String,
+        session: Option<String>,
         /// Return entries after this sequence
         #[arg(long)]
         after: Option<u64>,

@@ -547,6 +547,50 @@ fn pr_status_preserves_partial_results() -> Result {
     Ok(())
 }
 
+fn ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read() -> Result {
+    let rig = self::rig()?;
+    let output = rig.command(&["ci", "failures", "pr", "1", "2", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = report["data"].as_array().ok_or("data array")?;
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["pr"], 1);
+    assert_eq!(data[1]["pr"], 2);
+
+    let gh_calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    let graphql_calls = gh_calls
+        .lines()
+        .filter(|line| line.contains("graphql"))
+        .count();
+    assert_eq!(
+        graphql_calls, 1,
+        "expected exactly 1 batched GraphQL read, but got:\n{gh_calls}"
+    );
+    Ok(())
+}
+
+fn ci_failures_flag_form_accepts_multiple_prs_with_one_batched_read() -> Result {
+    let rig = self::rig()?;
+    let output = rig.command(&["ci", "failures", "--pr", "1", "--pr", "2", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = report["data"].as_array().ok_or("data array")?;
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["pr"], 1);
+    assert_eq!(data[1]["pr"], 2);
+
+    let gh_calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    let graphql_calls = gh_calls
+        .lines()
+        .filter(|line| line.contains("graphql"))
+        .count();
+    assert_eq!(
+        graphql_calls, 1,
+        "expected exactly 1 batched GraphQL read, but got:\n{gh_calls}"
+    );
+    Ok(())
+}
+
 fn normalise_repo_api_argument(argument: &str) -> Option<String> {
     let mut segments = argument.splitn(4, '/');
     let resource = segments.next()?;
@@ -651,6 +695,50 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = normalise_api_call(args)?;
     match normalised.as_str() {
+        "repo view --json nameWithOwner" => {
+            io::stdout().write_all(br#"{"nameWithOwner":"owner/repo"}"#)?;
+        }
+        value if value.starts_with("api graphql -f query=") => {
+            let body = serde_json::json!({
+                "data": {
+                    "repository": {
+                        "a00": {
+                            "number": 1,
+                            "state": "OPEN",
+                            "headRefOid": HEAD,
+                            "isDraft": false,
+                            "mergeStateStatus": "CLEAN",
+                            "reviewDecision": "APPROVED",
+                            "url": "https://github.com/owner/repo/pull/1",
+                            "statusCheckRollup": {
+                                "contexts": {
+                                    "totalCount": 0,
+                                    "nodes": []
+                                }
+                            }
+                        },
+                        "a01": {
+                            "number": 2,
+                            "state": "OPEN",
+                            "headRefOid": OTHER,
+                            "isDraft": false,
+                            "mergeStateStatus": "CLEAN",
+                            "reviewDecision": "APPROVED",
+                            "url": "https://github.com/owner/repo/pull/2",
+                            "statusCheckRollup": {
+                                "contexts": {
+                                    "totalCount": 0,
+                                    "nodes": []
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            let bytes = serde_json::to_vec(&body)?;
+            io::stdout().write_all(b"HTTP/2 200\r\n\r\n")?;
+            io::stdout().write_all(&bytes)?;
+        }
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
         }
@@ -985,7 +1073,7 @@ fn main() -> ExitCode {
     }
     let result = if args
         .first()
-        .is_some_and(|arg| matches!(arg.as_str(), "pr" | "api"))
+        .is_some_and(|arg| matches!(arg.as_str(), "pr" | "api" | "repo"))
     {
         fake_gh(&args)
     } else {
@@ -1042,6 +1130,14 @@ fn main() -> ExitCode {
             (
                 "pr_status_prints_one_compact_line_per_pull_request",
                 pr_status_prints_one_compact_line_per_pull_request,
+            ),
+            (
+                "ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read",
+                ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read,
+            ),
+            (
+                "ci_failures_flag_form_accepts_multiple_prs_with_one_batched_read",
+                ci_failures_flag_form_accepts_multiple_prs_with_one_batched_read,
             ),
         ];
         provenant_supervisor::fixture::run_libtest(

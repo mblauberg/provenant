@@ -10,7 +10,7 @@ license = "MIT"
 # The only direct dependencies allowed (ADR 0028; docs/specs/rust-workspace.md#dependencies). Member crates
 # use `{ workspace = true }`; an entry here enters Cargo.lock only once used.
 [workspace.dependencies]
-clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 jiff = "0.2"
 libc = "0.2"
 regex = "1.13"

@@ -7,8 +7,17 @@ pub enum Ci {
     /// Extract failing test names, panics and error lines from failed CI jobs
     #[command(add = crate::metadata::CoreCommand(11, "provenant ci failures pr 1947"))]
     Failures {
+        /// Pull request numbers
+        #[arg(
+            long = "pr",
+            value_name = "PR",
+            num_args = 1..,
+            action = clap::ArgAction::Append,
+        )]
+        pr: Vec<u64>,
+
         #[command(subcommand)]
-        target: FailureTarget,
+        target: Option<FailureTarget>,
     },
 }
 
@@ -16,9 +25,9 @@ pub enum Ci {
 pub enum FailureTarget {
     /// Failing jobs of a pull request's checks
     Pr {
-        /// Pull request number
-        #[arg(catalog_u64_range = 1..)]
-        number: u64,
+        /// Pull request numbers
+        #[arg(catalog_u64_range = 1.., required = true)]
+        numbers: Vec<u64>,
     },
     /// Failing jobs of one Actions run
     Run {
