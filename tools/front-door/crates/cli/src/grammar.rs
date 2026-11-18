@@ -357,11 +357,6 @@ pub enum Pr {
         #[arg(long)]
         bind: bool,
     },
-    /// Wait for CI and report pass or fail with each pull request head
-    Watch {
-        #[arg(required = true, catalog_u64_range = 1..)]
-        numbers: Vec<u64>,
-    },
     /// Open a pull request with the repository template filled from receipts
     Open(Box<PrOpen>),
     /// Print one line per pull request: state, head, checks, merge and review

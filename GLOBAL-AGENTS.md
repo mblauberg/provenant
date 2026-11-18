@@ -59,7 +59,7 @@ SKILL.md.
   risk (`code-review`): a small change needs none; when review runs, the author
   is never its reviewer and lens coverage comes before provider family.
 - **Waiting.** Never poll with `sleep` or repeated reads. Block on `provenant wait`
-  or `provenant pr watch` in the background and carry on.
+  (`--pr NUMBER` for a pull request) in the background and carry on.
 - **Memory.** Durable knowledge goes in project docs, cross-project preferences
   in these rules or a skill. Private memory holds only what must outlive the
   session but justifies neither; delete entries once promoted or obsolete.

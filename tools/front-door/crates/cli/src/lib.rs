@@ -2159,6 +2159,17 @@ mod tests {
         }
     }
     #[test]
+    fn pr_watch_is_no_longer_a_subcommand() {
+        assert!(
+            matches!(
+                parsed(&["pr", "watch", "1668"]),
+                ParseOutcome::Invalid { .. }
+            ),
+            "`pr watch` parses as a command"
+        );
+    }
+
+    #[test]
     fn ci_observation_commands_accept_batch_and_json_forms() {
         assert!(matches!(
             valid(&["pr", "status", "12", "34", "--json"]).command,
@@ -2203,7 +2214,6 @@ mod tests {
             (vec!["steer"], "target", "provenant steer"),
             (vec!["edit"], "name", "provenant edit"),
             (vec!["route", "resolve"], "route", "provenant route resolve"),
-            (vec!["pr", "watch"], "number", "provenant pr watch"),
             (vec!["config"], "subcommand", "provenant config show"),
             (vec!["accounts"], "subcommand", "provenant accounts list"),
             (vec!["disk"], "subcommand", "provenant disk report"),
@@ -2329,14 +2339,18 @@ mod tests {
             }
         }
         fn retired_command(path: &[&str]) -> bool {
-            REMOVED.iter().any(|removed| {
-                removed.flag.is_none()
-                    && removed.words.len() <= path.len()
-                    && path
-                        .iter()
-                        .zip(removed.words)
-                        .all(|(word, removed)| *word == *removed)
-            })
+            // #3528 removes `pr watch` under ADR 0035 with no compatibility
+            // row; #3284 retires this table and the refusal rows entirely.
+            const NO_REFUSAL: &[&[&str]] = &[&["pr", "watch"]];
+            NO_REFUSAL.contains(&path)
+                || REMOVED.iter().any(|removed| {
+                    removed.flag.is_none()
+                        && removed.words.len() <= path.len()
+                        && path
+                            .iter()
+                            .zip(removed.words)
+                            .all(|(word, removed)| *word == *removed)
+                })
         }
         fn has_option(command: &clap::Command, root: &clap::Command, name: &str) -> bool {
             command.get_arguments().any(|argument| {

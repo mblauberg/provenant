@@ -87,6 +87,35 @@ fn terminal_data(
     })
 }
 
+/// The last known check summary and next step that `pr watch` used to print at
+/// a timeout. `wait --pr` keeps them as an extra diagnostic line so the final
+/// line stays owned by the wait final-line format.
+fn pr_timeout_details(sources: &[Source], latest: &[Option<Reading>]) -> Vec<String> {
+    sources
+        .iter()
+        .zip(latest)
+        .filter_map(|(source, reading)| match (source, reading) {
+            (Source::Pr { .. }, Some(reading)) => {
+                serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+                    .ok()
+                    .filter(|line| line.verdict().is_none())
+                    .map(|line| {
+                        let next = if line.checks_unreported() {
+                            format!(
+                                "; cause=checks_not_scheduled; next: {}",
+                                crate::pr::status::NO_CHECKS_NEXT
+                            )
+                        } else {
+                            String::new()
+                        };
+                        format!("last known {}{next}", line.text())
+                    })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Reading {
     settle: Settle,
@@ -1623,6 +1652,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         human.push_str("nothing to wait for: no unsettled graphs\n");
     }
     if !done {
+        for detail in pr_timeout_details(&sources, &latest) {
+            human.push_str(&detail);
+            human.push('\n');
+        }
         human.push_str("wait timed out; the work continues\n");
     }
     let observation = observation
@@ -2230,5 +2263,45 @@ mod tests {
             Settle::Succeeded
         );
         assert_eq!(settle(&[attempt("running", Value::Null)]), Settle::Pending);
+    }
+
+    #[test]
+    fn pr_timeout_reports_the_last_known_check_summary_and_next_step() {
+        let sources = vec![Source::Pr {
+            number: 7,
+            repository: Ok("owner/repo".into()),
+        }];
+        let pending = Reading {
+            settle: Settle::Pending,
+            line: "#7 pending".into(),
+            data: json!({
+                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
+                "merge": "clean", "review": "unknown", "error": null,
+                "checks_passed": null, "checks_total": null,
+                "checks_failed": null, "checks_pending": null
+            }),
+        };
+        let settled = Reading {
+            settle: Settle::Succeeded,
+            line: "#7 ready".into(),
+            data: json!({
+                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
+                "merge": "clean", "review": "approved", "error": null,
+                "checks_passed": 1, "checks_total": 1,
+                "checks_failed": 0, "checks_pending": 0
+            }),
+        };
+        let details = pr_timeout_details(&sources, &[Some(pending), Some(settled)]);
+        assert_eq!(details.len(), 1, "only an unsettled PR gets a detail");
+        assert!(details[0].contains("#7 OPEN abc"), "{details:?}");
+        assert!(details[0].contains("checks=unavailable"), "{details:?}");
+        assert!(
+            details[0].contains("cause=checks_not_scheduled"),
+            "{details:?}"
+        );
+        assert!(
+            details[0].contains(crate::pr::status::NO_CHECKS_NEXT),
+            "{details:?}"
+        );
     }
 }

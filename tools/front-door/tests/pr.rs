@@ -108,14 +108,23 @@ fn no_merge(rig: &TestRig) -> Result {
     Ok(())
 }
 
-fn pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer() -> Result {
+/// Moved from the retired `pr watch` integration test: the single PR wait
+/// still reads CI through the observer and never merges.
+fn wait_pr_reports_the_observed_head_and_passes() -> Result {
     let rig = self::rig()?;
-    let output = rig.command(&["pr", "watch", "1668", "--full"])?;
+    let output = rig.command(&["wait", "--pr", "1668", "--timeout", "30s", "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output);
+    let value: serde_json::Value = String::from_utf8(output.stdout.bytes)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("wait emitted no JSON record")?;
+    assert_eq!(value["data"]["targets"][0]["target"], "#1668", "{value}");
     assert_eq!(
-        String::from_utf8(output.stdout.bytes)?,
-        format!("pass #1668 {HEAD}\n")
+        value["data"]["targets"][0]["settle"], "succeeded",
+        "{value}"
     );
+    assert_eq!(value["data"]["targets"][0]["data"]["head"], HEAD, "{value}");
     let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
     assert!(
         calls.contains(&format!("commits/{HEAD}/check-runs")),
@@ -123,23 +132,6 @@ fn pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer() -> Res
     );
     assert!(!calls.contains("pr checks"), "{calls}");
     no_merge(&rig)
-}
-
-fn pr_watch_failure_and_head_changes_report_fail_with_head() -> Result {
-    for flag in ["watch-fail", "move-head"] {
-        let rig = self::rig()?;
-        if flag == "watch-fail" {
-            fs::write(rig.project.join("checks.json"), r#"[{"bucket":"fail"}]"#)?;
-        } else {
-            fs::write(rig.project.join(flag), "")?;
-        }
-        let output = rig.command(&["pr", "watch", "1668"])?;
-        assert_ne!(code(&output), 0, "{flag}");
-        let error = String::from_utf8(output.stderr.bytes)?;
-        assert!(error.contains(&format!("fail #1668 {HEAD}")), "{error}");
-        no_merge(&rig)?;
-    }
-    Ok(())
 }
 
 fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
@@ -443,8 +435,6 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         vec!["pr", "land", "0", "--head", HEAD],
         vec!["land", "0"],
         vec!["land", "1668", "--head"],
-        vec!["pr", "watch", "0"],
-        vec!["pr", "watch", "--admin"],
     ] {
         assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
     }
@@ -691,7 +681,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             };
             let draft =
                 Path::new("draft").exists() || head_value["isDraft"].as_bool().unwrap_or(false);
-            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft});
+            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft,"html_url":"https://github.com/owner/repo/pull/1668"});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
@@ -996,12 +986,8 @@ fn main() -> ExitCode {
                 pr_status_preserves_partial_results,
             ),
             (
-                "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer",
-                pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer,
-            ),
-            (
-                "pr_watch_failure_and_head_changes_report_fail_with_head",
-                pr_watch_failure_and_head_changes_report_fail_with_head,
+                "wait_pr_reports_the_observed_head_and_passes",
+                wait_pr_reports_the_observed_head_and_passes,
             ),
             (
                 "land_refuses_unpassed_missing_and_malformed_checks",
