@@ -139,23 +139,9 @@ pub(crate) fn advance_graphs_after_settlement(
                 if config.domains.fabric.steer.fallback
                     == provenant_fabric_runtime::config::SteerFallback::FreshWithHandoff
                 {
-                    let source = match config.origins.get("domains.fabric.steer.fallback") {
-                        Some(provenant_config::Origin::User { .. }) => {
-                            "config.toml (domains.fabric.steer.fallback)".to_owned()
-                        }
-                        Some(provenant_config::Origin::Compiled { profile }) => {
-                            format!("compiled {profile:?} profile (domains.fabric.steer.fallback)")
-                        }
-                        None => "compiled defaults (domains.fabric.steer.fallback)".to_owned(),
-                    };
-                    {
-                        use std::io::Write as _;
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "{}",
-                            steer_fallback_warning(&source)
-                        );
-                    }
+                    // The fallback is announced before the live attempt is
+                    // interrupted (in deliver_steer); no second, after-the-fact
+                    // warning is needed here.
                     store.prepare_fresh_steer_continuation(settled.attempt_id, &call)
                 } else {
                     Err(error)
@@ -191,6 +177,31 @@ pub(crate) fn advance_graphs_after_settlement(
             }
         };
         if let Some(run) = successor {
+            // Several lanes steered together settle near-simultaneously. Space
+            // their restarts through a shared gate so they queue behind the
+            // launch lock instead of racing it (configurable; source shown).
+            let config = provenant_cli::config_reads::read_for(&roots, "fabric context")?;
+            let spacing_ms = config.domains.fabric.steer.restart_spacing_ms;
+            if spacing_ms > 0 {
+                let source = provenant_cli::config_reads::setting_source(
+                    &config.origins,
+                    "domains.fabric.steer.restart_spacing_ms",
+                );
+                let waited = provenant_cli::run::pace_steer_restart(
+                    roots.state.as_path(),
+                    spacing_ms,
+                    &call,
+                )
+                .map_err(|failure| std::io::Error::other(failure.message))?;
+                if waited > 0 {
+                    use std::io::Write as _;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: steer restart staggered by {} ms (source: {source})",
+                        waited / 1_000
+                    );
+                }
+            }
             let edge = provenant_cli::run::Edge {
                 roots: &roots,
                 home: &settled.roots.home,
@@ -672,26 +683,4 @@ pub(crate) fn settle_attempt(
         cancel: &cancel,
     };
     Ok(store.worktree_settlement(id, &call)?)
-}
-
-fn steer_fallback_warning(source: &str) -> String {
-    format!(
-        "warning: steer.fallback=fresh_with_handoff (source: {source}); provider session unavailable, continuing with the accepted brief, prior handoff and steering instructions"
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
-    use super::*;
-
-    // Spec: docs/specs/fabric.md#session-ready-steering
-    #[test]
-    fn fresh_steer_fallback_warning_names_the_setting_source() {
-        let warning =
-            steer_fallback_warning("compiled Balanced profile (domains.fabric.steer.fallback)");
-        assert!(warning.starts_with("warning: steer.fallback=fresh_with_handoff"));
-        assert!(warning.contains("source: compiled Balanced profile"));
-        assert!(warning.contains("accepted brief, prior handoff and steering instructions"));
-    }
 }

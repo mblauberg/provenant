@@ -1152,6 +1152,23 @@ fn constraints(path: &str) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_help_names_providers_that_keep_or_restart_the_session() {
+        let mut model = command_model();
+        let steer = model.find_subcommand_mut("steer").expect("steer grammar");
+        let help = steer.render_long_help().to_string();
+        for provider in ["claude", "codex", "cursor", "agy", "opencode"] {
+            assert!(help.contains(provider), "help must name {provider}: {help}");
+        }
+        for restart in ["command", "host-native"] {
+            assert!(help.contains(restart), "help must name {restart}: {help}");
+        }
+        assert!(help.contains("keep that session"), "{help}");
+        assert!(help.contains("restart fresh"), "{help}");
+    }
+
     #[test]
     fn run_accepts_pinned_review_pr() {
         let invocation = valid(&["run", "review.security", "--pr", "3465"]);
