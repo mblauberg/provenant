@@ -481,6 +481,12 @@ impl ForgePort {
         &self,
         operation: ForgeOperation,
     ) -> Result<(ForgeOperation, Invocation), PortError> {
+        if matches!(self.adapter.backend, PortBackend::None) {
+            return Err(PortError::Disabled {
+                owner: self.adapter.owner,
+                port_source: self.adapter.port_source,
+            });
+        }
         let raw =
             provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
         let operation = if operation.requires_projection() {

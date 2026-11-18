@@ -217,7 +217,7 @@ fn validate_graph_steer(
     Err(FacadeError::StateCorrupt)
 }
 
-fn validate_graph_output(
+pub(super) fn validate_graph_output(
     factory: &Factory,
     owner: &BinaryRunOwner<'_>,
     request: &PeerRequest,

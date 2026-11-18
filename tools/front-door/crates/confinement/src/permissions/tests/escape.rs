@@ -20,6 +20,10 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
 
     let fixture = crate::test_support::Fixture::new()?;
     let root = provenant_os::fs::canonicalize(fixture._temp.path())?;
+    // The lane's short TMPDIR alias addresses the same fixture without exceeding
+    // sockaddr_un's path limit; policy still uses canonical paths.
+    let canonical_tmp = std::fs::canonicalize(std::env::temp_dir())?;
+    let socket_root = std::env::temp_dir().join(root.strip_prefix(canonical_tmp)?);
     let home = root.join("home");
     let state = root.join("state");
     let xdg = root.join("xdg");
@@ -574,10 +578,11 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         socket_profiles.push((writer, open_sbpl));
     }
     // The named credential socket is absent when both profiles compile.
-    let _ssh_listener = std::os::unix::net::UnixListener::bind(&ssh_agent_socket)?;
-    let ordinary_socket = root.join("ordinary.sock");
+    let ssh_socket = socket_root.join("synthetic-agent.sock");
+    let _ssh_listener = std::os::unix::net::UnixListener::bind(&ssh_socket)?;
+    let ordinary_socket = socket_root.join("ordinary.sock");
     let _ordinary_listener = std::os::unix::net::UnixListener::bind(&ordinary_socket)?;
-    for socket in [&ssh_agent_socket, &ordinary_socket] {
+    for socket in [&ssh_socket, &ordinary_socket] {
         std::os::unix::net::UnixStream::connect(socket)?;
     }
     for (writer, open_sbpl) in socket_profiles {
@@ -586,7 +591,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             successful_probe(&ordinary),
             "writer={writer}: ambient Unix socket: {ordinary:?}"
         );
-        let credential = connect(&open_sbpl, &ssh_agent_socket);
+        let credential = connect(&open_sbpl, &ssh_socket);
         assert!(
             denied_probe(&credential),
             "writer={writer}: exact SSH_AUTH_SOCK credential boundary: {credential:?}"
@@ -968,7 +973,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700))?;
     }
-    let peer_socket = agent.join("peer.sock");
+    let peer_socket = socket_root.join("state/peer-agent/peer.sock");
     let _peer_listener = std::os::unix::net::UnixListener::bind(&peer_socket)?;
     std::os::unix::net::UnixStream::connect(&peer_socket)?;
     let system_socket = Path::new("/private/var/run/mDNSResponder");
