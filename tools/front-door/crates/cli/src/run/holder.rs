@@ -1015,7 +1015,9 @@ mod tests {
         );
         assert_eq!(
             decoded.reason.as_deref(),
-            Some("provider capture evidence defect at stdout.log line 2; replay incomplete: provider protocol is malformed")
+            Some(
+                "provider capture evidence defect at stdout.log line 2; replay incomplete: provider protocol is malformed"
+            )
         );
 
         let valid_tail = make_frames()?;
