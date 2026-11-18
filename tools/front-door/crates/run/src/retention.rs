@@ -105,6 +105,12 @@ impl ScratchPolicy<'_> {
 }
 
 pub(crate) fn scratch_owner(record: &AttemptRecord, request: &CanonicalRequest) -> ScratchOwner {
+    // Read-only attempts have no branch or writer checkout to retain. Their
+    // scratch lifetime is solely the configured idle period, even when the
+    // launch was admitted from a graph or names a source checkout.
+    if request.task.writer.is_none() {
+        return ScratchOwner::Unowned;
+    }
     if record.superseded_by.is_some() {
         return ScratchOwner::Finished;
     }
@@ -347,10 +353,16 @@ impl RunStore {
                     )?
                     .ok_or(RunError::Validation("scratch request unavailable"))?;
                     let request: CanonicalRequest = crate::db::decode(&raw)?;
-                    let owner = policy.owner.map_or_else(
-                        || scratch_owner(&record, &request),
-                        |owner| owner(&record, &request),
-                    );
+                    let owner = if request.task.writer.is_none() {
+                        // Read-only scratch ages out independently of the
+                        // graph/worktree retention callback used for writers.
+                        ScratchOwner::Unowned
+                    } else {
+                        policy.owner.map_or_else(
+                            || scratch_owner(&record, &request),
+                            |owner| owner(&record, &request),
+                        )
+                    };
                     !continuing
                         && match owner {
                             ScratchOwner::Finished => true,
@@ -2175,6 +2187,96 @@ mod tests {
         )?;
         assert!(scratch.attempt_tmp.is_empty());
         assert!(temporary.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn released_read_only_scratch_uses_idle_age_independent_of_graph_and_checkout() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let source = temp.path().join("source-checkout");
+        fs::create_dir(&source)?;
+        input.request.task.access.source_root = Some(source.clone());
+        input
+            .request
+            .task
+            .context
+            .as_mut()
+            .ok_or("graph context missing")?
+            .pr = Some(3518);
+        store.create(&input, &call)?;
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempt_id));
+        let temporary = attempt.join("tmp/candidate-0/target/debug");
+        fs::create_dir_all(&temporary)?;
+        fs::write(temporary.join("artifact"), b"scratch target")?;
+        let durable = [
+            (attempt.join("result.md"), b"result".as_slice()),
+            (
+                attempt.join("provider-state/handoff.json"),
+                b"handoff".as_slice(),
+            ),
+            (attempt.join("stdout.log"), b"log".as_slice()),
+        ];
+        for (path, contents) in &durable {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, contents)?;
+        }
+
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let idle = 7 * 86_400;
+        let retained_by_writer_owner = |_, _| ScratchOwner::Owned;
+        let policy = ScratchPolicy {
+            idle_seconds: idle,
+            owner: Some(&retained_by_writer_owner),
+            ..ScratchPolicy::new(idle)
+        };
+        let before_release = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000)?,
+            false,
+            &call,
+        )?;
+        assert!(before_release.attempt_tmp.is_empty());
+        assert!(temporary.exists(), "a live attempt retains scratch");
+
+        withdraw(&store, &input, &call)?;
+        let before_idle = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000 - 1)?,
+            false,
+            &call,
+        )?;
+        assert!(before_idle.attempt_tmp.is_empty());
+        assert!(temporary.exists(), "scratch remains until gc.idle");
+
+        let collected = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000)?,
+            false,
+            &call,
+        )?;
+        assert_eq!(collected.attempt_tmp.len(), 1);
+        assert!(!attempt.join("tmp").exists());
+        for (path, contents) in &durable {
+            assert_eq!(
+                fs::read(path)?,
+                *contents,
+                "{} remains durable",
+                path.display()
+            );
+        }
         Ok(())
     }
 
