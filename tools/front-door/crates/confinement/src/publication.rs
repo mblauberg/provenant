@@ -708,6 +708,20 @@ fn quote(byte: u8) -> bool {
     matches!(byte, b'"' | b'\'' | b'`')
 }
 
+fn word(c: char) -> bool {
+    if c.is_alphanumeric() || c == '_' {
+        return true;
+    }
+    if c.is_ascii() {
+        return false;
+    }
+    // Unicode word continuations include marks, connectors and join controls.
+    // https://docs.rs/regex/latest/regex/#perl-character-classes-unicode-friendly
+    static WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let regex = WORD.get_or_init(|| regex::Regex::new(r"^\w$").expect("static word class"));
+    regex.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
 fn quoted_end(text: &str, start: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let quote = bytes[start];
@@ -717,7 +731,6 @@ fn quoted_end(text: &str, start: usize) -> Option<usize> {
             i = (i + 2).min(bytes.len());
         } else if bytes[i] == quote {
             // A possessive or contraction inside prose does not close its quote.
-            let word = |c: char| c.is_alphanumeric() || c == '_';
             if quote == b'\''
                 && text[..i].chars().next_back().is_some_and(word)
                 && text[i + 1..].chars().next().is_some_and(word)
@@ -1058,6 +1071,19 @@ mod tests {
                 "`api key`=`[REDACTED]`; copy private-value",
             ),
         ] {
+            let projected = projector
+                .project(Destination::CrossHostTransport, raw.as_bytes())
+                .unwrap();
+            assert_eq!(projected.bytes(), expected.as_bytes());
+        }
+        for continuation in [
+            "\u{301}", "\u{903}", "\u{20DD}", "\u{203F}", "\u{200C}", "\u{200D}", "\u{B2}",
+        ] {
+            let raw = format!(
+                "diagnostic 'cafe{continuation}'s token: private-value'; copy private-value"
+            );
+            let expected =
+                format!("diagnostic 'cafe{continuation}'s token: [REDACTED]'; copy private-value");
             let projected = projector
                 .project(Destination::CrossHostTransport, raw.as_bytes())
                 .unwrap();

@@ -543,6 +543,7 @@ dependencies = [
  "provenant-records",
  "provenant-supervisor",
  "provenant-test-support",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
