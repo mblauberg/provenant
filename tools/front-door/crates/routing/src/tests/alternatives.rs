@@ -866,7 +866,7 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
             extra: Default::default(),
             pool: "thirty_day".into(),
             window_seconds: Some(2_592_000),
-            used_basis_points: 1_000,
+            used_basis_points: 500,
             resets_unix_seconds: Some(2_592_100),
         },
     ];

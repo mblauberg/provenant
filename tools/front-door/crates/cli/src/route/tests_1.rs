@@ -925,3 +925,34 @@
             .is_err()
         );
     }
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn route_list_exposes_monthly_settings_estimates_and_sources() -> Result<(), Box<dyn Error>> {
+        for (settings, burst, cost, source, knob) in [
+            ("", 10, 100, "bundled default", "domains.routing.pacing.monthly"),
+            ("[domains.routing.pacing.monthly]\nburst_percent=25\ninitial_launch_cost_basis_points=50\n", 25, 50, "configuration", "domains.routing.pacing.monthly"),
+            ("[domains.routing.pacing.accounts.\"cursor/local\".monthly]\nburst_percent=30\ninitial_launch_cost_basis_points=200\n", 30, 200, "account configuration", "domains.routing.pacing.accounts.cursor/local.monthly"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let roots = exclusion_roots(&temp)?;
+            std::fs::write(roots.state.as_path().join("config.toml"), format!("schema_version=1\n{settings}"))?;
+            let list = super::display_list_data(&roots, &super::RouteListRequest { valid:false, adapter:Some("cursor".into()), pool:None })?;
+            let json = serde_json::to_value(&list)?;
+            let row = json["monthly_allowances"].as_array().unwrap().iter().find(|r| r["account"] == "local").unwrap();
+            assert_eq!(row["assessment"]["settings"]["burst_percent"], burst);
+            assert_eq!(row["assessment"]["settings"]["initial_launch_cost_basis_points"], cost);
+            assert_eq!(row["assessment"]["settings"]["enabled"], true);
+            assert_eq!(row["assessment"]["settings"]["source"], source);
+            assert_eq!(row["assessment"]["settings"]["knob"], knob);
+            assert!(row["assessment"]["windows"][0]["estimated_basis_points"].is_u64());
+            assert!(row["assessment"]["windows"][0]["budget_basis_points"].is_u64());
+            let human = super::monthly_list_lines(&list).join("\n");
+            for value in [format!("burst_percent={burst}"), format!("initial_launch_cost_basis_points={cost}"), format!("source={source}"), format!("knob={knob}"), "estimated_bp=".into(), "budget_bp=".into(), "estimated cycle: calendar month UTC".into()] {
+                assert!(human.contains(&value), "missing {value}");
+            }
+            assert!(json["monthly"].get("source").is_some());
+            assert!(json["monthly"].get("knob").is_some());
+        }
+        Ok(())
+    }

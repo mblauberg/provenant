@@ -575,6 +575,7 @@ fn depletion_facts_judge_each_account_with_the_dispatch_checks()
         details: None,
     };
     let quota = [QuotaObservation {
+        allowance: Default::default(),
         model: model(LUNA),
         snapshot,
         expires_unix_seconds: NOW + 60,
@@ -628,9 +629,12 @@ fn depletion_readiness_uses_custom_pool_and_explicit_provider_scope()
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
+    // This invariant isolates model scope with a genuinely ready monthly account.
+    let observations = [monthly_quota(cursor_model.as_str(), "opaque-account", 0)];
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &records;
     ctx.access = &access;
+    ctx.quota = &observations;
     let facts = depletion_facts(&ctx, RouteIntent::default(), &[])?;
     assert!(
         facts
@@ -651,6 +655,7 @@ fn depletion_readiness_uses_custom_pool_and_explicit_provider_scope()
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &records;
     ctx.access = &access;
+    ctx.quota = &observations;
     let facts = depletion_facts(&ctx, RouteIntent::default(), &[])?;
     assert!(facts.iter().all(|fact| fact.model != cursor_model));
     Ok(())

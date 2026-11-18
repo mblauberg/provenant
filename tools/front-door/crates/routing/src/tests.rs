@@ -123,6 +123,7 @@ fn quota(
     let model = ModelId::parse(model)?;
     let plan = fixture_plan(&model);
     Ok(QuotaObservation {
+        allowance: Default::default(),
         model: model.clone(),
         expires_unix_seconds: expires,
         snapshot: provenant_quota::QuotaSnapshot {
@@ -627,6 +628,20 @@ mod quotas;
 mod readiness;
 mod selection;
 
+fn monthly_quota(model: &str, account: &str, used: u64) -> QuotaObservation {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let mut q = quota(model, account, QuotaStatus::Available, 1, 80, 120).unwrap();
+    q.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
+        pool: "billing_cycle".into(),
+        used_basis_points: used,
+        window_seconds: Some(30 * 86400),
+        resets_unix_seconds: Some(30 * 86400),
+    }];
+    q.allowance.observe(&q.snapshot);
+    q
+}
+
 // Spec: docs/specs/routing.md#provider-model-scope
 #[test]
 fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dyn std::error::Error>>
@@ -760,3 +775,5 @@ fn catalogue_launch_suffix_preserves_canonical_identity() -> Result<(), Box<dyn 
     );
     Ok(())
 }
+
+mod monthly;

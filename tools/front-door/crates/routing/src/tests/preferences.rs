@@ -109,6 +109,9 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         },
     ];
     let mut ctx = context(&catalogue, &config, now()?);
+    // Capability filtering is isolated from monthly pacing by a ready cursor account.
+    let observations = [monthly_quota("cursor/composer-2.5", "opaque-account", 0)];
+    ctx.quota = &observations;
     ctx.availability = &availability;
     ctx.access = &access;
     ctx.launch_specs = Some(&lookup);
@@ -215,6 +218,8 @@ fn image_input_preference_keeps_pool_weights_and_falls_back()
             },
         ];
         let mut ctx = context(&catalogue, &config, now()?);
+        let observations = [monthly_quota("cursor/composer-2.5", "opaque-account", 0)];
+        ctx.quota = &observations;
         ctx.availability = &available;
         ctx.access = &access;
         ctx.launch_specs = Some(&lookup);

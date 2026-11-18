@@ -256,6 +256,7 @@ pub fn reserve(
         account: stored_account,
         expected: current.cloned(),
         replacement: Some(record),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     })
@@ -309,6 +310,7 @@ pub fn complete(
                     }
                 }
             }
+            next.allowance.observe(&snapshot);
             snapshot.revision = next.revision;
             next.snapshot = Some(snapshot);
             next.failures = 0;
@@ -336,6 +338,7 @@ pub fn complete(
         account: current.account.clone(),
         expected: Some(current.clone()),
         replacement: Some(next),
+        clear_provider_observations: false,
         readiness_probe_result: None,
         login_probe_expiry: None,
     })
@@ -402,10 +405,29 @@ pub fn plan_tick_with_settings(
                     })
         });
         if selected(&record.account.adapter) && !retaining && absent_from_detection {
+            // Provider discovery owns observations, not independently booked allowance debt.
+            let local_login = provenant_records::AdapterSpec::get(&record.account.adapter)
+                .is_some_and(|spec| {
+                    spec.local_login && spec.local_account.1 == record.account.account_key
+                });
+            let replacement =
+                if local_login && record.allowance != crate::AllowanceLedger::default() {
+                    let mut ledger_only = AccountRecord::empty(record.account.clone());
+                    ledger_only.extra = record.extra.clone();
+                    ledger_only.allowance = record.allowance.clone();
+                    ledger_only.revision = record
+                        .revision
+                        .checked_add(1)
+                        .ok_or(QuotaError::NumberOutOfRange)?;
+                    Some(ledger_only)
+                } else {
+                    None
+                };
             drops.push(UpdateIntent {
                 account: record.account.clone(),
                 expected: Some(record.clone()),
-                replacement: None,
+                replacement,
+                clear_provider_observations: true,
                 readiness_probe_result: None,
                 login_probe_expiry: None,
             });
@@ -2037,6 +2059,56 @@ mod transition_tests {
         assert_eq!(plan.drops.len(), 1);
         assert_eq!(plan.drops[0].account, opencode);
         assert!(plan.drops[0].replacement.is_none());
+    }
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn plan_tick_retains_only_canonical_local_login_debt() {
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        for (adapter, key, retain) in [
+            ("cursor", "local", true),
+            ("cursor", "registered", false),
+            ("claude", "local", false),
+            ("opencode", "registered", false),
+        ] {
+            let mut record = AccountRecord::empty(account(adapter, key));
+            record.allowance.record_launch("first", 100, 600).unwrap();
+            record.last_error = Some(ProbeFailure::Network);
+            let detections = [Detection {
+                adapter: adapter.into(),
+                accounts: Some(vec![]),
+                status: QuotaStatus::Available,
+            }];
+            let plan = plan_tick(
+                crate::source::TEST_POLICIES,
+                &[record.clone()],
+                &detections,
+                &tick,
+                100,
+            )
+            .unwrap();
+            let drop = &plan.drops[0];
+            assert!(drop.clear_provider_observations);
+            assert_eq!(drop.replacement.is_some(), retain, "{adapter}/{key}");
+            if let Some(ledger_only) = &drop.replacement {
+                let mut expected = AccountRecord::empty(record.account.clone());
+                expected.revision = record.revision + 1;
+                expected.allowance = record.allowance;
+                assert_eq!(ledger_only, &expected);
+                let repeat = plan_tick(
+                    crate::source::TEST_POLICIES,
+                    std::slice::from_ref(ledger_only),
+                    &detections,
+                    &tick,
+                    101,
+                )
+                .unwrap();
+                assert!(repeat.drops[0].clear_provider_observations);
+            }
+        }
     }
     #[test]
     fn ambient_auth_status_uses_each_accounts_freshness_and_probe_failure() {

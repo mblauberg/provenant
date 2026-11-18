@@ -74,6 +74,7 @@ pub const CARGO_SOURCE_WRITES_SOURCE: &str = "PROVENANT_CARGO_SOURCE_WRITES_SOUR
 pub const BUILD_SLOT: &str = "PROVENANT_BUILD_SLOT";
 pub const BUILD_SLOT_STATE: &str = "PROVENANT_BUILD_SLOT_STATE";
 pub const BUILD_SLOTS: &str = "PROVENANT_BUILD_SLOTS";
+pub const BUILD_WAIT_DIR: &str = "PROVENANT_BUILD_WAIT_DIR";
 pub const LOCAL_CARGO: &str = "PROVENANT_LOCAL_CARGO";
 pub const BUILD_ADMISSION_BACKEND: &str = "PROVENANT_BUILD_ADMISSION_BACKEND";
 pub const BUILD_ADMISSION_SOURCE: &str = "PROVENANT_BUILD_ADMISSION_SOURCE";
@@ -382,6 +383,13 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Lane,
         Internal,
         "The host build-slot count.",
+        BUILD_SHIM,
+    ),
+    var(
+        BUILD_WAIT_DIR,
+        Lane,
+        Internal,
+        "The lane scratch directory for the build-slot wait signal.",
         BUILD_SHIM,
     ),
     var(

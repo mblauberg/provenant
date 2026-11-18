@@ -340,6 +340,12 @@ fn setup(steps: &[SetupStep]) -> Result<()> {
                 file.write_all(bytes)?;
                 file.sync_all()?;
             }
+            SetupStep::CreateLock(path) => {
+                let parent = path.parent().ok_or("lock has no parent")?;
+                let name = path.file_name().ok_or("lock has no name")?;
+                provenant_os::fs::Directory::open_anchor(parent)?
+                    .try_lock(name, provenant_os::fs::LockMode::Exclusive)?;
+            }
             SetupStep::Symlink { link, target } => match std::fs::read_link(link) {
                 Ok(existing) if &existing == target => {}
                 Ok(_) => return Err("conflicting link".into()),

@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 mod catalog;
 mod discovery;
+mod monthly;
+pub use monthly::*;
 mod exclusion;
 mod facts;
 mod fallback;

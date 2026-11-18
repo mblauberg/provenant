@@ -336,7 +336,7 @@ pub(super) fn prepare_command(
         }
     }
     set_cargo_profile(&mut spec.env, &settings, !sandbox.effective);
-    if sandbox.effective {
+    {
         set_cargo_jobs(
             &mut spec.env,
             registry
@@ -507,6 +507,32 @@ pub(super) fn local_cargo(
     }
 }
 
+// A nested lane inherits the outer lane's PATH. Recognise generated shims by
+// their script contents so a real Cargo in a similarly named directory works.
+fn real_cargo_on_path(path: &std::ffi::OsStr, scratch: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    std::env::split_paths(path)
+        .filter(|dir| dir != &scratch.join(provenant_os::build_slots::SHIM_DIRECTORY))
+        .map(|dir| dir.join("cargo"))
+        .find(|candidate| {
+            if !candidate.is_absolute() || !candidate.is_file() {
+                return false;
+            }
+            let mut prefix = Vec::new();
+            let shim = std::fs::File::open(candidate)
+                .and_then(|file| file.take(8192).read_to_end(&mut prefix))
+                .is_ok()
+                && prefix.starts_with(b"#!/bin/sh\n")
+                && prefix
+                    .windows(b"PROVENANT_BUILD_WAIT_DIR=".len())
+                    .any(|part| part == b"PROVENANT_BUILD_WAIT_DIR=")
+                && prefix
+                    .windows(b" internal build-slot -- ".len())
+                    .any(|part| part == b" internal build-slot -- ");
+            !shim
+        })
+}
+
 #[allow(
     clippy::print_stderr,
     clippy::too_many_arguments,
@@ -534,12 +560,21 @@ pub(super) fn configure_build_slots(
             .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
     {
         check_sandbox_off_build_disk(&spec.env, state, policy)?;
-        return Ok(Vec::new());
     }
-    let cargo = home.join(".cargo/bin/cargo");
-    if !spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") || !cargo.is_file() {
+    let default_cargo = home.join(".cargo/bin/cargo");
+    let cargo = if let Some(cargo) = spec
+        .env
+        .iter()
+        .find(|(name, _)| name == "PATH")
+        .and_then(|(_, path)| real_cargo_on_path(path, scratch))
+    {
+        cargo
+    } else if default_cargo.is_file() {
+        default_cargo
+    } else {
+        eprintln!("provenant: cargo was not found; build-slot shim unavailable for this lane");
         return Ok(Vec::new());
-    }
+    };
     let spec = std::cell::RefCell::new(spec);
     provenant_config::dispatch_port_backend(
         &port.backend,
@@ -782,6 +817,26 @@ pub(super) fn skip(route: &str, kind: SkipKind, _detail: impl Into<String>) -> S
 #[cfg(test)]
 mod refusal_tests {
     use super::*;
+
+    #[test]
+    fn nested_lane_finds_real_cargo_after_outer_shims() {
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer/cargo-bin");
+        let inner = root.path().join("inner/cargo-bin");
+        let real = root.path().join("real/cargo-bin");
+        for dir in [&outer, &inner, &real] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let shim = "#!/bin/sh\nPROVENANT_BUILD_WAIT_DIR='/tmp'\nexec '/provenant' internal build-slot -- '/cargo' \"$@\"\n";
+        std::fs::write(outer.join("cargo"), shim).unwrap();
+        std::fs::write(inner.join("cargo"), shim).unwrap();
+        std::fs::write(real.join("cargo"), "real cargo").unwrap();
+        let path = std::env::join_paths([&inner, &outer, &real]).unwrap();
+        assert_eq!(
+            real_cargo_on_path(&path, &root.path().join("inner")),
+            Some(real.join("cargo"))
+        );
+    }
 
     #[test]
     fn command_preparation_unavailable_retains_full_remedy() {

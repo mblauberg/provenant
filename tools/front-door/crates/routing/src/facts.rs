@@ -38,7 +38,33 @@ pub fn validate_availability(
 pub struct QuotaObservation {
     pub model: ModelId,
     pub snapshot: QuotaSnapshot,
+    pub allowance: provenant_quota::AllowanceLedger,
     pub expires_unix_seconds: i64,
+}
+
+impl QuotaObservation {
+    /// Carry reservations even before the first provider report. Unknown stays unknown.
+    pub fn from_record(model: ModelId, record: &provenant_quota::AccountRecord, ttl: i64) -> Self {
+        let snapshot = record.snapshot.clone().unwrap_or_else(|| QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: record.account.clone(),
+            revision: record.revision,
+            status: provenant_quota::QuotaStatus::Unknown,
+            observed_unix_seconds: 0,
+            source_ref: "local allowance ledger".into(),
+            authority_ref: None,
+            windows: Vec::new(),
+            details: None,
+        });
+        let expires_unix_seconds = snapshot.observed_unix_seconds.saturating_add(ttl);
+        Self {
+            model,
+            snapshot,
+            allowance: record.allowance.clone(),
+            expires_unix_seconds,
+        }
+    }
 }
 
 /// Stored evidence is a projection only; it cannot construct a verified fact.

@@ -893,6 +893,23 @@ impl Registry<'_> {
             partial_signals: Vec::new(),
             turns: Vec::new(),
         };
+        let capture_defect = |line: usize, error: &str| {
+            let line = line.max(1) as u64;
+            let mut decoded = unproven(&format!(
+                "provider capture evidence defect at stdout.log line {line}; replay incomplete: {}",
+                provenant_confinement::redact::bounded_line(error, 512)
+            ));
+            decoded.terminal_cause = Some(run::TerminalCause::ProviderCaptureDefect { line });
+            decoded
+        };
+        // Only lost framing is missing evidence. A complete frame that reports a
+        // provider failure, or a stream past its bound, is a definite outcome.
+        let provider_failed = |error: &provenant_providers::ProviderError| {
+            failed(&provenant_confinement::redact::bounded_line(
+                &error.to_string(),
+                512,
+            ))
+        };
         let Some(adapter) = REGISTRY
             .iter()
             .find(|r| Some(r.adapter.id()) == route.provider.as_deref())
@@ -929,15 +946,27 @@ impl Registry<'_> {
                 state
             }
         };
-        let (mut events, parse_error, identity_mismatch) = match adapter.observe(&mut state, stdout)
-        {
-            Ok(events) => (events, None, false),
-            Err(error) => (
-                Vec::new(),
-                Some(error.to_string()),
-                matches!(error, provenant_providers::ProviderError::IdentityMismatch),
-            ),
-        };
+        // Replay the raw local capture completely before deriving any provider
+        // outcome. A damaged frame is missing evidence, not a failed task or a
+        // partial answer made from the progress messages preceding that frame.
+        let mut events = Vec::new();
+        for (index, frame) in stdout.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            match adapter.observe(&mut state, frame) {
+                Ok(decoded) => events.extend(decoded),
+                Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                    let mut decoded = failed("provider identity mismatch");
+                    decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+                    return Ok(decoded);
+                }
+                Err(
+                    error @ (provenant_providers::ProviderError::Malformed
+                    | provenant_providers::ProviderError::IncompleteFrame),
+                ) => {
+                    return Ok(capture_defect(index + 1, &error.to_string()));
+                }
+                Err(error) => return Ok(provider_failed(&error)),
+            }
+        }
         // The prepared route key was checked against the provider identity port.
         // Keep it as observed usage identity only while the adapter still sees an authenticated stream.
         let account_key = match adapter.account(&state) {
@@ -970,24 +999,37 @@ impl Registry<'_> {
         );
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(error) => {
-                let mismatch = identity_mismatch
-                    || matches!(error, provenant_providers::ProviderError::IdentityMismatch);
-                let mut decoded = failed(if mismatch {
-                    "provider identity mismatch"
-                } else {
-                    "provider outcome is malformed"
-                });
-                if mismatch {
-                    decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
-                }
+            Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                let mut decoded = failed("provider identity mismatch");
+                decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
                 return Ok(decoded);
             }
+            Err(
+                error @ (provenant_providers::ProviderError::Malformed
+                | provenant_providers::ProviderError::IncompleteFrame),
+            ) => {
+                return Ok(capture_defect(
+                    stdout.split_inclusive(|byte| *byte == b'\n').count(),
+                    &error.to_string(),
+                ));
+            }
+            Err(error) => return Ok(provider_failed(&error)),
         };
-        if identity_mismatch {
-            let mut decoded = failed("provider identity mismatch");
-            decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
-            return Ok(decoded);
+        if outcome.status() == OutcomeStatus::Malformed && !outcome.framing_loss() {
+            return Ok(failed(&provenant_confinement::redact::bounded_line(
+                outcome
+                    .protocol_error()
+                    .unwrap_or("provider protocol is malformed"),
+                512,
+            )));
+        }
+        if outcome.status() == OutcomeStatus::Malformed {
+            return Ok(capture_defect(
+                stdout.split_inclusive(|byte| *byte == b'\n').count(),
+                outcome
+                    .protocol_error()
+                    .unwrap_or("provider protocol is malformed"),
+            ));
         }
         if expected_session.is_some() && outcome.session().is_none() {
             return Ok(unproven(
@@ -1271,18 +1313,16 @@ impl Registry<'_> {
                 (
                     run::Outcome::Failed,
                     Some(
-                        parse_error
-                            .or_else(|| outcome.protocol_error().map(str::to_owned))
-                            .unwrap_or_else(|| "provider protocol is malformed".into()),
+                        outcome
+                            .protocol_error()
+                            .unwrap_or("provider protocol is malformed")
+                            .into(),
                     ),
                 )
             }
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
-        }
-        if identity_mismatch {
-            decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
         }
         if result_fallback && decoded.outcome == run::Outcome::Succeeded {
             decoded.reason.get_or_insert_with(|| {

@@ -30,6 +30,7 @@ fn reset_reference_standby_and_continue_after_observed_deadline()
             "michael",
             vec![own.clone()],
             vec![QuotaObservation {
+                allowance: Default::default(),
                 model: reference.model.clone(),
                 expires_unix_seconds: reference.expires_unix_seconds,
                 snapshot: reference.snapshot.clone(),
@@ -138,7 +139,8 @@ fn fixed_deadlines_use_injected_utc_for_weekly_monthly_and_absolute_times()
             resets_unix_seconds: Some(reset),
         }];
         let pacing = |with_deadline: bool| -> Result<RoutingConfig, serde_json::Error> {
-            let mut profile = serde_json::json!({"policy":"pace", "windows":[selector]});
+            // Deadline ranking is independent of the monthly eligibility cap.
+            let mut profile = serde_json::json!({"policy":"pace", "windows":[selector], "monthly":{"enabled":false}});
             if with_deadline {
                 profile["deadline"] = serde_json::json!(deadline);
             }
@@ -414,6 +416,11 @@ fn go_fixture() -> Result<GoFixture, Box<dyn std::error::Error>> {
         PacingProfile {
             policy: Some(PacingPolicy::Pace),
             windows: Some(vec![PacingWindow::Rolling, PacingWindow::Monthly]),
+            // Keep calibration's advisory invariant independent of monthly eligibility.
+            monthly: Some(MonthlyPacingSettings {
+                enabled: false,
+                ..MonthlyPacingSettings::default()
+            }),
             ..PacingProfile::default()
         },
     );
@@ -495,6 +502,7 @@ fn go_settings(
 
 fn go_duplicate(observation: &QuotaObservation) -> QuotaObservation {
     QuotaObservation {
+        allowance: observation.allowance.clone(),
         model: observation.model.clone(),
         snapshot: observation.snapshot.clone(),
         expires_unix_seconds: observation.expires_unix_seconds,
@@ -507,9 +515,11 @@ fn apply_go_calibration(
 ) -> Result<QuotaObservation, Box<dyn std::error::Error>> {
     let mut record = provenant_quota::AccountRecord::empty(observation.snapshot.account.clone());
     record.snapshot = Some(observation.snapshot.clone());
+    record.allowance = observation.allowance.clone();
     let mut records = [record];
     settings.apply_calibration(&mut records, 100);
     Ok(QuotaObservation {
+        allowance: observation.allowance.clone(),
         snapshot: records[0].snapshot.clone().ok_or("calibrated snapshot")?,
         ..go_duplicate(observation)
     })

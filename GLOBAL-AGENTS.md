@@ -23,8 +23,7 @@ SKILL.md.
 - **Delegation.** Delegate decoupled, context-heavy or cross-family work, or
   to use another subscription. Keep small, coupled and user-facing steps with
   the chair. Split by context and dependency, not role; settle shared interfaces
-  before fan-out. Budget roughly 1.4–3.3 times the tokens for concurrent work.
-  Integrate each return as it finishes and land ready work independently. Any
+  before fan-out. Integrate each return as it finishes and land ready work independently. Any
   lane may delegate within its authority. Briefs carry outcome, reasoning and
   task; credentials and secrets stay out.
 - **Vehicles.** Prefer native sub-agents for short, read-only or same-account
@@ -56,9 +55,9 @@ SKILL.md.
   a red default branch, merge on green without review; weakening a check or changing a real boundary
   does not qualify.
 - **Checks.** Locally, run only fast targeted checks: lint, types and
-  touched tests. Full suites run in CI, which gates the merge, with the lens
-  review the risk requires (`code-review`). No author certifies its own work; lens
-  coverage comes before provider family.
+  touched tests. Full suites run in CI, which gates the merge. Review follows
+  risk (`code-review`): a small change needs none; when review runs, the author
+  is never its reviewer and lens coverage comes before provider family.
 - **Waiting.** Never poll with `sleep` or repeated reads. Block on `provenant wait`
   or `provenant pr watch` in the background and carry on.
 - **Memory.** Durable knowledge goes in project docs, cross-project preferences

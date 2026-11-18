@@ -50,6 +50,70 @@
         assert_eq!(replacement.pool_selection.unwrap().redraws[0].rejected_pick, "codex/paid");
         Ok(())
     }
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn review_preview_requires_local_login_evidence_beyond_allowance_debt() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::DirBuilder::new().mode(0o700).create(&state)?;
+        let roots = provenant_core::RootInputs {
+            state_dir: Some(state.clone()),
+            ..provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"))
+        }.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let config = state.join("config.toml");
+        std::fs::write(&config, "schema_version=1\n[domains.routing.pools]\nlocal=[{model='cursor/composer-2.5',weight=1}]\n")?;
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))?;
+        let preview = || super::resolve_review_family(&roots, &serde_json::json!("local"), Some("cursor"), &[]);
+        assert!(preview().is_err(), "an absent login cannot supply a local family");
+        let account = provenant_quota::AccountScope {
+            extra: Default::default(), adapter: "cursor".into(), account_key: "local".into(), label: "default".into(),
+        };
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let mut record = provenant_quota::AccountRecord::empty(account.clone());
+        record.allowance.record_launch("first", now, 1)?;
+        let quota = state.join("quota/local");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&quota)?;
+        let quota_path = quota.join("cursor.json");
+        std::fs::write(&quota_path, serde_json::to_vec(&record)?)?;
+        std::fs::set_permissions(&quota_path, std::fs::Permissions::from_mode(0o600))?;
+        assert!(preview().is_err(), "allowance debt cannot supply a local family");
+
+        let readiness = state.join("readiness/local");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&readiness)?;
+        std::fs::set_permissions(state.join("readiness"), std::fs::Permissions::from_mode(0o700))?;
+        let readiness_path = readiness.join("cursor.json");
+        let mut file = provenant_quota::ReadinessFile::default();
+        file.records.push(provenant_quota::RouteReadiness {
+            extra: Default::default(), schema_version: 1,
+            scope: provenant_quota::ReadinessScope {
+                extra: Default::default(), host: provenant_quota::LOCAL_HOST.into(), adapter: "cursor".into(),
+                account_key: "local".into(), route: "cursor/composer-2.5".into(),
+            },
+            state: provenant_quota::ReadinessState::Ready, reason: None,
+            observed_unix_seconds: now, expires_unix_seconds: now + 300,
+            reset_unix_seconds: None, evidence_ref: Some("fixture:login-status".into()),
+        });
+        std::fs::write(&readiness_path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
+        let read = crate::quota::read_readiness(&state, &file.records[0].scope, now);
+        assert_eq!(read.state, provenant_quota::ReadinessState::Ready, "{read:?}");
+        assert_eq!(preview()?, "cursor", "real readiness remains a candidate");
+        file.sync_probe_result(&record, provenant_quota::LOCAL_HOST, now, 300,
+            Some(provenant_quota::ReadinessReason::ProbeTimeout))?;
+        std::fs::write(&readiness_path, serde_json::to_vec(&file)?)?;
+        assert!(preview().is_err(), "a published local probe failure still constrains preview");
+        std::fs::remove_file(&readiness_path)?;
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(), schema_version: 1, account, revision: 0,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: now, source_ref: "fixture".into(), authority_ref: None,
+            details: None, windows: Vec::new(),
+        });
+        std::fs::write(&quota_path, serde_json::to_vec(&record)?)?;
+        assert_eq!(preview()?, "cursor", "a provider observation remains a candidate");
+        Ok(())
+    }
     #[test]
     fn review_uses_unused_families_and_substitutes_when_exhausted() -> Result<(), Box<dyn Error>> {
         assert!(!super::review_family_excluded(None, &[]));

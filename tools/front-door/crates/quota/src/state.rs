@@ -216,6 +216,8 @@ pub struct AccountRecord {
     pub account: AccountScope,
     pub revision: u64,
     pub snapshot: Option<QuotaSnapshot>,
+    #[serde(default)]
+    pub allowance: crate::AllowanceLedger,
     pub claim: Option<RefreshClaim>,
     pub last_attempt_unix_seconds: Option<i64>,
     pub backoff_until_unix_seconds: Option<i64>,
@@ -254,6 +256,7 @@ impl AccountRecord {
             account,
             revision: 0,
             snapshot: None,
+            allowance: Default::default(),
             claim: None,
             last_attempt_unix_seconds: None,
             backoff_until_unix_seconds: None,
@@ -287,6 +290,7 @@ impl AccountRecord {
     }
     pub fn validate(&self) -> Result<(), QuotaError> {
         self.account.validate()?;
+        self.allowance.validate()?;
         if self.schema_version != 1 || self.claim.as_ref().is_some_and(|c| !component(&c.token)) {
             return Err(QuotaError::Invalid("record header or claim"));
         }
@@ -431,6 +435,9 @@ pub struct UpdateIntent {
     pub account: AccountScope,
     pub expected: Option<AccountRecord>,
     pub replacement: Option<AccountRecord>,
+    /// Remove all derived provider readiness and login observations, even when
+    /// the account record remains solely to carry local allowance debt.
+    pub clear_provider_observations: bool,
     /// Probe result metadata stays in the in-memory write intent, never the
     /// v1 quota account JSON. `Some(None)` means a successful probe cleared it.
     pub readiness_probe_result: Option<Option<crate::ReadinessReason>>,
