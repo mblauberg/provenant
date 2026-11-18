@@ -4370,157 +4370,174 @@ fn graph_writer_restarts_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for (alternative, dirty) in [(true, false), (false, false), (true, true)] {
-        let rig = policy_codex_fixture()?;
-        let cleanup = rig.process_cleanup();
-        fs::write(
-            rig.state.join("config.toml"),
-            format!(
-                "schema_version=1\n[knobs]\n'lanes.sandbox'='on'\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries=100000\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
-                if alternative {
-                    ",{model='codex/gpt-6.1-terra',weight=0,effort='low'}"
-                } else {
-                    ""
-                }
-            ),
-        )?;
-        let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
-        let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
-        assert_eq!(code(&out), 0, "{out:?}");
-        let tree = rig.project.join(".worktrees/auto-writer");
+    // Each case owns its repository, state and provider. Overlap their stop and
+    // restart cycles while retaining all three independent boundary cases.
+    std::thread::scope(|scope| -> Result {
+        let cases = [(true, false), (false, false), (true, true)]
+            .into_iter()
+            .map(|(alternative, dirty)| {
+                scope.spawn(move || {
+                    graph_writer_restart_case(alternative, dirty).map_err(|error| error.to_string())
+                })
+            })
+            .collect::<Vec<_>>();
+        for case in cases {
+            case.join().map_err(|_| "restart case panicked")??;
+        }
+        Ok(())
+    })
+}
+
+fn graph_writer_restart_case(alternative: bool, dirty: bool) -> Result {
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[knobs]\n'lanes.sandbox'='on'\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries=100000\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
+            if alternative {
+                ",{model='codex/gpt-6.1-terra',weight=0,effort='low'}"
+            } else {
+                ""
+            }
+        ),
+    )?;
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
+    let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let tree = rig.project.join(".worktrees/auto-writer");
+    let out = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "auto-writer",
+            tree.to_str().ok_or("tree")?,
+        ],
+        None,
+    )?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let prompt = if dirty {
+        "fixture policy continuation fixture fresh continuation fixture dirty stop"
+    } else {
+        "fixture policy continuation fixture fresh continuation"
+    };
+    let lane = run_graph_provider_with_wait(
+        &rig,
+        "auto-continuation",
+        json!({
+            "id":"writer", "prompt":prompt, "access":"worktree_write", "worktree":tree,
+            "route": {"alias":"writer-restart"}
+        }),
+        "30s",
+    )?;
+    let attempt_dir = rig
+        .state
+        .join("attempts")
+        .join(lane["attempt_id"].as_str().ok_or("attempt")?);
+    // The helper reads the node's current attempt. A stopped writer is
+    // restarted in place, so that is the successor, not the stopped
+    // attempt. The successor is refused before launch when the exclusion
+    // leaves no route; its refusal is checked on its record below.
+    if alternative {
+        assert_eq!(
+            lane["state"],
+            "succeeded",
+            "{lane}\nprovider stderr: {}",
+            fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
+        );
+    }
+    if alternative {
+        assert_eq!(
+            fs::read_to_string(tree.join("auto-finished.txt"))?,
+            "original brief completed"
+        );
+    } else {
+        assert!(!tree.join("auto-finished.txt").exists());
+    }
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let mut query = db.prepare("SELECT record FROM attempts ORDER BY sequence")?;
+    let records: Vec<Vec<u8>> = query
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let attempts = records
+        .iter()
+        .map(|raw| serde_json::from_slice::<provenant_run::AttemptRecord>(raw))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(attempts.len(), 2);
+    // The first attempt is the stopped writer: it settled as uncommitted
+    // when it left edits behind, and as needing review otherwise.
+    let stopped = if dirty {
+        provenant_records::run::Outcome::Uncommitted
+    } else {
+        provenant_records::run::Outcome::ReviewRequired
+    };
+    assert!(
+        matches!(
+            &attempts[0].state,
+            provenant_records::run::AttemptState::Terminal { outcome, .. } if *outcome == stopped
+        ),
+        "{:?}",
+        attempts[0].state
+    );
+    if dirty {
+        // The stopped writer committed nothing; its retained edit reached
+        // the fresh successor, which committed it with the rest.
         let out = rig.execute(
             &git,
             &[
-                "worktree",
-                "add",
-                "-qb",
-                "auto-writer",
+                "-C",
                 tree.to_str().ok_or("tree")?,
+                "show",
+                "--name-only",
+                "--format=",
+                "HEAD",
             ],
             None,
         )?;
-        assert_eq!(code(&out), 0, "{out:?}");
-        let prompt = if dirty {
-            "fixture policy continuation fixture fresh continuation fixture dirty stop"
-        } else {
-            "fixture policy continuation fixture fresh continuation"
-        };
-        let lane = run_graph_provider_with_wait(
-            &rig,
-            "auto-continuation",
-            json!({
-                "id":"writer", "prompt":prompt, "access":"worktree_write", "worktree":tree,
-                "route": {"alias":"writer-restart"}
-            }),
-            "30s",
-        )?;
-        let attempt_dir = rig
-            .state
-            .join("attempts")
-            .join(lane["attempt_id"].as_str().ok_or("attempt")?);
-        // The helper reads the node's current attempt. A stopped writer is
-        // restarted in place, so that is the successor, not the stopped
-        // attempt. The successor is refused before launch when the exclusion
-        // leaves no route; its refusal is checked on its record below.
-        if alternative {
-            assert_eq!(
-                lane["state"],
-                "succeeded",
-                "{lane}\nprovider stderr: {}",
-                fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
-            );
-        }
-        if alternative {
-            assert_eq!(
-                fs::read_to_string(tree.join("auto-finished.txt"))?,
-                "original brief completed"
-            );
-        } else {
-            assert!(!tree.join("auto-finished.txt").exists());
-        }
-        let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-        let mut query = db.prepare("SELECT record FROM attempts ORDER BY sequence")?;
-        let records: Vec<Vec<u8>> = query
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        let attempts = records
-            .iter()
-            .map(|raw| serde_json::from_slice::<provenant_run::AttemptRecord>(raw))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        assert_eq!(attempts.len(), 2);
-        // The first attempt is the stopped writer: it settled as uncommitted
-        // when it left edits behind, and as needing review otherwise.
-        let stopped = if dirty {
-            provenant_records::run::Outcome::Uncommitted
-        } else {
-            provenant_records::run::Outcome::ReviewRequired
-        };
         assert!(
-            matches!(
-                &attempts[0].state,
-                provenant_records::run::AttemptState::Terminal { outcome, .. } if *outcome == stopped
-            ),
-            "{:?}",
-            attempts[0].state
+            String::from_utf8_lossy(&out.stdout.bytes).contains("auto-worktree.txt"),
+            "{out:?}"
         );
-        if dirty {
-            // The stopped writer committed nothing; its retained edit reached
-            // the fresh successor, which committed it with the rest.
-            let out = rig.execute(
-                &git,
-                &[
-                    "-C",
-                    tree.to_str().ok_or("tree")?,
-                    "show",
-                    "--name-only",
-                    "--format=",
-                    "HEAD",
-                ],
-                None,
-            )?;
-            assert!(
-                String::from_utf8_lossy(&out.stdout.bytes).contains("auto-worktree.txt"),
-                "{out:?}"
-            );
-        }
-        assert_ne!(attempts[0].attempt_id, attempts[1].attempt_id);
-        assert_eq!(attempts[0].superseded_by, None);
-        assert_eq!(attempts[1].retry_of, None);
-        assert_eq!(
-            attempts[1].profile.knobs.get("routing.graph_exclude"),
-            Some(&json!(["codex/gpt-6-luna"]))
-        );
-        if alternative {
-            assert_eq!(
-                attempts[1]
-                    .applied_route
-                    .as_ref()
-                    .ok_or("successor route")?
-                    .model
-                    .as_deref(),
-                Some("codex/gpt-6.1-terra")
-            );
-            assert!(matches!(
-                attempts[1].state,
-                provenant_records::run::AttemptState::Terminal {
-                    outcome: provenant_records::run::Outcome::Succeeded,
-                    ..
-                }
-            ));
-        } else {
-            // A single-member user pool is exhausted by the predecessor
-            // exclusion. The successor is refused before provider launch.
-            assert_ne!(attempts[1].provider_launched, Some(true));
-            assert_eq!(
-                attempts
-                    .iter()
-                    .filter(|attempt| attempt.provider_launched == Some(true))
-                    .count(),
-                1
-            );
-        }
-        cleanup.disarm();
     }
+    assert_ne!(attempts[0].attempt_id, attempts[1].attempt_id);
+    assert_eq!(attempts[0].superseded_by, None);
+    assert_eq!(attempts[1].retry_of, None);
+    assert_eq!(
+        attempts[1].profile.knobs.get("routing.graph_exclude"),
+        Some(&json!(["codex/gpt-6-luna"]))
+    );
+    if alternative {
+        assert_eq!(
+            attempts[1]
+                .applied_route
+                .as_ref()
+                .ok_or("successor route")?
+                .model
+                .as_deref(),
+            Some("codex/gpt-6.1-terra")
+        );
+        assert!(matches!(
+            attempts[1].state,
+            provenant_records::run::AttemptState::Terminal {
+                outcome: provenant_records::run::Outcome::Succeeded,
+                ..
+            }
+        ));
+    } else {
+        // A single-member user pool is exhausted by the predecessor
+        // exclusion. The successor is refused before provider launch.
+        assert_ne!(attempts[1].provider_launched, Some(true));
+        assert_eq!(
+            attempts
+                .iter()
+                .filter(|attempt| attempt.provider_launched == Some(true))
+                .count(),
+            1
+        );
+    }
+    cleanup.disarm();
     Ok(())
 }
 
