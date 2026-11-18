@@ -2169,8 +2169,7 @@ impl RunStore {
                     };
                     let terminal_note = if let Some(host_message) = refusal.host_message.as_deref()
                     {
-                        let host_message =
-                            provenant_redact::bounded_line(host_message, 160);
+                        let host_message = provenant_redact::bounded_line(host_message, 160);
                         Some(match terminal_note {
                             Some(note) => format!("{host_message}; {note}"),
                             None => host_message,
