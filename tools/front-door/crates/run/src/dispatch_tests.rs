@@ -182,12 +182,15 @@ impl Providers for Confined {
             .unwrap(),
             cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
-            sandbox: provenant_confinement::run_config::SandboxMode {
-                requested: true,
-                effective: true,
-                source: provenant_confinement::run_config::SandboxSource::Knob,
-                warning: None,
-            },
+            // This fixture tests grant recording and stops at a fake handoff;
+            // it never launches a provider, so native sandbox availability is
+            // outside the invariant under test.
+            sandbox: provenant_confinement::run_config::SandboxMode::required(
+                false,
+                false,
+                provenant_confinement::run_config::SandboxSource::Knob,
+                None,
+            ),
             backend: None,
             cargo_target: Default::default(),
         });

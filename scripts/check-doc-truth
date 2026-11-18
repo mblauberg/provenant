@@ -4,7 +4,7 @@
 Unknown commands and flags in runbooks, skills and ambient instructions fail,
 inline or in fenced `provenant` lines; in other documents, and for paths and
 ADRs, they are advisory warnings.
-Deleted commands, research index omissions and projection mismatches fail;
+Research index omissions and projection mismatches fail;
 strict inventory enforces headers, Anchor paths and diagram metadata. Rust
 comments citing Spec: sections always resolve strictly. Runtime absolute paths
 and templates are excluded. Commands

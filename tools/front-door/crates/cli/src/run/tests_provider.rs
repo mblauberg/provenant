@@ -872,6 +872,99 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
             .starts_with("Checking the commit.\nVERDICT: PASS\n")
     );
 }
+
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+#[test]
+fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done_handoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let thread = "01234567-89ab-cdef-0123-456789abcdef";
+    let day = temp.path().join("candidate-0/sessions/2026/10/24");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl"));
+    let identity = format!(
+        "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-6.1-terra\"}}}}\n"
+    );
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(
+        &rollout,
+        format!("{identity}{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{secret}\"}}}}\n"),
+    )
+    .unwrap();
+    let retained = std::fs::read_to_string(&rollout).unwrap();
+    assert!(retained.starts_with(&identity));
+    assert!(retained.contains(secret));
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        sandbox: Some(run::SandboxModeReceipt {
+            effective: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"n\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let message = |text: &str| {
+        serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":text}})
+            .to_string()
+    };
+    let stream = [
+        format!(r#"{{"type":"thread.started","thread_id":"{thread}"}}"#),
+        r#"{"type":"item.started","item":{"id":"item_30","type":"command_execution","command":"/bin/zsh -lc \"sed -n '145,180p' src/main.rs; rg -n 'fn scan|credential-shaped|password='\"","aggregated_output":""}}"#.to_owned(),
+        message("Done inspecting files."),
+        message("VERDICT: PASS"),
+        message(handoff),
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#.to_owned(),
+    ]
+    .join("\n") + "\n";
+
+    let decoded = Registry::default()
+        .decode(&route, stream.as_bytes(), &clean_exit(), temp.path())
+        .unwrap();
+
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert_eq!(decoded.reason, None);
+    let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
+        .expect("handoff parses")
+        .expect("handoff found");
+    assert_eq!(
+        declared.status,
+        provenant_records::handoff::HandoffStatus::Done
+    );
+    assert_eq!(declared.note, "n");
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn malformed_replay_frame_reports_evidence_defect_naming_the_line() {
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+        "this is not valid json\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+
+    assert_eq!(decoded.outcome, run::Outcome::Unsettled);
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
+    );
+    let reason = decoded.reason.as_deref().unwrap();
+    assert!(reason.contains("stdout.log line 2"));
+    assert!(reason.contains("provider protocol frame on line 2 is malformed"));
+}
+
 #[test]
 fn codex_usage_records_cache_read_apart_from_uncached_input() {
     let route = run::RouteRecord {

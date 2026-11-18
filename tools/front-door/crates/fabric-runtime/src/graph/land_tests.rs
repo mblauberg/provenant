@@ -1405,7 +1405,7 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
         &patch::PatchContext {
             library: &library,
             resolvers: &resolvers,
-            scan: &|_| Ok(()),
+
             journal: None,
             limits: &limits,
 

@@ -785,6 +785,11 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
 #[test]
 fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
 -> Result<(), Box<dyn std::error::Error>> {
+    if host_test(
+        "fabric::peer_tests::peer_graph_lifecycle::accepted_attempt_observes_stable_host_after_alias_is_renamed",
+    )? {
+        return Ok(());
+    }
     use provenant_fabric_runtime::graph::{self, AttemptOwner};
     let rig = crate::worktree_tests::repository()?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;

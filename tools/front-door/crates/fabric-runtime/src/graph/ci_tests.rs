@@ -867,11 +867,11 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
             .starts_with("test: assertion failed")
     );
     assert!(
-        !serde_json::to_string(&run.checkpoint)
+        serde_json::to_string(&run.checkpoint)
             .unwrap()
             .contains(secret)
     );
-    assert!(owner.prompts.iter().all(|prompt| !prompt.contains(secret)));
+    assert!(owner.prompts[0].contains(secret));
     assert_eq!(outputs.findings[0].url.as_deref(), Some("https://checks/1"));
     assert!(owner.prompts[0].contains("assertion failed"));
     assert!(owner.prompts[0].contains("https://checks/1"));

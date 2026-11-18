@@ -521,6 +521,7 @@ dependencies = [
  "provenant-redact",
  "provenant-supervisor",
  "provenant-test-support",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -648,7 +649,6 @@ dependencies = [
  "provenant-core",
  "provenant-os",
  "serde_json",
- "tempfile",
  "thiserror",
 ]
 

@@ -31,4 +31,5 @@ pub use plan::{
 };
 pub use repo::{ReadOnlyRepo, VerifiedRepo, VerifiedWorktree, verify_worktree};
 pub use utility::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility, run_utility};
+pub mod publication;
 pub mod push;

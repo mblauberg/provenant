@@ -4,8 +4,6 @@
 import test_git_env
 test_git_env.isolate()
 
-import importlib.machinery
-import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -16,9 +14,6 @@ import unittest
 
 SCRIPTS = Path(__file__).resolve().parent
 FIXTURES = SCRIPTS / "fixtures/doc-truth"
-_loader = importlib.machinery.SourceFileLoader("check_doc_truth", str(SCRIPTS / "check-doc-truth"))
-check_doc_truth = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
-_loader.exec_module(check_doc_truth)
 
 
 class DocTruthTests(unittest.TestCase):
