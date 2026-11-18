@@ -22,7 +22,7 @@ reported, never resolved by guessing; conflicting manifest settings are refused.
 
 Help and version inspection require no project state. Paths retain their native
 bytes, and invalid or conflicting arguments are rejected.
-The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains.
+The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains. Every catalogued command resolves to scoped help containing its metadata.
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
 
