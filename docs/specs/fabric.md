@@ -482,8 +482,9 @@ replacement routes, preserving stored nodes.
 
 Captured output is normalised before storage or consumption. `prompt_text::Context`
 enumerates identity positions (review_base, worktree, branch, route fields, finding
-IDs, files and propagation markers, repair item IDs, node references, template names
-and sources). Identity fields and all object keys are scanned across each new
+IDs, files and propagation markers, repair item IDs, node references, template names,
+work provenance, attempt placement and new-worktree branch/base fields, and sources).
+Identity fields and all object keys are scanned across each new
 structured capture, including fields omitted by typed projections. A credential-shaped
 identity or key refuses that capture as invalid output; it is never rewritten. Only
 declared scalar identity fields retain their bytes: a route or source object does not

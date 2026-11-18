@@ -3879,6 +3879,8 @@ fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() 
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "worktree":secret}]}),
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "review_base":secret}]}),
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "route":{"model":secret}}]}),
+        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "context":{"graph_id":secret}}]}),
+        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "attempt":{"new_worktree":{"branch":secret}}}]}),
         json!({"schema_version":1, "templates":{"unused":{"brief":"work", "parameters":{secret:{"type":"string"}}}}, "nodes":[]}),
     ] {
         let mut document = planner(8);

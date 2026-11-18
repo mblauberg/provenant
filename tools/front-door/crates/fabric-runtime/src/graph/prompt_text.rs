@@ -80,6 +80,9 @@ pub(super) enum Context {
     Document,
     Patch,
     Node,
+    WorkContext,
+    Attempt,
+    NewWorktree,
     Route,
     RequestedRoute,
     Source,
@@ -123,6 +126,16 @@ impl Context {
             | (Composite, "exports")
             | (Plan, "fallback_inputs") => Input,
             (Patch, "idempotency_key" | "skip") => Identity,
+            (Document | Node, "context") => WorkContext,
+            (Node, "attempt") => Attempt,
+            (Attempt, "new_worktree") => NewWorktree,
+            (Attempt, "directory" | "host" | "account" | "admitted_by")
+            | (NewWorktree, "branch" | "base")
+            | (
+                WorkContext,
+                "graph_id" | "node_id" | "template" | "parent_node" | "writer_predecessor"
+                | "pattern" | "role" | "role_digest" | "shadow_of" | "tier" | "preset",
+            ) => Identity,
             (
                 Node,
                 "id" | "template" | "use" | "depends_on" | "after" | "after_settled"
@@ -450,6 +463,8 @@ mod tests {
         let base = serde_json::json!({
             "review_base": "base", "integration_branch": "branch",
             "nodes": [{"id": "work", "worktree": "/tmp/work", "review_base": "base",
+                "context": {"graph_id": "graph", "node_id": "work", "template": "task", "parent_node": "plan"},
+                "attempt": {"account": "account", "new_worktree": {"branch": "branch", "base": "main"}},
                 "route": {"alias": "senior", "model": "model", "account": "account"}}]
         });
         let registered = "registered-identity-3391";
@@ -464,6 +479,13 @@ mod tests {
                 "/nodes/0/id",
                 "/nodes/0/worktree",
                 "/nodes/0/review_base",
+                "/nodes/0/context/graph_id",
+                "/nodes/0/context/node_id",
+                "/nodes/0/context/template",
+                "/nodes/0/context/parent_node",
+                "/nodes/0/attempt/account",
+                "/nodes/0/attempt/new_worktree/branch",
+                "/nodes/0/attempt/new_worktree/base",
                 "/nodes/0/route/alias",
                 "/nodes/0/route/model",
                 "/nodes/0/route/account",
