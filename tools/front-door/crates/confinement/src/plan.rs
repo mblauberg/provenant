@@ -206,9 +206,12 @@ impl ConfinedPlan {
             ));
         }
         if p.nested_confinement {
-            return Err(plan_boundary_error(
-                "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
-                PermissionError::NestedConfinementUnsupported.into(),
+            // The backend cannot provide nested confinement. This is a
+            // capability failure, distinct from a request that exceeds the
+            // caller's authority; callers may only inherit equivalent
+            // enforcement through a separately verified launch route.
+            return Err(plan_permission_error(
+                PermissionError::NestedConfinementUnsupported,
             ));
         }
         for grant in &p.write_roots {

@@ -7,7 +7,7 @@ pub use adapters::{
     CapabilitySupport, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
     HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities, LaunchField, LaunchRequest,
     LoginObservation, LoginReprobe, ModelListingFormat, ModelObservation, NamedEntry,
-    QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
+    QuotaProbeKind, SetupRoot, SkillLocation, StreamContract, UnsupportedLaunch,
 };
 
 /// The instruction content bound into this product build and projected into
@@ -50,7 +50,10 @@ pub use canonical::{
 };
 pub use finding::Finding;
 pub use input::{InputWarning, decode_input};
-pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
+pub use json::{
+    DecodeError, EncodeError, Limits, RecordHeader, decode, decode_stored_record,
+    decode_stored_record_v1, decode_v1, encode,
+};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use port_receipt::{

@@ -6,7 +6,7 @@ use super::{
 use provenant_os::exec::{
     ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -32,6 +32,8 @@ pub enum PortError {
     EvidenceVisible { cause: String },
     #[error("port execution returned {0:?}")]
     Disposition(PortCommandDisposition),
+    #[error("publication projection unavailable or failed")]
+    Projection,
     #[error("invalid forge response: {0}")]
     Response(&'static str),
 }
@@ -271,7 +273,7 @@ fn disposition(outcome: &ExecOutcome) -> PortCommandDisposition {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum ForgeOperation {
     Repository,
     PullByHead {
@@ -325,6 +327,58 @@ pub enum ForgeOperation {
         input: Option<Vec<u8>>,
     },
 }
+
+impl ForgeOperation {
+    /// Only declared observation operations may bypass publication projection.
+    pub fn requires_projection(&self) -> bool {
+        match self {
+            Self::Open { .. } | Self::Land { .. } => true,
+            Self::Api { arguments, .. } => api_publishes(arguments),
+            Self::Cli { arguments, input } => {
+                if arguments.first().is_some_and(|arg| arg == "api") {
+                    return input.is_some() || api_publishes(&arguments[1..]);
+                }
+                input.is_some()
+                    || !matches!(
+                        (
+                            arguments.first().and_then(|a| a.to_str()),
+                            arguments.get(1).and_then(|a| a.to_str())
+                        ),
+                        (
+                            Some("pr"),
+                            Some("view" | "list" | "checks" | "diff" | "status")
+                        ) | (Some("issue"), Some("view" | "list" | "status"))
+                            | (Some("repo"), Some("view"))
+                            | (Some("run"), Some("view" | "list" | "watch"))
+                    )
+            }
+            _ => false,
+        }
+    }
+}
+
+fn api_publishes(arguments: &[OsString]) -> bool {
+    arguments.iter().any(|arg| {
+        let arg = arg.to_string_lossy();
+        matches!(
+            arg.as_ref(),
+            "-f" | "-F" | "--field" | "--raw-field" | "--input"
+        ) || arg.starts_with("--field=")
+            || arg.starts_with("--raw-field=")
+            || arg.starts_with("--input=")
+            || arg.starts_with("-f")
+            || arg.starts_with("-F")
+    }) || arguments.windows(2).any(|pair| {
+        (pair[0] == "-X" || pair[0] == "--method") && pair[1] != "GET" && pair[1] != "HEAD"
+    }) || arguments.iter().any(|arg| {
+        let arg = arg.to_string_lossy();
+        arg.strip_prefix("--method=")
+            .or_else(|| arg.strip_prefix("-X"))
+            .is_some_and(|method| !method.is_empty() && method != "GET" && method != "HEAD")
+    })
+}
+
+type Projector = dyn Fn(ForgeOperation) -> Result<ForgeOperation, PortError> + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeadersObservation {
@@ -381,6 +435,7 @@ pub trait Forge {
 /// Typed forge facade over the common port adapter.
 pub struct ForgePort {
     adapter: Adapter,
+    projector: Option<Box<Projector>>,
 }
 impl ForgePort {
     pub fn new(
@@ -392,6 +447,7 @@ impl ForgePort {
     ) -> io::Result<Self> {
         Ok(Self {
             adapter: Adapter::new(port, owner, project, state, policy)?,
+            projector: None,
         })
     }
 
@@ -404,11 +460,52 @@ impl ForgePort {
     ) -> io::Result<Self> {
         Ok(Self {
             adapter: Adapter::from_land_port(port, owner, project, state, policy)?,
+            projector: None,
         })
     }
 
     pub fn set_cancel(&mut self, cancel: provenant_core::CancelToken) {
         self.adapter.set_cancel(cancel);
+    }
+
+    /// Install the destination owner's projection. Config deliberately does not
+    /// depend on confinement; absent projection withholds content publication.
+    pub fn set_publication_projector(
+        &mut self,
+        projector: impl Fn(ForgeOperation) -> Result<ForgeOperation, PortError> + Send + Sync + 'static,
+    ) {
+        self.projector = Some(Box::new(projector));
+    }
+
+    fn invocation(
+        &self,
+        operation: ForgeOperation,
+    ) -> Result<(ForgeOperation, Invocation), PortError> {
+        if matches!(self.adapter.backend, PortBackend::None) {
+            return Err(PortError::Disabled {
+                owner: self.adapter.owner,
+                port_source: self.adapter.port_source,
+            });
+        }
+        let raw =
+            provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
+        let operation = if operation.requires_projection() {
+            self.projector.as_ref().ok_or(PortError::Projection)?(operation)?
+        } else {
+            operation
+        };
+        let projected =
+            provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
+        let mut invocation = Invocation::for_operation(&operation, self.adapter.owner);
+        // Receipts bind both the source operation and the exact projected payload,
+        // including title, stdin and command arguments, never just a branch name.
+        invocation.key = format!(
+            "{}:{}:{}",
+            invocation.key,
+            provenant_records::CanonicalV1::file_digest(raw.as_bytes()),
+            provenant_records::CanonicalV1::file_digest(projected.as_bytes())
+        );
+        Ok((operation, invocation))
     }
 
     pub fn execute_with(
@@ -423,7 +520,7 @@ impl ForgePort {
         ) -> io::Result<ExecOutcome>,
     ) -> Result<PortExecution, PortError> {
         let budget = self.adapter.budget(budget)?;
-        let invocation = Invocation::for_operation(&operation, self.adapter.owner);
+        let (_operation, invocation) = self.invocation(operation)?;
         let argv = invocation.builtin_argv.clone();
         let environment = invocation.environment.clone();
         let input = invocation.input.clone();
@@ -455,7 +552,7 @@ impl ForgePort {
         ) -> io::Result<ExecOutcome>,
     ) -> Result<ForgeResponse, PortError> {
         let budget = self.adapter.budget(budget)?;
-        let invocation = Invocation::for_operation(&operation, self.adapter.owner);
+        let (operation, invocation) = self.invocation(operation)?;
         let argv = invocation.builtin_argv.clone();
         let environment = invocation.environment.clone();
         let input = invocation.input.clone();
@@ -1191,6 +1288,33 @@ esac
         );
     }
 
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn failed_publication_projection_never_invokes_forge_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut forge = ForgePort::new(
+            port(PortBackend::Builtin),
+            "tracker",
+            dir.path(),
+            dir.path(),
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        )
+        .unwrap();
+        forge.set_publication_projector(|_| Err(PortError::Projection));
+        let result = forge.execute_with(
+            ForgeOperation::Open {
+                base: "main".into(),
+                head: "branch".into(),
+                title: "title".into(),
+                body: b"raw secret".to_vec(),
+                draft: false,
+            },
+            Duration::from_secs(2),
+            |_, _, _, _| panic!("failed projection reached publisher"),
+        );
+        assert!(matches!(result, Err(PortError::Projection)));
+    }
+
     #[test]
     fn every_forge_operation_uses_each_backend_and_preserves_typed_headers() {
         let dir = tempfile::tempdir().unwrap();
@@ -1208,6 +1332,7 @@ esac
                 std::sync::Arc::new(provenant_records::policy::Policy::default()),
             )
             .unwrap();
+            builtin_port.set_publication_projector(Ok);
             let response = builtin_port
                 .request_with(operation.clone(), budget, run_fake_gh(builtin.clone()))
                 .unwrap();
@@ -1238,6 +1363,7 @@ esac
                 std::sync::Arc::new(provenant_records::policy::Policy::default()),
             )
             .unwrap();
+            command_port.set_publication_projector(Ok);
             let response = command_port
                 .request_with(operation.clone(), budget, |_, _, _, _| {
                     panic!("command backend ran builtin closure")

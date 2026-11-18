@@ -29,6 +29,9 @@ pub enum OutOfScopePin {
 pub struct ProviderSettings {
     /// Allowed model name patterns; None permits every model.
     pub models: Option<Vec<String>>,
+    /// Codex's optional suppression of inherited configuration for writers.
+    /// Read-only authority still requires a clean configuration.
+    pub clean_config: bool,
     pub out_of_scope_pin: OutOfScopePin,
     pub update: ProviderUpdate,
     pub update_interval_seconds: u64,
@@ -42,6 +45,7 @@ impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
             models: None,
+            clean_config: false,
             out_of_scope_pin: OutOfScopePin::default(),
             update: ProviderUpdate::default(),
             update_interval_seconds: 24 * 60 * 60,

@@ -3,6 +3,7 @@ use serde::{
     de::{DeserializeOwned, Error as _},
 };
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const ABSOLUTE_MAX_DEPTH: usize = 64;
@@ -137,8 +138,182 @@ pub enum DecodeError {
         line: usize,
         column: usize,
     },
-    #[error("JSON value does not match its record type at line {line}, column {column}")]
-    Typed { line: usize, column: usize },
+    #[error("{}", format_typed_decode_error(*.line, *.column, .field.as_deref(), *.schema_version))]
+    Typed {
+        line: usize,
+        column: usize,
+        field: Option<String>,
+        schema_version: Option<u64>,
+    },
+    #[error(
+        "{}",
+        format_context_decode_error(
+            .path.as_deref(),
+            .record_type.as_deref(),
+            *.schema_version,
+            .source.as_ref()
+        )
+    )]
+    Context {
+        path: Option<PathBuf>,
+        record_type: Option<String>,
+        schema_version: Option<u64>,
+        #[source]
+        source: Box<DecodeError>,
+    },
+}
+
+impl DecodeError {
+    pub fn at_path(self, path: impl Into<PathBuf>) -> Self {
+        self.with_context_parts(Some(path.into()), None, None)
+    }
+
+    pub fn for_record(self, record_type: impl Into<String>) -> Self {
+        self.with_context_parts(None, Some(record_type.into()), None)
+    }
+
+    pub fn with_context(self, path: impl Into<PathBuf>, record_type: impl Into<String>) -> Self {
+        self.at_path(path).for_record(record_type)
+    }
+
+    /// Return the classified decode error behind optional stored-record
+    /// context, so callers can retain upgrade and corruption handling.
+    pub fn root_cause(&self) -> &Self {
+        match self {
+            Self::Context { source, .. } => source.root_cause(),
+            other => other,
+        }
+    }
+
+    fn with_context_parts(
+        self,
+        path: Option<PathBuf>,
+        record_type: Option<String>,
+        schema_version: Option<u64>,
+    ) -> Self {
+        match self {
+            Self::Context {
+                path: current_path,
+                record_type: current_type,
+                schema_version: current_version,
+                source,
+            } => Self::Context {
+                path: path.or(current_path),
+                record_type: record_type.or(current_type),
+                schema_version: schema_version.or(current_version),
+                source,
+            },
+            Self::Typed {
+                line,
+                column,
+                field,
+                schema_version: current_version,
+            } => Self::Context {
+                path,
+                record_type,
+                schema_version: schema_version.or(current_version),
+                source: Box::new(Self::Typed {
+                    line,
+                    column,
+                    field,
+                    schema_version: None,
+                }),
+            },
+            Self::UnsupportedVersion {
+                found,
+                line,
+                column,
+            } => Self::Context {
+                path,
+                record_type,
+                schema_version: schema_version.or(Some(found)),
+                source: Box::new(Self::UnsupportedVersion {
+                    found,
+                    line,
+                    column,
+                }),
+            },
+            other => Self::Context {
+                path,
+                record_type,
+                schema_version,
+                source: Box::new(other),
+            },
+        }
+    }
+}
+
+fn format_typed_decode_error(
+    line: usize,
+    column: usize,
+    field: Option<&str>,
+    schema_version: Option<u64>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("JSON value does not match its record type");
+    let mut details = Vec::new();
+    if let Some(version) = schema_version {
+        details.push(format!("schema version {version}"));
+    }
+    if let Some(field) = field {
+        details.push(format!("missing field `{field}`"));
+    }
+    if !details.is_empty() {
+        out.push_str(&format!(" ({})", details.join(", ")));
+    }
+    out.push_str(&format!(" at line {line}, column {column}"));
+    out
+}
+
+fn format_context_decode_error(
+    path: Option<&Path>,
+    record_type: Option<&str>,
+    schema_version: Option<u64>,
+    source: &DecodeError,
+) -> String {
+    let mut out = String::from("stored record");
+    if let Some(path) = path {
+        out.push_str(&format!(" {}", path.display()));
+    }
+    let mut details = Vec::new();
+    if let Some(record_type) = record_type {
+        details.push(format!("record type {record_type}"));
+    }
+    if let Some(schema_version) = schema_version {
+        details.push(format!("schema version {schema_version}"));
+    }
+    if !details.is_empty() {
+        out.push_str(&format!(" ({})", details.join(", ")));
+    }
+    out.push_str(&format!(": {source}"));
+    out
+}
+
+fn extract_missing_field(error: &serde_json::Error) -> Option<String> {
+    let msg = error.to_string();
+    if let Some(start) = msg.find("missing field `") {
+        let rest = &msg[start + "missing field `".len()..];
+        if let Some(end) = rest.find('`') {
+            return Some(rest[..end].to_owned());
+        }
+    }
+    None
+}
+
+fn extract_schema_version(bytes: &[u8], facts: &ValidationFacts) -> Option<u64> {
+    if facts.schema_version_offset.is_some()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
+    {
+        return value.get("schema_version").and_then(|v| v.as_u64());
+    }
+    None
+}
+
+fn readable_schema_version(bytes: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .get("schema_version")?
+        .as_u64()
 }
 
 #[derive(Debug, Error)]
@@ -153,11 +328,43 @@ where
     R: Read,
 {
     let mut bytes = read_bounded(reader, limits.max_bytes)?;
-    let facts = validate_document(&bytes, limits)?;
-    normalise_negative_zeroes(&mut bytes, &facts.negative_zeroes);
-    serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
+    decode_bytes(&mut bytes, limits)
+}
+
+/// Read and decode one stored record while retaining its path, type, and any
+/// schema version that remains readable in the input.
+pub fn decode_stored_record<T, R>(
+    reader: R,
+    limits: Limits,
+    path: impl Into<PathBuf>,
+    record_type: impl Into<String>,
+) -> Result<T, DecodeError>
+where
+    T: DeserializeOwned,
+    R: Read,
+{
+    let path = path.into();
+    let record_type = record_type.into();
+    let mut bytes = read_bounded(reader, limits.max_bytes).map_err(|error| {
+        error.with_context_parts(Some(path.clone()), Some(record_type.clone()), None)
+    })?;
+    let schema_version = readable_schema_version(&bytes);
+    decode_bytes(&mut bytes, limits)
+        .map_err(|error| error.with_context_parts(Some(path), Some(record_type), schema_version))
+}
+
+fn decode_bytes<T>(bytes: &mut [u8], limits: Limits) -> Result<T, DecodeError>
+where
+    T: DeserializeOwned,
+{
+    let facts = validate_document(bytes, limits)?;
+    normalise_negative_zeroes(bytes, &facts.negative_zeroes);
+    let schema_version = extract_schema_version(bytes, &facts);
+    serde_json::from_slice(bytes).map_err(|source| DecodeError::Typed {
         line: source.line(),
         column: source.column(),
+        field: extract_missing_field(&source),
+        schema_version,
     })
 }
 
@@ -168,12 +375,43 @@ where
     R: Read,
 {
     let mut bytes = read_bounded(reader, limits.max_bytes)?;
-    let facts = validate_document(&bytes, limits)?;
-    normalise_negative_zeroes(&mut bytes, &facts.negative_zeroes);
+    decode_v1_bytes(&mut bytes, limits)
+}
+
+/// Decode a flat stored record with strict schema version one while retaining
+/// its path, record type, and readable schema version on failures.
+pub fn decode_stored_record_v1<T, R>(
+    reader: R,
+    limits: Limits,
+    path: impl Into<PathBuf>,
+    record_type: impl Into<String>,
+) -> Result<T, DecodeError>
+where
+    T: DeserializeOwned,
+    R: Read,
+{
+    let path = path.into();
+    let record_type = record_type.into();
+    let mut bytes = read_bounded(reader, limits.max_bytes).map_err(|error| {
+        error.with_context_parts(Some(path.clone()), Some(record_type.clone()), None)
+    })?;
+    let schema_version = readable_schema_version(&bytes);
+    decode_v1_bytes(&mut bytes, limits)
+        .map_err(|error| error.with_context_parts(Some(path), Some(record_type), schema_version))
+}
+
+fn decode_v1_bytes<T>(bytes: &mut [u8], limits: Limits) -> Result<T, DecodeError>
+where
+    T: DeserializeOwned,
+{
+    let facts = validate_document(bytes, limits)?;
+    normalise_negative_zeroes(bytes, &facts.negative_zeroes);
     let header_value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
+        serde_json::from_slice(bytes).map_err(|source| DecodeError::Typed {
             line: source.line(),
             column: source.column(),
+            field: extract_missing_field(&source),
+            schema_version: None,
         })?;
     let Some(object) = header_value.as_object() else {
         return Err(DecodeError::MissingVersion { line: 1, column: 1 });
@@ -184,22 +422,24 @@ where
     let Some(version) = version_value.as_u64() else {
         let (line, column) = facts
             .schema_version_offset
-            .map_or((1, 1), |offset| location(&bytes, offset));
+            .map_or((1, 1), |offset| location(bytes, offset));
         return Err(DecodeError::InvalidVersion { line, column });
     };
     if version != 1 {
         let (line, column) = facts
             .schema_version_offset
-            .map_or((1, 1), |offset| location(&bytes, offset));
+            .map_or((1, 1), |offset| location(bytes, offset));
         return Err(DecodeError::UnsupportedVersion {
             found: version,
             line,
             column,
         });
     }
-    serde_json::from_slice(&bytes).map_err(|source| DecodeError::Typed {
+    serde_json::from_slice(bytes).map_err(|source| DecodeError::Typed {
         line: source.line(),
         column: source.column(),
+        field: extract_missing_field(&source),
+        schema_version: Some(version),
     })
 }
 
@@ -525,4 +765,96 @@ fn location(input: &[u8], offset: usize) -> (usize, usize) {
         }
     }
     (line, column)
+}
+
+#[cfg(test)]
+mod stored_context_tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct NeedsField {
+        #[serde(rename = "schema_version")]
+        _schema_version: u64,
+        #[serde(rename = "required")]
+        _required: String,
+    }
+
+    #[test]
+    fn stored_syntax_error_keeps_path_and_type() {
+        let error = decode_stored_record::<serde_json::Value, _>(
+            b"{ ".as_slice(),
+            Limits::default(),
+            "/state/attempts/example/launch.json",
+            "LaunchRecord",
+        )
+        .expect_err("malformed JSON must fail");
+
+        assert!(matches!(error.root_cause(), DecodeError::Syntax { .. }));
+        let message = error.to_string();
+        assert!(message.contains("/state/attempts/example/launch.json"));
+        assert!(message.contains("record type LaunchRecord"));
+    }
+
+    #[test]
+    fn stored_typed_error_keeps_readable_schema_and_field_name() {
+        let error = decode_stored_record::<NeedsField, _>(
+            br#"{"schema_version":1}"#.as_slice(),
+            Limits::default(),
+            "/state/attempts/example/process-exit.json",
+            "StoredExit",
+        )
+        .expect_err("missing required field must fail");
+
+        assert!(matches!(
+            error.root_cause(),
+            DecodeError::Typed {
+                field: Some(field),
+                ..
+            } if field == "required"
+        ));
+        let message = error.to_string();
+        assert!(message.contains("/state/attempts/example/process-exit.json"));
+        assert!(message.contains("record type StoredExit"));
+        assert!(message.contains("schema version 1"));
+        assert!(message.contains("missing field `required`"));
+    }
+
+    #[test]
+    fn stored_v1_error_keeps_unsupported_version_classification() {
+        let error = decode_stored_record_v1::<serde_json::Value, _>(
+            br#"{"schema_version":2}"#.as_slice(),
+            Limits::default(),
+            "/state/attempts/example/launch.json",
+            "LaunchRecord",
+        )
+        .expect_err("unsupported version must fail");
+
+        assert!(matches!(
+            error.root_cause(),
+            DecodeError::UnsupportedVersion { found: 2, .. }
+        ));
+        assert!(error.to_string().contains("schema version 2"));
+    }
+
+    #[test]
+    fn stored_size_error_keeps_path_and_type() {
+        let error = decode_stored_record::<serde_json::Value, _>(
+            b"{}".as_slice(),
+            Limits {
+                max_bytes: 1,
+                ..Limits::default()
+            },
+            "/state/attempts/example/launch.json",
+            "LaunchRecord",
+        )
+        .expect_err("oversized JSON must fail");
+
+        assert!(matches!(
+            error.root_cause(),
+            DecodeError::TooLarge { limit: 1 }
+        ));
+        let message = error.to_string();
+        assert!(message.contains("/state/attempts/example/launch.json"));
+        assert!(message.contains("record type LaunchRecord"));
+    }
 }

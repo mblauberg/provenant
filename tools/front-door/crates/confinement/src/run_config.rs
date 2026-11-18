@@ -2,7 +2,7 @@
 //! paths, and the repository paths a writer may change without forcing review.
 use crate::permissions::{
     Availability, HostPolicySettings, LanePolicy, MandatoryRoots, NetworkAccess, OptionalPolicy,
-    PathGrant, PathScope,
+    PathGrant, PathScope, PermissionError,
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
@@ -153,6 +153,15 @@ pub enum SandboxSource {
     /// Default resolution: lanes run unsandboxed like the CLI started by hand.
     Default,
 }
+/// Whether launch needs a newly compiled profile to meet its selected policy.
+/// The inherited case is only produced when the route independently resolves
+/// to trusted, no-profile execution without the outer OS sandbox.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BackendRequirement {
+    #[default]
+    Required,
+    TrustedInherited,
+}
 // One declaration owns restriction discovery and the backend-selection matrix.
 macro_rules! sandbox_restrictions {
     ($network:ident, $policy:ident; $($name:ident => ($label:literal, $condition:expr)),+ $(,)?) => {
@@ -185,7 +194,8 @@ pub struct SandboxInputs<'a> {
     pub parent_sandboxed: bool,
     /// Resolved explicit denials, discovered from the policy declaration above.
     pub restrictions: &'a [SandboxRestriction],
-    /// The current process is already inside an operating-system sandbox (e.g. Seatbelt).
+    /// The current process is already inside an operating-system sandbox
+    /// (e.g. Seatbelt). Presence alone is not proof of equivalent protection.
     pub os_sandboxed: bool,
     /// Whether the host platform supports sandbox confinement (true on macOS).
     pub platform_supported: bool,
@@ -199,41 +209,52 @@ pub struct SandboxMode {
     pub effective: bool,
     /// Why the lane runs with or without the sandbox.
     pub source: SandboxSource,
+    /// Whether this attempt needs a new profile. This is internal launch
+    /// state; receipts record the effective mode and source instead.
+    #[serde(skip)]
+    backend_requirement: BackendRequirement,
     /// Warning emitted when an explicit request overrides a restriction or cannot be honored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
 impl SandboxMode {
-    /// Finalise a selected profile against the actual backend before sealing
-    /// its receipt. Unavailable enforcement warns and leaves the lane runnable.
-    pub fn resolve_backend(
-        &mut self,
-        availability: Availability,
-        restrictions: &[SandboxRestriction],
-        inherited: bool,
-    ) {
-        if !self.effective {
-            return;
+    /// Build a mode that requires the host's enforcing backend when effective.
+    /// Trusted inherited modes are only resolved by `RunConfig::sandbox_for`.
+    pub fn required(
+        requested: bool,
+        effective: bool,
+        source: SandboxSource,
+        warning: Option<String>,
+    ) -> Self {
+        Self {
+            requested,
+            effective,
+            source,
+            backend_requirement: BackendRequirement::Required,
+            warning,
         }
-        if let Availability::Unavailable { reason } = availability {
-            self.effective = inherited;
-            let names = restrictions
-                .iter()
-                .map(|restriction| restriction.label())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let requested = if names.is_empty() {
-                "sandbox profile"
-            } else {
-                &names
-            };
-            let warning = format!(
-                "{requested} restriction not enforced: {reason}; launching without an additional sandbox profile"
-            );
-            self.warning = Some(match self.warning.take() {
-                Some(previous) => format!("{previous}; {warning}"),
-                None => warning,
-            });
+    }
+
+    /// Whether launch must resolve a new enforcing backend for this mode.
+    pub fn requires_backend(&self) -> bool {
+        self.effective && self.backend_requirement == BackendRequirement::Required
+    }
+
+    /// Finalise a selected profile against the actual backend before sealing
+    /// its receipt. Every compiled profile carries mandatory credential, Git,
+    /// and authority protections, so unavailable enforcement is a capability
+    /// failure. A route that already resolves to trusted, no-profile execution
+    /// may continue within its inherited OS sandbox without claiming it
+    /// provides equivalent roots.
+    pub fn resolve_backend(&self, availability: Availability) -> Result<(), PermissionError> {
+        if !self.requires_backend() {
+            return Ok(());
+        }
+        match availability {
+            Availability::Available { .. } => Ok(()),
+            Availability::Unavailable { reason } => {
+                Err(PermissionError::BackendNotAvailable(reason))
+            }
         }
     }
 
@@ -383,8 +404,10 @@ impl RunConfig {
 
     /// Resolve one attempt's sandbox mode. Ambient launches default off.
     /// Explicit denials always select a profile, even with an off knob or an
-    /// unsupported platform: backend resolution warns if it cannot enforce it.
-    /// The off knob may still override advisory route and parent floors.
+    /// unsupported platform: backend resolution reports unavailable mandatory
+    /// enforcement as a capability failure.
+    /// The off knob may override an advisory route or warning floor, but not
+    /// an active parent retention floor.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
@@ -398,25 +421,12 @@ impl RunConfig {
             Some(_) => false,
         };
 
-        if inputs.os_sandboxed {
-            let warning = if inputs.knob == Some("off") {
-                Some("process is already inside an operating-system sandbox; inherited sandbox remains effective".to_string())
-            } else {
-                None
-            };
-            return SandboxMode {
-                requested,
-                effective: true,
-                source: SandboxSource::Parent,
-                warning,
-            };
-        }
-
         if !inputs.restrictions.is_empty() {
             return SandboxMode {
                 requested,
                 effective: true,
                 source: SandboxSource::Restriction,
+                backend_requirement: BackendRequirement::Required,
                 warning: if inputs.knob == Some("off") {
                     Some(
                         "explicit restrictions select a sandbox profile despite sandbox=off".into(),
@@ -427,6 +437,29 @@ impl RunConfig {
             };
         }
 
+        if inputs.os_sandboxed {
+            let trusted_inherited =
+                !inputs.parent_sandboxed && (inputs.knob == Some("off") || (!requested && !listed));
+            let warning = match inputs.knob {
+                Some("off") => Some("process is already inside an operating-system sandbox; this launch cannot disable it".to_string()),
+                Some(value) if !matches!(value, "auto" | "off" | "on") => {
+                    Some("invalid lanes.sandbox; using default off".into())
+                }
+                _ => None,
+            };
+            return SandboxMode {
+                requested,
+                effective: true,
+                source: SandboxSource::Parent,
+                backend_requirement: if trusted_inherited {
+                    BackendRequirement::TrustedInherited
+                } else {
+                    BackendRequirement::Required
+                },
+                warning,
+            };
+        }
+
         if !inputs.platform_supported {
             let effective =
                 requested || inputs.parent_sandboxed || (listed && inputs.knob != Some("off"));
@@ -434,18 +467,28 @@ impl RunConfig {
                 requested,
                 effective,
                 source: SandboxSource::Platform,
+                backend_requirement: BackendRequirement::Required,
                 warning: effective
                     .then(|| "requested sandbox is unavailable on this platform".into()),
             };
         }
 
         if inputs.knob == Some("off") {
+            if inputs.parent_sandboxed {
+                return SandboxMode {
+                    requested: false,
+                    effective: true,
+                    source: SandboxSource::Parent,
+                    backend_requirement: BackendRequirement::Required,
+                    warning: Some(
+                        "active parent sandbox floor requires confinement despite sandbox=off"
+                            .into(),
+                    ),
+                };
+            }
             let mut dropped = Vec::new();
             if listed {
                 dropped.push(format!("route '{}'", inputs.route));
-            }
-            if inputs.parent_sandboxed {
-                dropped.push("parent sandbox floor".to_string());
             }
             let warning = if dropped.is_empty() {
                 None
@@ -459,6 +502,7 @@ impl RunConfig {
                 requested: false,
                 effective: false,
                 source: SandboxSource::Knob,
+                backend_requirement: BackendRequirement::Required,
                 warning,
             };
         }
@@ -468,6 +512,7 @@ impl RunConfig {
                 requested: true,
                 effective: true,
                 source: SandboxSource::Knob,
+                backend_requirement: BackendRequirement::Required,
                 warning: None,
             };
         }
@@ -477,6 +522,7 @@ impl RunConfig {
                 requested: false,
                 effective: true,
                 source: SandboxSource::Parent,
+                backend_requirement: BackendRequirement::Required,
                 warning: None,
             }
         } else if listed {
@@ -484,6 +530,7 @@ impl RunConfig {
                 requested: false,
                 effective: true,
                 source: SandboxSource::Route,
+                backend_requirement: BackendRequirement::Required,
                 warning: None,
             }
         } else {
@@ -491,6 +538,7 @@ impl RunConfig {
                 requested: false,
                 effective: false,
                 source: SandboxSource::Default,
+                backend_requirement: BackendRequirement::Required,
                 warning: inputs
                     .knob
                     .filter(|value| !matches!(*value, "auto" | "off" | "on"))
@@ -939,13 +987,15 @@ mod tests {
         lane_input(route)
     }
 
+    // Spec: docs/specs/run-launch.md#policy-and-confinement
     #[test]
     fn precedence_table_invariants() {
         let config_with_routes: RunConfig =
             toml_edit::de::from_str("sandboxed_routes = [\"opencode/opencode/\"]").unwrap();
         let default_config = RunConfig::default();
 
-        // Ambient defaults and advisory floors remain overridable.
+        // Ambient defaults and route preferences remain overridable; an active
+        // parent retention floor always selects confinement.
         for config in [&default_config, &config_with_routes] {
             for route in ["codex/gpt-5.5", "opencode/opencode/glm-5.3-flash-free"] {
                 for parent_sandboxed in [false, true] {
@@ -957,19 +1007,27 @@ mod tests {
                             ..lane_input(route)
                         });
                         assert_eq!(mode.requested, knob == Some("on"));
+                        if parent_sandboxed {
+                            assert_eq!(
+                                mode.backend_requirement,
+                                BackendRequirement::Required,
+                                "an active parent floor cannot become a trusted fallback"
+                            );
+                        }
                         assert_eq!(
                             mode.effective,
                             knob == Some("on")
-                                || (knob != Some("off") && (parent_sandboxed || listed))
+                                || parent_sandboxed
+                                || (knob != Some("off") && listed)
                         );
                     }
                 }
             }
         }
 
-        // Every declared restriction is enforced by an available backend or
-        // explicitly warns with its name and the backend's reason. Absence of
-        // a backend never refuses a lane or silently drops a restriction.
+        // Every selected profile has mandatory protections. An unavailable
+        // backend is a capability failure, even when an OS sandbox is
+        // inherited; presence alone does not prove equivalent enforcement.
         for restriction in SandboxRestriction::ALL {
             let restrictions = std::slice::from_ref(restriction);
             for availability in [
@@ -989,26 +1047,26 @@ mod tests {
                     reason: crate::permissions::AvailabilityReason::ProbeFailed,
                 },
             ] {
-                for inherited in [false, true] {
-                    for knob in [None, Some("auto"), Some("off"), Some("on")] {
-                        let mut mode = default_config.sandbox_for(SandboxInputs {
-                            restrictions,
-                            knob,
-                            ..lane_input("command/probe")
-                        });
-                        assert!(mode.effective, "{restriction:?} selects a profile");
-                        mode.resolve_backend(availability, restrictions, inherited);
-                        match availability {
-                            Availability::Available { .. } => assert!(mode.effective),
-                            Availability::Unavailable { reason } => {
-                                assert_eq!(mode.effective, inherited);
-                                let warning = mode
-                                    .warning
-                                    .as_deref()
-                                    .expect("unavailable enforcement must be disclosed");
-                                assert!(warning.contains(restriction.label()));
-                                assert!(warning.contains(&reason.to_string()));
-                            }
+                for knob in [None, Some("auto"), Some("off"), Some("on")] {
+                    let mode = default_config.sandbox_for(SandboxInputs {
+                        restrictions,
+                        knob,
+                        ..lane_input("command/probe")
+                    });
+                    assert!(mode.effective, "{restriction:?} selects a profile");
+                    let result = mode.resolve_backend(availability);
+                    match availability {
+                        Availability::Available { .. } => {
+                            assert!(result.is_ok());
+                            assert!(mode.effective);
+                        }
+                        Availability::Unavailable { reason } => {
+                            assert!(matches!(
+                                result,
+                                Err(crate::permissions::PermissionError::BackendNotAvailable(found))
+                                    if found == reason
+                            ));
+                            assert!(mode.effective, "failure must not claim a fallback");
                         }
                     }
                 }
@@ -1047,7 +1105,10 @@ mod tests {
             }
         }
 
-        // 3. Invariant: Inherited OS sandbox is always reported effective (property: inherited-OS is always reported effective).
+        // For a route that defaults off, an inherited OS sandbox may remain in
+        // force without selecting a new profile. Once a parent floor or
+        // explicit request selects a profile, presence alone proves no
+        // equivalent credential, Git or authority protection.
         for knob in [None, Some("auto"), Some("off"), Some("on")] {
             for parent_sandboxed in [false, true] {
                 let input = SandboxInputs {
@@ -1065,11 +1126,90 @@ mod tests {
                 if knob == Some("off") {
                     assert!(
                         mode.warning.is_some(),
-                        "honest warning when --no-sandbox cannot drop OS sandbox"
+                        "disclose that --no-sandbox cannot remove the parent sandbox"
                     );
+                }
+                let trusted_inherited = !parent_sandboxed && knob != Some("on");
+                assert_eq!(
+                    mode.backend_requirement,
+                    if trusted_inherited {
+                        BackendRequirement::TrustedInherited
+                    } else {
+                        BackendRequirement::Required
+                    }
+                );
+                let result = mode.resolve_backend(Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::ProbeFailed,
+                });
+                if trusted_inherited {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(crate::permissions::PermissionError::BackendNotAvailable(
+                            crate::permissions::AvailabilityReason::ProbeFailed
+                        ))
+                    ));
                 }
             }
         }
+
+        let listed_inherited = config_with_routes.sandbox_for(SandboxInputs {
+            route: "opencode/opencode/glm-5.3-flash-free",
+            os_sandboxed: true,
+            ..lane_input("opencode/opencode/glm-5.3-flash-free")
+        });
+        assert_eq!(
+            listed_inherited.backend_requirement,
+            BackendRequirement::Required,
+            "a configured route remains profile-bound inside an inherited sandbox"
+        );
+        assert!(matches!(
+            listed_inherited.resolve_backend(Availability::Unavailable {
+                reason: crate::permissions::AvailabilityReason::ProbeFailed,
+            }),
+            Err(crate::permissions::PermissionError::BackendNotAvailable(
+                crate::permissions::AvailabilityReason::ProbeFailed
+            ))
+        ));
+
+        // Restrictions still require a freshly resolved profile, even when
+        // the process is already sandboxed and the trusted knob is off.
+        let restriction = [SandboxRestriction::Network];
+        let restricted_inherited = default_config.sandbox_for(SandboxInputs {
+            knob: Some("off"),
+            restrictions: &restriction,
+            os_sandboxed: true,
+            ..lane_input("command/probe")
+        });
+        assert_eq!(
+            restricted_inherited.backend_requirement,
+            BackendRequirement::Required
+        );
+        assert!(matches!(
+            restricted_inherited.resolve_backend(Availability::Unavailable {
+                reason: crate::permissions::AvailabilityReason::ProbeFailed,
+            }),
+            Err(crate::permissions::PermissionError::BackendNotAvailable(
+                crate::permissions::AvailabilityReason::ProbeFailed
+            ))
+        ));
+
+        // Explicit trusted mode keeps the lane runnable without compiling a
+        // profile, including where a backend is not available.
+        let trusted = default_config.sandbox_for(SandboxInputs {
+            knob: Some("off"),
+            ..lane_input("command/probe")
+        });
+        assert!(!trusted.effective);
+        assert!(
+            trusted
+                .resolve_backend(Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::UnsupportedPlatform,
+                })
+                .is_ok()
+        );
+        assert!(!trusted.effective);
 
         // 4. Unsupported platforms never turn an implicit sandbox on.
         for knob in [None, Some("auto"), Some("off"), Some("on")] {
@@ -1095,6 +1235,12 @@ mod tests {
             .collect();
         assert!(fields.contains(&&"effective".to_string()), "{value}");
         assert!(!fields.contains(&&"sandboxed".to_string()), "{value}");
+        assert!(
+            !fields.contains(&&"backend_requirement".to_string()),
+            "{value}"
+        );
+        let restored: SandboxMode = serde_json::from_value(value)?;
+        assert_eq!(restored.backend_requirement, BackendRequirement::Required);
         Ok(())
     }
     #[test]

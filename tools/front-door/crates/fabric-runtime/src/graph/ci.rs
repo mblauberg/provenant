@@ -192,8 +192,8 @@ pub(super) fn evaluate<O: AttemptOwner>(
         observation.summary = "CI observation has no valid head SHA".into();
         observation.failed_checks.clear();
     }
-    // CI logs become findings and repair prompts too. Normalise before caps
-    // can split a credential and before the evidence enters the checkpoint.
+    // Inspect raw CI text before applying caps so warnings see the complete
+    // source; the checkpoint and repair input retain the original bytes.
     observation = prompt_text::normalise(&observation, prompt_text::Context::CiObservation)?;
     observation.bound_failed_checks(max_bytes, max_checks);
     // The gate stays bound to the last known head: an observation without a

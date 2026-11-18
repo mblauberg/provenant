@@ -557,6 +557,155 @@ pub(crate) fn disk_alert(
     Ok(vec![detail])
 }
 
+/// A paused or pending graph whose work has already landed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct StaleGraph {
+    pub project: provenant_core::ProjectId,
+    pub name: String,
+    pub state: &'static str,
+    pub age_seconds: u64,
+    pub evidence: &'static str,
+}
+
+/// List old paused/pending graphs with local landed evidence. Every read is
+/// best effort: an unreadable checkpoint or store yields a warning, never a
+/// refusal to collect the rest of the machine.
+pub(crate) fn stale_graphs(
+    roots: &Roots,
+    projects: &[provenant_core::ProjectId],
+    age_seconds: u64,
+    now_micros: i64,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+) -> (Vec<StaleGraph>, Vec<String>) {
+    use provenant_core::{AttemptId, StateRoot};
+    use provenant_fabric_runtime::graph::FileJournal;
+    use provenant_fabric_store::{HostStore, Request as StoreRequest};
+    use provenant_records::custody::{CustodyState, Subject, SubjectKind};
+    use provenant_run::{Contributions, Request as RunRequest};
+
+    let mut warnings = Vec::new();
+    let mut found = Vec::new();
+    let state: &StateRoot = &roots.state;
+    let request = RunRequest { clock, cancel };
+    let store_request = StoreRequest { clock, cancel };
+    #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
+    let ledger = HostStore::open_read_only(
+        state,
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    )
+    .unwrap_or(None);
+    let contributions = Contributions::open_read_only(state.as_path(), &request).unwrap_or(None);
+
+    for project in projects {
+        let ids = match FileJournal::graph_ids(state, *project) {
+            Ok(ids) => ids,
+            Err(error) => {
+                warnings.push(format!("{project}: stale graph scan failed: {error}"));
+                continue;
+            }
+        };
+        for name in ids {
+            let Some(checkpoint) = FileJournal::read_status_checkpoint(state, *project, &name)
+                .unwrap_or_else(|error| {
+                    warnings.push(format!(
+                        "{project}/{name}: stale graph checkpoint unreadable: {error}"
+                    ));
+                    None
+                })
+            else {
+                continue;
+            };
+            let settled = checkpoint.nodes.iter().all(|node| node.state.settled());
+            let state_name = if checkpoint.pause.is_some() {
+                "paused"
+            } else if settled {
+                "complete"
+            } else {
+                "pending"
+            };
+            if state_name == "complete" {
+                continue;
+            }
+            let changed = FileJournal::read_events(state, *project, &name)
+                .unwrap_or_default()
+                .last()
+                .map(|event| event.timestamp_micros);
+            let Some(changed) = changed else { continue };
+            let observed_age_seconds =
+                u64::try_from(now_micros.saturating_sub(changed).max(0) / 1_000_000)
+                    .unwrap_or(u64::MAX);
+            if observed_age_seconds < age_seconds {
+                continue;
+            }
+
+            let branches: std::collections::BTreeSet<String> = checkpoint
+                .nodes
+                .iter()
+                .flat_map(|node| {
+                    node.attempts
+                        .iter()
+                        .chain(node.previous_attempts.iter())
+                        .filter_map(|attempt| attempt.attempt_ref.as_deref())
+                })
+                .filter_map(|reference| AttemptId::parse(reference).ok())
+                .filter_map(|attempt| {
+                    contributions
+                        .as_ref()
+                        .and_then(|store| {
+                            store.branch_for_attempt(*project, attempt, &request).ok()
+                        })
+                        .flatten()
+                })
+                .collect();
+            let mut evidence = None;
+            for branch in &branches {
+                let merged = ledger.as_ref().and_then(|ledger| {
+                    ledger
+                        .custody_item(
+                            *project,
+                            &Subject::new(SubjectKind::Branch, branch),
+                            &store_request,
+                        )
+                        .ok()
+                        .flatten()
+                });
+                if merged.is_some_and(|item| {
+                    matches!(
+                        item.state,
+                        CustodyState::Landed { .. } | CustodyState::Retired { .. }
+                    )
+                }) {
+                    evidence = Some("branch merged");
+                    break;
+                }
+                if contributions
+                    .as_ref()
+                    .and_then(|store| {
+                        store
+                            .branch_prs_closed(*project, branch, &request)
+                            .ok()
+                            .flatten()
+                    })
+                    .unwrap_or(false)
+                {
+                    evidence = Some("PR closed");
+                    break;
+                }
+            }
+            let Some(evidence) = evidence else { continue };
+            found.push(StaleGraph {
+                project: *project,
+                name,
+                state: state_name,
+                age_seconds: observed_age_seconds,
+                evidence,
+            });
+        }
+    }
+    (found, warnings)
+}
+
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.

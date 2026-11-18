@@ -721,6 +721,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                     NodeState::Skipped
                 },
                 cancelled_from: None,
+                wait_reason: None,
                 skip_reason: when::skip_reason(&n.when),
                 advance_error: None,
                 advance_error_code: None,

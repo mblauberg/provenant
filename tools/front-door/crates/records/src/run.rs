@@ -1736,6 +1736,53 @@ impl Default for SkippedRoute {
     }
 }
 
+/// Metadata binds exactly the bytes of one representation, never another.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepresentationMetadata {
+    pub digest: FileDigest,
+    pub bytes: u64,
+}
+
+impl RepresentationMetadata {
+    pub fn for_bytes(bytes: &[u8]) -> Self {
+        Self {
+            digest: CanonicalV1::file_digest(bytes),
+            bytes: bytes.len() as u64,
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_metadata_tests {
+    use super::*;
+
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
+    #[test]
+    fn each_representation_binds_its_own_bytes() {
+        let raw = b"secret value";
+        let exported = b"[REDACTED]";
+        let metadata = PublicationMetadata {
+            raw: RepresentationMetadata::for_bytes(raw),
+            exported: RepresentationMetadata::for_bytes(exported),
+        };
+        assert_eq!(metadata.raw.bytes, raw.len() as u64);
+        assert_eq!(metadata.raw.digest, CanonicalV1::file_digest(raw));
+        assert_eq!(metadata.exported.bytes, exported.len() as u64);
+        assert_eq!(metadata.exported.digest, CanonicalV1::file_digest(exported));
+        assert_ne!(metadata.raw.digest, metadata.exported.digest);
+    }
+}
+
+/// Publication binds the retained representation and the independently projected
+/// bytes. Projection failure withholds publication without changing local outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationMetadata {
+    pub raw: RepresentationMetadata,
+    pub exported: RepresentationMetadata,
+}
+
+/// The digest and length describe the bytes stored at `path`; `redacted`
+/// describes that representation only, not a future publication projection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRecord {
     #[serde(flatten)]

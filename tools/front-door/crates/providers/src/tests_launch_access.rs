@@ -181,7 +181,7 @@ fn claude_writer_uses_confinement_instead_of_native_tool_permissions() -> Result
             .windows(2)
             .any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")
     );
-    assert!(spec.profile.spec.deny_keychain_access);
+    assert!(!spec.profile.spec.confinement.keychain_permitted());
     assert!(spec.profile.spec.authentication.is_empty());
     Ok(())
 }
@@ -379,7 +379,7 @@ fn claude_native_permission_controls_ignore_host_scrub_overrides() -> Result<(),
 #[test]
 fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
 -> Result<(), ProviderError> {
-    let prompt = Prompt::new("fixture prompt".into());
+    let prompt = Prompt::new("  to make a test pass: fix the code\npassword=fixture-token\nghp_abcdefghijklmnopqrstuvwxyz0123456789\n".into());
     let token = fixture_token();
     let repo = Path::new("/fixture/repo");
     for entry in REGISTRY.iter().filter(|entry| {
@@ -1291,6 +1291,46 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
                 .map(|(_, value)| value.as_os_str())
                 .collect();
             assert_eq!(homes, [input.home.as_os_str()]);
+        }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
+#[test]
+fn codex_configuration_is_a_writer_preference_and_read_only_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for configuration in [CodexPolicy::Clean, CodexPolicy::Inherited] {
+            if access == Access::ReadOnly && configuration == CodexPolicy::Inherited {
+                continue; // The plan owner rejects unconfined read-only extensions.
+            }
+            let base = fixture_access_plan(access, Some("login"), false);
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: base.scope(),
+                permissions: base.permissions().clone(),
+                codex: configuration,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+            })?;
+            for sandboxed in [false, true] {
+                let lookup = |key: &str| {
+                    (key == provenant_core::consumer_env::SANDBOX)
+                        .then(|| if sandboxed { "on" } else { "off" }.into())
+                };
+                let mut input =
+                    fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+                input.host_var = &lookup;
+                let launch = codex::Codex.prepare(input)?;
+                assert_eq!(
+                    launch.argv.iter().any(|arg| arg == "--ignore-user-config"),
+                    configuration == CodexPolicy::Clean
+                );
+            }
         }
     }
     Ok(())

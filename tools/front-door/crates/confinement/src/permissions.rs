@@ -9,6 +9,7 @@ mod policy;
 mod probe;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 mod render;
+mod resolved;
 mod types;
 mod validation;
 
@@ -22,6 +23,7 @@ pub use self::policy::*;
 pub use self::probe::*;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use self::render::*;
+pub use self::resolved::*;
 pub use self::types::*;
 pub use self::validation::*;
 

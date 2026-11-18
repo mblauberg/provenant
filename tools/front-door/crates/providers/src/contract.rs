@@ -17,6 +17,8 @@ pub enum ProviderError {
     },
     #[error("provider protocol is malformed")]
     Malformed,
+    #[error("evidence defect: provider protocol frame on line {line} is malformed")]
+    MalformedFrame { line: usize },
     /// The JSON frame ended before the input did. Only actual stream EOF may
     /// classify this as a final fragment; a newline-complete frame is loss.
     #[error("provider protocol frame ended before the record was complete")]
@@ -42,6 +44,10 @@ pub enum ProviderError {
     LoginRequired,
     #[error("launch path is not absolute or lies outside the plan's roots")]
     InvalidPath,
+    #[error("provider capability unavailable: {0}")]
+    CapabilityUnavailable(&'static str),
+    #[error("invalid provider invocation: {0}")]
+    InvalidInvocation(&'static str),
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
     #[error("provider cannot honour configured policy action for {code}")]
@@ -96,8 +102,11 @@ impl ProviderError {
             | Self::InvalidPath
             | Self::UnsupportedPolicy => B::Authority,
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
-            Self::PromptTooLarge { .. }
+            Self::CapabilityUnavailable(_)
+            | Self::InvalidInvocation(_)
+            | Self::PromptTooLarge { .. }
             | Self::Malformed
+            | Self::MalformedFrame { .. }
             | Self::IncompleteFrame
             | Self::MalformedResult(_)
             | Self::Overflow
@@ -119,6 +128,14 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     assert_eq!(
         ProviderError::IdentityMismatch.boundary_class(),
         B::Authority
+    );
+    assert_eq!(
+        ProviderError::CapabilityUnavailable("model").boundary_class(),
+        B::None
+    );
+    assert_eq!(
+        ProviderError::InvalidInvocation("argv").boundary_class(),
+        B::None
     );
     assert_eq!(
         ProviderError::UnsupportedPolicy.boundary_class(),
@@ -271,7 +288,7 @@ impl Prompt {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
                 Ok(())
             }
-            Effect::Refuse(_) => Err(error()),
+            Effect::Refuse(_) | Effect::Stop(_) => Err(error()),
         }
     }
 }

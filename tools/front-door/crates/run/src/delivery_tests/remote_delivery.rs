@@ -629,6 +629,19 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
         "Run fixture\nAttempt fixture",
     )?;
     assert!(body.len() <= PR_BODY_LIMIT && body.ends_with(PR_BODY_TRUNCATION_NOTE.trim_end()));
+    fixture.commit(&fixture.writer.worktree, &"s".repeat(60_000))?;
+    let body = host.commit_body(
+        &fixture.writer,
+        host.head(&fixture.writer)?,
+        "Run fixture\nAttempt fixture",
+    )?;
+    assert_eq!(
+        body,
+        format!(
+            "Run fixture\nAttempt fixture\n\n{}",
+            PR_BODY_TRUNCATION_NOTE.trim()
+        )
+    );
     Ok(())
 }
 
@@ -801,7 +814,8 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
         host.integrate(&fixture.writer, &fixture.request, head),
-        Err(RunError::IntegrationConflict { child_head }) if child_head == head
+        Err(RunError::IntegrationConflict { child_head, conflicting_files })
+            if child_head == head && conflicting_files == ["conflict"]
     ));
     assert_eq!(
         host.command(

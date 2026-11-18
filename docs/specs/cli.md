@@ -320,7 +320,30 @@ worktree links without following them through the host filesystem.
 
 `pr status [NUMBER ...]` reports each pull request's head, check rollup and failed check names in one batched GraphQL read when available; omitting numbers selects this account's open pull requests. The REST observer shares ETag-backed check pages by repository and head SHA. Batched results have a short per-pull-request freshness window and fall back to REST when GraphQL cannot answer; a REST rate limit falls back to GraphQL when available.
 
+`wait --pr NUMBER` is the one way to block on a pull request. It reads CI through the shared observer and reports the PR's class as it changes (`--follow` for every transition), always naming the head being watched. `--head SHA` pins the wait to one head: until GitHub reports that exact SHA the reading stays pending whatever the previous head's checks say, so a push's predecessor can never produce a verdict. Without `--head`, when the PR's branch is known locally and its tip differs from GitHub's head, the wait warns and watches the local tip instead. At a timeout it prints the last known check summary and, when no check was ever reported, the next step: check the workflow triggers or push an empty commit to start CI. Its budget is `--timeout` (or `domains.wait.timeout_seconds`, clamped to `domains.wait.max_timeout_seconds`), so the wait, the landing gate and graph waits share one configured policy and one set of exit codes. The last line names every target's settle state (`settled ok`, `failed`, `needs input` or `still running at timeout`) and the one next command, and compact output keeps that line through an owner summary. The observation method is diagnostic detail shown only under `--full` and in the JSON envelope, never as the last line of default output.
+
 `ci failures pr NUMBER` and `ci failures run ID` report failing test names, panic locations and messages, and error lines from failed job logs. The parser handles nextest and legacy `cargo test` output. Human output is compact by default; `--json` returns structured evidence. Failed logs share the CI observation cache for a short freshness window. Unreadable logs and bounded output remain visible in the result.
 
-- Owner: `src/pr/status.rs`, `src/pr/status/batch.rs`, `src/ci.rs`
-- Why: a chair needs actionable CI evidence without mistaking missing observations for success.
+### Wait/pr causes
+
+A `wait --pr` reading of a head with no reported checks names why before it
+suggests an action. The shared observer reads the pull request's `mergeable` and
+`mergeStateStatus` from the PR resource first; an UNKNOWN mergeability is reread
+a bounded number of times (`MERGEABLE_UNKNOWN_RETRIES`, with the source shown in
+`src/pr/observer.rs`) before a cause is chosen. The causes are:
+
+- `merge_conflict` — GitHub reports the head as conflicting (`mergeable` is
+  `CONFLICTING`, `mergeStateStatus` is `DIRTY`, or REST `mergeable_state` is
+  `dirty`). GitHub starts no `pull_request` workflows for a conflicting head, so
+  the next step is to merge the base into the branch (`git merge origin/BASE`
+  then push the merge), not to start CI.
+- `not_scheduled` — the head is mergeable, or mergeability stayed UNKNOWN after
+  the bounded rereads. The next step keeps the workflow-trigger/empty-commit
+  advice.
+
+The cause and next step appear in the `wait` reading line and in `pr status`;
+they are hints, not a settlement. A conflicting head stays pending until it is
+merged with its base and its checks run.
+
+- Owner: `src/pr/observer.rs`, `src/pr/status.rs`, `src/pr/status/batch.rs`, `src/status_wait.rs`, `src/ci.rs`
+- Why: a chair needs actionable CI evidence without mistaking missing observations for success, and without blaming workflow triggers for a merge conflict.

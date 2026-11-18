@@ -37,6 +37,14 @@ class ReferenceTests(unittest.TestCase):
         self.assertIn('config schema --all', compact)
         self.assertIn('config.history_max_bytes', GEN['config_reference'](data, all_fields=True))
 
+    def test_registry_documents_compact_fields_and_codex_setting(self):
+        data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
+        compact = GEN['config_reference'](data)
+        advanced = GEN['config_reference']({'knobs': {}, 'host_codex_settings':
+                                            data['host_codex_settings']}, all_fields=True)
+        self.assertIn('`providers.codex.clean_config`', compact)
+        self.assertIn('`clean_config`', advanced)
+
 
     def test_missing_sources_are_named_without_losing_available_sources(self):
         source = self.root / GEN['KNOBS']

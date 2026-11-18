@@ -27,6 +27,9 @@ pub struct CompositeSpec {
     /// Named lenses that a protected path floor requires to succeed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_review_lenses: Vec<String>,
+    /// Cap on concurrent member nodes running at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -496,12 +499,14 @@ fn children(
             node.source = None;
             node.read_roots.clear();
             node.attachments.clear();
+            node.max_parallel = node.max_parallel.or(spec.max_parallel);
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
                 reduce_verdict: spec.reduce_verdict,
                 soft_review_coverage: spec.soft_review_coverage,
                 hard_review_coverage: spec.hard_review_coverage,
                 required_review_lenses: spec.required_review_lenses,
+                max_parallel: spec.max_parallel,
                 nodes: Vec::new(),
                 exports: spec
                     .exports

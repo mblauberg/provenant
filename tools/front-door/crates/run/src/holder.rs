@@ -164,7 +164,7 @@ fn apply_provider_identity(
             // delimiter-complete frame was oversized, undecodable or
             // unreadable, or capture drain timed out, the terminal owner
             // cannot prove that the provider stayed in the admitted session.
-            Effect::Refuse(_) => unsettle(
+            Effect::Refuse(_) | Effect::Stop(_) => unsettle(
                 decoded,
                 "provider identity evidence was incomplete; continuation refused by policy",
             ),
@@ -2213,11 +2213,6 @@ impl RunStore {
         {
             decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
         }
-        // Provider-owned session transcripts record tool output, so a printed
-        // credential can survive there after capture and result filtering.
-        // Scrub before publication so a retry never starts from new plaintext.
-        let session_redaction_failed =
-            provenant_redact::scrub_session_history(&provider_state).is_err();
         let captured_handoff = self.capture_handoff(attempt, &record, &decoded)?;
         let trailing_verdict_tolerated = captured_handoff.trailing_verdict_tolerated;
         let (mut handoff, handoff_error) = match captured_handoff.handoff {
@@ -2977,43 +2972,13 @@ impl RunStore {
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
-        // Local provider captures remain raw for replay. Seal only a filtered
-        // rendering of the decoded answer at this publication boundary.
-        // A filter failure withholds the result instead of blocking settlement
-        // forever: the lane fails with a fixed placeholder and stays terminal.
-        let (mut result, result_redaction_failed) =
-            match provenant_redact::known_shapes(decoded.result.as_bytes()) {
-                Ok(safe) => match String::from_utf8(safe) {
-                    Ok(text) => (text, false),
-                    Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
-                },
-                Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
-            };
+        let mut result = decoded.result.clone();
         if task.writer.is_some()
             && task.deliver.is_none()
             && task.profile.knobs.get("lanes.receipts") == Some(&serde_json::json!("none"))
         {
             decoded.complete &= result.len() + UNDELIVERED_NOTICE.len() <= RESULT_LIMIT as usize;
             result = undelivered_writer_result(&result);
-        }
-        let redaction_failed = result_redaction_failed || session_redaction_failed;
-        if redaction_failed {
-            if decoded.terminal_cause == Some(TerminalCause::TokenBudget) {
-                decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
-            }
-            // A redaction failure fails a lane that would otherwise succeed. A
-            // cancelled, timed-out or lost lane keeps its outcome, and every
-            // reason it already has survives with the redaction failure after it.
-            if matches!(
-                decoded.outcome,
-                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-            ) {
-                decoded.outcome = Outcome::Failed;
-            }
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {REDACTION_FAILED_REASON}"),
-                None => REDACTION_FAILED_REASON.into(),
-            });
         }
         // Delivery keys off the outcome before a declared stop, so partial work
         // is still delivered. The stop changes only the settled state.
@@ -3153,7 +3118,6 @@ impl RunStore {
         // External delivery runs only from the committed decision below.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         let delivery_applicable = succeeded_before_stop
-            && !redaction_failed
             && !cancelled
             && exit.stop_reason.is_none()
             && (outcome_only || !exit.unresolved_cleanup)
@@ -3246,7 +3210,7 @@ impl RunStore {
             reason: decoded_reason,
             result: &result,
             complete: decoded.complete,
-            redacted: true,
+            redacted: false,
             resolved_route: record.resolved_route.clone(),
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,
@@ -3471,10 +3435,6 @@ pub const EMPTY_WRITER_REASON: &str =
     "the provider ended with an empty final message; its commit is kept for review";
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
-/// Stored instead of the provider's answer when settlement cannot filter it.
-const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
-const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
-
 /// Captured text can suggest a denial, but cannot establish its source or
 /// supply a path safe for a remote diagnostic. The operation is a closed fact;
 /// the path stays in the captured output.
@@ -3557,7 +3517,7 @@ fn bounded_reason(mut reason: String) -> String {
 
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
-    provenant_redact::bounded_line(note, 240)
+    provenant_core::bounded_line(note, 240)
 }
 
 #[cfg(test)]
@@ -4316,7 +4276,9 @@ mod writer_recovery_tests {
                     found.as_slice(),
                     [(
                         _,
-                        crate::Reconciled::Finished | crate::Reconciled::Withdrawn
+                        crate::Reconciled::Finished
+                            | crate::Reconciled::Withdrawn
+                            | crate::Reconciled::WriterLeaseReleased { .. }
                     )]
                 ),
                 "{mode}: {found:?}"
@@ -6866,7 +6828,12 @@ mod writer_recovery_tests {
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver,
             )?;
-            assert_eq!(found, vec![(id, crate::Reconciled::Finished)]);
+            assert!(matches!(
+                found.as_slice(),
+                [
+                    (attempt, crate::Reconciled::WriterLeaseReleased { locks })
+                ] if *attempt == id && !locks.is_empty()
+            ));
             let record = store.record(id, &call)?;
             assert!(
                 matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
@@ -6890,13 +6857,23 @@ mod writer_recovery_tests {
     #[test]
     fn reconcile_settles_failed_import_once_and_keeps_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        settlement_fault_modes(&["reconcile_failed", "reconcile_new", "reconcile_reboot"])
+        for mode in ["reconcile_failed", "reconcile_new", "reconcile_reboot"] {
+            settlement_fault_modes(&[mode])
+                .map_err(|error| std::io::Error::other(format!("{mode}: {error}")))?;
+        }
+        Ok(())
     }
 
     #[test]
     fn retained_import_excludes_writer_after_lock_release()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         settlement_fault_modes(&["release_boundary"])
+    }
+
+    #[test]
+    fn retained_graph_writer_import_completes_while_recovery_holds_writer_lock()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["held_import_success"])
     }
 
     #[test]
@@ -6950,7 +6927,9 @@ mod writer_recovery_tests {
             )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
-            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            // Fixture commands must bypass the active lane's private Git binding.
+            let git =
+                provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
             crate::objects::prepare_bound(
                 &git,
                 launch.worktree.repo(),
@@ -6959,7 +6938,8 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let retained_commit = if mode.starts_with("reconcile_") {
+            let retained_commit = if mode.starts_with("reconcile_") || mode == "held_import_success"
+            {
                 // Make a real commit that exists only in the lane's private objects.
                 let tree = crate::objects::command(
                     &git,
@@ -6997,16 +6977,54 @@ mod writer_recovery_tests {
                 );
                 let raw = output.stdout;
                 let head = provenant_core::GitOid::parse(std::str::from_utf8(&raw)?.trim())?;
-                std::fs::write(
-                    candidate.join("git-common").join(launch.branch.as_str()),
-                    format!("{head}\n"),
-                )?;
+                if mode == "held_import_success" {
+                    let commit = format!("{head}^{{commit}}");
+                    let private = provenant_os::fixture::git_command_at(&git)
+                        .arg("--git-dir")
+                        .arg(candidate.join("git-common"))
+                        .args(["cat-file", "-e", &commit])
+                        .env("GIT_OBJECT_DIRECTORY", candidate.join("git-objects"))
+                        .env(
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            launch.worktree.repo().common_git_dir().join("objects"),
+                        )
+                        .output()?;
+                    assert!(
+                        private.status.success(),
+                        "commit is absent from private Git source: {}",
+                        String::from_utf8_lossy(&private.stderr)
+                    );
+                    let host = provenant_os::fixture::git_command_at(&git)
+                        .arg("--git-dir")
+                        .arg(launch.worktree.repo().common_git_dir())
+                        .args(["cat-file", "-e", &commit])
+                        .output()?;
+                    assert!(
+                        !host.status.success(),
+                        "retained commit was already visible in host Git"
+                    );
+                }
+                let branch_ref = candidate.join("git-common").join(launch.branch.as_str());
+                std::fs::write(&branch_ref, format!("{head}\n")).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "write retained private branch ref {}: {error}",
+                        branch_ref.display()
+                    ))
+                })?;
                 let oid = head.to_string();
                 let path = candidate
                     .join("git-objects")
                     .join(&oid[..2])
                     .join(&oid[2..]);
-                Some((head, path.clone(), std::fs::read(path)?))
+                // The fixture Git executable must honour the candidate's
+                // GIT_OBJECT_DIRECTORY for this private source snapshot.
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "read retained private commit object {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                Some((head, path, bytes))
             } else {
                 None
             };
@@ -7027,6 +7045,7 @@ mod writer_recovery_tests {
                 fixture.commit(&fixture.writer.worktree, "Competing branch")?;
             }
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lock_directory = directory.try_clone()?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
                 directory,
                 scope,
@@ -7038,6 +7057,18 @@ mod writer_recovery_tests {
             let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
                 .into_recovery()?;
             recovery.prepare_settlement()?;
+            if mode == "held_import_success" {
+                store.record_worktree_settlement(
+                    id,
+                    &serde_json::json!({
+                        "schema_version":1,
+                        "state":"retained",
+                        "worktree":fixture.writer.worktree,
+                        "reason":"graph writer worktree retained for continuation, later rounds and explicit delivery",
+                    }),
+                    &call,
+                )?;
+            }
             let mut observed = crate::tests::exit();
             observed.scope = scope;
             crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -7090,7 +7121,14 @@ mod writer_recovery_tests {
                     &provenant_supervisor::census::SystemProcessObserver,
                 );
                 crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
-                assert!(found?.contains(&(id, crate::Reconciled::Finished)));
+                assert!(found?.iter().any(|(attempt, state)| {
+                    *attempt == id
+                        && matches!(
+                            state,
+                            crate::Reconciled::Finished
+                                | crate::Reconciled::WriterLeaseReleased { .. }
+                        )
+                }));
                 assert!(
                     matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
                     EffectDisposition::Failed { retryable: false, ref reason }
@@ -7098,7 +7136,12 @@ mod writer_recovery_tests {
                 );
                 assert!(store.writer_fences()?.is_empty());
                 let (_, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
-                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    &std::fs::read(path).map_err(|error| {
+                        std::io::Error::other(format!("retained private commit after GC: {error}"))
+                    })?,
+                    bytes
+                );
                 assert_eq!(
                     crate::objects::resolve_ref(
                         &git,
@@ -7138,7 +7181,60 @@ mod writer_recovery_tests {
                 &call,
             );
             crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
-            let first = first?;
+            let first = first.map_err(|error| {
+                std::io::Error::other(format!(
+                    "drive held-Recovery settlement import and effects: {error}"
+                ))
+            })?;
+            if mode == "held_import_success" {
+                assert!(
+                    first.release_permitted,
+                    "{:?}",
+                    first.record.settlement_receipts
+                );
+                assert!(matches!(
+                    &first
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .ok_or("settlement receipts")?
+                        .git_import,
+                    EffectDisposition::Done
+                ));
+                assert_eq!(
+                    store
+                        .worktree_settlement(id, &call)?
+                        .ok_or("retained receipt")?["state"],
+                    "retained"
+                );
+                assert!(recovery.holds_writer_lock(&lock_directory)?);
+                assert!(
+                    lock_directory
+                        .try_lock(
+                            OsStr::new("writer.lock"),
+                            provenant_os::fs::LockMode::Exclusive,
+                        )
+                        .is_err()
+                );
+                let (head, _, _) = retained_commit.as_ref().ok_or("retained commit")?;
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    *head
+                );
+                store
+                    .settle_recovered(&attempt, recovery)
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "settle recovered writer after successful import: {error}"
+                        ))
+                    })?;
+                assert!(store.writer_fences()?.is_empty());
+                continue;
+            }
             if mode == "manifest_conflict" {
                 assert!(matches!(
                     first.record.settlement_receipts.unwrap().manifest_conflict,
@@ -7347,7 +7443,14 @@ mod writer_recovery_tests {
                         .reconcile_with_observer(run.attempt_id, &providers, &call, observer)
                         .expect("recovery");
                     assert!(
-                        found.contains(&(id, crate::Reconciled::Finished)),
+                        found.iter().any(|(attempt, state)| {
+                            *attempt == id
+                                && matches!(
+                                    state,
+                                    crate::Reconciled::Finished
+                                        | crate::Reconciled::WriterLeaseReleased { .. }
+                                )
+                        }),
                         "{found:?}"
                     );
                     Ok(())
@@ -7368,7 +7471,14 @@ mod writer_recovery_tests {
                     read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?,
                     sealed
                 );
-                assert_eq!(std::fs::read(candidate.join("git-common/HEAD"))?, retained);
+                assert_eq!(
+                    std::fs::read(candidate.join("git-common/HEAD")).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "retained candidate HEAD after reconcile: {error}"
+                        ))
+                    })?,
+                    retained
+                );
                 assert_eq!(read_sealed(&attempt, "result.md", RESULT_LIMIT)?, result);
                 let (head, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
                 let recovery_info =
@@ -7385,7 +7495,12 @@ mod writer_recovery_tests {
                     false,
                     &call,
                 )?;
-                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    &std::fs::read(path).map_err(|error| {
+                        std::io::Error::other(format!("retained private commit after GC: {error}"))
+                    })?,
+                    bytes
+                );
                 assert_eq!(
                     crate::objects::resolve_ref(
                         &git,
@@ -7467,7 +7582,14 @@ mod writer_recovery_tests {
                         &provenant_supervisor::census::SystemProcessObserver,
                     )?;
                     assert!(
-                        found.contains(&(id, crate::Reconciled::Finished)),
+                        found.iter().any(|(attempt, state)| {
+                            *attempt == id
+                                && matches!(
+                                    state,
+                                    crate::Reconciled::Finished
+                                        | crate::Reconciled::WriterLeaseReleased { .. }
+                                )
+                        }),
                         "{found:?}"
                     );
                     assert!(

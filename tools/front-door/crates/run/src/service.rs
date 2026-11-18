@@ -99,7 +99,7 @@ impl<'a> Service<'a> {
         };
         let mut contribution_branch = None;
         let mut nested_refusal = None;
-        // Refuse an unsupported launch or a secret prompt before preparing a writer.
+        // Refuse unsupported launches before preparing a writer.
         {
             let task = &input.task;
             let route = Self::route(task.route.clone())?;
@@ -110,15 +110,7 @@ impl<'a> Service<'a> {
                 nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
-        {
-            let task = &input.task;
-            if let Err(error) = Self::scan(&task.prompt) {
-                if input.parent_attempt.is_none() {
-                    return self.preflight_refusal(&input, task, cwd, error, call);
-                }
-                nested_refusal.get_or_insert((error, task.worktree.clone()));
-            }
-        }
+        Self::warn_for_secrets("task.prompt", &input.task.prompt);
         let (request, prompt) = {
             let mut task = input.task;
             if task
@@ -555,13 +547,14 @@ impl<'a> Service<'a> {
             )),
         }
     }
-    pub fn scan(prompt: &str) -> Result<()> {
-        provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).map_err(|_| {
-            RunError::Input {
-                kind: ErrorKind::SecretInput,
-                message: "input matches a secret pattern; remove the secret and retry".into(),
-            }
-        })
+    fn warn_for_secrets(field: &str, prompt: &str) {
+        if provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).is_err() {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "provenant: warning: field={field} rule=known_secret_shape"
+            );
+        }
     }
     pub fn status(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.custody_state(self.store.record(id, call)?, call)
@@ -644,7 +637,7 @@ impl<'a> Service<'a> {
             .start_checked(attempt, expected, providers, holder, call)
     }
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<AttemptRecord> {
-        Self::scan(&input.prompt)?;
+        Self::warn_for_secrets("resume.prompt", &input.prompt);
         self.store.resume(input, call)
     }
     pub fn events(
@@ -754,6 +747,7 @@ error_kinds! {
     Timeout => "TIMEOUT", "The wait budget expired.";
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
+    WriterLeaseHeld => "writer_lease_held", "Another attempt holds the writer lease.";
     WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
     WriterLockBusy => "WRITER_LOCK_BUSY", "The writer registry lock is held by another operation.";
     WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
@@ -813,6 +807,7 @@ impl ErrorKind {
             | Self::Refused
             | Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLeaseHeld
             | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::RetainedWriterImport
@@ -843,7 +838,7 @@ impl ErrorKind {
         match self {
             Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
             Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::RetainedWriterImport => B::LaneGit,
+            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::LaneGit,
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
@@ -858,6 +853,7 @@ impl ErrorKind {
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
+            RunError::StoredRecordRead { source, .. } => Self::from(source.as_ref()),
             RunError::Input { kind, .. } => *kind,
             RunError::ContinuationRefused { .. } => Self::ContinuationUnsupported,
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
@@ -879,6 +875,9 @@ impl From<&RunError> for ErrorKind {
                 | provenant_confinement::worktrees::WorktreeError::UnknownOccupancy { .. }
                 | provenant_confinement::worktrees::WorktreeError::IncompleteCensus { .. },
             ) => Self::WriterUnknown,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld { .. },
+            ) => Self::WriterLeaseHeld,
             RunError::Writer(_) => Self::WriterScope,
             RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialRoot
@@ -923,9 +922,15 @@ impl From<&RunError> for ErrorKind {
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
             RunError::Contention => Self::Contention,
-            RunError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-                found, ..
-            }) if *found > 1 => Self::UpgradeRequired,
+            RunError::Decode(error)
+                if matches!(
+                    error.root_cause(),
+                    provenant_records::DecodeError::UnsupportedVersion { found, .. }
+                        if *found > 1
+                ) =>
+            {
+                Self::UpgradeRequired
+            }
             RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
             _ => Self::Io,
         }

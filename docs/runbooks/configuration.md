@@ -17,6 +17,31 @@ Use `provenant config show --full` to inspect effective settings and their sourc
 the operation. See the [supervisor spec](../specs/supervisor.md) for boundary
 behaviour and [GC](gc.md) for retention configuration.
 
+## Port table
+
+The port table layers compiled builtins, host `state/ports.json`, then project
+`.provenant/ports.json`. A layer only needs the fields it changes: object fields
+deep-merge over the lower layer, so `{"verify": {"base": "origin/master"}}`
+keeps the other verify fields from the layers below it. `schema_version` is
+optional in a layer; it defaults to the current version, and a mismatch warns
+rather than refuses a compatible shape. `provenant config show --full` lists the
+effective `verify.base` and `verify.remote` with the layer or inferred ref that
+supplied each value.
+
+When no layer sets `verify.base`, Provenant infers it from
+`refs/remotes/<remote>/HEAD` for the effective `verify.remote` and marks the
+value as inferred in `config show`. If no remote HEAD resolves, the refusal
+names `verify.base` in `.provenant/ports.json` or host `ports.json` and shows an
+example value. Set `verify.remote` as well when the project does not use the
+default remote. A malformed layer names its file and key; a bad project layer
+is warned and skipped so commands that do not need verify still run, while an
+unreadable host port table still refuses lane identity.
+
+This repository keeps its source at `config/ports.json` and links the optional
+`.provenant/ports.json` path to it. Repository-specific scripts such as
+`scripts/verify-nextest` belong in that source (direct CI reads it without
+Provenant); the builtin verify tiers are neutral cargo commands.
+
 ## Provider model scope
 
 `[providers.cursor]` defaults to `models = ["auto", "composer-*", "grok-*"]`.
@@ -96,9 +121,13 @@ Use `sandboxed_routes` to select routes for sandboxing and `--no-sandbox` to
 request an unsandboxed run. Configure `sandbox_cache_reads` for host caches a
 sandboxed lane needs. Explicit network restrictions and host path denials select
 an enforcing profile even when the sandbox setting is off. If the backend is
-unavailable, the lane launches without that profile and records a warning naming
-the restriction and reason. Its prepared environment keeps its narrower settings.
-Check the attempt receipt for the effective mode and source.
+unavailable, a selected enforcing profile fails with a capability error. An
+inherited sandbox alone does not establish equivalent protection. Select a
+trusted unsandboxed route explicitly when that is the intended authority.
+A route that defaults to trusted, or an explicit `--no-sandbox`, retains an
+existing OS sandbox without requiring a new profile only when no explicit
+restriction or parent floor requires one.
+Check the attempt receipt for the selected mode and source.
 See [ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md) and the
 [supervisor spec](../specs/supervisor.md) for boundaries.
 

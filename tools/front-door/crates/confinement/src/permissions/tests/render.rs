@@ -197,7 +197,7 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
             scope: PathScope::Subtree,
         },
     }));
-    profile.spec.deny_keychain_access = true;
+    profile.spec.confinement = profile.spec.confinement.clone().without_keychain();
     let worktree = WorktreeWriteGrants::from_paths(
         Path::new("/fixture/worktrees/lane"),
         Path::new("/fixture/repo/.git/worktrees/lane"),
@@ -1417,8 +1417,22 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
     });
     let grants = GrantSet::build(&plan, &profile, home, None)?;
     let rendered = render(&grants)?;
+    let resolved = profile.spec.confinement.resolve_for(&plan);
+    let optional = plan.policy.as_ref().expect("policy").optional();
+    assert_eq!(resolved.deny_read(), optional.deny_read);
+    assert_eq!(resolved.deny_write(), optional.deny_write);
+    assert!(
+        resolved
+            .sources()
+            .iter()
+            .any(|source| matches!(source, ConfinementSource::Host(_)))
+    );
     assert!(rule_index(&rendered, RuleAction::Allow, "default", None).is_some());
-    assert!(rule_index(&rendered, RuleAction::Deny, "file-link", None).is_some());
+    assert!(!rule_facts(&rendered).iter().any(|rule| {
+        rule.action == RuleAction::Deny
+            && rule.operations.iter().any(|op| op == "file-link")
+            && rule.strings.is_empty()
+    }));
     assert!(
         rule_index_with_facts(
             &rendered,
@@ -1444,7 +1458,7 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
             PathScope::Exact => "literal",
             PathScope::Subtree => "subpath",
         };
-        for operation in ["file-write*", "process-exec"] {
+        for operation in ["file-write*", "process-exec", "file-link"] {
             assert!(
                 rule_index_with_facts(
                     &rendered,
@@ -1508,7 +1522,8 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
     Ok(())
 }
 
-// Small: optional host ceilings cannot widen requests, including offline adapters.
+// Spec: docs/specs/supervisor.md#permission-policy
+// Optional host ceilings cannot widen requests, and every restriction has a source.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
 fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
@@ -1544,6 +1559,20 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
             );
             plan.network = request;
             plan.policy = Some(policy);
+            let resolved = profile.spec.confinement.resolve_for(&plan);
+            assert_eq!(resolved.network(), NetworkPolicy::from(effective));
+            assert_eq!(resolved.resolve_for(&plan), resolved);
+            assert_eq!(
+                resolved.sources().contains(&ConfinementSource::Plan),
+                request != NetworkAccess::Open
+            );
+            assert_eq!(
+                resolved
+                    .sources()
+                    .iter()
+                    .any(|source| matches!(source, ConfinementSource::Host(_))),
+                ceiling != NetworkAccess::Open
+            );
             let rendered = render(&GrantSet::build(&plan, &profile, home, None)?)?;
             assert_eq!(
                 rendered.contains("(allow network-outbound (remote ip \"*:*\"))"),
@@ -1557,7 +1586,11 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
                 rendered.contains("(deny network*)"),
                 effective != NetworkAccess::Open
             );
-            profile.spec.deny_network = true;
+            profile.spec.confinement = profile.spec.confinement.clone().offline();
+            let resolved = profile.spec.confinement.resolve_for(&plan);
+            assert_eq!(resolved.network(), NetworkPolicy::Offline);
+            assert!(resolved.sources().contains(&ConfinementSource::Provider));
+            assert!(!resolved.github_permitted());
             let offline = render(&GrantSet::build(&plan, &profile, home, None)?)?;
             let final_deny = offline.rfind("(deny network*)").expect("offline denial");
             assert!(
@@ -1614,7 +1647,11 @@ fn keychain_ipc_requires_the_selected_typed_mechanism() -> Result<(), Permission
     ] {
         let (mut plan, mut profile) = write_grants_fixture();
         plan.selected_authentication = selected.then(|| "keychain".into());
-        profile.spec.deny_keychain_access = explicit_deny;
+        profile.spec.confinement = if explicit_deny {
+            ResolvedConfinementPolicy::default().without_keychain()
+        } else {
+            ResolvedConfinementPolicy::default()
+        };
         profile.spec.authentication.push(AuthenticationProfile {
             keychain: typed.then_some(KeychainAccess::SecurityServer),
             mechanism: "keychain".into(),
@@ -1625,6 +1662,13 @@ fn keychain_ipc_requires_the_selected_typed_mechanism() -> Result<(), Permission
             in_place_writes: vec![],
         });
         let source = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+        if typed {
+            assert_eq!(
+                source.contains(&format!("(deny file-read* (literal \"{path}\"))")),
+                !permitted,
+                "disabled or unselected typed keychain must retain its file denial"
+            );
+        }
         assert_eq!(
             source.contains("(deny process-exec (literal \"/usr/bin/security\"))"),
             !permitted

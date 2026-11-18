@@ -36,6 +36,15 @@ deleting the file. Never copy it between account directories.
 Register each account with its own CLI login; do not copy refresh tokens.
 Use `provenant quota` to inspect account health and follow its recovery command.
 
+## Codex configuration
+
+Codex writer configuration suppression is selected by
+`providers.codex.clean_config` in host configuration (default false). Set it to
+true to pass `--ignore-user-config`. Read-only execution requires clean
+configuration regardless of that writer preference. The applied route's launch
+diagnostics retain the effective choice and source. Private state and selected
+login isolation still apply; this setting grants no additional file access.
+
 ## Check provider routes
 
 Before and after a release, run `provenant check providers --json` against the

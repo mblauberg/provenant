@@ -130,6 +130,116 @@ fn add_child(
     )?)
 }
 
+// Spec: docs/specs/fabric.md#publication-boundary
+#[test]
+fn graph_output_claim_requires_the_retained_launch_and_origin() -> TestResult {
+    use provenant_fabric_runtime::hosts::{
+        OutputAudience, PeerAction, PeerRequest, ProjectLocator,
+    };
+    use provenant_fabric_runtime::identity::{Address, CrossHostProjectKey};
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::graph_output_claim_requires_the_retained_launch_and_origin",
+    )? {
+        return Ok(());
+    }
+    let (_rig, mut factory) = receiver().map_err(|error| format!("receiver: {error}"))?;
+    let source = provenant_core::HostId::from_bytes([42; 16]);
+    let actor = Address::new(source, "origin")?.actor;
+    let agent = format!("graph-{actor}");
+    factory.context.identity.inbox = Address::new(source, &agent)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let operation = "graph-output-claim".parse()?;
+    let submit = serde_json::from_value(json!({
+        "op":"submit", "operation_id":operation,
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"collect output", "access":"read_only",
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            submit,
+            actor,
+            Default::default(),
+            None,
+            None,
+            budget,
+            &cancel,
+        )
+    })
+    .map_err(|error| format!("submission: {error:?}"))?;
+    let input = OutputInput::Read {
+        extra: Default::default(),
+        target: receipt.targets[0].clone(),
+        part: OutputPart::Result,
+        offset: 0,
+        max_bytes: provenant_records::run::OUTPUT_LIMIT,
+    };
+    let audience = OutputAudience::GraphExecution {
+        launch_actor: actor,
+        launch_operation: operation,
+        origin_work_key: origin_key(),
+    };
+    let request = PeerRequest::new(
+        factory.context.identity.host,
+        source,
+        agent,
+        ProjectLocator {
+            extra: Default::default(),
+            key: CrossHostProjectKey::from_home(Path::new("/fixture"), Path::new("/fixture/repo"))?,
+            common_dir: "repo".into(),
+        },
+        PeerAction::Output {
+            extra: Default::default(),
+            audience: audience.clone(),
+            input: input.clone(),
+        },
+    );
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let validate = |request: &PeerRequest, audience: &OutputAudience, input: &OutputInput| {
+        super::super::peer::validate_graph_output(
+            &factory, &owner, request, audience, input, budget, &cancel,
+        )
+    };
+    validate(&request, &audience, &input).map_err(|error| format!("valid claim: {error:?}"))?;
+    let mut wrong_agent = request.clone();
+    wrong_agent.agent = "other".into();
+    assert!(validate(&wrong_agent, &audience, &input).is_err());
+    let mut wrong_target = input.clone();
+    if let OutputInput::Read { target, .. } = &mut wrong_target {
+        target.host = Some(source);
+    }
+    assert!(validate(&request, &audience, &wrong_target).is_err());
+    for forged in [
+        OutputAudience::GraphExecution {
+            launch_actor: actor,
+            launch_operation: "different-operation".parse()?,
+            origin_work_key: origin_key(),
+        },
+        OutputAudience::GraphExecution {
+            launch_actor: actor,
+            launch_operation: "graph-output-claim".parse()?,
+            origin_work_key: provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([77; 16]),
+                "origin-graph",
+                "other",
+                1,
+            )?,
+        },
+    ] {
+        assert!(validate(&request, &forged, &input).is_err());
+    }
+    Ok(())
+}
+
 #[test]
 fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResult {
     if host_test(

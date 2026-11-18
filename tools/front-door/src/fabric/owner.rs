@@ -807,6 +807,23 @@ pub(crate) fn graph_journal_error(
     error: provenant_fabric_runtime::graph::JournalError,
 ) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
+    let unsupported_version = match error.root_cause() {
+        JournalError::Decode(decode) => match decode.root_cause() {
+            provenant_records::DecodeError::UnsupportedVersion { found, .. } if *found > 1 => {
+                Some(*found)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(version) = unsupported_version {
+        return FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph checkpoint schema".into(),
+            version,
+        };
+    }
     if let JournalError::Graph { ref source, .. } = error {
         return match source.root_cause() {
             JournalError::TooLarge => FacadeError::DispatchRefused {
@@ -818,15 +835,6 @@ pub(crate) fn graph_journal_error(
             JournalError::Filesystem(_)
             | JournalError::Io(_)
             | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
-            JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-                found,
-                ..
-            }) if *found > 1 => FacadeError::UpgradeRequired {
-                reader_release: env!("CARGO_PKG_VERSION").into(),
-                writer_release: "unknown".into(),
-                record: "graph checkpoint schema".into(),
-                version: *found,
-            },
             _ if source.is_unreadable() => FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,
@@ -836,14 +844,6 @@ pub(crate) fn graph_journal_error(
         };
     }
     match error {
-        JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-            found, ..
-        }) if found > 1 => FacadeError::UpgradeRequired {
-            reader_release: env!("CARGO_PKG_VERSION").into(),
-            writer_release: "unknown".into(),
-            record: "graph checkpoint schema".into(),
-            version: found,
-        },
         JournalError::TooLarge => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -3683,6 +3683,33 @@ impl BoundGraphOwner<'_> {
                 } else {
                     (None, None)
                 };
+                let result_warning = result_warning.or_else(|| {
+                    if let Some(delivery) = effective_delivery
+                        && let provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } = &delivery.state
+                    {
+                        Some(reason.clone())
+                    } else {
+                        None
+                    }
+                });
+                let stop = if effective_delivery.as_ref().is_some_and(|delivery| {
+                    matches!(
+                        &delivery.state,
+                        provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } if reason.contains("integration_conflict") || reason.contains("merge conflict")
+                    )
+                }) {
+                    Some(provenant_records::StopCause::Blocked)
+                } else {
+                    stop
+                };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
                 // route fallback for authentication or quota failures.
@@ -4602,6 +4629,21 @@ mod journal_error_tests {
     }
 
     #[test]
+    fn graph_journal_future_context_requires_upgrade() {
+        let source = provenant_records::DecodeError::UnsupportedVersion {
+            found: 2,
+            line: 1,
+            column: 1,
+        }
+        .with_context("/fixture/checkpoint.json", "GraphRecord");
+        let error = provenant_fabric_runtime::graph::JournalError::Decode(source);
+        assert!(matches!(
+            super::graph_journal_error(error),
+            super::FacadeError::UpgradeRequired { version: 2, .. }
+        ));
+    }
+
+    #[test]
     fn unreadable_graph_journal_preserves_the_cause() {
         use super::{FacadeError, graph_journal_error};
         use provenant_fabric_runtime::graph::JournalError;
@@ -4633,18 +4675,20 @@ mod journal_error_tests {
 
 /// Stream the result through the existing authenticated, bounded output API.
 /// The serving host verifies each artifact read; capture remains on the chair.
-/// A peer's handoff is untrusted at this boundary: validate it as any decoded
-/// handoff, then redact it, before a continuation prompt can carry it.
-/// An absent key means no captured handoff; a present key is the peer's sealed
-/// typed outcome, already revalidated by the record decoder. Redact it again
-/// before it reaches the capture.
+/// A peer handoff has already crossed the typed record decoder. Revalidate its
+/// bounds without rewriting authorised execution context.
 fn peer_handoff(
     sealed: Option<&provenant_records::handoff::HandoffResult>,
 ) -> provenant_records::handoff::HandoffResult {
     let Some(sealed) = sealed else {
         return Ok(None);
     };
-    provenant_run::sanitise_handoff_result(sealed.clone())
+    if let Ok(Some(handoff)) = sealed {
+        handoff
+            .validate()
+            .map_err(|reason| provenant_records::handoff::HandoffError::new("$", reason))?;
+    }
+    sealed.clone()
 }
 
 fn remote_graph_result(
@@ -4733,7 +4777,7 @@ mod peer_handoff_tests {
     )]
     use super::*;
     #[test]
-    fn peer_handoff_is_validated_and_redacted_before_it_reaches_the_capture() {
+    fn peer_handoff_is_validated_and_retained_losslessly() {
         let sealed = |note: &str| {
             serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":note,
                 "remaining":[],"decisions":[],"verify":[]}})
@@ -4744,7 +4788,7 @@ mod peer_handoff_tests {
         };
         let clean = peer_handoff(Some(&decode(sealed(&format!("key {token}")))));
         let note = clean.unwrap().unwrap().note;
-        assert!(!note.contains(token));
+        assert_eq!(note, format!("key {token}"));
         // A malformed outcome stays explicit evidence; absence stays absence.
         let error = provenant_records::handoff::HandoffError::new("schema_version", "expected 2");
         assert_eq!(peer_handoff(Some(&Err(error.clone()))), Err(error));

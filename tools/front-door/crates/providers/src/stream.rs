@@ -170,7 +170,7 @@ impl ProviderOutcome {
     }
 }
 pub(crate) type Decoder = fn(&[u8]) -> Result<Vec<ProviderEvent>, ProviderError>;
-const MAX_LINE_BYTES: usize = 1_048_576;
+const MAX_LINE_BYTES: usize = provenant_os::exec::PROVIDER_LINE_LIMIT;
 /// An oversized Codex `command_execution` item (its `aggregated_output` echoes
 /// whatever a command printed) is not evidence; every other oversized line
 /// still fails closed. The item type sits in the first bytes of the frame.
@@ -204,6 +204,10 @@ pub struct StreamState {
     refusal: bool,
     auth_required: bool,
     malformed: bool,
+    line_count: usize,
+    malformed_line: Option<usize>,
+    protocol_error: Option<String>,
+    incomplete_eof_fragment: bool,
     tail_truncated: bool,
     last_assistant_text: Option<String>,
     result_text_seen: bool,
@@ -235,12 +239,20 @@ impl StreamState {
             refusal: false,
             auth_required: false,
             malformed: false,
+            line_count: 0,
+            malformed_line: None,
+            protocol_error: None,
+            incomplete_eof_fragment: false,
             tail_truncated: false,
             last_assistant_text: None,
             result_text_seen: false,
             early_stop: false,
             turn_tool_activity: false,
         }
+    }
+    /// Whether the actual EOF record ended before its JSON value was complete.
+    pub fn incomplete_eof_fragment(&self) -> bool {
+        self.incomplete_eof_fragment
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
         self.expect_session(session);
@@ -271,8 +283,12 @@ impl StreamState {
     pub(crate) fn authentication_required(&self) -> bool {
         self.auth_required
     }
+    fn raw_stream(&self) -> bool {
+        provenant_records::AdapterSpec::get(self.adapter)
+            .is_some_and(|spec| spec.stdout == provenant_records::StreamContract::Raw)
+    }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
-        if self.adapter == "command" {
+        if self.raw_stream() {
             const TAIL_BYTES: usize = provenant_records::COMMAND_OUTPUT_TAIL_BYTES;
             let total = self.pending.len().saturating_add(bytes.len());
             self.tail_truncated |= total > TAIL_BYTES;
@@ -288,11 +304,16 @@ impl StreamState {
             return Ok(Vec::new());
         }
         if self.malformed {
-            return Err(ProviderError::Malformed);
+            return Err(match self.malformed_line {
+                Some(line) => ProviderError::MalformedFrame { line },
+                None => ProviderError::Malformed,
+            });
         }
         let mut events = Vec::new();
         for byte in bytes {
             if *byte == b'\n' {
+                self.line_count += 1;
+                let current_line = self.line_count;
                 if std::mem::take(&mut self.discarding) {
                     continue;
                 }
@@ -305,19 +326,21 @@ impl StreamState {
                     Err(error) => {
                         self.malformed = true;
                         self.retained_events = events;
-                        return Err(if matches!(&error, ProviderError::IncompleteFrame) {
-                            ProviderError::Malformed
-                        } else {
-                            error
-                        });
+                        let error = match error {
+                            ProviderError::IncompleteFrame | ProviderError::Malformed => {
+                                self.malformed_line = Some(current_line);
+                                ProviderError::MalformedFrame { line: current_line }
+                            }
+                            other => other,
+                        };
+                        self.protocol_error = Some(error.to_string());
+                        return Err(error);
                     }
                 }
             } else if self.discarding {
             } else {
                 if self.pending.len() == MAX_LINE_BYTES {
                     if oversize_ignorable(self.adapter, &self.pending) {
-                        // Tool output echoed back by the provider carries no
-                        // identity, answer or completion evidence: drop the line.
                         self.discarding = true;
                         self.pending.clear();
                         continue;
@@ -325,7 +348,11 @@ impl StreamState {
                     self.malformed = true;
                     self.pending.clear();
                     self.retained_events = events;
-                    return Err(ProviderError::Overflow);
+                    let line = self.line_count + 1;
+                    self.malformed_line = Some(line);
+                    let error = ProviderError::MalformedFrame { line };
+                    self.protocol_error = Some(error.to_string());
+                    return Err(error);
                 }
                 self.pending.push(*byte);
             }
@@ -337,7 +364,7 @@ impl StreamState {
         bytes: &[u8],
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
         let mut events = self.observe(bytes)?;
-        if self.adapter == "command" || self.pending.is_empty() {
+        if self.raw_stream() || self.pending.is_empty() {
             return Ok(events);
         }
         let line = std::mem::take(&mut self.pending);
@@ -349,6 +376,16 @@ impl StreamState {
             Err(error) => {
                 self.malformed = true;
                 self.retained_events = events;
+                self.incomplete_eof_fragment = matches!(error, ProviderError::IncompleteFrame);
+                let error = match error {
+                    ProviderError::IncompleteFrame | ProviderError::Malformed => {
+                        let line = self.line_count + 1;
+                        self.malformed_line = Some(line);
+                        ProviderError::MalformedFrame { line }
+                    }
+                    other => other,
+                };
+                self.protocol_error = Some(error.to_string());
                 Err(error)
             }
         }
@@ -476,8 +513,8 @@ impl StreamState {
         exit: ExitObservation,
     ) -> Result<ProviderOutcome, ProviderError> {
         let mut final_events = std::mem::take(&mut self.retained_events);
-        let mut protocol_error = None;
-        if self.adapter == "command" {
+        let mut protocol_error = self.protocol_error.take();
+        if self.raw_stream() {
             let mut text = String::new();
             if self.tail_truncated {
                 text.push_str("[output truncated; retained tail]\n");
@@ -509,7 +546,10 @@ impl StreamState {
             self.terminal = true;
             final_events.push(ProviderEvent::Text(text));
         }
-        let mut framing_loss = self.malformed;
+        // A malformed provider result can carry a useful typed diagnostic
+        // without losing the JSONL boundary. Only line framing failures mean
+        // the retained capture cannot support a terminal decision.
+        let mut framing_loss = self.malformed_line.is_some();
         if !self.pending.is_empty() && !self.malformed {
             let line = std::mem::take(&mut self.pending);
             match self.line(&line) {
@@ -520,7 +560,14 @@ impl StreamState {
                         error,
                         ProviderError::Malformed | ProviderError::IncompleteFrame
                     );
-                    protocol_error = Some(error.to_string());
+                    let diagnostic = if framing_loss {
+                        let line = self.line_count + 1;
+                        self.malformed_line = Some(line);
+                        ProviderError::MalformedFrame { line }.to_string()
+                    } else {
+                        error.to_string()
+                    };
+                    protocol_error = Some(diagnostic);
                 }
             }
         }

@@ -100,12 +100,10 @@ impl Capture<'_> {
                 continue;
             }
             let child_path = current.join(&name);
-            if !child_path.starts_with(self.source)
-                && provenant_confinement::refuses_lane_root(
-                    &child_path,
-                    true,
-                    self.credential_roots,
-                )
+            if self
+                .credential_roots
+                .skill_entry_refusal(&child_path, self.source)
+                .is_some()
             {
                 self.warn(&path, "credential_root");
                 continue;
@@ -159,8 +157,10 @@ impl Capture<'_> {
             self.warn(relative, "changed_during_copy");
             return;
         };
-        if !target.starts_with(self.source)
-            && provenant_confinement::refuses_lane_root(&target, true, self.credential_roots)
+        if self
+            .credential_roots
+            .skill_entry_refusal(&target, self.source)
+            .is_some()
         {
             self.warn(relative, "credential_root");
             return;
@@ -238,9 +238,8 @@ impl Capture<'_> {
     }
 }
 
-/// Capture a selected source; its ordinary entries are allowed even where the
-/// selected skills directory sits beneath an adapter credential directory.
-/// Link targets are checked independently against the credential guard.
+/// Capture ordinary skills beneath an enclosing adapter store. Independently
+/// declared credentials and resolved link targets are always checked.
 pub(crate) fn capture(
     source: &Path,
     destination: &Path,
@@ -262,8 +261,11 @@ pub(crate) fn capture(
             StagedUserSkills::default()
         };
     };
-    if canonical != source
-        && provenant_confinement::refuses_lane_root(&canonical, true, credential_roots)
+    if credential_roots
+        .skill_entry_refusal(&canonical, &canonical)
+        .is_some()
+        || (canonical != source
+            && provenant_confinement::refuses_lane_root(&canonical, true, credential_roots))
     {
         return skipped("credential_root");
     }
@@ -297,6 +299,83 @@ pub(crate) fn capture(
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn nested_declarations_and_their_link_targets_never_enter_skill_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let source = home.join(".gemini/skills");
+        let destination = home.join("staged");
+        std::fs::create_dir_all(source.join("ordinary"))?;
+        std::fs::create_dir_all(source.join("unselected-account"))?;
+        for name in [
+            "ordinary/profile.json",
+            "unselected-account/auth.json",
+            "aliased-secret",
+        ] {
+            std::fs::write(source.join(name), b"secret-sentinel")?;
+        }
+        std::fs::write(source.join("ordinary/SKILL.md"), b"safe")?;
+        symlink(
+            source.join("ordinary/profile.json"),
+            source.join("linked-file"),
+        )?;
+        symlink(
+            source.join("unselected-account"),
+            source.join("linked-store"),
+        )?;
+        symlink(
+            source.join("aliased-secret"),
+            home.join("registered-profile"),
+        )?;
+        symlink(home.join("registered-profile"), source.join("linked-alias"))?;
+        symlink(source.join("ordinary"), source.join("linked-directory"))?;
+        let mut roots = CredentialRoots::for_home(&home);
+        for (path, scope) in [
+            (source.join("ordinary/profile.json"), CredentialScope::Exact),
+            (source.join("unselected-account"), CredentialScope::Subtree),
+            (home.join("registered-profile"), CredentialScope::Exact),
+        ] {
+            roots.add(
+                path,
+                scope,
+                "unselected account declaration",
+                CredentialKind::Store,
+            );
+        }
+        let roots =
+            roots.with_aliases(provenant_confinement::permissions::resolve_boundary_path)?;
+        let staged = capture(&source, &destination, &home, &roots, 4096);
+        for name in ["ordinary/SKILL.md", "linked-directory/SKILL.md"] {
+            assert!(staged.setup().iter().any(|step| matches!(step,
+                SetupStep::WriteFile { path, bytes }
+                    if path == &destination.join(name) && bytes.as_slice() == b"safe")));
+        }
+        for name in [
+            "ordinary/profile.json",
+            "unselected-account",
+            "aliased-secret",
+            "linked-file",
+            "linked-store",
+            "linked-alias",
+            "linked-directory/profile.json",
+        ] {
+            assert!(
+                staged
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.path == Path::new(name)
+                        && warning.reason == "credential_root"),
+                "missing exclusion for {name}"
+            );
+        }
+        assert!(staged.setup().iter().all(|step| !matches!(step,
+            SetupStep::WriteFile { bytes, .. } if bytes.as_slice() != b"safe")));
+        Ok(())
+    }
 
     #[test]
     fn stages_links_without_granting_host_paths_or_credentials()

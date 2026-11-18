@@ -17,6 +17,8 @@ use thiserror::Error;
 pub const DEFAULT_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
 pub const FRAME_LIMIT: usize = 64 * 1024;
+/// Maximum source bytes in a structured provider protocol line.
+pub const PROVIDER_LINE_LIMIT: usize = 1_048_576;
 const DETACHED_RECEIPT_LIMIT: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]

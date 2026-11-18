@@ -40,7 +40,6 @@ pub mod telemetry_args;
 pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-pub use provenant_config::removed::{REMOVED, Removed};
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
@@ -257,48 +256,6 @@ fn parse_with_models(
     }
 }
 
-/// The removed spelling `argv` uses, read from its command words and options.
-fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
-    let model = expanded_model();
-    let mut words = Vec::new();
-    let mut flags = Vec::new();
-    let mut args = argv.iter().skip(1);
-    while let Some(arg) = args.next() {
-        let word = arg.to_str()?;
-        if word == "--" {
-            break;
-        }
-        if let Some(option) = word.strip_prefix("--") {
-            let (name, joined) = option
-                .split_once('=')
-                .map_or((option, false), |(name, _)| (name, true));
-            // Skip the value of a global option, which is never a command word.
-            if !joined
-                && model.get_arguments().any(|arg| {
-                    arg.get_long() == Some(name)
-                        && arg.get_num_args().map_or_else(
-                            || arg.get_action().takes_values(),
-                            |range| range.min_values() > 0,
-                        )
-                })
-            {
-                args.next();
-            }
-            flags.push(name);
-        } else if !word.starts_with('-') {
-            words.push(word);
-        }
-    }
-    REMOVED.iter().find(|removed| {
-        words.len() >= removed.words.len()
-            && words
-                .iter()
-                .zip(removed.words)
-                .all(|(word, path)| word == path)
-            && removed.flag.is_none_or(|flag| flags.contains(&flag))
-    })
-}
-
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
     // Clap normally includes the rejected value. Fence tokens are secrets,
     // including malformed tokens, so redact them before either renderer.
@@ -328,14 +285,6 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
                 }
             }
         }
-    }
-
-    if let Some(removed) = removed_spelling(argv) {
-        return CliError::Invalid {
-            // The message names the replacement, so the error stays one line.
-            message: removed.message(),
-            repair: None,
-        };
     }
 
     if matches!(
@@ -377,15 +326,17 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         .split("\n  [subcommands:")
         .next()
         .unwrap_or(&text)
-        .trim();
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let example = usage_example(argv);
-    let message = message.strip_prefix("error: ").unwrap_or(message);
+    let message = message.strip_prefix("error: ").unwrap_or(&message);
     let mut message = match &example {
         Some(example) => format!("{message}\nexample: {example}"),
         None => message.into(),
     };
     if let Some(suggestion) = suggestion {
-        message.push_str(&format!("\ndid you mean `{suggestion}`?"));
+        message.push_str(&format!(" did you mean `{suggestion}`?"));
     }
     CliError::Invalid {
         message,
@@ -486,7 +437,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
     if retired_pr_land {
         path = "provenant land".into();
     }
-    let lands = matches!(path.as_str(), "provenant land" | "provenant pr land");
+    let lands = matches!(path.as_str(), "provenant land");
     if lands {
         // `--wait` takes its duration only as `--wait=5m`; a spaced one is
         // read as a positional, so name the joined spelling.
@@ -558,7 +509,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
     }
 
     match path.as_str() {
-        "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
+        "provenant land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some("provenant route resolve senior".into()),
         "provenant output" => Some("provenant output fix-login/review".into()),
         "provenant steer" => Some("provenant steer fix-login/implement --brief-file -".into()),
@@ -2159,6 +2110,17 @@ mod tests {
         }
     }
     #[test]
+    fn pr_watch_is_no_longer_a_subcommand() {
+        assert!(
+            matches!(
+                parsed(&["pr", "watch", "1668"]),
+                ParseOutcome::Invalid { .. }
+            ),
+            "`pr watch` parses as a command"
+        );
+    }
+
+    #[test]
     fn ci_observation_commands_accept_batch_and_json_forms() {
         assert!(matches!(
             valid(&["pr", "status", "12", "34", "--json"]).command,
@@ -2203,7 +2165,6 @@ mod tests {
             (vec!["steer"], "target", "provenant steer"),
             (vec!["edit"], "name", "provenant edit"),
             (vec!["route", "resolve"], "route", "provenant route resolve"),
-            (vec!["pr", "watch"], "number", "provenant pr watch"),
             (vec!["config"], "subcommand", "provenant config show"),
             (vec!["accounts"], "subcommand", "provenant accounts list"),
             (vec!["disk"], "subcommand", "provenant disk report"),
@@ -2287,135 +2248,258 @@ mod tests {
         assert_eq!(error.repair(), Some("provenant config show"));
     }
 
-    /// The words that spell `removed`, with a value after a removed flag so
-    /// that a flag which took a value is still refused.
-    fn removed_words(removed: &Removed) -> Vec<String> {
-        let mut words: Vec<String> = removed.words.iter().map(|w| (*w).into()).collect();
-        if let Some(flag) = removed.flag {
-            words.push(format!("--{flag}"));
-            words.push("fix-login".into());
+    #[test]
+    fn unknown_commands_and_flags_use_generic_invalid_invocation_errors() {
+        for (words, field) in [
+            (vec!["stats"], "subcommand"),
+            (vec!["gc", "--idle-days", "2"], "--idle-days"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("expected generic invalid invocation for {words:?}");
+            };
+            let message = error.to_string();
+            let first = message.lines().next().unwrap_or_default();
+            assert!(
+                first.contains(field),
+                "{words:?}: expected the first line to name {field:?}, got {message:?}"
+            );
         }
-        words
+        assert_eq!(
+            crate::exit_status(&provenant_records::Outcome::Invalid),
+            2,
+            "the exit-code table assigns invalid invocations status 2"
+        );
     }
 
+    /// Every `provenant <words...>` written in a user-facing Rust string
+    /// literal must name a live command, so a retired or misspelt name in
+    /// advice, a `next:` value or an error fails CI like
+    /// `scripts/check-retired-names` does for module names.
+    ///
+    /// The extraction is deliberately simple: scan the `.rs` files under
+    /// `tools/front-door/src` and `tools/front-door/crates/*/src` at test time,
+    /// skip `#[cfg(test)]` modules (their strings are assertions, not advice)
+    /// and clap derive attributes, read ordinary double-quoted string literals
+    /// (byte strings are hashes, not advice), and take the words after a
+    /// lowercase `provenant ` while they look like subcommands. A flag, a
+    /// placeholder (`NAME`, `N`, `PATH`), a format brace or a value such as
+    /// `fix-login/review` ends the path. Resolution walks the same clap command
+    /// model the CLI parses with; once a command is a leaf, the remaining words
+    /// are example arguments and are ignored.
     #[test]
-    fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
-        for removed in REMOVED {
-            let words = removed_words(removed);
-            let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
-            else {
-                panic!("{words:?} still parses");
-            };
-            // Invalid input exits 2, and with no repair the error is one line.
-            assert!(matches!(error, CliError::Invalid { .. }), "{words:?}");
-            let text = error.to_string();
-            assert_eq!(text.lines().count(), 1, "{words:?}: {text}");
-            assert!(text.contains(removed.replacement), "{words:?}: {text}");
-            assert_eq!(error.repair(), None, "{words:?}");
-        }
-    }
+    fn advice_in_string_literals_names_live_commands() {
+        use std::path::{Path, PathBuf};
 
-    #[test]
-    fn every_absent_v1_11_1_clap_member_has_a_refusal_row() {
-        fn command_at<'a>(command: &'a clap::Command, path: &[&str]) -> Option<&'a clap::Command> {
-            let (head, tail) = path.split_first()?;
-            let next = command.get_subcommands().find(|child| {
-                child.get_name() == *head || child.get_all_aliases().any(|alias| alias == *head)
-            })?;
-            if tail.is_empty() {
-                Some(next)
-            } else {
-                command_at(next, tail)
-            }
-        }
-        fn retired_command(path: &[&str]) -> bool {
-            REMOVED.iter().any(|removed| {
-                removed.flag.is_none()
-                    && removed.words.len() <= path.len()
-                    && path
-                        .iter()
-                        .zip(removed.words)
-                        .all(|(word, removed)| *word == *removed)
-            })
-        }
-        fn has_option(command: &clap::Command, root: &clap::Command, name: &str) -> bool {
-            command.get_arguments().any(|argument| {
-                argument.get_long() == Some(name)
-                    || argument
-                        .get_all_aliases()
-                        .is_some_and(|aliases| aliases.contains(&name))
-            }) || root.get_arguments().any(|argument| {
-                argument.get_long() == Some(name)
-                    || argument
-                        .get_all_aliases()
-                        .is_some_and(|aliases| aliases.contains(&name))
-            })
+        fn workspace_root() -> PathBuf {
+            // CARGO_MANIFEST_DIR is tools/front-door/crates/cli.
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .expect("cli crate lives under tools/front-door/crates")
+                .to_owned()
         }
 
-        let model = expanded_model();
-        let fixture = include_str!("removed-cli-1.11.1.txt");
-        let mut rows = 0;
-        let mut missing = Vec::new();
-        for line in fixture
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        {
-            rows += 1;
-            let columns: Vec<_> = line.splitn(3, '\t').collect();
-            assert_eq!(columns.len(), 3, "malformed historical clap row: {line}");
-            let path: Vec<_> = if columns[0] == "." {
-                Vec::new()
-            } else {
-                columns[0].split_whitespace().collect()
-            };
-            let current = if path.is_empty() {
-                Some(&model)
-            } else {
-                command_at(&model, &path)
-            };
-            if !path.is_empty() && current.is_none() {
-                // Under an external-subcommand command (provider hook events)
-                // the words are dispatched by declaration, not clap members.
-                let dispatched = (1..path.len()).any(|end| {
-                    command_at(&model, &path[..end])
-                        .is_some_and(clap::Command::is_allow_external_subcommands_set)
-                });
-                if !retired_command(&path) && !dispatched {
-                    missing.push(format!("command {}", path.join(" ")));
+        fn rust_sources(root: &Path) -> Vec<PathBuf> {
+            let mut roots = vec![root.join("src")];
+            if let Ok(crates) = std::fs::read_dir(root.join("crates")) {
+                for entry in crates.flatten() {
+                    let src = entry.path().join("src");
+                    if src.is_dir() {
+                        roots.push(src);
+                    }
                 }
-                continue;
             }
-            let current = current.expect("root command exists");
-            for child in columns[1].split_whitespace() {
-                let mut child_path = path.clone();
-                child_path.push(child);
-                if !current.is_allow_external_subcommands_set()
-                    && !current.get_subcommands().any(|command| {
-                        command.get_name() == child
-                            || command.get_all_aliases().any(|alias| alias == child)
-                    })
-                    && !retired_command(&child_path)
+            let mut files = Vec::new();
+            let mut stack = roots;
+            while let Some(dir) = stack.pop() {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            stack.push(path);
+                        } else if path.extension().is_some_and(|ext| ext == "rs") {
+                            files.push(path);
+                        }
+                    }
+                }
+            }
+            files.sort();
+            files
+        }
+
+        // One-line ordinary double-quoted string literal contents. A `b"`
+        // prefix marks a byte string (a hash or discriminator), not advice.
+        fn string_literals(code: &str) -> Vec<String> {
+            let bytes = code.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] != b'"' {
+                    i += 1;
+                    continue;
+                }
+                let byte_string = i > 0
+                    && bytes[i - 1] == b'b'
+                    && (i < 2 || !bytes[i - 2].is_ascii_alphanumeric());
+                let start = i + 1;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += usize::from(bytes[i] == b'\\') + 1;
+                }
+                if !byte_string && i <= bytes.len() {
+                    out.push(code[start..i].to_owned());
+                }
+                i += 1;
+            }
+            out
+        }
+
+        // The words after each `provenant ` in a literal, while they look like
+        // subcommands: lowercase identifiers. Uppercase placeholders, flags,
+        // braces and value punctuation stop the path. An empty path is prose
+        // such as "provenant OpenCode hook", not a command.
+        fn command_words(literal: &str) -> Vec<Vec<String>> {
+            const NEEDLE: &[u8] = b"provenant ";
+            let bytes = literal.as_bytes();
+            let mut found = Vec::new();
+            let mut pos = 0;
+            while pos + NEEDLE.len() <= bytes.len() {
+                if &bytes[pos..pos + NEEDLE.len()] != NEEDLE
+                    || (pos > 0 && bytes[pos - 1].is_ascii_alphanumeric())
                 {
-                    missing.push(format!("command {}", child_path.join(" ")));
+                    pos += 1;
+                    continue;
+                }
+                let mut cursor = pos + NEEDLE.len();
+                let mut words = Vec::new();
+                loop {
+                    while bytes.get(cursor) == Some(&b' ') {
+                        cursor += 1;
+                    }
+                    let begin = cursor;
+                    while cursor < bytes.len()
+                        && (bytes[cursor].is_ascii_lowercase()
+                            || bytes[cursor].is_ascii_digit()
+                            || bytes[cursor] == b'-'
+                            || bytes[cursor] == b'_')
+                    {
+                        cursor += 1;
+                    }
+                    if cursor == begin || !bytes[begin].is_ascii_lowercase() {
+                        break;
+                    }
+                    words.push(literal[begin..cursor].to_owned());
+                }
+                if !words.is_empty() {
+                    found.push(words);
+                }
+                pos += NEEDLE.len();
+            }
+            found
+        }
+
+        fn resolves(model: &clap::Command, words: &[String]) -> Result<(), String> {
+            let mut current = model;
+            for (index, word) in words.iter().enumerate() {
+                if let Some(child) = current.find_subcommand(word) {
+                    current = child;
+                } else if current.get_subcommands().next().is_none() {
+                    // A leaf command: the rest are example arguments.
+                    return Ok(());
+                } else {
+                    return Err(format!(
+                        "`{word}` is not a subcommand of `provenant {}`",
+                        words[..index].join(" ")
+                    ));
                 }
             }
-            for option in columns[2].split_whitespace() {
-                let name = option
-                    .strip_prefix("--")
-                    .expect("fixture options use long spellings");
-                let exact = REMOVED
-                    .iter()
-                    .any(|removed| removed.flag == Some(name) && removed.words == path);
-                if !has_option(current, &model, name) && !exact && !retired_command(&path) {
-                    missing.push(format!("option {option} at {}", path.join(" ")));
+            Ok(())
+        }
+
+        let root = workspace_root();
+        let model = command_model();
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for file in rust_sources(&root) {
+            let text = std::fs::read_to_string(&file).expect("read workspace Rust source");
+            let relative = file.strip_prefix(&root).unwrap_or(&file);
+            let mut skip_depth: Option<usize> = None;
+            let mut pending_test = false;
+            let mut depth = 0usize;
+            for (line_number, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                // Track braces outside string literals so a `#[cfg(test)]`
+                // module can be skipped without breaking the file's depth.
+                let code = line.split("//").next().unwrap_or(line);
+                let mut mask = String::with_capacity(code.len());
+                let mut in_string = false;
+                let mut escaped = false;
+                for ch in code.chars() {
+                    if in_string {
+                        if escaped {
+                            escaped = false;
+                        } else if ch == '\\' {
+                            escaped = true;
+                        } else if ch == '"' {
+                            in_string = false;
+                        }
+                        mask.push(' ');
+                    } else if ch == '"' {
+                        in_string = true;
+                        mask.push(' ');
+                    } else {
+                        mask.push(ch);
+                    }
+                }
+                let before = depth;
+                for ch in mask.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+                if skip_depth.is_some_and(|target| before <= target && depth < target) {
+                    skip_depth = None;
+                }
+                if skip_depth.is_some() {
+                    continue;
+                }
+                if trimmed.starts_with("#[cfg(test)]") {
+                    pending_test = true;
+                    continue;
+                }
+                if pending_test && trimmed.starts_with("mod ") && trimmed.contains('{') {
+                    skip_depth = Some(depth);
+                    pending_test = false;
+                    continue;
+                }
+                if trimmed.starts_with('#') {
+                    continue; // clap derive attributes declare the tree itself
+                }
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                for literal in string_literals(code) {
+                    for words in command_words(&literal) {
+                        checked += 1;
+                        if let Err(reason) = resolves(&model, &words) {
+                            failures.push(format!(
+                                "{}:{}: `provenant {}`: {reason}",
+                                relative.display(),
+                                line_number + 1,
+                                words.join(" ")
+                            ));
+                        }
+                    }
                 }
             }
         }
-        assert!(rows > 0, "the 1.11.1 clap fixture must not be empty");
+        assert!(checked > 0, "the advice scan found no command strings");
         assert!(
-            missing.is_empty(),
-            "unrefused historical members: {missing:?}"
+            failures.is_empty(),
+            "advice names commands that are not live:\n{}",
+            failures.join("\n")
         );
     }
 
@@ -2652,6 +2736,13 @@ mod tests {
             "--any",
         ]);
         valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        let sha = "a".repeat(40);
+        let Command::Wait(wait) = valid(&["wait", "--pr", "2721", "--head", &sha]).command else {
+            panic!("wait command")
+        };
+        assert_eq!(wait.head.as_deref(), Some(sha.as_str()));
+        invalid(&["wait", "--pr", "2721", "--head", "abc"]);
+        invalid(&["wait", "--pr", "2721", "--head", "zz"]);
         invalid(&["wait", "--all", "--any"]);
         invalid(&["wait", "--any", "--fail-fast"]);
         for timeout in ["1", "4h", "14400"] {

@@ -785,6 +785,17 @@ fn credential_declarations(
                 (*spec.default_account_root_kind).clone(),
             )
         };
+        if spec.credential_profile_sibling {
+            declarations.push(CredentialDeclaration {
+                root: CredentialRoot {
+                    path: path.with_extension("json"),
+                    source: format!("{source} credential file"),
+                    kind: CredentialKind::Store,
+                    scope: CredentialScope::Exact,
+                },
+                inventory: CredentialInventory::Adapter(spec.name.to_owned()),
+            });
+        }
         declarations.push(CredentialDeclaration {
             root: CredentialRoot {
                 path,
@@ -1042,21 +1053,17 @@ pub(super) fn github_auth_permitted(
     plan: &ConfinedPlan,
     profile: &provenant_confinement::permissions::ProviderProfileSpec,
 ) -> bool {
-    if plan.permissions().network != NetworkAccess::Open
-        || profile.deny_credential_access
-        || profile.deny_network
-    {
-        return false;
-    }
-    plan.permissions().policy.as_ref().is_none_or(|policy| {
-        !policy.optional().deny_read.iter().any(|denied| {
-            policy
-                .mandatory()
-                .github()
-                .iter()
-                .any(|root| denied.overlaps(root))
+    let resolved = profile.confinement.resolve_for(plan.permissions());
+    resolved.github_permitted()
+        && plan.permissions().policy.as_ref().is_none_or(|policy| {
+            !resolved.deny_read().iter().any(|denied| {
+                policy
+                    .mandatory()
+                    .github()
+                    .iter()
+                    .any(|root| denied.overlaps(root))
+            })
         })
-    })
 }
 
 /// Home and TMPDIR for the host's Git utility: a fresh private directory under

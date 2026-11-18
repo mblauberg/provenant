@@ -268,10 +268,13 @@ fn rebooted_handoff_with_renumbered_devices_keeps_custody() -> TestResult {
     value["attempt_inode"] = attempt_meta.inode.into();
     std::fs::write(&child_reservation, serde_json::to_vec(&value)?)?;
 
-    assert_eq!(
-        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
-        vec![(id, Reconciled::Finished)]
-    );
+    let reconciled =
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?;
+    assert!(matches!(
+        reconciled.as_slice(),
+        [(attempt, Reconciled::WriterLeaseReleased { locks })]
+            if *attempt == id && locks.iter().any(|lock| lock == &custody.join("writer.lock"))
+    ));
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     assert!(store.writer_fences()?.is_empty());
     assert!(!child_reservation.exists());
@@ -480,8 +483,16 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         .join(scope.attempt.to_string())
         .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let boot = value["boot"].clone();
     let fields = value.as_object_mut().ok_or("reservation")?;
-    fields.insert("launch_state".into(), "never_spawned".into());
+    fields.insert("launch_state".into(), "settling".into());
+    fields.insert(
+        "guardian".into(),
+        serde_json::json!({
+            "boot": boot, "pid": 2147483647, "native_start": 1,
+            "group_id": 2147483647, "session_id": 2147483647,
+        }),
+    );
     fields.insert("unresolved_cleanup".into(), false.into());
     fields.insert("census_incomplete".into(), false.into());
     fields.insert("attempt_device".into(), meta.device.into());
@@ -498,6 +509,31 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         RECORD_LIMIT,
     )?;
     seal_exit(&store, &observed)?;
+    let listing = store.writer_fence_listing()?;
+    assert!(listing.issues.is_empty(), "{listing:?}");
+    assert!(
+        listing
+            .reservations
+            .iter()
+            .any(|fence| fence.scope == scope)
+    );
+
+    // An unrelated unreadable fence must survive without hiding this release.
+    let unrelated = custody
+        .parent()
+        .ok_or("writer registry")?
+        .join("unreadable-slot")
+        .join(AttemptId::from_bytes([99; 16]).to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&unrelated)?;
+    artifacts::seal(
+        &Directory::open_anchor(&unrelated)?,
+        "reservation.json",
+        br#"{"schema_version":1}"#,
+        RECORD_LIMIT,
+    )?;
 
     let fake = Fake {
         observed: Some(route()),
@@ -509,9 +545,17 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
     )?;
-    assert_eq!(found, vec![(id, Reconciled::Finished)]);
+    assert!(
+        matches!(
+            found.as_slice(),
+            [(attempt, Reconciled::WriterLeaseReleased { locks })]
+                if *attempt == id && locks.iter().any(|lock| lock.ends_with("lane/writer.lock"))
+        ),
+        "{found:?}"
+    );
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     assert!(store.writer_fences()?.is_empty());
+    assert!(unrelated.join("reservation.json").exists());
     assert!(
         store
             .reconcile_with_observer(
@@ -780,5 +824,67 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     // The host-observed head of a read-only lane persists; unobserved stays absent.
     assert_eq!(store.record(first, &call)?.head, Some(observed));
     assert_eq!(store.record(second, &call)?.head, None);
+    Ok(())
+}
+
+// Spec: docs/specs/state.md#strict-bounded-records
+#[test]
+fn reconcile_names_an_unparseable_process_exit_record() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let starting = store.mark_starting(
+        &store.record(run.attempt_id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let attempt = store.attempt_dir(run.attempt_id, false)?;
+    let summary = serde_json::json!({
+        "schema_version": 1, "scope": RunStore::scope(&starting),
+        "requester": provenant_core::ActorId::from_bytes([2; 16]),
+    });
+    artifacts::seal(
+        &attempt,
+        "launch.json",
+        &serde_json::to_vec(&summary)?,
+        RECORD_LIMIT,
+    )?;
+    artifacts::seal(
+        &attempt,
+        "process-exit.json",
+        br#"{"schema_version":1}"#,
+        RECORD_LIMIT,
+    )?;
+    let found = store.reconcile_with_observer(
+        run.attempt_id,
+        &Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
+    let [(id, Reconciled::Uncertain { reason })] = found.as_slice() else {
+        return Err(format!("unexpected reconciliation: {found:?}").into());
+    };
+    assert_eq!(*id, run.attempt_id);
+    let detail = reason.to_string();
+    let path = attempt.current_path()?.join("process-exit.json");
+    let display_path = path.to_string_lossy();
+    for fact in [
+        display_path.as_ref(),
+        "StoredExit",
+        "schema version 1",
+        "scope",
+    ] {
+        assert!(detail.contains(fact), "missing {fact}: {detail}");
+    }
+    assert!(!matches!(
+        store.record(run.attempt_id, &call)?.state,
+        AttemptState::Terminal { .. }
+    ));
     Ok(())
 }

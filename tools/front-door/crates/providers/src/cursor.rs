@@ -293,6 +293,9 @@ fn prepare(
         session_state,
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
+                confinement:
+                    provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                        .resolve_for(input.confined.permissions()),
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
                 runtime_reads: [package.clone()]

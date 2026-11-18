@@ -78,10 +78,7 @@ fn event(
 
 fn effect_identifier(kind: &str, value: Option<&str>) -> Option<Value> {
     let value = value?;
-    if value.len() > 512
-        || !value.bytes().all(|byte| byte.is_ascii_graphic())
-        || super::patch::scan_for_secrets(value).is_err()
-    {
+    if value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
         return None;
     }
     Some(serde_json::json!({"effect":kind,"identifier":value}))

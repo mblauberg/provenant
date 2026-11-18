@@ -723,8 +723,8 @@ fn native_lane(
                 grant(git.clone(), PathScope::Exact),
             ],
             allow_process_fork: true,
-            deny_credential_access: true,
-            deny_keychain_access: true,
+            confinement: provenant_confinement::permissions::ResolvedConfinementPolicy::default()
+                .without_credentials(),
             runtime_reads: vec![
                 grant(executable, PathScope::Exact),
                 grant(git, PathScope::Exact),

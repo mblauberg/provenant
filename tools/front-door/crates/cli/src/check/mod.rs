@@ -78,6 +78,8 @@ pub enum CheckError {
     Invalid(&'static str),
     #[error("required check evidence is unreadable or incomplete: {0}")]
     Evidence(&'static str),
+    #[error("required check evidence is unreadable or incomplete: {0}")]
+    EvidencePath(String),
     #[error(transparent)]
     Fs(#[from] FsError),
     #[error(transparent)]

@@ -633,7 +633,7 @@ fn untyped_launch_refusal_persists_reason_without_an_attempt() {
     );
     let reason = node.advance_error.as_deref().unwrap();
     assert!(reason.contains("worktree setup failed: missing dependency"));
-    assert!(!reason.contains(secret));
+    assert!(reason.contains(secret));
     assert!(!reason.contains("receipt"));
     // Re-read the persisted checkpoint as a later status request does.
     let encoded = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();

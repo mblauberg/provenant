@@ -704,6 +704,8 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<GraphRoute>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
     /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
@@ -1915,6 +1917,9 @@ pub struct NodeProgress {
     pub worktree: Option<String>,
     pub id: String,
     pub state: NodeState,
+    /// Reason a queued node is waiting: "cap" or "after".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
     /// State to restore when a cancelled graph is resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled_from: Option<NodeState>,
@@ -2439,6 +2444,8 @@ pub struct InputRequest {
     pub attempt_ref: Option<String>,
     /// Origin identity of the attempt that produced this input.
     pub attempt_key: Option<AttemptKey>,
+    /// Launch actor bound to the selected upstream attempt.
+    pub launch_actor: Option<String>,
     /// Findings from a non-attempt member, such as a CI gate with no result file.
     pub inline_findings: Option<Vec<Finding>>,
     /// Composite qualification to apply to IDs in the source result.

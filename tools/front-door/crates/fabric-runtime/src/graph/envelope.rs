@@ -374,6 +374,7 @@ fn node_bound(
         new_worktree_base: None,
         id: node.id.clone(),
         state: NodeState::Succeeded,
+        wait_reason: None,
         cancelled_from: Some(NodeState::Running),
         skip_reason: Some("graph cancelled".into()),
         advance_error: Some(String::new()),

@@ -182,12 +182,15 @@ impl Providers for Confined {
             .unwrap(),
             cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
-            sandbox: provenant_confinement::run_config::SandboxMode {
-                requested: true,
-                effective: true,
-                source: provenant_confinement::run_config::SandboxSource::Knob,
-                warning: None,
-            },
+            // This fixture tests grant recording and stops at a fake handoff;
+            // it never launches a provider, so native sandbox availability is
+            // outside the invariant under test.
+            sandbox: provenant_confinement::run_config::SandboxMode::required(
+                false,
+                false,
+                provenant_confinement::run_config::SandboxSource::Knob,
+                None,
+            ),
             backend: None,
             cargo_target: Default::default(),
         });
@@ -822,7 +825,7 @@ fn holder_release_temporary_fixture(binding: ReservationBinding) -> TestResult {
 
 /// Recovery drains the reactions a terminal commit owes; tests that check the
 /// rest of recovery finish them first.
-fn finish_reactions(store: &RunStore) -> TestResult {
+pub(super) fn finish_reactions(store: &RunStore) -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     for run in store.open_attempts(100, &call)? {
@@ -831,6 +834,7 @@ fn finish_reactions(store: &RunStore) -> TestResult {
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
+            reaction.observation_done = true;
             Ok(())
         })?;
     }
@@ -1019,6 +1023,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     if worktree_state == WorktreeState::Removed {
         std::fs::remove_dir(&worktree)?;
     }
+    let has_prior_reservation = reservation.exists();
     let system = provenant_supervisor::census::SystemProcessObserver;
     let reboot = RebootObserver(NEW_BOOT);
     let observer: &dyn provenant_supervisor::census::ProcessObserver =
@@ -1054,12 +1059,23 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
             [(attempt, Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { .. } })] if *attempt == id),
             "{reconciled:?}"
         );
+    } else if should_settle && has_prior_reservation {
+        assert!(
+            matches!(
+                reconciled.as_slice(),
+                [(attempt, Reconciled::WriterLeaseReleased { locks })]
+                    if *attempt == id
+                        && locks.iter().any(|lock| lock == &custody.join("writer.lock"))
+            ),
+            "{reconciled:?}"
+        );
+    } else if should_settle {
+        assert_eq!(reconciled, vec![(id, Reconciled::Finished)]);
     } else {
         assert!(reconciled.contains(&(
             id,
             match evidence {
                 ProcessEvidence::CurrentGuardian => Reconciled::Held,
-                ProcessEvidence::PreviousBootTree if should_settle => Reconciled::Finished,
                 _ => Reconciled::Uncertain {
                     reason: UncertainReason::GuardianNotObservable
                 },
@@ -1388,10 +1404,21 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         ));
         store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?;
     } else {
-        assert_eq!(
-            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
-            vec![(id, Reconciled::Finished)]
-        );
+        let had_prior_writer_fence = writer && reservation.exists();
+        let reconciled =
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?;
+        if had_prior_writer_fence {
+            assert!(matches!(
+                reconciled.as_slice(),
+                [(attempt, Reconciled::WriterLeaseReleased { locks })]
+                    if *attempt == id
+                        && locks
+                            .iter()
+                            .any(|lock| lock == &custody.join("writer.lock"))
+            ));
+        } else {
+            assert_eq!(reconciled, vec![(id, Reconciled::Finished)]);
+        }
     }
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     if worktree_state == WorktreeState::Removed {

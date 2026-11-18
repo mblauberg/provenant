@@ -381,7 +381,7 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             .iter()
             .all(|(key, _)| key != "CLAUDE_CODE_OAUTH_TOKEN")
     );
-    assert!(launch.profile.spec.deny_keychain_access);
+    assert!(!launch.profile.spec.confinement.keychain_permitted());
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         (

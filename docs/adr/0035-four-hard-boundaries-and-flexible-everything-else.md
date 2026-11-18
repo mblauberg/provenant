@@ -1,8 +1,8 @@
-# ADR 0035: Four hard boundaries, flexible everything else
+# ADR 0035: Four hard boundaries, flexible execution and publication disclosure
 
 **Status:** Accepted
 
-Changed: 2026-11-15, #3078
+Changed: 2026-11-18, #3422
 
 ## Context
 
@@ -21,8 +21,8 @@ Four boundaries are strict and fail closed:
    held by delivery checks and route trust ([ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md#sandbox-mode)).
 2. **Credentials:** credentials never cross hosts. GitHub access and its
    read-only credential-store exception are governed by [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md#permitted-exceptions).
-3. **Object integrity:** Git objects are digest-checked and fsck-verified on
-   receipt, and results bind base and head.
+3. **Data integrity:** state and objects retain custody and integrity checks; Git
+   objects are digest-checked and fsck-verified, and results bind base and head.
 4. **Authority gates:** landing, publishing, handoff acceptance and chair
    switching need the held authority; knobs for them refuse malformed values
    rather than recovering to permissive defaults.
@@ -45,13 +45,31 @@ Provenant artifact names; anything else left by 1.x is an operator's manual
 release step or a doctor warning. Breaking changes include a clear operator
 step when one is needed.
 
-Provider and launch guards outside the four boundaries warn and continue, or are configurable defaults with a visible source. The policy is declared once and overrides remain visible.
+Automatic non-boundary checks warn or proceed. Explicit owner-configured stops
+are distinct from immutable refusals and name their source. Heuristic scanners
+never stop briefs or graph patches, or silently rewrite execution instructions;
+warnings identify the field and rule without matched values. Malformed input,
+missing capabilities and invalid state remain operation errors.
+
+Local execution data, provider histories and graph text remain lossless in
+host-owned private state. File modes are defence in depth, not isolation from
+same-user processes; lanes receive only authorised state. Publication projections
+protect known credential values and typed secret fields at their destination,
+without mutating unrelated task text. Authenticated execution transport across
+hosts is projected just like exported diagnostics and artefacts. Same-host
+execution remains raw. Raw and exported representations have
+separate accurate lengths and digests. Projection failure withholds the affected
+publication without changing the local execution outcome.
+
+Install publication coverage before removing local redaction. Provider and host
+restrictions are explicit, sourced and configurable; ordinary filesystem, tools
+and network access remain open by default.
 
 ## Consequences
 
 Hard holds require a real boundary in one of the four classes. Reviews treat
-a lane or launch refusal outside them, or any guard that blocks ordinary work,
-as a defect to loosen, not a safety gain. See
+an automatic lane or launch safety refusal outside them as a defect to loosen.
+A deliberately configured stop is a preference, not a safety boundary. See
 [Build for change](../specs/rust-workspace.md#build-for-change-refuse-what-can-lose-data) and the
 [supervisor spec](../specs/supervisor.md).
 

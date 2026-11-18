@@ -89,10 +89,19 @@ fn settled_loop_dependency_does_not_inherit_entry_inputs() {
                   "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
              ]}}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
-    let first = expanded.nodes.iter().find(|node| node.id == "cycle--r1--first").unwrap();
-    let second = expanded.nodes.iter().find(|node| node.id == "cycle--r1--second").unwrap();
+    let first = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "cycle--r1--first")
+        .unwrap();
+    let second = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "cycle--r1--second")
+        .unwrap();
     assert!(first.inputs.iter().any(|input| input.node == "prior"));
     assert_eq!(second.after_settled, ["cycle--r1--first"]);
     assert!(second.inputs.iter().all(|input| input.node != "prior"));
@@ -2523,9 +2532,12 @@ fn repair_growth_resolves_and_runs_a_fresh_panel() {
         }
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        let synthesis = run.checkpoint.nodes.iter().find(|node| {
-            node.id.ends_with("--panel--selected--synthesis")
-        }).unwrap();
+        let synthesis = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id.ends_with("--panel--selected--synthesis"))
+            .unwrap();
         assert_eq!(synthesis.state, NodeState::Succeeded, "{synthesis:?}");
         assert_eq!(owner.repair_panel_calls, 1);
         assert_eq!(owner.repair_growth_calls, 1);
@@ -2756,6 +2768,7 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             exports: vec![],
         },
     ));
@@ -2813,6 +2826,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             exports: vec![],
         },
     )];
@@ -3093,7 +3107,7 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
             &patch::PatchContext {
                 library: &library,
                 resolvers: &resolvers,
-                scan: &patch::scan_for_secrets,
+
                 journal: None,
                 limits: &Default::default(),
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

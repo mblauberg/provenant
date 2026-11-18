@@ -13,6 +13,18 @@ writer branch publication, the terminal record is committed before custody relea
 import refusal retains private Git for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
+The guardian transfers its existing writer exclusion to recovery; import and
+cleanup reuse that guard for the same scope and directory instead of opening a
+second description. Failed steps before import share a durable three-failure
+budget. A resumed worker honours `retry_after_ms` before its first pass and
+paces every subsequent pending pass even if that deadline has expired. Exhausted
+retries retain their cause and stop automatic recovery; status reports settlement
+blocked and calls for explicit reconciliation. A retry deadline overdue by three
+minutes is flagged as stalled in the existing status reason, including failures
+before a driver is claimed.
+- Why: a retained writer must not contend with itself or spend CPU retrying an
+  unchanged failure indefinitely.
+
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`
@@ -136,7 +148,8 @@ There is no reader for the previous snapshot shape. A malformed final handoff
 never falls back to stale progress, including on interruption. Only an absent
 final declaration on an interrupted attempt can use its granted progress file;
 a malformed or unreadable progress file is also explicit evidence. Diagnostics,
-retained fields and forward fields are redacted before persistence or disclosure.
+retained fields and forward fields remain lossless in local persistence; disclosure
+uses a destination projection.
 
 One settlement classification derives the terminal outcome, sealed stop and graph outcome from terminal evidence, reason and handoff.
 A missing required writer handoff seals `handoff_missing` and goes to the chair; graph dependants cannot treat it as success.
@@ -201,13 +214,13 @@ and model identity checks.
 
 Host-local stdout and stderr captures retain raw provider bytes for replay.
 Filtering JSONL before retention can destroy framing and hide the final answer.
-Known credential shapes are filtered from decoded results before sealing and
-from artifact text before disclosure; local capture paths are private evidence,
-not safe publication artifacts. A result redaction failure
-withholds the result; a session redaction failure retains it. Either prevents
-delivery. Result-only orphan recovery preserves its sealed bytes and reports
-when it cannot establish redaction.
-- Why: a failed filter must not silently publish credentials.
+Local results and provider continuation state are retained without shape-based
+rewriting. External publication masks known credentials and typed secret fields;
+a projection failure withholds publication without changing the local execution
+outcome. Raw and exported metadata each bind the bytes they describe; local
+capture paths are private evidence, not safe publication artifacts. A publication
+failure withholds delivery while preserving local sealed bytes.
+- Why: publication must not disclose credentials or corrupt local evidence.
 
 Reconciliation never replays an uncertain launch. Cleanup does not delete under
 a reservation or follow links, and preserves lock identity.

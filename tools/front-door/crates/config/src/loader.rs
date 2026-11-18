@@ -628,6 +628,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     for key in [
         "gc.schedule",
         "gc.idle",
+        "gc.stale_graph_age",
         "gc.graph_checkpoint_days",
         "gc.discard_archive_days",
         "gc.free_floor",
@@ -681,6 +682,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "update_timeout_seconds",
             "runtime_deadline_seconds",
             "models",
+            "clean_config",
             "out_of_scope_pin",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());

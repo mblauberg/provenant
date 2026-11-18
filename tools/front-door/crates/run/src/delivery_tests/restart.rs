@@ -587,7 +587,11 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
     )?;
-    assert_eq!(found, vec![(id, Reconciled::Finished)]);
+    assert!(matches!(
+        found.as_slice(),
+        [(attempt, Reconciled::WriterLeaseReleased { locks })]
+            if *attempt == id && locks.iter().any(|lock| lock.ends_with("writer.lock"))
+    ));
     let refusal =
         crate::holder::object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
     assert!(matches!(
@@ -852,12 +856,15 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     .unwrap(),
                 cargo_target_seed: false,
                 state_root: self.state.clone(),
-                sandbox: provenant_confinement::run_config::SandboxMode {
-                    requested: true,
-                    effective: true,
-                    source: provenant_confinement::run_config::SandboxSource::Knob,
-                    warning: None,
-                },
+                // The test's fake handoff never starts a provider. Keep the
+                // writer revalidation path independent of native backend
+                // availability on hosts without macOS sandbox support.
+                sandbox: provenant_confinement::run_config::SandboxMode::required(
+                    false,
+                    false,
+                    provenant_confinement::run_config::SandboxSource::Knob,
+                    None,
+                ),
                 backend: None,
                 cargo_target: Default::default(),
             });

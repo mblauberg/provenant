@@ -587,7 +587,7 @@ fn retry_context<'a>(
     patch::PatchContext {
         library,
         resolvers,
-        scan: &patch::scan_for_secrets,
+
         journal: None,
         limits,
 

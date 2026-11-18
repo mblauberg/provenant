@@ -25,14 +25,14 @@ impl Strength {
 
     pub const fn behaviour(self) -> &'static str {
         match self {
-            Self::Refuse => "refuse the violated predicate",
+            Self::Refuse => "block the violated predicate",
             Self::Warn => "warn and proceed",
             Self::Off => "proceed without a policy warning",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     CompiledDefault,
@@ -50,8 +50,8 @@ pub struct Rule {
     pub justification: String,
     pub site: String,
     pub threshold: Option<String>,
-    /// A non-boundary rule may offer a strict, user-selected refusal only
-    /// when its consumer has a meaningful refusal path.
+    /// A non-boundary rule may offer a strict, user-selected stop only
+    /// when its consumer has a meaningful stop path.
     #[serde(default)]
     pub refusable: bool,
 }
@@ -60,7 +60,13 @@ impl Rule {
         match (self.boundary, strength) {
             (Boundary::None, Strength::Refuse) => self.refusable,
             (Boundary::None, Strength::Warn | Strength::Off) => true,
-            (_, Strength::Refuse) => true,
+            (
+                Boundary::Credentials
+                | Boundary::GitIsolation
+                | Boundary::DataIntegrity
+                | Boundary::Authority,
+                Strength::Refuse,
+            ) => true,
             _ => false,
         }
     }
@@ -74,7 +80,7 @@ impl Rule {
             .collect::<Vec<_>>()
             .join("; ");
         format!(
-            "Policy {} (default={}, source=compiled default; override={}): {}.",
+            "Policy {} (default={}, source=compiled default; override={}): {}. For a non-boundary rule, refuse means a configured stop; boundary refusal is immutable.",
             self.code,
             strength_name(self.strength),
             self.knob.as_deref().unwrap_or("none; immutable boundary"),
@@ -102,6 +108,14 @@ pub struct Policy {
     pub rules: Vec<EffectiveRule>,
 }
 
+/// A heuristic finding identifies its field and rule without retaining matched values.
+/// Scanners report findings; they do not select policy effects or stop execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScannerFinding {
+    pub field: String,
+    pub rule: String,
+}
+
 /// A caller supplies a failed predicate and its observed facts, never a decision.
 pub struct Facts {
     pub violated: bool,
@@ -121,16 +135,17 @@ pub enum Effect {
     Proceed,
     Warn(String),
     Refuse(Box<crate::diagnostic::Diagnostic>),
+    Stop(Box<crate::diagnostic::Diagnostic>),
 }
 impl Effect {
     pub fn blocks(&self) -> bool {
-        matches!(self, Self::Refuse(_))
+        matches!(self, Self::Refuse(_) | Self::Stop(_))
     }
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::Proceed => None,
             Self::Warn(message) => Some(message),
-            Self::Refuse(diag) => diag.detail.as_deref(),
+            Self::Refuse(diag) | Self::Stop(diag) => diag.detail.as_deref(),
         }
     }
 }
@@ -178,6 +193,9 @@ impl Policy {
                 );
                 continue;
             };
+            if source < effective.source {
+                continue;
+            }
             if effective.rule.knob.is_none() {
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -233,6 +251,9 @@ impl Policy {
         match rule.strength {
             Strength::Off => Effect::Proceed,
             Strength::Warn => Effect::Warn(message),
+            Strength::Refuse if rule.boundary == Boundary::None => Effect::Stop(Box::new(
+                crate::diagnostic::Diagnostic::new(code).detail(message),
+            )),
             Strength::Refuse => Effect::Refuse(Box::new(
                 crate::diagnostic::Diagnostic::new(code).detail(message),
             )),
@@ -240,7 +261,7 @@ impl Policy {
     }
     /// Shared path for a non-boundary rule: a violated predicate warns on
     /// stderr, naming the rule, setting source and knob, then proceeds; under
-    /// strict mode the caller's refusal is returned. Boundary rules use
+    /// strict mode the caller's configured stop is returned. Boundary rules use
     /// `boundary_error`, never this.
     #[allow(clippy::print_stderr, clippy::panic)]
     pub fn warn_or<E>(
@@ -260,7 +281,8 @@ impl Policy {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
                 Ok(())
             }
-            Effect::Refuse(diagnostic) => Err(refuse(*diagnostic)),
+            Effect::Stop(diagnostic) => Err(refuse(*diagnostic)),
+            Effect::Refuse(_) => panic!("non-boundary policy cannot refuse"),
         }
     }
     /// Keep an existing domain error while routing its immutable safety
@@ -278,7 +300,7 @@ impl Policy {
         );
         match self.check(code, facts) {
             Effect::Refuse(_) => typed_error,
-            Effect::Proceed | Effect::Warn(_) => {
+            Effect::Proceed | Effect::Warn(_) | Effect::Stop(_) => {
                 panic!("violated boundary policy did not refuse")
             }
         }
@@ -289,10 +311,16 @@ impl Policy {
             .iter()
             .map(|value| {
                 format!(
-                    "{} boundary={:?} strength={:?} source={:?} knob={} supported={}\n",
+                    "{} boundary={:?} strength={:?} effect={} source={:?} knob={} supported={}\n",
                     value.rule.code,
                     value.rule.boundary,
                     value.rule.strength,
+                    match (value.rule.boundary, value.rule.strength) {
+                        (_, Strength::Off) => "proceed",
+                        (_, Strength::Warn) => "warn",
+                        (Boundary::None, Strength::Refuse) => "configured_stop",
+                        (_, Strength::Refuse) => "boundary_refusal",
+                    },
                     value.source,
                     value.rule.knob.as_deref().unwrap_or("none"),
                     value
@@ -426,7 +454,13 @@ mod tests {
             assert_eq!(policy.rule("WRITE_SCOPE").source, source);
             assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, strength);
         }
-        let Effect::Refuse(diagnostic) =
+        policy.overlay(
+            &BTreeMap::from([("WRITE_SCOPE".into(), Strength::Off)]),
+            Source::Host,
+        );
+        assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Dispatch);
+        assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
+        let Effect::Stop(diagnostic) =
             policy.check("WRITE_SCOPE", Facts::violation("outside scope"))
         else {
             panic!("strict policy must refuse")

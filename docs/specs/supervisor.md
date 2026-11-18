@@ -189,6 +189,18 @@ fabricated terminal event.
 
 Lane profiles start open and deny the boundaries
 ([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)).
+`ResolvedConfinementPolicy` composes the host's optional restrictions, the lane's
+network selection and the provider's authentication and offline preferences.
+Admission and rendering consume this same resolution and retain restriction
+sources. An absent optional setting leaves ordinary files, tools, local
+services and network access open. Capacity settings warn by default; a sourced
+configured stop remains distinct from a mandatory boundary refusal.
+
+Every credential declaration is enforced independently. An exception for an
+enclosing runtime, package or selected authentication root cannot open a nested
+declared store. Selected authentication and its exact aliases retain only their
+declared access. Link operations remain subject to credential, state, source
+and Git boundaries without a blanket denial of ordinary hard links.
 
 ### Plans refuse unsafe roots
 
@@ -265,9 +277,20 @@ standalone Codex release package read exception belongs only to the built-in
 default Codex home; dedicated relocated and registered stores retain whole-store
 protection. Shared stores use the validated carve-out rule above. The exception confers no writes and never exempts another
 overlapping credential denial.
+
 Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
+
+Skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
+resolved link target. The selected skills directory may sit beneath an enclosing
+provider store; that permits ordinary skills only within the selected source.
+Every independently declared nested store and exact endpoint remains excluded,
+including declarations for unselected accounts and their resolved aliases.
+Directories containing declared endpoints may supply ordinary siblings, but
+neither the endpoints nor links to them may enter staged setup bytes. Selecting
+a declared store itself does not exempt it. Provider-declared sibling profile
+files retain exact scope for registered and default account directories.
 
 A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
@@ -280,9 +303,15 @@ directories and private worktree Git directories keep their hard hold.
 `run --explain` and launch preparation use one source admission decision and
 report its refusal code and reason or sourced warnings.
 
-Unsupported confinement fails `ConfinementUnavailable` and never widens
-access. An optional root that resolves into a declared credential root is
-omitted with a warning.
+Unsupported confinement fails honestly and never widens a selected profile's
+access. The mere presence of an inherited OS sandbox does not prove equivalent
+credential, Git or read-only protection. A trusted route selected by the host's
+default or an explicit off setting can retain an existing OS sandbox without a
+new profile when neither explicit restrictions nor an active parent floor
+require one; its receipt reports inherited enforcement.
+Failure to enforce a selected profile cannot choose that route implicitly.
+An optional root that resolves into a declared
+credential root is omitted with a warning.
 
 Registered Git projects' declared worktree allocation roots remain protected
 from extra host write grants, including before those roots exist. Resolve the
@@ -290,7 +319,7 @@ project port table from the verified primary checkout in Git's worktree
 inventory; the common Git directory's parent does not establish that owner.
 - Why: one broad grant silently voids the boundary.
 - Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
-  `crates/cli/src/run/provider/confinement.rs`
+  `crates/cli/src/run/provider/confinement.rs`, `crates/providers/src/skill_stage.rs`
 
 ### Shared Git metadata is read-only
 
@@ -340,9 +369,11 @@ build output and tool configuration use private lane caches.
 
 ### Network, IPC and process information
 
-No lane reaches the peer agent's socket. Lanes may read process information
-but never another process's arguments, and signals stay inside the lane's own
-sandbox. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
+No lane reaches the peer agent's socket. Ordinary system and process metadata
+queries remain open. Arguments, task information and memory from outside the
+lane's sandbox stay private; the cross-process pidinfo guard is required to
+enforce the argument boundary. Same-sandbox process queries and signals remain
+available. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
 separate OS user or VM.
 - Why: the peer agent relays to unconfined children, and Seatbelt can enforce
   no more.
@@ -364,6 +395,11 @@ available from `provenant config show --full`.
 
 ### Disclosure and safe Git evidence
 
+Disclosure is selected by destination, not transport. Authorised execution
+context remains lossless; external publication projects known credential values
+and typed secret fields, and withholds publication if projection fails. Raw and
+exported bytes have separate lengths and digests.
+
 A prompt snapshot with a known secret is refused before sealing. Host-local
 provider captures preserve raw bytes for settlement replay; decoded results and
 artifact text are redacted at publication and disclosure boundaries. Quoted credential values
@@ -374,12 +410,18 @@ any cap. Without a definite close, masking continues through the end of the raw 
 after a definite close or the line end. An assignment value that is exactly
 `[REDACTED]` stays unchanged across chunks and rescans; further value bytes are
 masked. Marker recognition never changes the input to token scanning.
+
+Provider stdout and stderr are retained losslessly within bounded, host-owned
+private capture. Provider JSONL frames are decoded without rewriting their bytes;
+malformed retained frames remain evidence defects. Capture and local settlement
+do not modify provider continuation state.
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and
 refuses credential-bearing URLs.
 - Why: repository content and lane output are attacker-controlled input to the host.
-- Owner: `crates/redact/src/lib.rs`, `crates/confinement/src/utility.rs`
+- Owner: `crates/redact/src/lib.rs`, `crates/confinement/src/publication.rs`, `crates/confinement/src/utility.rs`
 
 ## Worktrees
 

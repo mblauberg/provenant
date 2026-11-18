@@ -527,8 +527,16 @@ const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 
+/// Framing declared by the adapter for provider stream decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamContract {
+    ProviderJsonl,
+    Raw,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
+    pub stdout: StreamContract,
     pub id: Harness,
     pub name: &'static str,
     /// Format of a supported CLI model listing.
@@ -824,6 +832,7 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
 adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: None,
         family: "anthropic",
         binary: "claude",
@@ -926,6 +935,7 @@ adapter_specs! { $;
     },
     Codex [] (codex: 0) {
         name: "codex",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CodexJson),
         family: "openai",
         binary: "codex",
@@ -1035,6 +1045,7 @@ adapter_specs! { $;
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::CursorText),
         family: "cursor",
         binary: "cursor-agent",
@@ -1149,6 +1160,7 @@ adapter_specs! { $;
     },
     Agy [] (agy: 3) {
         name: "agy",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::AgyText),
         family: "google",
         binary: "agy",
@@ -1264,6 +1276,7 @@ adapter_specs! { $;
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: Some(ModelListingFormat::OpencodeText),
         family: "opencode",
         binary: "opencode",
@@ -1377,6 +1390,7 @@ adapter_specs! { $;
     },
     Command [] (command: 5) {
         name: "command",
+        stdout: StreamContract::Raw,
         model_listing: None,
         family: "command",
         binary: "",
@@ -1462,6 +1476,7 @@ adapter_specs! { $;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: None,
         family: "host-native",
         binary: "",
@@ -1546,6 +1561,7 @@ adapter_specs! { $;
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
+        stdout: StreamContract::ProviderJsonl,
         model_listing: None,
         family: "fixture",
         binary: "fixture-provider",

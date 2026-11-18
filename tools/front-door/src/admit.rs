@@ -263,7 +263,8 @@ fn check_disk_and_trim(
                 provenant_records::policy::Effect::Warn(message) => {
                     say(&format!("warning: {message}; proceeding"));
                 }
-                provenant_records::policy::Effect::Refuse(diagnostic) => {
+                provenant_records::policy::Effect::Refuse(diagnostic)
+                | provenant_records::policy::Effect::Stop(diagnostic) => {
                     return Err(format!(
                         "{}; refusing to start command",
                         diagnostic.detail.unwrap_or_default()

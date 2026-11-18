@@ -89,7 +89,7 @@ pub fn handoff_brief(brief: &str, record: &LaunchRecord) -> String {
     };
     format!(
         "{}\n\n## Hand-off\n\nStart from commit `{}` on `{}`. {push} End the last commit message with the line `{}`. Never put credentials in commits or output.\n",
-        brief.trim_end(),
+        brief,
         record.head,
         record.base,
         trailer(&record.nonce),
@@ -366,7 +366,9 @@ mod tests {
             branch: None,
             base: None,
         };
-        let prompt = handoff_brief("Fix it.\n", &record);
+        let brief = "  to make a test pass: fix the code\npassword=fixture-token\n \n";
+        let prompt = handoff_brief(brief, &record);
+        assert!(prompt.starts_with(brief));
         assert!(prompt.contains(&trailer("abc")) && prompt.contains(&record.head));
         let (argv, stdin) = launch_argv(&launch, &record, &prompt).unwrap();
         assert_eq!(

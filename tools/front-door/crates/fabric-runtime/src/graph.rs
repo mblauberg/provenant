@@ -859,6 +859,8 @@ struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     composite: Option<CompositeSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_parallel: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distinct_from: Option<DistinctFrom>,
@@ -1487,7 +1489,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &patch::PatchContext {
                         library: &library,
                         resolvers: &resolvers,
-                        scan: &patch::scan_for_secrets,
                         journal: None,
                         limits,
                         worktree_layout: worktree_layout.clone(),
@@ -2124,7 +2125,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let context = patch::PatchContext {
                                         library: &library,
                                         resolvers: &resolvers,
-                                        scan: &patch::scan_for_secrets,
                                         journal: None,
                                         limits,
                                         worktree_layout: worktree_layout.clone(),

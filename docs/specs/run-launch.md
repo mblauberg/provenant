@@ -11,7 +11,7 @@ Admission commits the reservation and attempt together. A verified worktree has
 at most one writer; resource probes do not hold the shared registry lock or run
 inside the transaction. Busy capacity is not a queue. Direct-run custody uses
 the same captured project and actor identity as the run store. Uncertain custody
-keeps its ownership until release is proved.
+keeps its ownership until release is proved. Writer-bind refusals identify the durable lease holder, branch, worktree, reservation age and observed liveness. Reservation age is measured from its last durable update. Reconciliation reports released custody only after exclusion and native absence evidence prove it safe; an unknown or live holder retains custody. Stable lock inodes remain in place so concurrent observers cannot split exclusion.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
 Before entering handoff or spawning a guardian, the launcher durably prepares
@@ -62,12 +62,11 @@ so a writer edits another file when the fix needs it and lists it in its
 handoff; only a strict `WRITE_SCOPE` policy refuses it.
 - Why: advisory checks must not become accidental authority boundaries.
 
-Every non-boundary rule lives in `crates/run/assets/policy.toml`, defaults to
-`warn` and is `refusable`, so a project can opt into strict mode. Its knob
-`policy.<CODE>` is documented under `policy_rules` in
-`config/harness-knobs.json`. A consumer calls `Policy::warn_or`, which warns on
-stderr naming the rule, the setting source and the knob, or returns the
-caller's refusal under strict mode. Boundary rules keep using `boundary_error`.
+Policy rows live in `crates/run/assets/policy.toml`. Non-boundary rules default
+to warning or off; a rule with a meaningful stop path may offer an explicit
+`refuse` setting, which produces a configured stop. `Policy::warn_or` reports the source and knob, while immutable
+boundary refusals use `boundary_error`. Heuristic scanners cannot offer a stop.
+The `policy.<CODE>` knobs are documented in `config/harness-knobs.json`.
 
 Every provider lane has its native tool and shell surface. Read-only mode
 constrains filesystem writes; it does not remove shell, editing or web tools

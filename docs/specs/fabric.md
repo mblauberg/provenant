@@ -182,9 +182,24 @@ the writer consumes. `domains.fabric.implement.plan` sets the default and
 input, write scope or explicit plan parameter emits the advisory
 `unbounded_brief_junior_writer` warning. Set
 `domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+
+`batch` expands over `items`, accepting either bare strings or structured item tables
+`{ id, brief | brief_file, route | model, write_scope, after, with }`. Mutual exclusion
+is enforced between `brief` and `brief_file`, and between `route` and `model`. Slices
+support ordering via `after`, which names prerequisite item IDs; unknown IDs and dependency
+cycles are refused at compile time with offending IDs named. Slices run under a concurrency
+cap specified by `max_parallel` (default from config `domains.fabric.batch.max_parallel`,
+reported with its source in `--explain`, and overridable per run via `--set max_parallel=N`).
+The host provisions a distinct managed worktree for each slice. A dependent slice
+starts from the current integration head after its prerequisites integrate; an
+independent slice starts from the graph's pinned integration base.
+Queued slices appear as `waiting` in status with reason `cap` or `after`. As each slice settles,
+it integrates into `integration_branch`; a merge conflict pauses only the conflicting slice
+(`blocked` with conflicting files reported) and leaves remaining slices running.
 - Why: single writers start without an implicit planning stage; callers choose
-  when planning adds value.
-- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+  when planning adds value. Batch tasks require flexible per-slice briefs, routing,
+  dependency ordering, bounded concurrency, and isolated merge conflict handling.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/transitions.rs`, `crates/run/src/delivery.rs`
 
 ### Composite settlement
 
@@ -255,7 +270,10 @@ delimiter-complete frames, unreadable output, or drain-truncated live output
 also seal incomplete identity evidence. By default settlement warns with the
 policy source and uses the observed exit and result; `policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE`
 can suppress the warning or refuse settlement and continuation. An observed
-identity conflict remains fatal at every setting. The guardian
+identity conflict remains fatal at every setting. Undecodable protocol frames, including
+final fragments, report a one-based line-numbered `MalformedFrame` evidence
+defect during replay. Settlement leaves that result
+unsettled instead of admitting a same-session continuation. The guardian
 immediately routes a live identity conflict through its existing protocol
 rejection stop path while preserving the separate conflict evidence for
 settlement. It separately records an incomplete JSON record in the final bytes
@@ -410,6 +428,36 @@ Oversized findings use content-addressed graph text while the checkpoint retains
 
 - Why: dependants need evidence without copying or trusting transcripts.
 
+### Publication boundary
+
+Local execution, graph inputs and retained state are intended to remain raw and
+lossless under their existing custody and integrity controls. Disclosure masking
+belongs at an external publication destination, including graph and peer
+exports, forge content and fixture exports. `publication::Projector` protects
+known exact credential values and typed secret fields. Exact-value matching
+uses typed-field and ambient credentials of at least eight bytes; prose
+assignments mask only their own value spans. Its projection binds the
+raw and published byte lengths and digests separately. A projection error withholds
+the affected publication and never substitutes raw bytes.
+
+`PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
+not authorisation: the receiver must bind the authenticated actor, retained
+launch receipt, origin work key and requested attempt before allowing graph
+transport. The sender derives the claim from the retained upstream attempt and
+the receiver checks its actor namespace, launch receipt, origin and target.
+All cross-host payloads, including authenticated execution submissions and
+results, pass through `CrossHostTransport`; authentication never exempts
+disclosure. Same-host execution stays raw. Encoded hand-off attachments are
+decoded and projected as text, or withheld when they cannot be inspected. Peer
+output projects the complete verified text before paging, with published lengths
+and digests. Cross-host projection selects declared free-text fields (prompts,
+decoded attachments, output text and messages), preserving envelope keys, tags,
+identifiers and metadata. A projected stop handoff retains its sealed cause and
+passes the existing stop validation; the retained stop stays raw. Already projected
+output pages pass through response encoding untouched, including pages split
+inside a mask or a word. Binary output, over-bound projections
+and event pages that cannot be fully projected are withheld on projection failure.
+
 ### Checkpoint before launch
 
 Transitions are pure reducers; the scheduler saves the checkpoint under a stable
@@ -420,35 +468,15 @@ checkpoint missing launch evidence or its actor is refused.
 ### Checkpoint envelope
 
 Admission bounds the worst-case checkpoint before saving the plan.
-Graph text is normalised exactly once, at ingress, by schema path.
-`prompt_text::Context` enumerates identity positions (finding IDs, files and
-propagation markers, repair item IDs, node references, routes, template names
-and sources). Identity fields and all object keys are scanned across the whole
-new structured capture, including fields omitted by typed projections. A
-credential-shaped identity or key refuses that capture as invalid output; it is
-never rewritten. Only declared scalar identity fields retain their bytes: a route
-or source object does not exempt its extension values. Every other string is
-content, including flattened extension maps and template or parameter
-documentation. Content descendants cannot re-enter a schema context through
-identity-like keys. Live patches, retry briefs and CI observations use this
-representation before planning or hashing. A steer normalises only its new
-brief and replacement routes, preserving the rest of its stored node.
-Captured findings are parsed and normalised before merging stored upstream
-evidence; the remaining fresh capture projection (including handoff fields and
-repair item extensions) is normalised once before becoming graph outputs.
-Raw transient captures remain available to parse new patches at their own
-ingress, and never become persisted graph text. Captured fragments are parsed,
-normalised and scanned before storage; retries parse stored fragments without
-normalising them again. Template substitutions are scanned after interpolation,
-and each new admission's compiled expansion is scanned before commit, since
-separately safe fragments can assemble a credential. Scanning preserves original
-bytes and token boundaries, including beside redaction markers. Only an assignment
-value that is exactly a redaction marker is already redacted; a marker prefix
-never exempts further value bytes. This never rewrites stored
-nodes or prior expansions. Typed handoffs are normalised at capture before any
-consumer retains them. Checkpoints persist
-the normalised form. Compaction retains parsed, normalised findings as typed
-values in content-addressed storage. Resume never fills templates or rewrites a
+Graph text, identity fields and object keys retain their exact bytes in local
+state and execution context. Heuristic content inspection warns with the field
+and rule, without revealing matched values or refusing admission. Captured
+fragments, retries, template substitutions and expansions retain the same
+property. Schema, cycle, conflict and journal-integrity checks remain mandatory.
+Content-addressed storage externalises bytes without rewriting them, and digest
+checks verify the stored bytes. Publication requires a destination-aware disclosure
+projection; cross-host execution transport is projected as well. Resume
+never fills templates or rewrites a
 sealed submission. A resume path or document hash selects the retained graph
 identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
 another normalisation pass. Every strict read and every digest check verifies the
