@@ -1759,7 +1759,8 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
 }
 
 #[test]
-fn publication_refuses_orphan_history() -> TestResult {
+fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResult {
+    use provenant_records::policy::{Policy, Source, Strength};
     let fixture = Fixture::new("sha1")?;
     let tree = oid(git(
         &fixture.git,
@@ -1775,23 +1776,41 @@ fn publication_refuses_orphan_history() -> TestResult {
         None,
         &["commit-tree", &tree.to_string(), "-m", "orphan"],
     )?)?;
+    let mut strict = Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([("LANE_TIP_UNROOTED".into(), Strength::Refuse)]),
+        Source::Project,
+    );
     assert!(matches!(
-            super::publish_branch(
-                &fixture.git,
-                fixture.worktree.repo(),
-                "refs/heads/lane",
-                fixture.base,
-                None,
-                orphan
-            ,
-     &provenant_records::policy::Policy::default(),
-    ),
-            Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
-                if tip == orphan && base == fixture.base
-        ));
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            fixture.base,
+            None,
+            orphan,
+            &strict,
+        ),
+        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
+            if tip == orphan && base == fixture.base
+    ));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         fixture.base
+    );
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        fixture.base,
+        None,
+        orphan,
+        &Policy::default(),
+    )?;
+    assert_eq!(ancestor, super::Ancestor::Unrooted);
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        orphan
     );
     Ok(())
 }
@@ -1833,7 +1852,7 @@ fn update_ref(fixture: &Fixture, reference: &str, value: GitOid) -> TestResult {
 }
 
 #[test]
-fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestResult {
+fn publication_can_refuse_an_unrooted_tip_under_strict_policy() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let tree = oid(git(
         &fixture.git,
@@ -1849,6 +1868,14 @@ fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestRe
         None,
         &["commit-tree", &tree.to_string(), "-m", "orphan"],
     )?)?;
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "LANE_TIP_UNROOTED".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
     let error = super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
@@ -1856,7 +1883,7 @@ fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestRe
         fixture.base,
         Some("integration"),
         orphan,
-        &provenant_records::policy::Policy::default(),
+        &strict,
     )
     .expect_err("an unrooted tip is refused");
     assert!(error.import_refusal_is_final());
@@ -1867,6 +1894,47 @@ fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestRe
     // The other publication refusal depends on a branch that can move, so a
     // retry can change its answer: it must stay retryable.
     assert!(!super::invalid().import_refusal_is_final());
+    Ok(())
+}
+
+#[test]
+fn successful_git_import_with_graft_hint_keeps_result_and_other_stderr_refuses() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let wrapper = fixture.root.join("git-with-hint");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'hint: Support for <GIT_DIR>/info/grafts is deprecated' >&2\nexec '{}' \"$@\"\n",
+            fixture.git.display()
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    super::require_commit(
+        &wrapper,
+        fixture.worktree.repo().common_git_dir(),
+        fixture.worktree.repo().root_path(),
+        fixture.base,
+        None,
+        None,
+    )?;
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'error: corrupt object' >&2\nexec '{}' \"$@\"\n",
+            fixture.git.display()
+        ),
+    )?;
+    assert!(
+        super::require_commit(
+            &wrapper,
+            fixture.worktree.repo().common_git_dir(),
+            fixture.worktree.repo().root_path(),
+            fixture.base,
+            None,
+            None,
+        )
+        .is_err()
+    );
     Ok(())
 }
 
