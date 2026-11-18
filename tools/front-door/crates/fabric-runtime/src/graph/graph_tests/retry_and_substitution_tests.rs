@@ -149,6 +149,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
     assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
 }
 
+// Spec: docs/specs/routing.md#accounts-and-credentials
 #[test]
 fn review_task_substitution_is_bounded_and_replays() {
     for role in ["lens.tests", "review.verify"] {
@@ -156,7 +157,15 @@ fn review_task_substitution_is_bounded_and_replays() {
             let mut review = node("review", route("first"));
             review.role = Some(role.into());
             review.route = None;
-            review.routes = Some(vec![route("first"), route("second"), route("third")]);
+            review.routes = Some(
+                ["first", "second", "third"]
+                    .map(|name| {
+                        let mut candidate = route(name);
+                        candidate.account = Some(format!("account-{name}"));
+                        candidate
+                    })
+                    .to_vec(),
+            );
             let document = graph(vec![review]);
             let mut owner = FakeOwner {
                 observations: VecDeque::from([

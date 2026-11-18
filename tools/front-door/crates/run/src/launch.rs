@@ -2439,6 +2439,15 @@ impl RunStore {
                         | HandOff::Busy
                         | HandOff::RetainedImport { .. }),
                     ) => {
+                        // These handoff variants are returned only after the
+                        // local lease has been withdrawn. Preserve that typed
+                        // pre-provider failure for graph fallback; a boundary or
+                        // retained import does not establish safe preparation.
+                        let preparation_failure =
+                            matches!(&error, HandOff::Local(_) | HandOff::TypedLocal { .. })
+                                .then_some(
+                                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                                );
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
                             HandOff::Boundary { cause, .. } => {
@@ -2477,8 +2486,8 @@ impl RunStore {
                             ),
                             _ => unreachable!(),
                         };
-                        // Cancellation decides the outcome, but an independent
-                        // preparation failure remains evidence for the chair.
+                        // The terminal cause retains the independent failure,
+                        // but cancellation must not authorise route fallback.
                         let cancelled = self.attempt_dir(id, false).is_ok_and(|attempt| {
                             crate::store::cancel_requested(&attempt, Self::scope(&record))
                         });
@@ -2499,7 +2508,7 @@ impl RunStore {
                                 outcome,
                                 reason: &reason,
                                 finished_at: now()?,
-                                failure: None,
+                                failure: preparation_failure.filter(|_| !cancelled),
                                 terminal_cause,
                                 terminal_note: kind.terminal_note(),
                             },

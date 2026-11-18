@@ -21,7 +21,17 @@ window persists one deadline and next wake under the same operation identity.
 Transient, typed contention may back off within that window. An uncertain
 handoff reobserves the same guardian and route rather than launching a second
 provider. Unknown writer ownership remains fail-closed.
-Preparation fallback requires evidence that custody was released before launch.
+Preparation fallback uses the host's typed failure and local custody disposition.
+A local handoff failure records its preparation cause after withdrawing the
+unlaunched lease. An attempt proven never to have launched needs no provider
+custody lock; an existing lease or writer reservation must still be released.
+Boundary refusals and uncertain withdrawals do not authorise another launch.
+- If a terminal row is visible before local custody release, a route fallback
+  re-reads the same attempt's evidence after a short persisted wake. The wake is
+  bound to that attempt and expires after one second; replay cannot renew it.
+  Missing or unreadable evidence is retried only when the route, typed cause,
+  and retry limits would allow fallback once evidence is available. At expiry,
+  missing proof refuses the route.
 - Why: polling or process restart must not create more time or writer authority.
 
 ## Recovery preserves work and budget

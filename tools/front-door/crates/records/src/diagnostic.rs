@@ -523,7 +523,7 @@ impl ProviderFailureFact {
                 "provider denied an action; check account access and inspect the result"
             }
             Self::AuthRequired => {
-                "provider requires login; sign in to the selected account and run `provenant quota tick`"
+                "provider requires login; sign in to the selected account and run `provenant quota tick`; if login cannot be checked, retry after readiness expires"
             }
             Self::EarlyStop => "provider stopped early; inspect the result and resume if needed",
             Self::CodexIdentity => {
