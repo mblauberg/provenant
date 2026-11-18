@@ -2799,7 +2799,10 @@ mod tests {
             .as_path()
             .join(format!("attempts/{}", input.attempt_id));
         let temporary = attempt.join("tmp/candidate-0/target/debug");
-        fs::create_dir_all(&temporary)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&temporary)?;
         fs::write(temporary.join("artifact"), b"scratch target")?;
         let durable = [
             (
@@ -2856,7 +2859,7 @@ mod tests {
             &call,
             &RetentionScan::default(),
         )?;
-        assert_eq!(collected.attempt_tmp.len(), 1);
+        assert_eq!(collected.attempt_tmp.len(), 1, "{collected:?}");
         assert!(!attempt.join("tmp").exists());
         assert_eq!(fs::read(attempt.join("result.md"))?, result);
         for (path, contents) in &durable {
@@ -2879,7 +2882,7 @@ mod tests {
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
         let temporary = attempt.join("tmp");
-        fs::create_dir(&temporary)?;
+        fs::DirBuilder::new().mode(0o700).create(&temporary)?;
         for n in 0..256 {
             fs::write(temporary.join(format!("payload-{n}")), b"regenerable")?;
         }
@@ -2902,7 +2905,11 @@ mod tests {
         let now = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
         let partial =
             store.gc_temporary(&root, &ScratchPolicy::new(0), now, false, &call, &scan)?;
-        assert_eq!(partial.interrupted_at.as_ref(), Some(&attempt));
+        assert_eq!(
+            partial.interrupted_at.as_ref(),
+            Some(&attempt),
+            "{partial:?}"
+        );
         assert!(partial.errors.is_empty());
         assert!(
             partial.attempt_tmp.is_empty(),

@@ -74,9 +74,9 @@ pub struct Report {
     pub budget_bytes: u64,
     pub budget_setting: String,
     pub budget_source: String,
-    /// Profile directories kept because their locks are held or unprobeable.
+    /// Target trees kept because custody or any profile lock is held or unprobeable.
     pub busy: Vec<PathBuf>,
-    /// Profile directories kept because they were written within the grace.
+    /// Target trees kept because they were written within the grace.
     pub recent: Vec<PathBuf>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
@@ -315,7 +315,13 @@ pub fn target_protection_for_launch(
     current_worktree: Option<&Path>,
     current_common_dir: Option<&Path>,
 ) -> TargetProtection {
-    target_protection_for_launch_while(roots, current_worktree, current_common_dir, &mut || false)
+    target_protection_for_launch_while(
+        roots,
+        current_worktree,
+        current_common_dir,
+        &provenant_confinement::worktrees::SystemWorkerObserver,
+        &mut || false,
+    )
 }
 
 /// Snapshot every registered Git project's writer slots and process occupancy.
@@ -326,6 +332,7 @@ pub fn target_protection_for_launch_while(
     roots: &provenant_core::Roots,
     current_worktree: Option<&Path>,
     current_common_dir: Option<&Path>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
     should_stop: &mut dyn FnMut() -> bool,
 ) -> TargetProtection {
     let mut protection = TargetProtection::default();
@@ -575,7 +582,7 @@ pub fn target_protection_for_launch_while(
             budget,
             &cancel,
             registration,
-            &provenant_confinement::worktrees::SystemWorkerObserver,
+            workers,
             &keep_going,
         ) {
             Ok(occupancy) => occupancy,
@@ -2712,7 +2719,10 @@ mod tests {
     use provenant_os::fs::{ForeignLock, LockGuard, LockMode};
     use std::{
         fs,
-        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, PermissionsExt},
+        },
     };
 
     const TEST_NOW_SECONDS: u64 = 100_000;
@@ -3222,7 +3232,10 @@ mod tests {
         let target = shared_cache_root(fixture.home.path())
             .join(&key)
             .join("target");
-        fs::create_dir_all(target.join("deps"))?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(target.join("deps"))?;
         fs::write(target.join(CARGO_LOCK), b"")?;
         fs::write(target.join("deps/payload"), vec![7_u8; 8192])?;
 
@@ -3246,7 +3259,7 @@ mod tests {
             &protection,
         )?;
         assert!(report.removed.is_empty());
-        assert!(report.busy.iter().any(|path| path == &target));
+        assert!(report.busy.iter().any(|path| path == &target), "{report:?}");
         assert!(target.join("deps/payload").is_file());
         Ok(())
     }

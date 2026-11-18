@@ -1239,6 +1239,12 @@ impl FileJournal {
                 let Some(id) = orphan_artifact_id(&entry) else {
                     continue;
                 };
+                // A prior candidate can remove every derived artifact for this
+                // graph while this directory stream still buffers their names.
+                // Do not recreate and retire a graph lock for a vanished entry.
+                if !entry_exists(&directory, &entry)? {
+                    continue;
+                }
                 let cleaned = Self::collect_unreferenced_id(
                     root, project, &directory, id, &path, control, clock, None,
                 )?;

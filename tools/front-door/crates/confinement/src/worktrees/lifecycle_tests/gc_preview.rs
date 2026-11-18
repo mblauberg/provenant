@@ -10,6 +10,7 @@ fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Er
     fs::create_dir(&root)?;
     let archive = root.join("archive-old");
     fs::create_dir(&archive)?;
+    fs::set_permissions(&archive, fs::Permissions::from_mode(0o700))?;
     for index in 0..128 {
         fs::write(archive.join(format!("payload-{index:03}")), b"data")?;
     }
@@ -25,7 +26,7 @@ fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Er
         None,
         &mut || {
             checked += 1;
-            checked <= 12
+            checked > 12
         },
     );
     assert_eq!(partial.interrupted_at.as_deref(), Some(archive.as_path()));
@@ -41,7 +42,7 @@ fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Er
         &cancel(),
         partial.interrupted_at.as_deref(),
         partial.continuation.as_deref(),
-        &mut || false,
+        &mut || true,
     );
     assert_eq!(deferred.interrupted_at.as_deref(), Some(archive.as_path()));
     let resumed = super::super::archive::collect_archives(
@@ -51,7 +52,7 @@ fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Er
         &cancel(),
         deferred.interrupted_at.as_deref(),
         deferred.continuation.as_deref(),
-        &mut || true,
+        &mut || false,
     );
     assert!(resumed.interrupted_at.is_none());
     assert_eq!(resumed.removed, vec![archive]);

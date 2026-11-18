@@ -638,10 +638,12 @@ fn orphan_prompt_cleanup_resumes_from_the_saved_directory_cookie() {
             .collect::<Vec<_>>()
     });
     prompt_store::externalise(&directory, "g-test", &mut prompts).unwrap();
-    let checkpoint = directory.anchored_path().join("graph-g-test.json");
-    std::fs::remove_file(checkpoint).unwrap();
+    directory.unlink(OsStr::new("graph-g-test.json")).unwrap();
     std::fs::write(
-        directory.anchored_path().join("graph-g-test.advance-error"),
+        directory
+            .current_path()
+            .unwrap()
+            .join("graph-g-test.advance-error"),
         b"stale",
     )
     .unwrap();
@@ -683,7 +685,7 @@ fn orphan_prompt_cleanup_resumes_from_the_saved_directory_cookie() {
         &provenant_core::SweepControl {
             start_at: Some(&candidate),
             detail: Some(&continuation),
-            cancel,
+            cancel: CancelToken::new(),
             ..Default::default()
         },
         &clock,
@@ -699,13 +701,15 @@ fn orphan_prompt_cleanup_resumes_from_the_saved_directory_cookie() {
     assert_eq!(remaining_prompts, 0);
     assert!(
         !directory
-            .anchored_path()
+            .current_path()
+            .unwrap()
             .join("graph-g-test.advance-error")
             .exists()
     );
     assert!(
         directory
-            .anchored_path()
+            .current_path()
+            .unwrap()
             .join("graph-g-test.reserved")
             .exists()
     );

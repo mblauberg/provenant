@@ -711,10 +711,14 @@ mod tests {
                 .as_deref()
                 .is_some_and(|warning| warning.contains("gc.sweep_budget"))
         );
-        assert!(old.checkpoint(Cursor::default()).is_err());
+        // Fenced owners stop cooperatively without overwriting the new epoch.
+        old.checkpoint(Cursor::default()).unwrap();
         assert!(cancel.is_cancelled());
         old.complete().unwrap();
         assert_eq!(current.cursor(), Some(&cursor));
+        let saved = read_progress(&current.directory).unwrap().unwrap();
+        assert_eq!(saved.epoch, current.epoch());
+        assert_eq!(saved.cursor.as_ref(), Some(&cursor));
 
         drop(current);
         // An early exit releases its lease but keeps the cursor for resumption.
@@ -869,12 +873,16 @@ mod tests {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("new fixture sweep should acquire its lease"),
         };
+        let mut candidates = std::fs::read_dir(&fixture)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        candidates.sort();
         let mut visited = 0;
-        for (index, entry) in std::fs::read_dir(&fixture).unwrap().enumerate() {
+        for (index, candidate) in candidates.into_iter().enumerate() {
             if holder_over_budget(&lease.progress, &clock) {
                 break;
             }
-            let candidate = entry.unwrap().path();
             lease
                 .checkpoint(Cursor {
                     class: "FixtureCandidates".into(),

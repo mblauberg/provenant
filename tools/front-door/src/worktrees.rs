@@ -3292,6 +3292,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     roots,
                     None,
                     None,
+                    self.workers,
                     &mut should_stop,
                 );
                 refreshed.unobserved |= unobserved;
@@ -3958,9 +3959,10 @@ mod gc_preview_tests {
         assert_eq!(json["build_dirs_removed"], 1);
         assert_eq!(json["build_dir_bytes_reclaimed"], 4096);
         assert_eq!(json["build_dir_bytes"], 8192);
+        assert_eq!(json["build_dir_budget_source"], "host");
         let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
         assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
-        assert_eq!(json["build_dir_budget_source"], "host");
+        assert_eq!(json["build_dirs"]["budget_source"], "host");
         assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target");
     }
     #[test]
@@ -4059,7 +4061,8 @@ mod gc_preview_tests {
         let mut data = GcData::default();
         data.report.bytes_freed = 19;
         data.target_seeds.bytes = 23;
-        data.build_dirs.bytes = 29;
+        data.build_dirs.bytes = 7;
+        data.build_dirs.cache_bytes = 29;
         data.provider_state.payload.reclaimed_bytes = 31;
         data.provider_state
             .attempt_logs

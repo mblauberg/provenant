@@ -359,7 +359,7 @@ mod tests {
             &mut || false,
         )
         .unwrap();
-        assert_eq!(busy.busy, vec![PathBuf::from(".provenant-staging.old")]);
+        assert_eq!(busy.busy, vec![stage.clone()]);
         assert!(!ingest.exists() && stage.exists());
         drop(lock);
         collect(
@@ -395,14 +395,21 @@ mod tests {
         let install_path = temp.path().join("install");
         std::fs::create_dir(&install_path).unwrap();
         let install = root.open_directory(OsStr::new("install")).unwrap();
-        let _ingest = root
-            .try_lock(OsStr::new("ingest.lock"), LockMode::Exclusive)
-            .unwrap();
-        let _install = install
-            .try_lock(OsStr::new("install.lock"), LockMode::Exclusive)
-            .unwrap();
+        drop(
+            root.try_lock(OsStr::new("ingest.lock"), LockMode::Exclusive)
+                .unwrap(),
+        );
+        drop(
+            install
+                .try_lock(OsStr::new("install.lock"), LockMode::Exclusive)
+                .unwrap(),
+        );
         let stage = temp.path().join(".provenant-staging.large");
-        std::fs::create_dir(&stage).unwrap();
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&stage)
+            .unwrap();
         for index in 0..128 {
             std::fs::write(stage.join(format!("payload-{index:03}")), b"data").unwrap();
         }
@@ -421,7 +428,7 @@ mod tests {
             None,
             &mut || {
                 checked += 1;
-                checked <= 12
+                checked > 12
             },
         )
         .unwrap();
@@ -437,7 +444,7 @@ mod tests {
             &CancelToken::new(),
             partial.interrupted_at.as_deref(),
             partial.continuation.as_deref(),
-            &mut || false,
+            &mut || true,
         )
         .unwrap();
         assert_eq!(deferred.interrupted_at.as_deref(), Some(stage.as_path()));
@@ -449,7 +456,7 @@ mod tests {
             &CancelToken::new(),
             deferred.interrupted_at.as_deref(),
             deferred.continuation.as_deref(),
-            &mut || true,
+            &mut || false,
         )
         .unwrap();
         assert!(resumed.interrupted_at.is_none());
@@ -476,7 +483,7 @@ mod tests {
             None,
             &mut || {
                 checked += 1;
-                checked <= 12
+                checked > 12
             },
         )
         .unwrap();
@@ -502,7 +509,7 @@ mod tests {
             &CancelToken::new(),
             Some(&candidate),
             Some(&detail),
-            &mut || true,
+            &mut || false,
         )
         .unwrap();
         assert!(resumed.interrupted_at.is_none());
@@ -539,12 +546,14 @@ mod tests {
             &CancelToken::new(),
             None,
             None,
-            &mut || false,
+            &mut || true,
         )
         .unwrap();
         assert_eq!(partial.interrupted_at.as_deref(), Some(candidate.as_path()));
         let detail = partial.continuation.as_deref().unwrap();
 
+        // Keep the old inode allocated so replacement identity is deterministic.
+        let _old = std::fs::File::open(&candidate).unwrap();
         std::fs::remove_file(&candidate).unwrap();
         std::fs::write(&candidate, b"new").unwrap();
         std::fs::File::open(&candidate)
@@ -561,7 +570,7 @@ mod tests {
             &CancelToken::new(),
             partial.interrupted_at.as_deref(),
             Some(detail),
-            &mut || true,
+            &mut || false,
         )
         .unwrap();
         assert!(resumed.interrupted_at.is_none());

@@ -450,45 +450,55 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
-    let worktree = rig.project.join(".worktrees/idle");
-    let head = commit_unlanded_lane(&rig, &worktree)?;
-    let (roots, _) = writer_context(&rig)?;
-    mark_created_lane_as_managed(
-        &rig,
-        &roots,
-        &worktree,
-        "idle",
-        created["data"]["head"].as_str().ok_or("head")?.parse()?,
-        head,
-    )?;
-    let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
-    let profile = |name: &str, age: u64| -> Result<PathBuf> {
-        let dir = cache.join("target").join(name);
-        fs::create_dir_all(dir.join("deps"))?;
+    let target = |branch: &str, profile: &str, age: u64| -> Result<PathBuf> {
+        let created = ok(&rig, &["worktree", "create", branch, "--json"])?;
+        let worktree = rig.project.join(".worktrees").join(branch);
+        let head = commit_unlanded_lane(&rig, &worktree)?;
+        let (roots, _) = writer_context(&rig)?;
+        mark_created_lane_as_managed(
+            &rig,
+            &roots,
+            &worktree,
+            branch,
+            created["data"]["head"].as_str().ok_or("head")?.parse()?,
+            head,
+        )?;
+        let cache = prepare_lane_cache(&rig, &worktree, branch)?;
+        let target = cache.join("target");
+        let dir = target.join(profile);
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir.join("deps"))?;
         for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
             fs::write(dir.join(lock), b"")?;
         }
         fs::write(dir.join("deps/payload"), vec![1; 65_536])?;
         let when = std::time::SystemTime::now() - Duration::from_secs(age);
-        // Recency is the newest write anywhere below the directory, locks included.
+        // Targets, including their roots and every profile, are the eviction unit.
         for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
             fs::File::open(dir.join(lock))?.set_modified(when)?;
         }
-        for path in [dir.join("deps/payload"), dir.join("deps"), dir.clone()] {
+        for path in [
+            dir.join("deps/payload"),
+            dir.join("deps"),
+            dir,
+            target.clone(),
+        ] {
             fs::File::open(path)?.set_modified(when)?;
         }
-        Ok(dir)
+        Ok(target)
     };
-    let stale = profile("debug", 3_000)?;
-    let building = profile("release", 2_000)?;
-    let fresh = profile("fast", 1_000)?;
+    let stale = target("oldest", "debug", 3_000)?;
+    let building = target("building", "release", 2_000)?;
+    let fresh = target("newer", "fast", 1_000)?;
     fs::write(
         rig.state.join("config.toml"),
         b"schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.cargo_cache_max'='100000'\n",
     )?;
     // A running Cargo holds its profile's lock: the directory is never taken.
-    let held = Directory::open_anchor(&building)?;
+    let held = Directory::open_anchor(&building.join("release"))?;
     let ForeignLock::Acquired(_cargo) =
         held.try_flock_foreign(std::ffi::OsStr::new(".cargo-lock"), LockMode::Exclusive)?
     else {
@@ -500,7 +510,7 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
             .map(|paths| {
                 paths
                     .iter()
-                    .filter_map(|path| path.as_str()?.rsplit('/').next().map(str::to_owned))
+                    .filter_map(|path| path.as_str().map(str::to_owned))
                     .collect()
             })
             .unwrap_or_default()
@@ -509,14 +519,23 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     // is skipped, and the next oldest goes until the cap is met.
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
     let dirs = &preview["data"]["build_dirs"];
-    // Preview skips the expensive census and leaves every profile untouched.
-    assert_eq!(dirs["measurement_skipped"], true, "{dirs}");
-    assert!(names(&dirs["removed"]).is_empty(), "{dirs}");
-    assert!(stale.join("deps/payload").is_file() && fresh.is_dir());
+    // A bounded preview may measure this small fixture but never mutates it.
+    assert!(
+        dirs["errors"].as_array().ok_or("errors")?.is_empty(),
+        "{dirs}"
+    );
+    assert!(stale.join("debug/deps/payload").is_file());
+    assert!(building.join("release/deps/payload").is_file());
+    assert!(fresh.join("fast/deps/payload").is_file());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     let dirs = &applied["data"]["build_dirs"];
-    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
-    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
+    assert_eq!(
+        names(&dirs["removed"]),
+        [stale.to_string_lossy(), fresh.to_string_lossy()],
+        "{dirs}"
+    );
+    assert_eq!(names(&dirs["busy"]), [building.to_string_lossy()], "{dirs}");
+    assert!(building.join("release/deps/payload").is_file());
     assert!(dirs["bytes"].as_u64().ok_or("bytes")? >= 2 * 65_536);
     let remaining = dirs["cache_bytes"].as_u64().ok_or("cache_bytes")?;
     assert!((65_536..=100_000).contains(&remaining), "{dirs}");
