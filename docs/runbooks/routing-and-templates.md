@@ -55,9 +55,10 @@ Cache reads include that receipt; the next account publication absorbs it.
 Bypassed accounts avoid the lock and do not book monthly debt. Failed launches
 retain their reservation conservatively.
 
-Between reports, estimated spend is the last reported percentage plus launches
-since the anchor times estimated cost. Positive provider-reported usage changes
-confirm only the launches covered at the current cost estimate. A single-launch
+Between reports, estimated spend is the last reported percentage plus pending
+booked costs, conservatively raised by any learned per-launch cost. Positive
+provider-reported usage changes confirm only the reservations they cover, in
+ledger order. A single-launch
 sample can increase that estimate; ambiguous partial samples cannot lower it.
 Before calibration, the configured initial launch cost is booked with each
 reservation. Later overrides affect new launches; pending launches retain their
@@ -76,9 +77,9 @@ snapshot omits its cycle. Missing, stale, future-dated, reset or incomplete
 registered-account cycles are constrained; local login estimates name their
 cycle source and pace the recorded launches. Other windows retain their existing treatment, and
 monthly windows respect model-pool scope. Profiles can select other windows
-with `windows`. The estimate averages launches across one account's models and
-pools; it cannot measure individual launch costs or external usage before the
-provider reports it.
+with `windows`. The launch journal spans one account's models and pools; its
+booked costs estimate usage rather than measure actual individual costs or
+unreported external usage.
 
 ## Model policy
 
