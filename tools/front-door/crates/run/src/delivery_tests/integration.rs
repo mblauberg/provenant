@@ -196,8 +196,9 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
     let host_base = fixture.prepare()?.head(&fixture.writer)?;
     let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let child_head = std::cell::RefCell::new(None);
+    let shared_base = std::cell::RefCell::new(None);
 
-    let review = fixture.terminal(|| {
+    let review = fixture.terminal_shared(|| {
         use provenant_os::fs::LockMode;
 
         let attempt_path = fixture.root.join("attempt");
@@ -215,6 +216,11 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = runtime.open_repo(&executor, &fixture.writer.project, budget, &cancel)?;
         let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+        provenant_confinement::worktrees::acquire_worktree_subject(worktree.repo())?;
+        let scope = provenant_records::custody::Scope {
+            generation: 1,
+            ..crate::tests::exit().scope
+        };
 
         let shared_root = fixture.root.join("shared-view");
         provenant_os::fixture::private_state_dir(&shared_root)?;
@@ -256,23 +262,15 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
         )?)?;
 
         // A live parent's holder lets the child adopt its shared commit.
-        let slot_path = fixture.root.join("custody-slot");
-        std::fs::create_dir_all(&slot_path)?;
-        let slot = Directory::open_anchor(&slot_path)?;
-        for name in ["parent-attempt", "attempt"] {
-            std::fs::create_dir_all(slot_path.join(name))?;
-        }
+        let slot = Directory::open_anchor(&state)?;
+        std::fs::create_dir_all(state.join("parent-holder"))?;
         let parent_holder_dir =
-            slot.open_verified_directory(std::ffi::OsStr::new("parent-attempt"))?;
+            slot.open_verified_directory(std::ffi::OsStr::new("parent-holder"))?;
         let _parent_holder = parent_holder_dir.try_lock(
             std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
             LockMode::Exclusive,
         )?;
-        let current_holder_dir = slot.open_verified_directory(std::ffi::OsStr::new("attempt"))?;
-        let _current_holder = current_holder_dir.try_lock(
-            std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
-            LockMode::Exclusive,
-        )?;
+        let current_attempt = scope.attempt.to_string();
 
         let child_preparation = crate::objects::prepare_shared_bound(
             &executable,
@@ -284,46 +282,10 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
             crate::objects::SharedViewLaunch {
                 root: &shared_root,
                 custody_slot: Some(&slot),
-                current_attempt: Some("attempt"),
+                current_attempt: Some(&current_attempt),
             },
         )?;
         assert_eq!(child_preparation.base, parent_tip);
-
-        let layout =
-            runtime.project_layout_for_common(&executor, repo.common_git_dir(), budget, &cancel)?;
-        let writer = crate::writer::WriterLaunch {
-            worktree,
-            branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
-            layout,
-            executor_root: repo.root_path().to_path_buf(),
-            executor_root_identity: repo.root_identity(),
-            base: host_base,
-            custody: Some((
-                slot,
-                provenant_supervisor::custody::WriterBinding::read_only(),
-            )),
-            facts: Default::default(),
-        };
-        let scope = provenant_records::custody::Scope {
-            generation: 1,
-            ..crate::tests::exit().scope
-        };
-        writer.snapshot_shared(
-            &state,
-            &attempt,
-            scope,
-            &provenant_records::policy::Policy::default(),
-            Some(child_preparation.base),
-        )?;
-
-        let pins =
-            crate::artifacts::read_sealed(&attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?
-                .ok_or("writer Git pins")?;
-        let pins: serde_json::Value = crate::db::decode(&pins)?;
-        let host_base_text = host_base.to_string();
-        let parent_tip_text = parent_tip.to_string();
-        assert_eq!(pins["base"].as_str(), Some(host_base_text.as_str()));
-        assert_eq!(pins["shared_base"].as_str(), Some(parent_tip_text.as_str()));
 
         std::fs::write(fixture.writer.worktree.join("child.txt"), "child edit\n")?;
         private_git(&fixture, &shared_root, &executable, &["add", "child.txt"])?;
@@ -349,11 +311,27 @@ fn terminal_publishes_child_commit_from_live_parent_shared_view()
         )?;
         assert_eq!(changed_paths, "child.txt");
         *child_head.borrow_mut() = Some(tip);
-        Ok(())
+        *shared_base.borrow_mut() = Some(child_preparation.base);
+        Ok(child_preparation.base)
     })?;
 
     assert!(!review);
     let child_head = child_head.into_inner().ok_or("child tip")?;
+    let shared_base = shared_base.into_inner().ok_or("shared launch base")?;
+    let pins = crate::artifacts::read_sealed(
+        &Directory::open_anchor(&fixture.root.join("attempt"))?,
+        "writer-git-pins.json",
+        crate::RECORD_LIMIT,
+    )?
+    .ok_or("writer Git pins")?;
+    let pins: serde_json::Value = crate::db::decode(&pins)?;
+    let host_base_text = host_base.to_string();
+    let shared_base_text = shared_base.to_string();
+    assert_eq!(pins["base"].as_str(), Some(host_base_text.as_str()));
+    assert_eq!(
+        pins["shared_base"].as_str(),
+        Some(shared_base_text.as_str())
+    );
     assert_eq!(fixture.prepare()?.head(&fixture.writer)?, child_head);
     assert_eq!(
         std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,

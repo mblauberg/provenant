@@ -35,7 +35,10 @@ including HEAD, index, refs and objects. Per-attempt configuration and credentia
 remain separate; private data outlives an individual attempt's scratch.
 Under the shared view's existing initialisation gate, launch reconciles its tip
 with the host base. An ancestor tip advances by compare-and-swap and the shared
-index resets to the host base. A launch behind a live sibling adopts the shared
+index resets to the host base. A durable pending reset makes an interrupted
+ref/index transition retryable; a later sibling tip supersedes that reset.
+An equal-tip launch without a pending reset preserves staged edits.
+A launch behind a live sibling adopts the shared
 tip as its work base, while custody retains the host base for publication's
 compare-and-swap. Scope reporting starts at the adopted base so a child's work
 does not include its parent's commits. With no other live holders, a differing

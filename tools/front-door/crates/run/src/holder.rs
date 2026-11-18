@@ -5670,7 +5670,7 @@ mod writer_recovery_tests {
     }
 
     #[test]
-    fn strict_write_scope_keeps_budget_commit_private_until_scope_is_resolved()
+    fn strict_write_scope_keeps_outside_budget_edits_uncommitted()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         budget_stop_case(BudgetStopCase::StrictScope)
     }
@@ -6161,13 +6161,24 @@ mod writer_recovery_tests {
             );
             let source = crate::objects::bound_source(&attempt)?.ok_or("private source")?;
             let private_tip = crate::objects::private_tip(&source, launch.branch.as_str())?;
-            assert_ne!(private_tip, launch.base);
+            // Scoped budget commits must not capture edits outside the claim.
+            // Strict scope still refuses settlement and preserves those edits.
+            assert_eq!(private_tip, launch.base);
             let disposition: serde_json::Value = serde_json::from_slice(
                 &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?
                     .ok_or("budget commit disposition")?,
             )?;
-            let committed = disposition["commit"].as_str().ok_or("commit")?;
-            assert!(!committed.is_empty() && private_tip.to_string().starts_with(committed));
+            assert!(disposition.get("commit").is_none());
+            assert!(
+                disposition["note"]
+                    .as_str()
+                    .is_some_and(|note| note.contains("outside declared paths"))
+            );
+            assert!(
+                report["out_of_scope_paths"]
+                    .to_string()
+                    .contains("budget-work.txt")
+            );
             assert_eq!(
                 std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?,
                 "uncommitted work before budget stop\n"

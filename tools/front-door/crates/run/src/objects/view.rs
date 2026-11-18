@@ -392,12 +392,82 @@ fn shared_is_ancestor(
     Ok(uncontained.is_empty())
 }
 
+const SHARED_INDEX_RESET: &str = "pending-index-reset.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SharedIndexReset {
+    schema_version: u64,
+    target: GitOid,
+    recovered: Option<GitOid>,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_SHARED_INDEX_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn finish_shared_reset(root: &Directory) -> Result<()> {
+    root.unlink(OsStr::new(SHARED_INDEX_RESET))?;
+    root.sync()?;
+    Ok(())
+}
+
+fn resume_shared_reset(
+    git: &Path,
+    root: &Directory,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    current: GitOid,
+) -> Result<Option<GitOid>> {
+    let raw = match root.read_stable(OsStr::new(SHARED_INDEX_RESET), 1024) {
+        Ok(raw) => raw,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let pending: SharedIndexReset = crate::db::decode(&raw)?;
+    if pending.schema_version != 1 {
+        return Err(invalid());
+    }
+    // A later sibling ref update supersedes this reset. Never put its index
+    // back at the older target, even if that target is still an ancestor.
+    if current == pending.target {
+        reset_shared_index(git, source, repo, pending.target)?;
+    }
+    finish_shared_reset(root)?;
+    Ok(pending.recovered)
+}
+
+fn reconcile_shared_tip(
+    git: &Path,
+    root: &Directory,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    branch: &str,
+    change: SharedIndexReset,
+    old: GitOid,
+) -> Result<()> {
+    root.atomic_write(
+        OsStr::new(SHARED_INDEX_RESET),
+        ".index-reset-",
+        &crate::db::bytes(&change)?,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    update_private_tip(git, source, repo, branch, change.target, old)?;
+    reset_shared_index(git, source, repo, change.target)?;
+    finish_shared_reset(root)
+}
+
 fn reset_shared_index(
     git: &Path,
     source: &ObjectSource,
     repo: &VerifiedRepo,
     base: GitOid,
 ) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_SHARED_INDEX_RESET.with(|fault| fault.replace(false)) {
+        return Err(RunError::Validation("injected shared index reset failure"));
+    }
     let refs_path = source.refs.current_path()?;
     let objects_path = source.objects.current_path()?;
     let alternate = repo.common_git_dir().join("objects");
@@ -873,24 +943,30 @@ fn open_or_create_shared_view(
             let (_, refs, objects) = verify_shared_view(&receipt)?;
             let source = ObjectSource { objects, refs };
             let current_tip = private_tip(&source, branch)?;
+            let recovered = resume_shared_reset(git, &root, &source, repo, current_tip)?;
             if current_tip == base {
                 return Ok((
                     SharedViewBinding { receipt },
-                    SharedPreparation {
-                        base,
-                        recovered: None,
-                    },
+                    SharedPreparation { base, recovered },
                 ));
             }
             if shared_is_ancestor(git, &source, repo, current_tip, base)? {
-                update_private_tip(git, &source, repo, branch, base, current_tip)?;
-                reset_shared_index(git, &source, repo, base)?;
+                reconcile_shared_tip(
+                    git,
+                    &root,
+                    &source,
+                    repo,
+                    branch,
+                    SharedIndexReset {
+                        schema_version: 1,
+                        target: base,
+                        recovered,
+                    },
+                    current_tip,
+                )?;
                 return Ok((
                     SharedViewBinding { receipt },
-                    SharedPreparation {
-                        base,
-                        recovered: None,
-                    },
+                    SharedPreparation { base, recovered },
                 ));
             }
             let live = custody_slot
@@ -905,15 +981,26 @@ fn open_or_create_shared_view(
                         SharedViewBinding { receipt },
                         SharedPreparation {
                             base: current_tip,
-                            recovered: None,
+                            recovered,
                         },
                     ));
                 }
                 return Err(RunError::SharedViewBaseMismatch);
             }
             save_recovery_ref(git, &source, repo, current_tip)?;
-            update_private_tip(git, &source, repo, branch, base, current_tip)?;
-            reset_shared_index(git, &source, repo, base)?;
+            reconcile_shared_tip(
+                git,
+                &root,
+                &source,
+                repo,
+                branch,
+                SharedIndexReset {
+                    schema_version: 1,
+                    target: base,
+                    recovered: Some(current_tip),
+                },
+                current_tip,
+            )?;
             return Ok((
                 SharedViewBinding { receipt },
                 SharedPreparation {

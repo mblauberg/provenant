@@ -3063,6 +3063,9 @@ fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
         "cancelled",
         "diverged_idle",
         "missing_object",
+        "interrupted_advance",
+        "interrupted_reseed",
+        "superseded_reset",
     ] {
         let fixture = Fixture::new("sha1")?;
         git(
@@ -3094,7 +3097,15 @@ fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
             provenant_os::fs::LockMode::Exclusive,
         )?;
         let parent = slot.open_verified_directory(OsStr::new("parent"))?;
-        let live = matches!(scenario, "equal" | "host_merge" | "child" | "diverged_live");
+        let live = matches!(
+            scenario,
+            "equal"
+                | "host_merge"
+                | "child"
+                | "diverged_live"
+                | "interrupted_advance"
+                | "superseded_reset"
+        );
         let _parent_holder = live
             .then(|| {
                 parent.try_lock(
@@ -3134,7 +3145,10 @@ fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
             fixture.git_shared(&shared_root, &["commit", "-qm", "parent commit"])?;
             shared_tip = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
         }
-        if scenario == "host_merge" {
+        if matches!(
+            scenario,
+            "host_merge" | "interrupted_advance" | "superseded_reset"
+        ) {
             // Import the shared parent commit, then let the host merge main into
             // the checked-out lane. The shared view remains at the parent tip.
             super::settle(
@@ -3180,6 +3194,30 @@ fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
         fs::write(fixture.lane.join("staged"), "staged sibling work\n")?;
         fixture.git_shared(&shared_root, &["add", "staged"])?;
         let staged_tree = oid(fixture.git_shared(&shared_root, &["write-tree"])?)?;
+        if scenario.starts_with("interrupted") || scenario == "superseded_reset" {
+            super::view::FAIL_SHARED_INDEX_RESET.with(|fault| fault.set(true));
+            assert!(prepare("interrupted", base).is_err());
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
+                base
+            );
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
+                staged_tree
+            );
+            assert!(shared_root.join("pending-index-reset.json").exists());
+            if scenario == "superseded_reset" {
+                // A live sibling commits before retry. Its new index and tip
+                // supersede the interrupted reset's target.
+                fs::write(
+                    fixture.lane.join("sibling-new"),
+                    "sibling commit after interruption\n",
+                )?;
+                fixture.git_shared(&shared_root, &["add", "sibling-new"])?;
+                fixture.git_shared(&shared_root, &["commit", "-qm", "sibling advanced"])?;
+                base = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
+            }
+        }
         let prepared = prepare("second", base);
         if scenario == "missing_object" {
             assert!(
@@ -3212,6 +3250,7 @@ fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
             base
         };
         assert_eq!(prepared.base, expected, "{scenario}");
+        assert!(!shared_root.join("pending-index-reset.json").exists());
         assert_eq!(
             oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
             expected
@@ -3228,7 +3267,10 @@ fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
                     .git_shared(&shared_root, &["rev-parse", &format!("{base}^{{tree}}")])?)?
             );
         }
-        if matches!(scenario, "cancelled" | "diverged_idle") {
+        if matches!(
+            scenario,
+            "cancelled" | "diverged_idle" | "interrupted_reseed"
+        ) {
             assert_eq!(prepared.recovered, Some(shared_tip));
             let reference = format!("refs/provenant/recovery/{shared_tip}");
             assert_eq!(

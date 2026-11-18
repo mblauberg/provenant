@@ -6,6 +6,14 @@ use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
+#[derive(Default)]
+struct TerminalFixtureOptions {
+    resume_after_publish: bool,
+    advance_after_publish: bool,
+    budget_stop: bool,
+    snapshot_after_write: bool,
+}
+
 pub(super) struct PrepareFixture {
     _temp: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -314,13 +322,55 @@ impl PrepareFixture {
     }
     fn terminal_via_inner(
         &self,
-        _remote: &str,
+        remote: &str,
         base_ref: Option<&str>,
         resume_after_publish: bool,
         advance_after_publish: bool,
         budget_stop: bool,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        self.terminal_via_with_shared_base(
+            remote,
+            base_ref,
+            TerminalFixtureOptions {
+                resume_after_publish,
+                advance_after_publish,
+                budget_stop,
+                snapshot_after_write: false,
+            },
+            || {
+                write()?;
+                Ok(None)
+            },
+        )
+    }
+    fn terminal_shared(
+        &self,
+        write: impl FnOnce() -> std::result::Result<GitOid, Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        self.terminal_via_with_shared_base(
+            "origin",
+            None,
+            TerminalFixtureOptions {
+                snapshot_after_write: true,
+                ..Default::default()
+            },
+            || write().map(Some),
+        )
+    }
+    fn terminal_via_with_shared_base(
+        &self,
+        _remote: &str,
+        base_ref: Option<&str>,
+        options: TerminalFixtureOptions,
+        write: impl FnOnce() -> std::result::Result<Option<GitOid>, Box<dyn std::error::Error>>,
+    ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+        let TerminalFixtureOptions {
+            resume_after_publish,
+            advance_after_publish,
+            budget_stop,
+            snapshot_after_write,
+        } = options;
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
         use provenant_core::{CancelToken, Clock, WaitBudget};
         use provenant_os::fs::Directory;
@@ -377,12 +427,14 @@ impl PrepareFixture {
             generation: 1,
             ..tests::exit().scope
         };
-        launch.snapshot(
-            &state,
-            &attempt,
-            scope,
-            &provenant_records::policy::Policy::default(),
-        )?;
+        if !snapshot_after_write {
+            launch.snapshot(
+                &state,
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
+        }
         let binding = WriterBinding::from_verified(
             launch.worktree.repo().root_dir(),
             launch.worktree.repo().private_dir(),
@@ -403,7 +455,16 @@ impl PrepareFixture {
         )?
         .into_recovery()?;
         assert_eq!(recovery.observe(), RecoveryState::Absent);
-        write()?;
+        let shared_base = write()?;
+        if snapshot_after_write {
+            launch.snapshot_shared(
+                &state,
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+                shared_base,
+            )?;
+        }
         let scratch = attempt_path.join("tmp/candidate-0");
         std::fs::create_dir_all(&scratch)?;
         let git_executable = provenant_os::git::git_executable().ok_or("git executable")?;
@@ -1170,7 +1231,7 @@ fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std
 fn budget_stop_commit_preserves_sibling_edits_and_commits()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Each case has a fresh attempt so its sealed request remains immutable.
-    let mut shared_unscoped = budget_stop_case(&[], true)?;
+    let shared_unscoped = budget_stop_case(&[], true)?;
     let wt = &shared_unscoped.fixture.writer.worktree;
     std::fs::write(wt.join("ours.txt"), "our edit\n")?;
     std::fs::write(wt.join("sibling.txt"), "sibling edit\n")?;
@@ -1195,7 +1256,7 @@ fn budget_stop_commit_preserves_sibling_edits_and_commits()
         "sibling edit\n"
     );
 
-    let mut outside_scope = budget_stop_case(&["declared.txt"], true)?;
+    let outside_scope = budget_stop_case(&["declared.txt"], true)?;
     let wt = &outside_scope.fixture.writer.worktree;
     std::fs::write(wt.join("outside.txt"), "outside declared paths\n")?;
     let result = outside_scope
@@ -1214,7 +1275,7 @@ fn budget_stop_commit_preserves_sibling_edits_and_commits()
         "outside declared paths\n"
     );
 
-    let mut shared_scoped = budget_stop_case(&["ours.txt"], true)?;
+    let shared_scoped = budget_stop_case(&["ours.txt"], true)?;
     let wt = &shared_scoped.fixture.writer.worktree;
     std::fs::write(wt.join("ours.txt"), "our edit\n")?;
     std::fs::write(wt.join("sibling.txt"), "sibling edit\n")?;
@@ -1277,7 +1338,7 @@ fn budget_stop_commit_preserves_sibling_edits_and_commits()
 
     // The caller's own live holder is excluded, so an unscoped lone lane can
     // still commit its files when there is no sibling holder.
-    let mut lone = budget_stop_case(&[], false)?;
+    let lone = budget_stop_case(&[], false)?;
     let wt = &lone.fixture.writer.worktree;
     std::fs::write(wt.join("lone.txt"), "lone edit\n")?;
     let result = lone
