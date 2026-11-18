@@ -43,69 +43,10 @@ port table or settings, never a name compiled into a reader.
 ## Commands
 
 Command names may change freely. JSON envelopes other than `process-tree`
-are evolving. Human output, including printed next-step command lines, is evolving: scripts read `--json`. A removed command or option exits 2 with one line naming its replacement and is never an alias. The complete migration list follows.
-
-### Removed commands
-
-<!-- REMOVED_CLI_START -->
-| Removed spelling | Replacement |
-|---|---|
-| `provenant dispatch --prompt-file` | provenant run TEMPLATE --brief-file PATH |
-| `provenant dispatch --prompt-stdin` | provenant run TEMPLATE --brief-file - |
-| `provenant resume --no-fallback` | provenant retry NAME/NODE#N |
-| `provenant run --prompt-file` | provenant run TEMPLATE --brief-file PATH |
-| `provenant run --prompt-stdin` | provenant run TEMPLATE --brief-file - |
-| `provenant retry --no-fallback` | provenant retry NAME/NODE#N |
-| `provenant retry --prompt-file` | provenant retry NAME/NODE --brief TEXT |
-| `provenant retry --prompt-stdin` | provenant retry NAME/NODE --brief TEXT |
-| `provenant retry --operation-id` | no direct equivalent; use `provenant retry NAME/NODE#N` |
-| `provenant output --host` | no direct equivalent; use `provenant output NAME` |
-| `provenant dispatch` | provenant run TEMPLATE BRIEF |
-| `provenant lanes` | provenant status |
-| `provenant resume` | provenant retry NAME/NODE |
-| `provenant cancel` | provenant stop NAME |
-| `provenant continue` | provenant retry NAME/NODE#N |
-| `provenant redo` | provenant retry NAME/NODE |
-| `provenant preset` | provenant templates |
-| `provenant review` | provenant run review BRIEF |
-| `provenant stats` | provenant telemetry cost --by node |
-| `provenant pr land` | provenant land NUMBER --wait |
-| `provenant fabric claim` | provenant adopt KIND:ID or provenant release KIND:ID |
-| `provenant land --batch` | provenant land NUMBER [NUMBER ...] |
-| `provenant gc --idle-days` | provenant gc --idle DURATION |
-| `provenant fabric graph` | provenant status NAME |
-| `provenant fabric mcp` | provenant fabric |
-| `provenant fabric_graph` | provenant run TEMPLATE BRIEF |
-| `provenant quota usage` | provenant telemetry cost --by account |
-| `provenant config migrate` | provenant config check |
-| `provenant telemetry backfill` | nothing; this binary reads no format-1 store |
-| `provenant run --use` | provenant run TEMPLATE BRIEF |
-| `provenant run --tier` | provenant run TEMPLATE BRIEF --route ROUTE |
-| `provenant run --operation-id` | provenant run TEMPLATE BRIEF --name NAME |
-| `provenant run --wait` | provenant wait NAME |
-| `provenant status --wait` | provenant wait NAME |
-| `provenant status --target` | provenant status NAME or provenant wait --pr NUMBER |
-| `provenant status --until` | provenant wait NAME --any |
-| `provenant status --follow` | provenant wait NAME --follow |
-| `provenant status --stats` | provenant telemetry cost NAME --by node |
-| `provenant status --by` | provenant telemetry cost NAME --by node |
-| `provenant status --id` | provenant status NAME |
-| `provenant stop --operation-id` | provenant stop NAME |
-| `provenant stop --wait` | provenant wait NAME |
-| `provenant retry --node` | provenant retry NAME/NODE |
-| `provenant retry --wait` | provenant wait NAME |
-| `provenant output --trace` | provenant trace NAME |
-| `provenant reconcile --id` | provenant reconcile NAME |
-| `provenant telemetry stats --run-id` | provenant telemetry cost NAME |
-| `provenant telemetry stats --by` | provenant telemetry cost --by route |
-| `provenant telemetry stats --detail` | provenant telemetry cost NAME |
-| `provenant telemetry trace --run` | provenant telemetry trace NAME |
-| `provenant pr status --wait` | provenant pr watch NUMBER |
-| `provenant steer --text-stdin` | provenant steer TARGET --brief-file - |
-<!-- REMOVED_CLI_END -->
+are evolving. Human output, including printed next-step command lines, is evolving: scripts read `--json`. A removed command or option now fails with the ordinary unknown-command or unknown-flag error, which exits 2. There are no aliases. The 2.0.0 release notes retain the migration list.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
-- Owner: `crates/cli/src/grammar.rs`, `crates/config/src/removed.rs`
+- Owner: `crates/cli/src/grammar.rs`
 
 ## Run files are internal
 
