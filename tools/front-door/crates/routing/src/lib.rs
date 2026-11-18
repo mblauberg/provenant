@@ -47,7 +47,13 @@ pub enum RoutingError {
     #[error("route is not permitted for confidential input")]
     ConfidentialModel,
     #[error("no eligible pool member: {exclusions:?}")]
-    NoEligiblePoolMember { exclusions: Vec<String> },
+    NoEligiblePoolMember {
+        exclusions: Vec<String>,
+        /// A uniform account refusal, retained for diagnostics.
+        cause: Option<provenant_records::RouteExclusionReason>,
+        /// Aggregate local exclusion, even when candidates have different reasons.
+        preparation_failure: provenant_records::run::PreparationFailure,
+    },
     #[error("{model} does not support the requested effort {effort}; {support}")]
     UnsupportedEffort {
         model: String,

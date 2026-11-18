@@ -516,9 +516,8 @@ pub(super) fn with_context<T>(
                     provenant_records::LoginObservation::Reprobe => {
                         record.fixture_ref == format!("installed/{adapter}/login-status")
                     }
-                    provenant_records::LoginObservation::ExecutableOnly => {
-                        record.fixture_ref == format!("installed/{adapter}/login-unverified")
-                    }
+                    // Executable health does not replace a recorded login failure.
+                    provenant_records::LoginObservation::ExecutableOnly => false,
                     provenant_records::LoginObservation::None => false,
                 };
                 observed.then_some(if spec.login_check_names_account {
@@ -922,6 +921,8 @@ pub(super) fn resolve_dispatch_excluding_family(
                     records,
                     pools: &pools,
                 };
+                // Preparation owns unresolved observations and their typed causes;
+                // a missing identity on an observed account follows policy.
                 let gate = if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
                     admission.check(&resolved).map_err(EdgeError::from)
                 } else {

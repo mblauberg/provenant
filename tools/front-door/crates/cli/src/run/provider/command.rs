@@ -19,6 +19,7 @@ fn executable_unavailable(program: &str) -> PrepareError {
             .detail()
             .into(),
         cause: provenant_records::run::TerminalCause::CommandUnavailable,
+        fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
         note: Some(format!(
             "executable {}",
             provenant_records::diagnostic::safe_text(program)
@@ -845,6 +846,7 @@ mod refusal_tests {
             message,
             cause,
             note,
+            ..
         } = error
         else {
             unreachable!();
