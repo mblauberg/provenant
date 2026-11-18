@@ -1617,7 +1617,7 @@ mod disk_limit_tests {
                     DiskLevel::Ready => "proceed",
                     DiskLevel::Warning => "warn",
                     DiskLevel::Critical => match strength {
-                        Strength::Refuse => "refuse",
+                        Strength::Refuse => "stop",
                         Strength::Warn => "warn",
                         Strength::Off => "proceed",
                     },
@@ -1626,6 +1626,7 @@ mod disk_limit_tests {
                     Effect::Proceed => "proceed",
                     Effect::Warn(_) => "warn",
                     Effect::Refuse(_) => "refuse",
+                    Effect::Stop(_) => "stop",
                 };
                 assert_eq!(kind, expected_kind, "{strength:?} at {free}");
                 if let Some(message) = effect.message() {

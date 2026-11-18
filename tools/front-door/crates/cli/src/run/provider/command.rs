@@ -691,7 +691,8 @@ fn check_sandbox_off_build_disk(
             );
             Ok(())
         }
-        provenant_records::policy::Effect::Refuse(diagnostic) => Err(format!(
+        provenant_records::policy::Effect::Refuse(diagnostic)
+        | provenant_records::policy::Effect::Stop(diagnostic) => Err(format!(
             "{}; refusing to start a sandbox-off lane that can build",
             diagnostic.detail.unwrap_or_default()
         )),

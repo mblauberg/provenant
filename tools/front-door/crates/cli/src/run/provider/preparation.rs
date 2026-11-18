@@ -441,7 +441,8 @@ pub(super) fn dependency_preparation_event(
                     "reason": warning,
                 })),
                 provenant_records::policy::Effect::Proceed
-                | provenant_records::policy::Effect::Refuse(_) => None,
+                | provenant_records::policy::Effect::Refuse(_)
+                | provenant_records::policy::Effect::Stop(_) => None,
             }
         }
     }

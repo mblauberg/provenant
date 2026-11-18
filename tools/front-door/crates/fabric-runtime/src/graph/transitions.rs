@@ -1080,7 +1080,7 @@ pub(super) fn admit_attempt(
             Effect::Warn(message) => {
                 checkpoint.nodes[node_index].concurrency_warning = Some(message);
             }
-            Effect::Refuse(diagnostic) => {
+            Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
                 return Admission::PolicyRefused {
                     code: "concurrency_cap",
                     detail: diagnostic

@@ -895,7 +895,7 @@ impl RunStore {
             match provenant_config::DiskGate::new(limits, &policy).decide(free) {
                 Effect::Proceed => {}
                 Effect::Warn(message) => eprintln!("admission warning: {message}"),
-                Effect::Refuse(_) => {
+                Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::Disk {
                         free,
                         floor: limits.critical_free,
@@ -950,7 +950,7 @@ impl RunStore {
             match policy.check(code, Facts::violation(detail)) {
                 Effect::Proceed => {}
                 Effect::Warn(message) => eprintln!("warning: {message}"),
-                Effect::Refuse(_) => return Err(error),
+                Effect::Refuse(_) | Effect::Stop(_) => return Err(error),
             }
         }
         self.claim_observed(id, clock, &call, resources)?

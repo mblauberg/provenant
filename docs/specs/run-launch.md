@@ -58,12 +58,11 @@ so a writer edits another file when the fix needs it and lists it in its
 handoff; only a strict `WRITE_SCOPE` policy refuses it.
 - Why: advisory checks must not become accidental authority boundaries.
 
-Every non-boundary rule lives in `crates/run/assets/policy.toml`, defaults to
-`warn` and is `refusable`, so a project can opt into strict mode. Its knob
-`policy.<CODE>` is documented under `policy_rules` in
-`config/harness-knobs.json`. A consumer calls `Policy::warn_or`, which warns on
-stderr naming the rule, the setting source and the knob, or returns the
-caller's refusal under strict mode. Boundary rules keep using `boundary_error`.
+Policy rows live in `crates/run/assets/policy.toml`. Non-boundary rules default
+to warning or off; a rule with a meaningful stop path may offer an explicit
+`refuse` setting, which produces a configured stop. `Policy::warn_or` reports the source and knob, while immutable
+boundary refusals use `boundary_error`. Heuristic scanners cannot offer a stop.
+The `policy.<CODE>` knobs are documented in `config/harness-knobs.json`.
 
 Every provider lane has its native tool and shell surface. Read-only mode
 constrains filesystem writes; it does not remove shell, editing or web tools

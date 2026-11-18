@@ -541,7 +541,8 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
                 say(&format!("warning: {message}; building"));
                 Ok(())
             }
-            provenant_records::policy::Effect::Refuse(diagnostic) => Err(format!(
+            provenant_records::policy::Effect::Refuse(diagnostic)
+            | provenant_records::policy::Effect::Stop(diagnostic) => Err(format!(
                 "{}; refusing to start a new build",
                 diagnostic.detail.unwrap_or_default()
             )),
