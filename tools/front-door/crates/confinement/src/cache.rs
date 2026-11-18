@@ -591,6 +591,14 @@ fn guard_reason(state: &Occupancy) -> CacheGcReason {
     }
 }
 
+fn owner_path_matches_identity(owner: &CacheOwner) -> Result<bool, PermissionError> {
+    match std::fs::symlink_metadata(&owner.path) {
+        Ok(metadata) => Ok(owner.identity == (metadata.dev(), metadata.ino())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(cache_io_error("stat owner", &owner.path, error)),
+    }
+}
+
 type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<Option<LockGuard>, Occupancy> + 'a;
 
 /// Sweep caches while holding the owner's writer lock across idle or free-floor
@@ -1089,6 +1097,11 @@ fn sweep_cache_root(
                 None => {}
             }
         }
+        if let Err(error) = cache_gc_operation("readdir", Path::new(&name), || Ok(())) {
+            failures.push((None, cache_fs_error("readdir", Path::new(&name))(error)));
+            current = next.take();
+            continue;
+        }
         let cookie = entries
             .position()
             .map_err(cache_fs_error("position cache root", cache_root))?;
@@ -1335,6 +1348,34 @@ fn prune_worktree_cache(
         });
         return Ok(());
     };
+    // Acquire the worktree writer lock before measuring an idle candidate. The
+    // last-write snapshot must describe the cache after an active writer has
+    // been excluded, and the same guard remains held through detachment.
+    let mut idle_guard = None;
+    if tombstone.is_none()
+        && !policy.dry_run
+        && policy.idle_before_ns.is_some()
+        && let Some(owner) = owner.as_ref()
+        && policy.project_owners.contains(&owner.path)
+        && owner_path_matches_identity(owner)?
+    {
+        match writer_guard(&owner.path)
+            .and_then(|guard| guard.ok_or_else(|| missing_custody(&owner.path)))
+        {
+            Ok(guard) => idle_guard = Some(guard),
+            Err(state) => {
+                report.kept.push(CacheGcEntry {
+                    path: cache_root.join(name),
+                    bytes: 0,
+                    reason: guard_reason(&state),
+                });
+                return Ok(());
+            }
+        }
+        if read_cache_owner(&cache, Path::new(name))? != owner {
+            return Ok(());
+        }
+    }
     let (reason, measured) = if let Some((device, inode, fingerprint)) = tombstone {
         // Bind retry authority to what GC intended to rename, even if a
         // process stopped before verification or quarantine could complete.
@@ -1442,26 +1483,18 @@ fn prune_worktree_cache(
                 cache_owner_fingerprint(original_owner),
                 std::process::id()
             ));
-            let idle_guard = if matches!(
+            let idle_removal = matches!(
                 reason,
                 CacheGcReason::Idle | CacheGcReason::FreeFloor | CacheGcReason::TotalCap
-            ) {
-                match writer_guard(&original_owner.path)
-                    .and_then(|guard| guard.ok_or_else(|| missing_custody(&original_owner.path)))
-                {
-                    Ok(guard) => Some(guard),
-                    Err(state) => {
-                        report.kept.push(CacheGcEntry {
-                            path: cache_root.join(name),
-                            bytes: 0,
-                            reason: guard_reason(&state),
-                        });
-                        return Ok(());
-                    }
-                }
-            } else {
-                None
-            };
+            );
+            if idle_removal && idle_guard.is_none() {
+                // The owner became eligible after its identity was first
+                // checked. Re-enter from the start so measurement follows the
+                // writer lock on the next pass.
+                report.interrupted_at = Some(cache_root.join(name));
+                report.continuation = None;
+                return Ok(());
+            }
             if !scan.permits() {
                 report.interrupted_at = Some(cache_root.join(name));
                 report.continuation = None;
@@ -1494,7 +1527,11 @@ fn prune_worktree_cache(
             })
             .map_err(cache_fs_error("rename to tombstone", Path::new(name)))?;
             // The lane path is now free for a writer to create a fresh cache.
-            drop(idle_guard);
+            drop(if idle_removal {
+                idle_guard.take()
+            } else {
+                None
+            });
             detached.as_os_str()
         };
         let detached_cache = match verify_detached_cache(root, removal_name, &opened, &owner) {
@@ -2857,11 +2894,31 @@ mod tests {
                 }
             }
 
-            // Exercise the public GC entry point, including its root snapshot
-            // and descriptor-relative payload removal.
-            let result = gc_worktree_cargo_caches(home, &CacheGcPolicy::default());
-            assert!(result.is_ok(), "large cache removal failed: {result:#?}");
-            assert_eq!(result?.removed.len(), 1);
+            // Exercise the public GC entry point across bounded measurement
+            // passes, including its root snapshot and descriptor-relative
+            // payload removal.
+            let mut start_at = None;
+            let mut detail = None;
+            let mut removed = Vec::new();
+            let mut complete = false;
+            for _ in 0..8 {
+                let scan = CacheGcScan {
+                    start_at: start_at.as_deref(),
+                    detail: detail.as_deref(),
+                    ..CacheGcScan::default()
+                };
+                let report =
+                    super::gc_worktree_cargo_caches(home, &CacheGcPolicy::default(), &scan)?;
+                removed.extend(report.removed);
+                let Some(interrupted_at) = report.interrupted_at else {
+                    complete = true;
+                    break;
+                };
+                start_at = Some(interrupted_at);
+                detail = report.continuation;
+            }
+            assert!(complete, "large cache removal did not resume to completion");
+            assert_eq!(removed.len(), 1);
             assert_eq!(
                 std::fs::read_dir(path.parent().ok_or("cache parent")?)?.count(),
                 0
