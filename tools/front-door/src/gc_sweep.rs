@@ -493,7 +493,7 @@ fn elapsed_over_budget(elapsed: Duration, budget: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::time::{DurationMicros, MonoTime, TestClock, WallTime};
+    use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
 
     fn test_clock() -> TestClock {
         TestClock::new(
