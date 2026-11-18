@@ -484,7 +484,7 @@ pub(super) fn configure_process_tree(
     Ok(grant)
 }
 
-/// Cargo commands a lane may run locally, from the sealed `lanes.local_cargo`
+/// Preferred local Cargo scope, from the sealed `lanes.local_cargo`
 /// knob (host configuration, the run's `--knob`, or the graph node's
 /// `attempt.local_cargo`). The registry default and any unreadable value are
 /// `all`.
@@ -616,8 +616,7 @@ pub(super) fn configure_build_slots(
             if local_cargo(knobs) == "all" {
                 return Ok(Vec::new());
             }
-            // Disabling admission does not widen the separate configured
-            // permission to compile locally.
+            // Keep the separate local Cargo advisory when admission is disabled.
             let gate = provenant_providers::BuildSlotGate {
                 project,
                 backend: port.backend.clone(),
