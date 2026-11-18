@@ -7,7 +7,7 @@ pub const KNOB: &str = "lanes.verification";
 
 /// The default verification paragraph. A launch that does not override it
 /// includes this text unchanged.
-pub const CHECK_PARAGRAPH: &str = "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run cargo check, clippy on touched crates and targeted tests for changed code, then commit and push. Leave the whole workspace suite to CI (source: default; lanes.verification).\n";
+pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints. When a shared warm CARGO_TARGET_DIR is available, run `cargo check`, clippy on touched crates and the tests that cover your change; otherwise do not build cold: leave it to CI and say so. Report what you ran (source: default; lanes.verification).\n";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VerificationScope {

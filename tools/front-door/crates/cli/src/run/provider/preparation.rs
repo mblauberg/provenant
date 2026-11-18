@@ -3798,14 +3798,13 @@ pub(super) fn prepare_candidates(
         };
         let text = format!(
             "{}\n{text}",
-            run::lane_preamble_with_policy(
+            run::lane_preamble_with(
                 &model_policy.guidance(),
                 &limits,
                 writer
                     .is_some()
                     .then(|| run::ResolvedCiScope::resolve(&task.profile)),
                 writable_handoff.then_some(handoff.as_path()),
-                &launch_policy,
                 &extras,
             )
         );

@@ -293,10 +293,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// that compile share the host's build cap, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = concat!(
-    "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run cargo check, clippy on touched crates and targeted tests for changed code, then commit and push. Leave the whole workspace suite to CI (source: default; lanes.verification).\n",
-    "Build slots: compiling `cargo` commands and test runs share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n"
-);
+pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: compiling `cargo` commands and test runs share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
 
 /// Host build cap stated in the preamble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,10 +315,7 @@ fn slot_guidance(cap: Option<BuildCap>) -> String {
             "Build slots: compiling `cargo` commands and test runs share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
             cap.slots, cap.source
         ),
-        None => BUILD_SLOT_GUIDANCE
-            .split_once('\n')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_default(),
+        None => BUILD_SLOT_GUIDANCE.to_string(),
     }
 }
 
@@ -347,7 +341,7 @@ pub fn lane_preamble(
     )
 }
 
-fn lane_preamble_with(
+pub fn lane_preamble_with(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
     ci_scope: Option<crate::ResolvedCiScope>,
@@ -383,22 +377,6 @@ fn lane_preamble_with(
         "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}",
         limits.preamble(),
         handoff.map(handoff_progress_guidance).unwrap_or_default()
-    )
-}
-
-/// Effective guards are rendered by the same table used by enforcement.
-pub fn lane_preamble_with_policy(
-    model_guidance: &str,
-    limits: &provenant_records::LaneLimits,
-    ci_scope: Option<crate::ResolvedCiScope>,
-    handoff: Option<&Path>,
-    policy: &provenant_records::policy::Policy,
-    extras: &PreambleExtras,
-) -> String {
-    format!(
-        "{}Launch policy (code, boundary, strength, source, knob):\n{}",
-        lane_preamble_with(model_guidance, limits, ci_scope, handoff, extras),
-        policy.render()
     )
 }
 
