@@ -1,5 +1,6 @@
 name: Work item
 description: Propose a bounded change or decision for user or agent triage.
+type: Task
 body:
   - type: markdown
     attributes:
