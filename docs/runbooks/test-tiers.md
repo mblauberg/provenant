@@ -3,10 +3,21 @@ Owner: repository maintainers
 Anchor: scripts/verify-tier
 
 The tiers describe what each place runs; they are not a checklist for a lane.
-Lanes may run targeted tests cautiously using shared warm caches; full suites
-belong to CI and integration branches. The host or brief can narrow a lane's
-verification scope. `lanes.local_cargo`, `attempt.local_cargo` and the lane Cargo
-shim enforce the configured command limit.
+A lane needs a host-provided shared warm `CARGO_TARGET_DIR`, never a fresh cold target, and
+runs `cargo check`, clippy for touched crates, and tests filtered to changed
+code. Set `CARGO_BUILD_BUILD_DIR` to the same warm directory when it is set,
+so Cargo does not put intermediate build output in a separate cold directory. The whole workspace suite runs in CI. `lanes.verification` defaults to
+`targeted` and may be overridden by host or project configuration or a brief's
+`Verification scope:` line. The preamble names the source.
+
+Compiling cargo commands and targeted test runs share the host-wide
+`domains.fabric.lanes.max_concurrent_builds` budget. Busy slots wait a bounded
+time, then warn and proceed; zero disables the cap. Cargo serialises access to a
+shared target with its own locks. `lanes.local_cargo` can warn when a command
+exceeds a host's preferred scope; it does not refuse the command. The current
+launcher provisions private per-worktree targets and does not yet supply a shared
+write grant; provisioning it remains necessary before this tier works for
+ordinary confined launches. A missing warm target is not a reason to start a cold build.
 
 `scripts/verify-tier` runs the built-in `0` tier (format, check and unit tests
 for touched crates), `1` adds mapped integration binaries, `2` runs the

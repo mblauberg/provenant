@@ -6,8 +6,8 @@ use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub(crate) mod batch;
 mod ci;
-
 #[derive(Deserialize)]
 struct View {
     state: String,
@@ -54,6 +54,9 @@ pub(crate) struct Line {
     checks_total: Option<usize>,
     checks_failed: Option<usize>,
     checks_pending: Option<usize>,
+    /// Failed or cancelled check names, when checks were readable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_checks: Vec<String>,
     merge: String,
     review: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +116,10 @@ impl Line {
             line.push_str(&format!(" checks={passed}/{total}"));
             if failed > 0 {
                 line.push_str(&format!(" fail={failed}"));
+                let names = self.failing_checks.join(",");
+                if !names.is_empty() {
+                    line.push_str(&format!(" names={names}"));
+                }
             }
             if pending > 0 {
                 line.push_str(&format!(" pending={pending}"));
@@ -657,6 +664,12 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         checks_total: checks.map(<[_]>::len),
         checks_failed: count(&["fail", "cancel"]),
         checks_pending: count(&["pending"]),
+        failing_checks: checks
+            .unwrap_or(&[])
+            .iter()
+            .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
+            .map(|check| check.name.clone())
+            .collect(),
         merge: word(&view.merge),
         review: word(view.review.as_deref().unwrap_or_default()),
         state: view.state,
@@ -683,17 +696,71 @@ pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'stati
 }
 
 fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
-    numbers
+    // One GraphQL query answers every pull request when it can; the per-PR
+    // REST reads remain the fallback when the batch transport cannot.
+    let batch = batch::snapshot(state, project, numbers);
+    let batch_limited = matches!(batch, batch::Batch::RateLimited(_));
+    let entries = match batch {
+        batch::Batch::Entries(entries) => entries,
+        _ => Vec::new(),
+    };
+    let mut lines: Vec<(_, Line)> = entries
         .iter()
-        .map(|&number| {
-            wait_line(
-                project,
-                state,
-                number,
-                &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
-                std::time::Duration::ZERO,
-            )
-            .unwrap_or_else(|error| Line {
+        .map(|entry| (entry.number, batch::line_from_entry(entry)))
+        .collect();
+    // A rollup too large for one page is not evidence; re-read it exactly.
+    for entry in &entries {
+        if entry.truncated
+            && let Some(line) = {
+                let request =
+                    provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
+                wait_line(
+                    project,
+                    state,
+                    entry.number,
+                    &request,
+                    std::time::Duration::ZERO,
+                )
+                .ok()
+            }
+        {
+            lines.retain(|(number, _)| *number != entry.number);
+            lines.push((entry.number, line));
+        }
+    }
+    let answered: std::collections::BTreeSet<_> = lines.iter().map(|(number, _)| *number).collect();
+    for &number in numbers {
+        if answered.contains(&number) {
+            continue;
+        }
+        lines.push((number, rest_line(project, state, number, !batch_limited)));
+    }
+    let order: std::collections::BTreeMap<u64, usize> = numbers
+        .iter()
+        .enumerate()
+        .map(|(index, &number)| (number, index))
+        .collect();
+    lines.sort_by_key(|(number, _)| order.get(number).copied().unwrap_or(usize::MAX));
+    lines.into_iter().map(|(_, line)| line).collect()
+}
+
+/// The per-PR REST read, falling back to one GraphQL query when REST itself
+/// runs out of quota. `batch_limited` is false only while the GraphQL quota
+/// may still answer, so a PR never loops between the two transports.
+fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Line {
+    let request = provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
+    match wait_line(project, state, number, &request, std::time::Duration::ZERO) {
+        Ok(line) => line,
+        Err(error) => {
+            if try_graphql
+                && looks_rate_limited(error.as_ref())
+                && let batch::Batch::Entries(entries) = batch::single(state, project, number)
+                && let Some(entry) = entries.first()
+                && !entry.truncated
+            {
+                return batch::line_from_entry(entry);
+            }
+            Line {
                 number,
                 state: "UNAVAILABLE".into(),
                 head: "unknown".into(),
@@ -702,12 +769,22 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
                 checks_total: None,
                 checks_failed: None,
                 checks_pending: None,
+                failing_checks: Vec::new(),
                 merge: "unknown".into(),
                 review: "unknown".into(),
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
-            })
-        })
-        .collect()
+            }
+        }
+    }
+}
+
+/// A rate-limited read names the limit in its message, whatever transport
+/// produced it.
+fn looks_rate_limited(error: &dyn std::error::Error) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("rate limit")
 }
 
 pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
@@ -790,7 +867,9 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
     let rows: Vec<String> = action.iter().map(|line| line.text()).collect();
     let quiet = lines.len() - action.len();
     let next = match action.first() {
-        Some(line) if line.class() == "failing" => Some(format!("gh pr checks {}", line.number)),
+        Some(line) if line.class() == "failing" => {
+            Some(format!("provenant ci failures pr {}", line.number))
+        }
         Some(line) if line.class() == "pending" => {
             Some(format!("provenant wait --pr {}", line.number))
         }
@@ -825,6 +904,7 @@ mod tests {
             checks_total: Some(1),
             checks_failed: Some(0),
             checks_pending: Some(0),
+            failing_checks: Vec::new(),
             merge: "clean".into(),
             review: "approved".into(),
             error: error.map(str::to_owned),
