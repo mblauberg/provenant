@@ -14,12 +14,14 @@ use serde_json::Value;
 use thiserror::Error;
 
 /// Wire names of the relayed coordination requests.
+const NOTES: &str = "notes";
 const MAIL: &str = "fabric_mail";
 const EVENTS: &str = "fabric_events";
 const CLAIM: &str = "fabric_custody";
 
 /// A parsed relay request. Inputs are the runtime's exact serde contracts.
 pub enum ToolCall {
+    Notes(crate::notes::Input),
     Mail(MailInput, Option<OperationId>),
     Events(EventsInput, Option<OperationId>),
     Claim(ClaimInput, Option<OperationId>),
@@ -38,6 +40,7 @@ pub enum InvalidInput {
 impl ToolCall {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Notes(..) => NOTES,
             Self::Mail(..) => MAIL,
             Self::Events(..) => EVENTS,
             Self::Claim(..) => CLAIM,
@@ -91,11 +94,13 @@ impl ToolCall {
             Self::Mail(input, id) => Some((Mutation::Mail(input.clone()), id.clone())),
             Self::Events(input, id) => Some((Mutation::Events(input.clone()), id.clone())),
             Self::Claim(input, id) => Some((Mutation::Claim(input.clone()), id.clone())),
+            Self::Notes(_) => None,
         }
     }
 
     pub(crate) fn lane_request(&self) -> Result<super::host::Request, ServiceError> {
         let (mut arguments, id) = match self {
+            Self::Notes(input) => (serde_json::to_value(input)?, &None),
             Self::Mail(input, id) => (serde_json::to_value(input)?, id),
             Self::Events(input, id) => (serde_json::to_value(input)?, id),
             Self::Claim(input, id) => (serde_json::to_value(input)?, id),
@@ -159,6 +164,11 @@ impl ToolCall {
             )?)?);
         }
         match self {
+            Self::Notes(_) => Err(ServiceError::Cli {
+                code: "notes_host_missing".into(),
+                message: "notes require the host-bound notes owner".into(),
+                data: Value::Null,
+            }),
             Self::Mail(input, _) => Ok(serde_json::to_value(
                 coordination.mail(input, budget, cancel)?,
             )?),
@@ -174,6 +184,13 @@ impl ToolCall {
     /// Relay frames reserve sender identity for the host even when shared
     /// record inputs accept extension fields.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
+        if name == NOTES {
+            return serde_json::from_value(arguments)
+                .map(Self::Notes)
+                .map_err(|_| InvalidInput::Arguments {
+                    path: "arguments".into(),
+                });
+        }
         let mut arguments = arguments;
         if !matches!(name, MAIL | EVENTS | CLAIM) {
             return Err(InvalidInput::UnknownTool);

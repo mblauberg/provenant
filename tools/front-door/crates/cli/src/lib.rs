@@ -31,6 +31,7 @@ pub mod install;
 pub mod limits;
 mod metadata;
 pub mod mileage;
+pub mod notes;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
