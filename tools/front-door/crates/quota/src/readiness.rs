@@ -332,6 +332,7 @@ impl ReadinessFile {
                 evidence_ref: r.evidence_ref.clone(),
             }
         };
+        let mut account_fallback = None;
         if scope.route != ACCOUNT_ROUTE {
             let account = read(&ReadinessScope {
                 extra: Default::default(),
@@ -346,16 +347,23 @@ impl ReadinessFile {
                             ReadinessReason::SignedOut
                                 | ReadinessReason::LoginExpired
                                 | ReadinessReason::AccountMismatch
-                                | ReadinessReason::ProbedNoFigures
                         )
                     ))
             {
                 return account;
             }
+            if account.observed_scope.is_some()
+                && account.reason == Some(ReadinessReason::ProbedNoFigures)
+            {
+                account_fallback = Some(account);
+            }
         }
         let scoped = read(scope);
         if scoped.state == ReadinessState::Unavailable {
             return scoped;
+        }
+        if scoped.observed_scope.is_none() {
+            return account_fallback.unwrap_or(scoped);
         }
         scoped
     }
@@ -1112,5 +1120,71 @@ mod tests {
         );
         // The file refuses another account's records.
         assert!(ReadinessFile::decode(&bytes, "claude", "other").is_err());
+    }
+
+    #[test]
+    fn probed_no_figures_does_not_mask_route_unavailable() {
+        let mut account_record = crate::AccountRecord::empty(account());
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(&account_record, LOCAL_HOST, 100, 60, None)
+            .unwrap();
+
+        let refused_scope = route("claude/refused");
+        file.records.push(RouteReadiness {
+            extra: Default::default(),
+            schema_version: SCHEMA_VERSION,
+            scope: refused_scope.clone(),
+            state: ReadinessState::Unavailable,
+            reason: Some(ReadinessReason::ProviderRefusal),
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 200,
+            reset_unix_seconds: None,
+            evidence_ref: Some("provider-refusal".into()),
+        });
+
+        let unrecorded_scope = route("claude/unrecorded");
+
+        // #3364: account at ProbedNoFigures plus a route record Unavailable reads
+        // Unavailable for that route; account at ProbedNoFigures with no route record
+        // still reads unknown.
+        for (query_scope, expected_state, expected_reason) in [
+            (
+                &refused_scope,
+                ReadinessState::Unavailable,
+                Some(ReadinessReason::ProviderRefusal),
+            ),
+            (
+                &unrecorded_scope,
+                ReadinessState::Unknown,
+                Some(ReadinessReason::ProbedNoFigures),
+            ),
+        ] {
+            let read = file.get(query_scope, 120);
+            assert_eq!(read.state, expected_state);
+            assert_eq!(read.reason, expected_reason);
+        }
+
+        // Also verify via sync_refusals
+        account_record.refusals = vec![refused(None, "synced-refused", None)];
+        file.sync_refusals(&account_record, LOCAL_HOST, &at(&account_record, 100))
+            .unwrap();
+        let synced_refused_scope = route("claude/synced-refused");
+
+        for (query_scope, expected_state, expected_reason) in [
+            (
+                &synced_refused_scope,
+                ReadinessState::Unavailable,
+                Some(ReadinessReason::ProviderRefusal),
+            ),
+            (
+                &unrecorded_scope,
+                ReadinessState::Unknown,
+                Some(ReadinessReason::ProbedNoFigures),
+            ),
+        ] {
+            let read = file.get(query_scope, 120);
+            assert_eq!(read.state, expected_state);
+            assert_eq!(read.reason, expected_reason);
+        }
     }
 }
