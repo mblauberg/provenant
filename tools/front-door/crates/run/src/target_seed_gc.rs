@@ -1077,8 +1077,8 @@ mod tests {
     #[test]
     fn budget_stop_resumes_generation_inventory_and_eviction() {
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
         let state = tempfile::tempdir().unwrap();
         let old = generation(state.path(), "001", 3);
@@ -1135,7 +1135,7 @@ mod tests {
         fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
         fs::set_permissions(&generation, fs::Permissions::from_mode(0o500)).unwrap();
 
-        let mut cursor = None;
+        let mut cursor: Option<(PathBuf, String)> = None;
         let mut tree_cursor = None;
         for _ in 0..5 {
             let checks = Cell::new(0);

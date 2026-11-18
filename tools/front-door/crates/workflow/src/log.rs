@@ -418,7 +418,6 @@ impl LogStore {
             pruned,
             interrupted: true,
             continuation: serde_json::to_string(cursor).ok(),
-            ..GcProgress::default()
         }
     }
 
@@ -577,7 +576,7 @@ impl LogStore {
         let resumed = control
             .start_at
             .filter(|start| *start == db_path.as_path())
-            .and_then(|_| control.detail)
+            .and(control.detail)
             .and_then(|detail| serde_json::from_str::<GcCursor>(detail).ok())
             .filter(|cursor| {
                 cursor.version == 1
