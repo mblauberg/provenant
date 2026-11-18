@@ -999,9 +999,9 @@ fn payload_bytes(
     path: &std::path::Path,
     keep_going: &dyn Fn() -> bool,
     cancel: &provenant_core::CancelToken,
-) -> u64 {
+) -> Result<u64> {
     if !keep_going() {
-        return 0;
+        return Err(RunError::Cancelled);
     }
 
     let mut measured =
@@ -1009,29 +1009,37 @@ fn payload_bytes(
     let mut bytes = 0_u64;
     for name in [STATE, HISTORY, SCRATCH] {
         if !keep_going() {
-            return 0;
+            return Err(RunError::Cancelled);
         }
         let name = OsStr::new(name);
         if attempt.metadata_at(name, false).is_ok() {
             restore_owned_temporary_directories(attempt, name, keep_going);
-            measured.measure_at("payload", attempt, name, &path.join(name));
+            measured.measure_at_while("payload", attempt, name, &path.join(name), keep_going);
         }
     }
     for entry in &measured.entries {
         if !keep_going() {
-            return 0;
+            return Err(RunError::Cancelled);
         }
         bytes = bytes.saturating_add(entry.allocated_bytes);
     }
     for name in [AttemptFile::Stdout.name(), AttemptFile::Stderr.name()] {
         if !keep_going() {
-            return 0;
+            return Err(RunError::Cancelled);
         }
         if let Ok(meta) = attempt.metadata_at(OsStr::new(name), false) {
             bytes = bytes.saturating_add(meta.size.saturating_sub(LOG_TAIL));
         }
     }
-    bytes
+    if !keep_going() {
+        return Err(RunError::Cancelled);
+    }
+    if !measured.errors.is_empty() || measured.traversal_exhausted() {
+        return Err(RunError::Io(std::io::Error::other(
+            "payload measurement incomplete; observed bytes remain uncertain",
+        )));
+    }
+    Ok(bytes)
 }
 
 impl RunStore {
@@ -1093,7 +1101,7 @@ impl RunStore {
         let mut ledger = read_ledger(&self.root);
         if measure && scan.detail != Some("evict") {
             self.measure_payloads(&mut ledger, now, &mut report, call, scan)?;
-            if report.interrupted_at.is_some() {
+            if report.interrupted_at.is_some() || !report.errors.is_empty() {
                 report.accounted_bytes = ledger
                     .attempts
                     .values()
@@ -1212,6 +1220,7 @@ impl RunStore {
     ) -> Result<()> {
         let keep_going = &|| scan.permits(call);
 
+        let mut complete = true;
         let mut after = self.retention_after(scan.start_at)?;
         let mut attempts = if scan.start_at.is_some() {
             ledger.attempts.clone()
@@ -1271,7 +1280,7 @@ impl RunStore {
                         })) => (None, true),
                         Err(error) => return Err(error),
                     };
-                    let bytes = payload_bytes(&attempt, &path, keep_going, call.cancel);
+                    let bytes = payload_bytes(&attempt, &path, keep_going, call.cancel)?;
                     if !keep_going() {
                         return Err(RunError::Cancelled);
                     }
@@ -1297,12 +1306,19 @@ impl RunStore {
                         report.interrupted_phase = Some("measure");
                         return Ok(());
                     }
-                    Err(error) => issue(report, path, &error),
+                    Err(error) => {
+                        complete = false;
+                        if let Some(mut prior) = ledger.attempts.get(&id).cloned() {
+                            prior.pinned = true;
+                            attempts.insert(id, prior);
+                        }
+                        issue(report, path, &error);
+                    }
                 }
             }
         }
         ledger.attempts = attempts;
-        ledger.measured_micros = now.as_micros().max(1);
+        ledger.measured_micros = if complete { now.as_micros().max(1) } else { 0 };
         Ok(())
     }
 
@@ -3769,6 +3785,26 @@ mod tests {
             &call,
             &RetentionScan::default(),
         )
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn incomplete_payload_census_is_uncertain_and_never_grants_eviction() -> TestResult {
+        let pair = pair()?;
+        let mut path = pair.older.join(STATE).join("deep");
+        for _ in 0..270 {
+            fs::create_dir_all(&path)?;
+            path.push("d");
+        }
+        fs::write(path.with_file_name("payload"), b"unmeasured")?;
+        let report = payload(&pair, 0, 8 * DAY_MICROS, false, true)?;
+        assert!(!report.errors.is_empty(), "partial census is visible");
+        assert!(
+            report.evicted.is_empty(),
+            "an incomplete lower bound cannot authorise cap eviction"
+        );
+        assert!(pair.older.join(STATE).exists() && pair.newer.join(STATE).exists());
+        Ok(())
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps
