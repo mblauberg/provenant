@@ -836,6 +836,7 @@ fn failed_check() -> CiFailedCheck {
     }
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn ci_failure_findings_reach_repair_input_and_survive_resume() {
     let mut doc = document();
@@ -849,7 +850,10 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
         .unwrap(),
     );
     let mut failure = observation(CiState::Failed, "failed");
-    failure.failed_checks.push(failed_check());
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let mut check = failed_check();
+    check.excerpt.push_str(&format!(" using {secret}"));
+    failure.failed_checks.push(check);
     let mut owner = Owner {
         observations: VecDeque::from([failure]),
         ..Default::default()
@@ -857,7 +861,17 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
     let mut journal = Journal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     let outputs = run.checkpoint.nodes[0].outputs.as_ref().unwrap();
-    assert_eq!(outputs.findings[0].summary, "test: assertion failed");
+    assert!(
+        outputs.findings[0]
+            .summary
+            .starts_with("test: assertion failed")
+    );
+    assert!(
+        !serde_json::to_string(&run.checkpoint)
+            .unwrap()
+            .contains(secret)
+    );
+    assert!(owner.prompts.iter().all(|prompt| !prompt.contains(secret)));
     assert_eq!(outputs.findings[0].url.as_deref(), Some("https://checks/1"));
     assert!(owner.prompts[0].contains("assertion failed"));
     assert!(owner.prompts[0].contains("https://checks/1"));

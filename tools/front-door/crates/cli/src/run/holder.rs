@@ -450,12 +450,6 @@ fn live_graph_children(
         let checkpoint = match FileJournal::read_checkpoint(state, project, &id) {
             Ok(Some(checkpoint)) => checkpoint,
             Ok(None) => return Err("missing graph checkpoint".into()),
-            Err(error)
-                if error.is_unreadable()
-                    && FileJournal::unreadable_settled(state, project, &id)? =>
-            {
-                continue;
-            }
             Err(error) => return Err(error.into()),
         };
         if let Some(parent) = relay::historical_parent_of_attempt(&checkpoint, reference) {
@@ -1416,7 +1410,7 @@ mod tests {
             "blocked",
             "skipped",
         ] {
-            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":2,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
                     "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0, "attempt": 1},
@@ -1425,6 +1419,7 @@ mod tests {
                 }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
                 {"id":"parental--other","state":"running","attempts":[]}]
             }))?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
             assert_eq!(
                 holder.has_live_children(&raw)?,
@@ -1442,16 +1437,8 @@ mod tests {
                 .join("graph-custody.json"),
             b"broken checkpoint",
         )?;
+        // A corrupt checkpoint is surfaced, never read as settled (state.md).
         assert!(holder.has_live_children(&raw).is_err());
-        std::fs::write(
-            state
-                .as_path()
-                .join("fabric/graphs")
-                .join(project.to_string())
-                .join("graph-custody.json"),
-            br#"{"checkpoint":{"nodes":[{"state":"succeeded"}]}}"#,
-        )?;
-        assert!(!holder.has_live_children(&raw)?);
         let mut other = holder_context;
         other.attempt_id = AttemptId::from_bytes([5; 16]);
         assert!(matches!(

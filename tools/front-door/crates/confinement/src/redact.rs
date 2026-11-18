@@ -554,6 +554,9 @@ enum Assignment {
         backslashes: usize,
         pending_slashes: usize,
         line: bool,
+        masked: bool,
+        /// A fixed-size prefix held until the value ends or differs.
+        marker_length: usize,
     },
 }
 
@@ -582,10 +585,14 @@ impl AssignmentScanner {
                 self.mask_bytes(&word, output);
             }
             Assignment::Value {
-                quote: Some(_),
                 pending_slashes,
+                marker_length,
+                backslashes,
                 ..
-            } => self.mask_slashes(pending_slashes, output),
+            } => {
+                self.finish_marker(marker_length, backslashes, output);
+                self.mask_slashes(pending_slashes, output);
+            }
             _ => {}
         }
         self.run.clear();
@@ -612,6 +619,18 @@ impl AssignmentScanner {
     fn keep_slashes(&mut self, count: usize, masked: bool, output: &mut DecisionQueue) {
         for _ in 0..count {
             self.keep(b'\\', masked, output);
+        }
+    }
+
+    fn finish_marker(
+        &mut self,
+        length: usize,
+        trailing_slashes: usize,
+        output: &mut DecisionQueue,
+    ) {
+        let masked = length != REDACTED.len() || trailing_slashes != 0;
+        for byte in &REDACTED[..length] {
+            self.keep(*byte, masked, output);
         }
     }
 
@@ -706,6 +725,8 @@ impl AssignmentScanner {
                         backslashes: 0,
                         pending_slashes: 0,
                         line: scheme,
+                        masked: false,
+                        marker_length: 0,
                     };
                     continue;
                 }
@@ -737,6 +758,8 @@ impl AssignmentScanner {
                         backslashes: 0,
                         pending_slashes: 0,
                         line: true,
+                        masked: true,
+                        marker_length: 0,
                     };
                     continue;
                 }
@@ -746,78 +769,134 @@ impl AssignmentScanner {
                     backslashes,
                     pending_slashes,
                     line,
-                } => match quote {
-                    Some(quote) => {
-                        if byte == b'\n' || byte == b'\r' {
-                            self.mask_slashes(pending_slashes, output);
-                            continue;
-                        }
-                        if byte == quote && quote_close(backslashes, quote_slashes) {
-                            // Keep only the source slashes needed to encode this close.
-                            // Older slashes from the same run were emitted as masked.
-                            if pending_slashes > 0 {
-                                // The old scanner masks the first slash as a value
-                                // byte before recognising the closing delimiter.
-                                self.insertions.push(output.total);
-                                self.matched = true;
-                            }
-                            self.keep_slashes(pending_slashes, false, output);
-                            self.keep(byte, false, output);
-                            return;
-                        }
-                        if byte == b'\\' {
-                            let next_count = backslashes.saturating_add(1);
-                            if pending_slashes < quote_slashes {
-                                self.state = Assignment::Value {
-                                    quote: Some(quote),
-                                    quote_slashes,
-                                    backslashes: next_count,
-                                    pending_slashes: pending_slashes.saturating_add(1),
-                                    line,
-                                };
-                            } else {
-                                self.keep(byte, true, output);
-                                self.state = Assignment::Value {
-                                    quote: Some(quote),
-                                    quote_slashes,
-                                    backslashes: next_count,
-                                    pending_slashes,
-                                    line,
-                                };
-                            }
-                            return;
-                        }
-                        self.mask_slashes(pending_slashes, output);
-                        self.keep(byte, true, output);
+                    mut masked,
+                    mut marker_length,
+                } => {
+                    // The marker's closing bracket belongs to the candidate,
+                    // even though it normally delimits an unquoted value.
+                    if !masked && backslashes == 0 && REDACTED.get(marker_length) == Some(&byte) {
                         self.state = Assignment::Value {
-                            quote: Some(quote),
+                            quote,
                             quote_slashes,
-                            backslashes: 0,
-                            pending_slashes: 0,
+                            backslashes,
+                            pending_slashes,
                             line,
+                            masked,
+                            marker_length: marker_length + 1,
                         };
                         return;
                     }
-                    None => {
-                        let ends = if line {
-                            byte == b'\n' || byte == b'\r'
-                        } else {
-                            is_delimiter(byte)
-                        };
-                        if ends {
-                            continue;
+                    match quote {
+                        Some(quote) => {
+                            if byte == b'\n' || byte == b'\r' {
+                                self.finish_marker(marker_length, backslashes, output);
+                                self.mask_slashes(pending_slashes, output);
+                                continue;
+                            }
+                            if byte == quote && quote_close(backslashes, quote_slashes) {
+                                // Keep only the source slashes needed to encode this close.
+                                // Older slashes from the same run were emitted as masked.
+                                let exact_marker = !masked
+                                    && marker_length == REDACTED.len()
+                                    && backslashes == quote_slashes;
+                                self.finish_marker(
+                                    marker_length,
+                                    backslashes.saturating_sub(quote_slashes),
+                                    output,
+                                );
+                                if pending_slashes > 0 && !exact_marker {
+                                    // The old scanner masks the first slash as a value
+                                    // byte before recognising the closing delimiter.
+                                    self.insertions.push(output.total);
+                                    self.matched = true;
+                                }
+                                self.keep_slashes(pending_slashes, false, output);
+                                self.keep(byte, false, output);
+                                return;
+                            }
+                            if byte == b'\\' {
+                                let next_count = backslashes.saturating_add(1);
+                                if pending_slashes < quote_slashes {
+                                    self.state = Assignment::Value {
+                                        quote: Some(quote),
+                                        quote_slashes,
+                                        backslashes: next_count,
+                                        pending_slashes: pending_slashes.saturating_add(1),
+                                        line,
+                                        masked,
+                                        marker_length,
+                                    };
+                                } else {
+                                    self.finish_marker(marker_length, 1, output);
+                                    marker_length = 0;
+                                    masked = true;
+                                    self.keep(byte, true, output);
+                                    self.state = Assignment::Value {
+                                        quote: Some(quote),
+                                        quote_slashes,
+                                        backslashes: next_count,
+                                        pending_slashes,
+                                        line,
+                                        masked,
+                                        marker_length,
+                                    };
+                                }
+                                return;
+                            }
+                            self.finish_marker(marker_length, 1, output);
+                            marker_length = 0;
+                            masked = true;
+                            self.mask_slashes(pending_slashes, output);
+                            self.keep(byte, true, output);
+                            self.state = Assignment::Value {
+                                quote: Some(quote),
+                                quote_slashes,
+                                backslashes: 0,
+                                pending_slashes: 0,
+                                line,
+                                masked,
+                                marker_length,
+                            };
+                            return;
                         }
-                        self.keep(byte, true, output);
-                        self.state = Assignment::Value {
-                            quote: None,
-                            quote_slashes: 0,
-                            backslashes: 0,
-                            pending_slashes: 0,
-                            line,
-                        };
-                        return;
+                        None => {
+                            let ends = if line {
+                                byte == b'\n' || byte == b'\r'
+                            } else {
+                                // Backslashes and escaped delimiters continue the
+                                // credential, even after an exact marker. Raw line
+                                // endings still bound every unquoted value.
+                                byte == b'\n'
+                                    || byte == b'\r'
+                                    || (byte != b'\\'
+                                        && backslashes.is_multiple_of(2)
+                                        && is_delimiter(byte))
+                            };
+                            if ends {
+                                self.finish_marker(marker_length, 0, output);
+                                continue;
+                            }
+                            self.finish_marker(marker_length, 1, output);
+                            marker_length = 0;
+                            masked = true;
+                            self.keep(byte, true, output);
+                            self.state = Assignment::Value {
+                                quote: None,
+                                quote_slashes: 0,
+                                backslashes: if byte == b'\\' {
+                                    backslashes.saturating_add(1)
+                                } else {
+                                    0
+                                },
+                                pending_slashes: 0,
+                                line,
+                                masked,
+                                marker_length,
+                            };
+                            return;
+                        }
                     }
-                },
+                }
             }
         }
     }
@@ -1872,8 +1951,68 @@ mod tests {
 
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn exact_redacted_assignments_are_preserved_across_chunk_boundaries() {
+        for input in [
+            "token=[REDACTED]",
+            "token=[REDACTED] next",
+            "token=[REDACTED]\nnext",
+            "token=[REDACTED]\r\nnext",
+            "token=[REDACTED]\"next\"",
+            "token=[REDACTED]'next'",
+            "token='[REDACTED]'",
+            "token=\"[REDACTED]\" next",
+            "Authorization: Bearer [REDACTED]",
+            r#"{\"token\":\"[REDACTED]\"}"#,
+        ] {
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::new([]).unwrap();
+                assert_eq!(
+                    joined(
+                        &mut redactor,
+                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                    ),
+                    input.as_bytes()
+                );
+                assert!(!redactor.has_redaction(), "split {split}: {input}");
+            }
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn credential_assignments_are_redacted_across_chunk_boundaries() {
         let cases: &[(&str, &str)] = &[
+            (r"token=[REDACTED]\suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\\suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\ suffix", "token=[REDACTED]"),
+            (r#"token=[REDACTED]\"suffix"#, "token=[REDACTED]"),
+            (r"token=[REDACTED]\'suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\]suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\ suffix next", "token=[REDACTED] next"),
+            (
+                r#"token=[REDACTED]\"suffix" next"#,
+                r#"token=[REDACTED]" next"#,
+            ),
+            (r"token=[REDACTED]\\ next", "token=[REDACTED] next"),
+            (r"token=[REDACTED]\suffix next", "token=[REDACTED] next"),
+            (r"token=[REDACTED]\", "token=[REDACTED]"),
+            ("token=[REDACTED]\\\nnext", "token=[REDACTED]\nnext"),
+            ("token=[REDACTED]\\\r\nnext", "token=[REDACTED]\r\nnext"),
+            (r#"token="[REDACTED]\suffix""#, r#"token="[REDACTED]""#),
+            (r"token='[REDACTED]\suffix'", "token='[REDACTED]'"),
+            (r#"token="[REDACTED]\suffix"#, r#"token="[REDACTED]"#),
+            (r"token='[REDACTED]\suffix", "token='[REDACTED]"),
+            (r"token='[REDACTED]\", "token='[REDACTED]"),
+            (r#"token=\"[REDACTED]\\suffix\""#, r#"token=\"[REDACTED]\""#),
+            (r#"token=\"[REDACTED]\\suffix"#, r#"token=\"[REDACTED]"#),
+            ("token=\"[REDACTED]\\", "token=\"[REDACTED]"),
+            ("token=\"[REDACTED]\\\nnext", "token=\"[REDACTED]\nnext"),
+            (r#"token=\"[REDACTED]\"#, r#"token=\"[REDACTED]"#),
+            (r#"token=\"[REDACTED]suffix\""#, r#"token=\"[REDACTED]\""#),
+            ("token=[REDACTED]extra", "token=[REDACTED]"),
+            ("token=[REDACTED", "token=[REDACTED]"),
+            ("token=[REDACTED]extra next", "token=[REDACTED] next"),
+            ("token='[REDACTED]extra'", "token='[REDACTED]'"),
             ("password=hunter2 next", "password=[REDACTED] next"),
             ("PASSWORD: hunter2\n", "PASSWORD: [REDACTED]\n"),
             ("passwd = 'x y' end", "passwd = '[REDACTED]' end"),
@@ -1945,6 +2084,7 @@ mod tests {
                     expected.as_bytes(),
                     "{input:?} split {split}"
                 );
+                assert!(redactor.has_redaction(), "{input:?} split {split}");
             }
             let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
             let mut redactor = Redactor::new([]).expect("empty secret set");

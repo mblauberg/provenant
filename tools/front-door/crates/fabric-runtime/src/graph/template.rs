@@ -2701,6 +2701,7 @@ fn interpolate_prose(value: &Value, parameters: &Map<String, Value>) -> Result<V
             let replacement = interpolate(&Value::String(marker.clone()), parameters)?;
             if let Some(replacement) = replacement.as_str() {
                 rendered = rendered.replace(&marker, replacement);
+                super::patch::scan_for_secrets(&rendered)?;
             }
         }
     }
@@ -2719,7 +2720,10 @@ pub(super) fn interpolate(value: &Value, parameters: &Map<String, Value>) -> Res
                 && !name.contains(['{', '}'])
             {
                 return match parameters.get(name) {
-                    Some(value) => Ok(value.clone()),
+                    Some(value) => {
+                        super::patch::scan_for_secrets(&value.to_string())?;
+                        Ok(value.clone())
+                    }
                     None if name == ITEM => Ok(value.clone()),
                     None => Err(format!("unknown template parameter: {name}")),
                 };
@@ -2747,6 +2751,9 @@ pub(super) fn interpolate(value: &Value, parameters: &Map<String, Value>) -> Res
                 remaining = after;
             }
             rendered.push_str(remaining);
+            if rendered != *text {
+                super::patch::scan_for_secrets(&rendered)?;
+            }
             Ok(Value::String(rendered))
         }
         Value::Array(values) => values

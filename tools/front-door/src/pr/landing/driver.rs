@@ -162,7 +162,13 @@ pub fn run(
     let state = request.state;
     let shadow = request.shadow;
     let mut report = Report::default();
+    let review_warnings = std::cell::RefCell::new(Vec::new());
+    let request = Request {
+        approvals: request.approvals.with_warnings(&review_warnings),
+        ..request
+    };
     let result = run_inner(forge, repo, runner, alarms, request, &mut report);
+    report.warnings.extend(review_warnings.into_inner());
     if let Err(error) = &result {
         let unknown = matches!(
             error,
@@ -1146,7 +1152,7 @@ pub(super) mod tests {
             if !forge_approved {
                 forge.approvals_at_head.clear();
             }
-            let reviews = FakeReviews::of(BTreeMap::from([(
+            let mut reviews = FakeReviews::of(BTreeMap::from([(
                 1,
                 vec![ReviewRecord {
                     reference: "review-attempt".into(),
@@ -1156,6 +1162,8 @@ pub(super) mod tests {
                     independent,
                 }],
             )]));
+            let skipped = "graph-corrupt-review: bad checkpoint digest";
+            reviews.unusable.insert(1, vec![skipped.into()]);
             let state = tempfile::tempdir()?;
             let report = exercise_with(
                 &mut forge,
@@ -1168,6 +1176,12 @@ pub(super) mod tests {
                 state.path(),
                 Approvals::new(&settings.approval_sources, &reviews),
             )?;
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(skipped))
+            );
             if let Some(source) = expected {
                 assert_eq!(report.outcomes[&1], Outcome::Landed);
                 let pr = report
@@ -1194,7 +1208,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_review_store_read_failure_fails_the_run_and_merges_nothing()
+    fn a_review_store_read_failure_warns_and_requires_a_readable_approval()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::super::fakes::FakeReviews;
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
@@ -1216,7 +1230,14 @@ pub(super) mod tests {
             state.path(),
             Approvals::new(&settings.approval_sources, &reviews),
         );
-        assert!(result.is_err());
+        let report = result?;
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("store unreadable"))
+        );
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
         assert!(forge.merges.is_empty() && repo.pushes.is_empty());
         Ok(())
     }
@@ -3402,16 +3423,32 @@ pub(super) mod tests {
     #[test]
     fn refused_prefix_follow_failure_recovers_without_publication()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.post_merge.checks = vec!["ci-status".into()];
+        settings.post_merge.timeout_seconds = 1;
         forge.direct_push = false;
         forge.valid_merge_ids = true;
         forge.refuse_merge = Some(2);
         let landed = format!("{:040x}", 2001);
-        repo.fetches = ["a".repeat(40), "a".repeat(40), "a".repeat(40), landed].into();
+        repo.fetches = [
+            "a".repeat(40),
+            "a".repeat(40),
+            "a".repeat(40),
+            landed.clone(),
+        ]
+        .into();
+        forge.check_runs.insert(
+            landed.clone(),
+            vec![super::super::test_support::LandingFixture::evidence(
+                &landed,
+                GateResult::Passed,
+                None,
+            )],
+        );
         let state = tempfile::tempdir()?;
         let fail = std::rc::Rc::new(std::cell::Cell::new(false));
         forge.fail_fetch_on_refusal = Some(fail.clone());
-        forge.fail_approvals = Some(fail.clone());
+        forge.fail_checks = Some(fail.clone());
         assert!(
             exercise(
                 &mut forge,

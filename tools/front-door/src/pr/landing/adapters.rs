@@ -1410,6 +1410,7 @@ impl ReviewRecordSource for ProvenantReviews {
             .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
         Ok(Reviews {
             records: found
+                .reviews
                 .into_iter()
                 .map(|record| ReviewRecord {
                     reference: record.attempt_id.to_string(),
@@ -1419,7 +1420,7 @@ impl ReviewRecordSource for ProvenantReviews {
                     independent: record.independent,
                 })
                 .collect(),
-            unusable: Vec::new(),
+            unusable: found.unusable,
         })
     }
 }

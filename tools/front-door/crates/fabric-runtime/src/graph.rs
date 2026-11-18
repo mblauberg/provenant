@@ -45,6 +45,7 @@ mod outputs;
 pub mod patch;
 mod plans;
 mod prompt_store;
+mod prompt_text;
 pub mod relay;
 mod repair;
 mod retire;
@@ -59,6 +60,7 @@ pub mod when;
 #[doc(hidden)]
 pub use next_step::{DepletionFacts, DepletionRequest};
 pub use plans::prompt as rendered_prompt;
+pub use prompt_text::normalise_prompt_text;
 pub use validation::minimum_schema_version;
 pub use when::WhenTerm;
 #[cfg(test)]
@@ -1423,7 +1425,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
     let (mut plan, mut positions) = validate_flat_plan(&expanded, &unbounded)
         .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+    let plan_digest = plan_digest(&base)
         .map_err(GraphError::Canonical)?
         .to_string();
 
@@ -3517,7 +3519,9 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         spec_concern_count: None,
         spec_defect_count: None,
         artifact_findings: None,
+        full_artifact_findings: None,
         compact_disposition_findings: None,
+        full_disposition_findings: None,
         verdict_error: None,
         schema_version: 2,
         decide_outcome: None,

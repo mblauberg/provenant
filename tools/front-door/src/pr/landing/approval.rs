@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 /// The approval source and tier of one landing run.
 #[derive(Clone, Copy)]
 pub struct Approvals<'a> {
+    warnings: Option<&'a std::cell::RefCell<Vec<String>>>,
     sources: &'a [ApprovalSource],
     records: &'a dyn ReviewRecords,
     tier: ApprovalTier,
@@ -59,6 +60,7 @@ impl ReviewRecords for NoRecords {
 impl<'a> Approvals<'a> {
     pub fn new(sources: &'a [ApprovalSource], records: &'a dyn ReviewRecords) -> Self {
         Self {
+            warnings: None,
             sources,
             records,
             tier: ApprovalTier::Auto,
@@ -68,12 +70,25 @@ impl<'a> Approvals<'a> {
         }
     }
 
+    /// Keep source diagnostics in the caller's structured landing report,
+    /// including successful approval by another usable source.
+    pub fn with_warnings<'b>(self, warnings: &'b std::cell::RefCell<Vec<String>>) -> Approvals<'b>
+    where
+        'a: 'b,
+    {
+        Approvals {
+            warnings: Some(warnings),
+            ..self
+        }
+    }
+
     /// Carry each member's explicit owner acceptance.
     pub fn with_acceptances<'b>(self, acceptances: &'b BTreeMap<u64, String>) -> Approvals<'b>
     where
         'a: 'b,
     {
         Approvals {
+            warnings: self.warnings,
             sources: self.sources,
             records: self.records,
             tier: self.tier,
@@ -102,6 +117,7 @@ impl<'a> Approvals<'a> {
     #[cfg(test)]
     pub fn forge() -> Approvals<'static> {
         Approvals {
+            warnings: None,
             sources: &[ApprovalSource::Forge],
             records: &NoRecords,
             tier: ApprovalTier::Carry,
@@ -175,7 +191,6 @@ impl Approver<'_, '_> {
             return Ok(Decision::Approved(Approved::by("ci-only")));
         }
         let mut unusable = Vec::new();
-        let mut failures = Vec::new();
         let mut evidence_set = Vec::new();
         for source in approvals.sources {
             let candidates = match source {
@@ -202,7 +217,7 @@ impl Approver<'_, '_> {
                             .collect::<Vec<_>>()
                     }
                     Err(error) => {
-                        failures.push(error.to_string());
+                        unusable.push(format!("{source:?}: {error}"));
                         Vec::new()
                     }
                 },
@@ -222,7 +237,7 @@ impl Approver<'_, '_> {
                         })
                         .collect(),
                     Err(error) => {
-                        failures.push(error.to_string());
+                        unusable.push(format!("{source:?}: {error}"));
                         Vec::new()
                     }
                 },
@@ -233,6 +248,15 @@ impl Approver<'_, '_> {
             {
                 if !evidence_set.contains(&evidence) {
                     evidence_set.push(evidence);
+                }
+            }
+        }
+        if let Some(warnings) = approvals.warnings {
+            let mut warnings = warnings.borrow_mut();
+            for source in &unusable {
+                let warning = format!("pull request {number}: review source skipped: {source}");
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
                 }
             }
         }
@@ -257,9 +281,6 @@ impl Approver<'_, '_> {
                 }),
                 ..Approved::by("accepted-delta")
             }));
-        }
-        if !failures.is_empty() {
-            return Err(LandingError::Failed(failures.join("; ")));
         }
         Ok(Decision::Refused(if unusable.is_empty() {
             "no independent approval for the current head".to_owned()
@@ -391,6 +412,99 @@ mod tests {
             .at(&mut repo, "base")
             .decide(&mut forge, 1, "head", "writer")?;
         assert!(matches!(disabled, Decision::Refused(_)));
+        Ok(())
+    }
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn unusable_graph_diagnostic_keeps_decision_correct() -> Result<(), LandingError> {
+        use crate::pr::landing::ports::ReviewRecord;
+        use provenant_records::workflow::ReviewVerdict;
+
+        let graph = "graph-broken-review";
+        let sources = [ApprovalSource::ProvenantReview];
+        let mut forge = FakeForge::default();
+        let mut repo = FakeRepo::default();
+        let reviews = FakeReviews {
+            records: BTreeMap::from([(
+                1,
+                vec![ReviewRecord {
+                    reference: "review-attempt".into(),
+                    reviewer: "independent-reviewer".into(),
+                    head: "head".into(),
+                    verdict: ReviewVerdict::Approve,
+                    independent: true,
+                }],
+            )]),
+            unusable: BTreeMap::from([(1, vec![format!("graph {graph}: bad checkpoint digest")])]),
+            ..FakeReviews::default()
+        };
+
+        let warnings = std::cell::RefCell::new(Vec::new());
+        let decision = Approvals::new(&sources, &reviews)
+            .with_warnings(&warnings)
+            .at(&mut repo, "base")
+            .decide(&mut forge, 1, "head", "writer")?;
+        assert!(
+            warnings
+                .borrow()
+                .iter()
+                .any(|warning| warning.contains(graph))
+        );
+        let Decision::Approved(approved) = decision else {
+            return Err(LandingError::Failed(
+                "valid approval was hidden by an unusable graph".into(),
+            ));
+        };
+        assert_eq!(approved.reference, "review-attempt");
+        assert_eq!(approved.evidence.len(), 1);
+
+        let no_approval = FakeReviews {
+            unusable: BTreeMap::from([(1, vec![format!("graph {graph}: bad checkpoint digest")])]),
+            ..FakeReviews::default()
+        };
+        let decision = Approvals::new(&sources, &no_approval)
+            .at(&mut repo, "base")
+            .decide(&mut forge, 1, "head", "writer")?;
+        let Decision::Refused(reason) = decision else {
+            return Err(LandingError::Failed(
+                "unusable graph was treated as an approval".into(),
+            ));
+        };
+        assert!(reason.contains(graph), "{reason}");
+
+        let unreadable = FakeReviews {
+            failure: Some("graph enumeration denied".into()),
+            ..FakeReviews::default()
+        };
+        let sources = [ApprovalSource::ProvenantReview, ApprovalSource::Forge];
+        for has_approval in [true, false] {
+            let mut forge = FakeForge::default();
+            if has_approval {
+                forge.approvals_at_head.insert(
+                    (1, "head".into()),
+                    vec![super::super::ports::Approval {
+                        reference: "forge-review".into(),
+                        reviewer: "independent-reviewer".into(),
+                    }],
+                );
+            }
+            let warnings = std::cell::RefCell::new(Vec::new());
+            let decision = Approvals::new(&sources, &unreadable)
+                .with_warnings(&warnings)
+                .at(&mut repo, "base")
+                .decide(&mut forge, 1, "head", "writer")?;
+            assert_eq!(matches!(decision, Decision::Approved(_)), has_approval);
+            assert!(
+                warnings
+                    .borrow()
+                    .iter()
+                    .any(|warning| warning.contains("graph enumeration denied"))
+            );
+            if let Decision::Refused(reason) = decision {
+                assert!(reason.contains("graph enumeration denied"));
+            }
+        }
         Ok(())
     }
 

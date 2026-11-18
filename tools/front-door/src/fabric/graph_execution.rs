@@ -108,7 +108,8 @@ pub(crate) fn tick_graphs(
                 let checkpoint =
                     FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
                 let Some(checkpoint) = checkpoint else {
-                    // An already reported unreadable checkpoint must stay marked.
+                    // Only an absent checkpoint reaches this branch. Recheck
+                    // under the writer lock before retiring its pending marker.
                     if matches!(
                         FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
                         Ok(None)
@@ -124,9 +125,7 @@ pub(crate) fn tick_graphs(
                             &clock,
                         ) {
                             Ok(mut journal) => journal.clear_stale_pending()?,
-                            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                                provenant_os::fs::FsError::LockTimeout { .. },
-                            )) => {}
+                            Err(error) if error.is_lock_timeout() => {}
                             Err(error) => return Err(error.into()),
                         }
                     }
@@ -144,9 +143,7 @@ pub(crate) fn tick_graphs(
                     &clock,
                 ) {
                     Ok(journal) => journal,
-                    Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                        provenant_os::fs::FsError::LockTimeout { .. },
-                    )) => return Ok(false),
+                    Err(error) if error.is_lock_timeout() => return Ok(false),
                     Err(error) => return Err(error.into()),
                 };
                 let Some(mut checkpoint) = journal.load(&id)? else {
@@ -356,14 +353,19 @@ impl Factory {
 
     /// The one selector resolver for graph status, cancel and resume: a graph
     /// ID, a project-local document path or a document SHA-256 hash (prefix)
-    /// becomes the graph ID and, when one is retained or named, its document.
+    /// becomes the graph ID and its document or the retained read error.
+    /// Status and cancel can use the identity of an unreadable graph; resume
+    /// must propagate its read error rather than treat it as an absent document.
     pub(crate) fn resolve_graph(
         &self,
         selector: &str,
     ) -> Result<
         (
             String,
-            Option<provenant_fabric_runtime::graph::GraphDocument>,
+            Result<
+                provenant_fabric_runtime::graph::GraphDocument,
+                provenant_fabric_runtime::graph::JournalError,
+            >,
         ),
         FacadeError,
     > {
@@ -389,11 +391,24 @@ impl Factory {
                 {
                     return Err(refused());
                 }
-                return Ok((selector.to_owned(), Some(execution.document)));
+                return Ok((selector.to_owned(), Ok(execution.document)));
             }
-            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
+            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), Err(error))),
             _ => {}
         }
+        // Paths and hashes select a retained graph just like its exact ID.
+        // Resume must use its sealed execution, not re-plan the source file:
+        // initial admission may have added compiled template metadata.
+        let selected_document = |document: provenant_fabric_runtime::graph::GraphDocument| {
+            let id = document.graph_id.clone();
+            let document = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &id,
+            )
+            .map(|execution| execution.map_or(document, |execution| execution.document));
+            Ok((id, document))
+        };
         // Then a document path: any path-shaped selector, or a bare name of an
         // existing file in the working directory or the scratch graphs directory.
         let path = Path::new(selector);
@@ -412,7 +427,7 @@ impl Factory {
                 local
             };
             return match self.read_graph_document(&path) {
-                Ok(document) => Ok((document.graph_id.clone(), Some(document))),
+                Ok(document) => selected_document(document),
                 Err(FacadeError::Io { .. }) => Err(refused()),
                 Err(error) => Err(error),
             };
@@ -426,7 +441,7 @@ impl Factory {
             return Err(refused());
         };
         match <[_; 1]>::try_from(found) {
-            Ok([document]) => Ok((document.graph_id.clone(), Some(document))),
+            Ok([document]) => selected_document(document),
             Err(found) if found.is_empty() => Err(FacadeError::NotFound),
             Err(_) => Err(refused()),
         }
@@ -537,11 +552,7 @@ impl Factory {
                 let mut document = if resume {
                     self.resolve_graph(&document.to_string_lossy())?
                         .1
-                        .ok_or_else(|| FacadeError::DispatchRefused {
-                            fact: None,
-                            disk: None,
-                            reason: graph_selector_forms(),
-                        })?
+                        .map_err(graph_journal_error)?
                 } else {
                     let path = if document.is_absolute() {
                         document.clone()
@@ -561,7 +572,7 @@ impl Factory {
                     }
                     document
                 };
-                if document.submission_patch.is_none() {
+                if !resume && document.submission_patch.is_none() {
                     let submission_key = document
                         .provenance
                         .as_ref()
@@ -857,9 +868,7 @@ impl Factory {
                 id,
             ) {
                 Ok(journal) => journal,
-                Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                    provenant_os::fs::FsError::LockTimeout { .. },
-                )) => {
+                Err(error) if error.is_lock_timeout() => {
                     let checkpoint = FileJournal::read_checkpoint(
                         &self.context.roots.state,
                         self.context.identity.project,
@@ -888,9 +897,10 @@ impl Factory {
                     )
                     .cap_at(budget.deadline().as_mono_time());
                     match open(slice) {
-                        Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                            provenant_os::fs::FsError::LockTimeout { .. },
-                        )) if budget.remaining(self.clock.mono_now()).as_micros() > 0 => {
+                        Err(error)
+                            if error.is_lock_timeout()
+                                && budget.remaining(self.clock.mono_now()).as_micros() > 0 =>
+                        {
                             let bound = FileJournal::execution(
                                 &self.context.roots.state,
                                 self.context.identity.project,
@@ -1036,9 +1046,7 @@ impl Factory {
                     document: document.clone(),
                 })
                 .map_err(|error| match error {
-                    provenant_fabric_runtime::graph::JournalError::TooLarge => {
-                        graph_journal_error(error)
-                    }
+                    error if error.code() == "too_large" => graph_journal_error(error),
                     _ => FacadeError::Conflict,
                 })?;
             // Manual replay must use the same host directory as the original
@@ -1479,6 +1487,90 @@ pub(super) fn graph_operation(
 mod tests {
     use super::*;
 
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn sealed_checkpoint_without_template_resumes_through_front_door_and_lands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphCheckpoint, GraphExecution, GraphJournal, NodeState,
+            ReviewSettlement, landing_reviews,
+        };
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+        };
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let mut execution: GraphExecution = serde_json::from_value(fixture["execution"].clone())?;
+        execution.directory = rig.project.clone();
+        assert!(execution.document.submission_patch.is_none());
+        assert!(execution.document.nodes[0].template.is_none());
+        let mut checkpoint: GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
+        let review = ReviewSettlement {
+            attempt_id: provenant_core::AttemptId::from_bytes([7; 16]),
+            head,
+            base: None,
+            verdict: provenant_records::workflow::ReviewVerdict::Approve,
+            independent: true,
+        };
+        checkpoint.nodes[0].review_settlement = Some(review.clone());
+        // A sealed terminal fixture has already drained its attached children.
+        checkpoint.nodes[0].children_cancelled = true;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        {
+            let mut journal = FileJournal::open(
+                &roots.state,
+                project,
+                "g-test",
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(execution.clone())?;
+            journal.save(&checkpoint)?;
+        }
+        let path = roots
+            .state
+            .as_path()
+            .join(format!("fabric/graphs/{project}/graph-g-test.json"));
+        let stored = std::fs::read(&path)?;
+        let run = factory.graph(
+            GraphInput::Resume {
+                extra: Default::default(),
+                document: "g-test".into(),
+                extend: Vec::new(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(run.checkpoint.plan_digest, checkpoint.plan_digest);
+        assert!(run.advance_error.is_none(), "{:?}", run.advance_error);
+        let rebound = FileJournal::execution(&roots.state, project, "g-test")?.unwrap();
+        assert_eq!(rebound.document, execution.document);
+        let landed = landing_reviews(&roots.state, project, head)?;
+        assert_eq!(landed.reviews, vec![review]);
+        assert!(landed.unusable.is_empty());
+        assert_eq!(std::fs::read(&path)?, stored);
+        Ok(())
+    }
+
+    // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
     #[test]
     fn nested_graph_selectors_refuse_symlinked_scratch_directories()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1514,8 +1606,37 @@ mod tests {
             for selector in ["plan.json", source.to_str().ok_or("graph path")?, &digest] {
                 let (id, graph) = factory.resolve_graph(selector)?;
                 assert_eq!(id, "nested-selector");
-                assert_eq!(graph.ok_or("resolved document")?.graph_id, id);
+                assert_eq!(graph?.graph_id, id);
             }
+            // A corrupt exact ID remains resolved, with its typed error intact
+            // for resume; status/cancel still have the graph identity.
+            let mut corrupt: serde_json::Value = serde_json::from_slice(include_bytes!(
+                "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+            ))?;
+            let corrupt_id = "broken-checkpoint";
+            corrupt["checkpoint"]["graph_id"] = corrupt_id.into();
+            corrupt["execution"]["document"]["graph_id"] = corrupt_id.into();
+            corrupt["digest"] = format!("sha256:{}", "0".repeat(64)).into();
+            let retained = factory
+                .context
+                .roots
+                .state
+                .as_path()
+                .join("fabric/graphs")
+                .join(factory.context.identity.project.to_string());
+            std::fs::create_dir_all(&retained)?;
+            std::fs::write(
+                retained.join(format!("graph-{corrupt_id}.json")),
+                serde_json::to_vec(&corrupt)?,
+            )?;
+            let (id, resolved_document) = factory.resolve_graph(corrupt_id)?;
+            assert_eq!(id, corrupt_id);
+            let error = resolved_document.unwrap_err();
+            assert_eq!(error.code(), "bad_digest");
+            assert!(error.to_string().contains(corrupt_id));
+            let resume_error = graph_journal_error(error);
+            assert!(format!("{resume_error:?}").contains(corrupt_id));
+
             // The exception grants the scratch graph directory, not sibling
             // documents elsewhere in the enclosing checkout.
             let sibling = rig.project.join("sibling.json");

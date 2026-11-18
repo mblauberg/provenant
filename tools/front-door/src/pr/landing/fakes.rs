@@ -29,6 +29,7 @@ pub struct FakeForge {
     pub fail_fetch_after_merge: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub fail_fetch_on_refusal: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub fail_approvals: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    pub fail_checks: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub merge_attempts: Vec<u64>,
@@ -94,6 +95,9 @@ impl Forge for FakeForge {
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
+        if self.fail_checks.as_ref().is_some_and(|flag| flag.get()) {
+            return Err(LandingError::Failed("checks unavailable".into()));
+        }
         if let Some(observation) = self
             .check_sequences
             .get_mut(commit)

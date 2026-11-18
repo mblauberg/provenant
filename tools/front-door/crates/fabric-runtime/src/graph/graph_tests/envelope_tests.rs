@@ -679,11 +679,7 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
     let stored = StoredCheckpoint {
         extra: Default::default(),
         schema_version: 1,
-        digest: CanonicalV1::record_digest(
-            "fabric-graph-checkpoint",
-            2,
-            &(&checkpoint, &execution),
-        )
+        digest: checkpoint_digest(&checkpoint, &execution)
         .unwrap()
         .to_string(),
         checkpoint,

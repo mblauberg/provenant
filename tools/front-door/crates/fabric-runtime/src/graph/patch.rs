@@ -261,8 +261,14 @@ pub struct PatchContext<'a> {
 
 /// The confinement secret scan, as submission applies it.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
-    provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
-        .map_err(|_| "patch matches a secret pattern; remove the secret and retry".to_owned())
+    // Scan the original bytes so redaction markers retain their token boundaries.
+    let filtered = provenant_confinement::redact::known_shapes(text.as_bytes())
+        .map_err(|_| "patch secret scan failed".to_owned())?;
+    if filtered == text.as_bytes() {
+        Ok(())
+    } else {
+        Err("patch matches a secret pattern; remove the secret and retry".to_owned())
+    }
 }
 
 /// A running graph: its submitted document and its checkpoint.
@@ -341,7 +347,7 @@ fn admit_patch_for_retry(
                 "initial submission must precede launch",
             ));
         }
-        let compiled = submit(
+        let compiled = compile_submission(
             &graph.document.graph_id,
             patch,
             context,
@@ -525,6 +531,14 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
+    let normalised_brief = brief
+        .map(prompt_text::normalise_prompt_text)
+        .transpose()
+        .map_err(PatchError::invalid)?;
+    let brief = normalised_brief.as_deref();
+    if let Some(brief) = brief {
+        (context.scan)(brief).map_err(|reason| PatchError::new("secret", reason))?;
+    }
     let expanded = plans::expand(
         graph.document,
         &graph.checkpoint.extensions,
@@ -739,7 +753,13 @@ fn retry_node_scope(
     }
     if let Some(routes) = replacement_routes {
         node.route = None;
-        node.routes = Some(routes.to_vec());
+        let routes: Vec<GraphRoute> =
+            prompt_text::normalise(&routes.to_vec(), prompt_text::Context::Route)
+                .map_err(PatchError::invalid)?;
+        let text =
+            serde_json::to_string(&routes).map_err(|e| PatchError::invalid(e.to_string()))?;
+        (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+        node.routes = Some(routes);
     }
     // A reset removes its expansion-pause marker. Move the graph pause to
     // another waiting node, or clear it, before removing that marker.
@@ -916,6 +936,8 @@ pub fn submission(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
+    *document = prompt_text::normalise(document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
     for node in &mut document.nodes {
         node.template.get_or_insert_with(|| "raw".into());
     }
@@ -988,7 +1010,8 @@ pub fn submission(
         limits,
         worktree_layout,
     };
-    let compiled = submit(
+    scan(&patch, &context)?;
+    let compiled = compile_submission(
         &document.graph_id,
         &patch,
         &context,
@@ -997,13 +1020,32 @@ pub fn submission(
     if compiled.nodes != document.nodes {
         return Err(PatchError::invalid("submission differs from bound nodes"));
     }
-    document.submission_patch = Some(patch.clone());
+    document.submission_patch = Some(patch);
+    admit_submission(document, &context)?;
     Ok(())
 }
 
 /// Compile a submitted patch into a new graph document. Submission uses the
 /// same compiler and checks as a running graph's patches.
 pub fn submit(
+    graph_id: &str,
+    patch: &Patch,
+    context: &PatchContext<'_>,
+    integration_branch: Option<&str>,
+) -> Result<GraphDocument, PatchError> {
+    let document = compile_submission(graph_id, patch, context, integration_branch)?;
+    let document: GraphDocument = prompt_text::normalise(&document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
+    let text = serde_json::to_string(&document).map_err(|e| PatchError::invalid(e.to_string()))?;
+    (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+    admit_submission(&document, context)?;
+    Ok(document)
+}
+
+/// Build a new submission before host binding. This intermediate document is
+/// not admitted text: the host must call `submission` after binding, which
+/// normalises, scans and admits the complete document exactly once.
+pub fn compile_submission(
     graph_id: &str,
     patch: &Patch,
     context: &PatchContext<'_>,
@@ -1047,7 +1089,6 @@ pub fn submit(
             "a new graph has no nodes to skip or replace",
         ));
     }
-    scan(patch, context)?;
     let library = context
         .library
         .with(Layer::Inline, &patch.templates)
@@ -1089,12 +1130,19 @@ pub fn submit(
     };
 
     document.schema_version = u64::from(minimum_schema_version(&document));
+    Ok(document)
+}
+
+fn admit_submission(
+    document: &GraphDocument,
+    context: &PatchContext<'_>,
+) -> Result<(), PatchError> {
     document.admit(context.limits).map_err(|error| {
         let mut refusal = classify(error.to_string());
         refusal.admission = Some(error);
         refusal
     })?;
-    Ok(document)
+    Ok(())
 }
 
 /// A dependency cycle gets its own code so a caller can tell it from other
@@ -1145,6 +1193,18 @@ pub(super) fn prepare(
         Preparation::Live { retry } => retry,
         Preparation::FinalFragment => None,
     };
+    // A retry patch is assembled from stored nodes and a brief normalised at
+    // the steer boundary. Captured fragments were normalised before storage.
+    // Only a live patch still carries unprocessed ingress text.
+    let normalised = if matches!(mode, Preparation::Live { retry: None }) {
+        Some(
+            prompt_text::normalise(patch, prompt_text::Context::Patch)
+                .map_err(PatchError::invalid)?,
+        )
+    } else {
+        None
+    };
+    let patch = normalised.as_ref().unwrap_or(patch);
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"
@@ -1196,7 +1256,9 @@ pub(super) fn prepare(
             "patch adds, skips and replaces nothing",
         ));
     }
-    scan(patch, context)?;
+    if matches!(mode, Preparation::Live { retry: None }) {
+        scan(patch, context)?;
+    }
 
     // A planner's catalogue is host-authored and trusted; inline templates
     // are the author's own and get no more authority than raw nodes.
@@ -1449,6 +1511,14 @@ pub(super) fn prepare(
     };
     if matches!(mode, Preparation::FinalFragment) {
         expansion.final_fragment = true;
+    }
+    // Compilation, item expansion and namespacing can join separately safe
+    // fragments. Scan only this admission's final product, never the stored
+    // document or prior expansions, and never rewrite their digested bytes.
+    if retry.is_none() {
+        let text = serde_json::to_string(&expansion)
+            .map_err(|error| PatchError::invalid(error.to_string()))?;
+        (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
     }
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);

@@ -883,7 +883,7 @@ fn keyed(
         directory: edge.cwd.to_path_buf(),
         document,
     })?;
-    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":2, "graph_id":graph, "plan_digest":"fixture",
         "nodes":[{"id":node, "state":"running", "attempts":[{
             "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0, "attempt": 1},
@@ -891,6 +891,7 @@ fn keyed(
             "outcome":null, "launch_actor":"fixture"
         }]}]
     }))?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     Ok(())
 }

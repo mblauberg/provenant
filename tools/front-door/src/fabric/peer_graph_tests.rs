@@ -583,6 +583,7 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
             .iter()
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         expected
     };
@@ -834,6 +835,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     // graph has not yet recorded an attempt reference.
     checkpoint.nodes[0].attempts[0].attempt_ref = None;
     checkpoint.nodes[0].attempts[0].state = graph::AttemptState::Starting;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     let blocked = advance_receiver(&factory, graph, &cancel)?;
