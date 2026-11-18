@@ -293,7 +293,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// that compile share the host's build cap, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: compiling `cargo` commands share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
 
 /// Host build cap stated in the preamble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,10 +315,7 @@ fn slot_guidance(cap: Option<BuildCap>) -> String {
             "Build slots: compiling `cargo` commands share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
             cap.slots, cap.source
         ),
-        None => BUILD_SLOT_GUIDANCE
-            .split_once('\n')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_default(),
+        None => BUILD_SLOT_GUIDANCE.to_string(),
     }
 }
 
@@ -344,7 +341,7 @@ pub fn lane_preamble(
     )
 }
 
-fn lane_preamble_with(
+pub fn lane_preamble_with(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
     ci_scope: Option<crate::ResolvedCiScope>,
@@ -380,22 +377,6 @@ fn lane_preamble_with(
         "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}",
         limits.preamble(),
         handoff.map(handoff_progress_guidance).unwrap_or_default()
-    )
-}
-
-/// Effective guards are rendered by the same table used by enforcement.
-pub fn lane_preamble_with_policy(
-    model_guidance: &str,
-    limits: &provenant_records::LaneLimits,
-    ci_scope: Option<crate::ResolvedCiScope>,
-    handoff: Option<&Path>,
-    policy: &provenant_records::policy::Policy,
-    extras: &PreambleExtras,
-) -> String {
-    format!(
-        "{}Launch policy (code, boundary, strength, source, knob):\n{}",
-        lane_preamble_with(model_guidance, limits, ci_scope, handoff, extras),
-        policy.render()
     )
 }
 
