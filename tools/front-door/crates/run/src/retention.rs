@@ -2475,8 +2475,9 @@ mod tests {
         let operation = call(&clock, &cancel);
         let observer = call(&clock, &observer_cancel);
         withdraw(&store, &input, &operation)?;
-        let mut record = store.record(input.attempt_id, &operation)?;
+        let record = store.record(input.attempt_id, &operation)?;
         store.write(&operation, |db| {
+            let mut record = record.clone();
             for _ in 0..256 {
                 record.revision = record.revision.checked_add(1).ok_or(RunError::Conflict)?;
                 crate::store::insert_event(db, &record)?;

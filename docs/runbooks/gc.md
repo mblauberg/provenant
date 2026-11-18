@@ -54,7 +54,8 @@ handoffs, logs and process records. Unreleased or busy attempts are never collec
 After a merge, background cleanup targets only that branch's worktree and its
 attempt scratch. It does not scan the run store or collect shared caches. At lane
 launch, free space below `gc.free_floor` starts a best-effort background full
-sweep. Each sweep has an overridable `gc.sweep_budget` (default `5m`);
+sweep. Each sweep has an overridable `gc.sweep_budget` (default `5m`; `0`
+checkpoints immediately);
 diagnostics show its value and source, and a stopped sweep records its position
 for the next pass.
 The single-flight guard is released on exit. Dead or over-budget holders are

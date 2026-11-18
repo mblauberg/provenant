@@ -842,11 +842,7 @@ impl GcSettings {
 
     /// Resolve the bounded duration for one host-wide sweep.
     pub fn sweep_budget_seconds(&self) -> Result<u64, &'static str> {
-        let seconds = parse_gc_idle_duration(&self.sweep_budget)?;
-        if seconds == 0 {
-            return Err("sweep_budget_positive");
-        }
-        Ok(seconds)
+        parse_gc_idle_duration(&self.sweep_budget)
     }
 
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
@@ -1100,18 +1096,15 @@ mod tests {
 
     // Spec: docs/specs/disk.md#bounded-sweeps
     #[test]
-    fn sweep_budget_is_positive_and_uses_duration_units() {
+    fn sweep_budget_uses_duration_units_and_allows_immediate_checkpoint() {
         let mut settings = GcSettings::default();
         assert_eq!(settings.sweep_budget_seconds(), Ok(300));
         settings.sweep_budget = "2m".into();
         assert_eq!(settings.sweep_budget_seconds(), Ok(120));
         assert_eq!(settings.validate(), Ok(()));
         settings.sweep_budget = "0".into();
-        assert_eq!(
-            settings.sweep_budget_seconds(),
-            Err("sweep_budget_positive")
-        );
-        assert_eq!(settings.validate(), Err("sweep_budget_positive"));
+        assert_eq!(settings.sweep_budget_seconds(), Ok(0));
+        assert_eq!(settings.validate(), Ok(()));
     }
 
     #[test]
