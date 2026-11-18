@@ -3564,24 +3564,6 @@ pub(crate) fn with_context_mode_cancel<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn with_context_mode_with_owner<T>(
-    roots: &provenant_core::Roots,
-    home: &Path,
-    project: &Path,
-    mutation: Duration,
-    workers: &dyn WorkerObserver,
-    facts: &worktrees::RepoFacts,
-    read_only: bool,
-    owner: Option<(provenant_config::ProjectBinding, worktrees::ProjectLayout)>,
-    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
-) -> Result<T, Error> {
-    let cancel = CancelToken::new();
-    with_context_mode_with_owner_cancel(
-        roots, home, project, mutation, workers, facts, read_only, owner, &cancel, action,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn with_context_mode_with_owner_cancel<T>(
     roots: &provenant_core::Roots,
     home: &Path,
