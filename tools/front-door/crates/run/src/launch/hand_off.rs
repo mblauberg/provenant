@@ -40,7 +40,16 @@ fn typed_local(
         } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
         _ => None,
     };
-    let message = format!("{phase}: {error}");
+    let message = if matches!(error, RunError::SharedViewBaseMismatch) {
+        let diagnostic = crate::service::ErrorKind::SharedViewBaseMismatch.diagnostic();
+        format!(
+            "{phase}: {}: {error}; next: {}",
+            diagnostic.code,
+            diagnostic.next.as_deref().unwrap_or_default()
+        )
+    } else {
+        format!("{phase}: {error}")
+    };
     let class = error.boundary_class();
     if class != provenant_records::diagnostic::BoundaryClass::None {
         let code = match class {
@@ -449,41 +458,62 @@ impl RunStore {
                 local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
             }
             let writer_attempt = local_or_withdraw!(directory());
-            if let Some(writer) = &confinement.writer
-                && let Err(error) = crate::objects::prepare_shared_bound(
-                    &local_or_withdraw!(
-                        provenant_os::git::git_executable()
-                            .ok_or_else(|| local("Git", &RunError::GitUnavailable))
-                    ),
-                    writer.worktree.repo(),
-                    &writer_attempt,
-                    &confinement.plan.permissions().scratch.path,
-                    writer.branch.as_str(),
-                    writer.base,
-                    &local_or_withdraw!(match &confinement.plan.permissions().mode {
-                        provenant_confinement::permissions::AccessMode::WorktreeWrite(
-                            authority,
-                        ) => Ok(authority.git_state().path.clone()),
-                        _ => Err(local(
-                            "Git state",
-                            &RunError::Validation("writer Git authority missing")
-                        )),
-                    }),
-                )
-                .and_then(|()| {
-                    writer.snapshot(
-                        self.context.state_root.as_path(),
+            if let Some(writer) = &confinement.writer {
+                let attempt_str = scope.attempt.to_string();
+                let shared_root = local_or_withdraw!(match &confinement.plan.permissions().mode {
+                    provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =>
+                        Ok(authority.git_state().path.clone()),
+                    _ => Err(local(
+                        "Git state",
+                        &RunError::Validation("writer Git authority missing")
+                    )),
+                });
+                let effective_base = local_or_withdraw!(
+                    crate::objects::prepare_shared_bound(
+                        &local_or_withdraw!(
+                            provenant_os::git::git_executable()
+                                .ok_or_else(|| local("Git", &RunError::GitUnavailable))
+                        ),
+                        writer.worktree.repo(),
                         &writer_attempt,
-                        scope,
-                        &policy,
+                        &confinement.plan.permissions().scratch.path,
+                        writer.branch.as_str(),
+                        writer.base,
+                        crate::objects::SharedViewLaunch {
+                            root: &shared_root,
+                            custody_slot: Some(lease.lock_directory()),
+                            current_attempt: Some(&attempt_str)
+                        },
                     )
-                })
-            {
-                local_or_withdraw!(Err::<(), _>(typed_local(
-                    &policy,
-                    "lane Git objects",
-                    &error
-                )));
+                    .map_err(|error| typed_local(
+                        &policy,
+                        "lane Git objects",
+                        &error
+                    ))
+                );
+                if let Some(tip) = effective_base.recovered {
+                    let warning = crate::service::ErrorKind::SharedViewReseeded.diagnostic();
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: {}: shared tip {tip} preserved at {} refs/provenant/recovery/{tip}; {}",
+                        warning.code,
+                        shared_root.join("git-common").display(),
+                        warning.next.as_deref().unwrap_or_default()
+                    );
+                }
+                // Custody retains the host CAS base; attribution starts at the
+                // effective shared base without moving the host branch.
+                local_or_withdraw!(
+                    writer
+                        .snapshot_shared(
+                            self.context.state_root.as_path(),
+                            &writer_attempt,
+                            scope,
+                            &policy,
+                            Some(effective_base.base),
+                        )
+                        .map_err(|error| typed_local(&policy, "lane Git objects", &error))
+                );
             }
             if confinement.backend.is_some() {
                 match confinement.command(&plan.argv, &id) {
@@ -725,6 +755,19 @@ fn hosted_credential(name: &std::ffi::OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_view_divergence_keeps_typed_refusal_and_next_step() {
+        let handoff = super::typed_local(
+            &test_policy(),
+            "lane Git objects",
+            &RunError::SharedViewBaseMismatch,
+        );
+        assert!(
+            matches!(handoff, HandOff::Boundary { message, class: provenant_records::diagnostic::BoundaryClass::LaneGit, .. }
+            if message.contains("SHARED_VIEW_BASE_MISMATCH") && message.contains("next:") && message.contains("sibling"))
+        );
+    }
+
     #[test]
     fn hosted_credentials_are_stripped_and_the_lane_keeps_its_own_environment() {
         let cases = [

@@ -766,6 +766,8 @@ error_kinds! {
     RetainedWriterImport => "WRITER_IMPORT_RETAINED", "A predecessor writer import remains unresolved.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
     LaneTipUnrooted => "LANE_TIP_UNROOTED", "A lane tip descends from no branch the host knows, so it cannot be published.";
+    SharedViewReseeded => "SHARED_VIEW_RESEEDED", "The inactive shared worktree view was reseeded; its displaced tip was retained for recovery.";
+    SharedViewBaseMismatch => "SHARED_VIEW_BASE_MISMATCH", "The shared worktree view has diverged from the launch base while live siblings exist.";
 }
 impl ErrorKind {
     /// Safe projection for refusal kinds that do not need additional facts.
@@ -787,6 +789,10 @@ impl ErrorKind {
             Self::DuplicatePacingProfile => {
                 diagnostic.next("remove duplicate pacing profiles for the same account")
             }
+            Self::SharedViewReseeded => diagnostic.next("inspect the retained recovery ref in the shared worktree Git directory if the prior lane work is still needed"),
+            Self::SharedViewBaseMismatch => diagnostic.next(
+                "wait for live sibling lanes to finish, or run the lane in an independent worktree",
+            ),
             _ => diagnostic,
         }
     }
@@ -794,7 +800,7 @@ impl ErrorKind {
     /// Stable category shared by the output adapters.
     pub const fn category(self) -> &'static str {
         match self {
-            Self::MemoryFloor | Self::StaleReadiness => "warning",
+            Self::MemoryFloor | Self::StaleReadiness | Self::SharedViewReseeded => "warning",
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound
@@ -826,7 +832,8 @@ impl ErrorKind {
             | Self::QueueFull
             | Self::SecretInput
             | Self::Unsupported
-            | Self::ContinuationUnsupported => "refused",
+            | Self::ContinuationUnsupported
+            | Self::SharedViewBaseMismatch => "refused",
             _ => "error",
         }
     }
@@ -845,6 +852,7 @@ impl ErrorKind {
             | Self::WriterProjectMismatch
             | Self::GuardianIdentity
             | Self::LaneCoordinationRefused => B::Authority,
+            Self::SharedViewBaseMismatch => B::LaneGit,
             _ => B::None,
         }
     }
@@ -921,6 +929,7 @@ impl From<&RunError> for ErrorKind {
                 found, ..
             }) if *found > 1 => Self::UpgradeRequired,
             RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
+            RunError::SharedViewBaseMismatch => Self::SharedViewBaseMismatch,
             _ => Self::Io,
         }
     }

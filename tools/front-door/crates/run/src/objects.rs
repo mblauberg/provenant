@@ -23,7 +23,7 @@ use view::object_binding;
 #[cfg(any(test, feature = "fixture"))]
 pub(crate) use view::prepare_bound;
 pub(crate) use view::{
-    ObjectSource, bound_source, copy_index, is_shared_binding, merge_head, merge_objects,
+    ObjectSource, SharedViewLaunch, bound_source, copy_index, merge_head, merge_objects,
     prepare_read_only, prepare_shared_bound, private_tip, restore_index, update_private_tip,
 };
 #[cfg(test)]

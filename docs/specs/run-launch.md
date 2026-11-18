@@ -33,6 +33,20 @@ a sibling's staged paths.
 Authorised writers share incarnation- and branch-bound private Git data,
 including HEAD, index, refs and objects. Per-attempt configuration and credentials
 remain separate; private data outlives an individual attempt's scratch.
+Under the shared view's existing initialisation gate, launch reconciles its tip
+with the host base. An ancestor tip advances by compare-and-swap and the shared
+index resets to the host base. A launch behind a live sibling adopts the shared
+tip as its work base, while custody retains the host base for publication's
+compare-and-swap. Scope reporting starts at the adopted base so a child's work
+does not include its parent's commits. With no other live holders, a differing
+tip is retained at `refs/provenant/recovery/<tip>` in the shared Git directory
+before reseeding and warning. Only divergent histories with live siblings
+refuse, with a next step to wait or use an independent worktree. Git failures
+remain failures rather than ancestry answers.
+Liveness comes from each other attempt's retained occupancy holder proof,
+excluding the current attempt. Unscoped budget stops preserve files while
+siblings live; a lone holder can commit all its work and restore files on failed
+publication.
 Settlement copies object files through held, no-follow descriptors into a byte- and entry-bounded
 host-owned sender before sanitising sidecars. It preserves the live shared
 store and its validated host alternate; inconsistent input fails integrity checks

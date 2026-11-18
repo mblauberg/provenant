@@ -20,7 +20,7 @@ use thiserror::Error;
 
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
-const HOLDER_LOCK: &str = "holder.lock";
+pub const HOLDER_LOCK: &str = "holder.lock";
 use provenant_records::custody::Scope;
 
 /// Run seals this beside the reservation when private Git must be retained.
@@ -476,6 +476,9 @@ pub struct CustodyLease {
 impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
+    }
+    pub fn lock_directory(&self) -> &Directory {
+        &self.lock_directory
     }
     #[cfg(feature = "fixture")]
     pub(crate) fn record_fixture_spawned_provider(
@@ -2059,6 +2062,39 @@ fn observe_checkpoint(
 thread_local! {
     pub(crate) static WRITER_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Observe other live occupancy holders using the per-attempt proof retained
+/// through guardian settlement. The caller's own holder is excluded by name.
+pub fn other_holders_live(
+    directory: &Directory,
+    current_attempt: Option<&str>,
+) -> provenant_os::fs::Result<bool> {
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let name = entry.to_string_lossy();
+        if current_attempt == Some(name.as_ref()) || name.starts_with('.') {
+            continue;
+        }
+        let child = match directory.open_verified_directory(&entry) {
+            Ok(child) => child,
+            // Slot files (including writer.lock) are not holder directories.
+            Err(_)
+                if directory.metadata_at(&entry, false)?.kind
+                    != provenant_os::fs::FileKind::Directory =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match child.try_lock_existing(OsStr::new(HOLDER_LOCK), LockMode::Exclusive) {
+            Err(FsError::LockTimeout { .. }) => return Ok(true),
+            Ok(_free) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 /// Acquire shared worktree occupancy without keeping the observation gate

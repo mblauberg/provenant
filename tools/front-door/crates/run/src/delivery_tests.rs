@@ -741,7 +741,11 @@ fn lane_with_git_view(
             &scratch,
             "refs/heads/lane",
             base,
-            &shared_root,
+            crate::objects::SharedViewLaunch {
+                root: &shared_root,
+                custody_slot: None,
+                current_attempt: None,
+            },
         )?;
         return Ok((fixture, shared_root, git));
     }
@@ -791,6 +795,86 @@ fn worktree_git(
         .output()?;
     assert!(output.status.success());
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+struct BudgetStopCase {
+    fixture: PrepareFixture,
+    scratch: std::path::PathBuf,
+    git: std::path::PathBuf,
+    attempt: Directory,
+    launch: writer::WriterLaunch,
+    _holders: Vec<provenant_os::fs::LockGuard>,
+}
+
+fn budget_stop_case(
+    write_scope: &[&str],
+    sibling_live: bool,
+) -> std::result::Result<BudgetStopCase, Box<dyn std::error::Error>> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    let (fixture, scratch, git) = lane_with_git_view(true)?;
+    let utility = UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
+    let executor = SystemExecutor::new(1)?;
+    let repo = utility.open_repo(
+        &executor,
+        &fixture.writer.project,
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        &CancelToken::new(),
+    )?;
+    let layout = utility.project_layout_for_common(
+        &executor,
+        repo.common_git_dir(),
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        &CancelToken::new(),
+    )?;
+    let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+    let base = crate::objects::resolve_ref(&git, worktree.repo(), "refs/heads/lane")?;
+    let slot_path = fixture.root.join("custody-slot-budget");
+    std::fs::create_dir_all(&slot_path)?;
+    let slot = Directory::open_anchor(&slot_path)?;
+    std::fs::create_dir_all(slot_path.join("attempt"))?;
+    let current_attempt = slot.open_verified_directory(std::ffi::OsStr::new("attempt"))?;
+    let mut holders = vec![current_attempt.try_lock(
+        std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+    )?];
+    if sibling_live {
+        std::fs::create_dir_all(slot_path.join("sibling"))?;
+        let sibling = slot.open_verified_directory(std::ffi::OsStr::new("sibling"))?;
+        holders.push(sibling.try_lock(
+            std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
+    }
+    let attempt = Directory::open_anchor(&fixture.root.join("attempt"))?;
+    let mut request = crate::tests::input().request;
+    request.task.profile.write_scope = write_scope.iter().map(|path| (*path).to_owned()).collect();
+    crate::artifacts::seal(
+        &attempt,
+        "request.json",
+        &crate::db::bytes(&request)?,
+        crate::RECORD_LIMIT,
+    )?;
+    let launch = writer::WriterLaunch {
+        worktree,
+        branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
+        layout,
+        executor_root: repo.root_path().to_path_buf(),
+        executor_root_identity: repo.root_identity(),
+        base,
+        custody: Some((
+            slot,
+            provenant_supervisor::custody::WriterBinding::read_only(),
+        )),
+        facts: Default::default(),
+    };
+    Ok(BudgetStopCase {
+        fixture,
+        scratch,
+        git,
+        attempt,
+        launch,
+        _holders: holders,
+    })
 }
 
 /// A lane which merged the default branch and committed leaves HEAD, index and
@@ -1044,10 +1128,18 @@ fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std
     std::fs::create_dir_all(&slot_path)?;
     let slot_dir = Directory::open_anchor(&slot_path)?;
 
-    // Sibling holds a lock on writer.lock in slot_path
-    let sibling_lock = slot_dir.try_lock(
-        std::ffi::OsStr::new("writer.lock"),
-        provenant_os::fs::LockMode::Shared,
+    // Each real holder owns a slot-local attempt directory and holder.lock.
+    std::fs::create_dir_all(slot_path.join("attempt"))?;
+    let current_attempt = Directory::open_anchor(&slot_path.join("attempt"))?;
+    let current_holder_lock = current_attempt.try_lock(
+        std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    std::fs::create_dir_all(slot_path.join("sibling"))?;
+    let sibling_attempt = Directory::open_anchor(&slot_path.join("sibling"))?;
+    let sibling_lock = sibling_attempt.try_lock(
+        std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
     )?;
 
     let launch = writer::WriterLaunch {
@@ -1067,113 +1159,141 @@ fn unpublish_is_noop_when_siblings_live() -> std::result::Result<(), Box<dyn std
     assert!(note.contains("shared worktree left intact"), "{note}");
     assert!(wt.join("ours.txt").exists());
     drop(sibling_lock);
+    let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
+    assert!(note.contains("worktree restored"), "{note}");
+    assert!(!wt.join("ours.txt").exists());
+    drop(current_holder_lock);
     Ok(())
 }
 
 #[test]
 fn budget_stop_commit_preserves_sibling_edits_and_commits()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (fixture, scratch, git) = lane_with_git_view(true)?;
-    let wt = &fixture.writer.worktree;
-    let base = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
-
-    // Sibling writes an uncommitted edit to sibling.txt
-    std::fs::write(wt.join("sibling.txt"), "sibling uncommitted edit\n")?;
-
-    // This attempt writes an edit to ours.txt
-    std::fs::write(wt.join("ours.txt"), "our uncommitted edit\n")?;
-
-    let attempt_dir = Directory::open_anchor(&fixture.root.join("attempt"))?;
-
-    let utility = provenant_confinement::UtilityRuntime::new(
-        &git,
-        fixture.root.join("home"),
-        fixture.root.join("state"),
-    )?;
-    let executor = SystemExecutor::new(1)?;
-    let repo = utility.open_repo(
-        &executor,
-        &fixture.writer.project,
-        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
-        &CancelToken::new(),
-    )?;
-    let layout = utility.project_layout_for_common(
-        &executor,
-        repo.common_git_dir(),
-        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
-        &CancelToken::new(),
-    )?;
-    let executor_root = repo.root_path().to_path_buf();
-    let executor_root_identity = repo.root_identity();
-    let launch = writer::WriterLaunch {
-        worktree: provenant_confinement::verify_worktree(&repo, wt)?,
-        branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
-        layout,
-        executor_root,
-        executor_root_identity,
-        base: GitOid::parse(&base)?,
-        custody: None,
-        facts: Default::default(),
-    };
-
-    // With no declared ownership, shared dirty files stay untouched.
-    let no_scope = launch.commit_budget_stop(&attempt_dir, GitOid::parse(&base)?)?;
-    assert!(no_scope.committed.is_none());
-    assert!(no_scope.note.contains("no owned paths"));
+    // Each case has a fresh attempt so its sealed request remains immutable.
+    let mut shared_unscoped = budget_stop_case(&[], true)?;
+    let wt = &shared_unscoped.fixture.writer.worktree;
+    std::fs::write(wt.join("ours.txt"), "our edit\n")?;
+    std::fs::write(wt.join("sibling.txt"), "sibling edit\n")?;
+    let base = shared_unscoped.launch.base;
+    let result = shared_unscoped
+        .launch
+        .commit_budget_stop(&shared_unscoped.attempt, base)?;
+    assert!(result.committed.is_none());
+    assert!(result.note.contains("no owned paths"));
     assert_eq!(
-        private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?,
-        base
+        private_git(
+            &shared_unscoped.fixture,
+            &shared_unscoped.scratch,
+            &shared_unscoped.git,
+            &["rev-parse", "HEAD"]
+        )?,
+        base.to_string()
     );
-
-    // Write request.json with write_scope declaring only "ours.txt"
-    let mut canonical_req = crate::tests::input().request;
-    canonical_req.task.profile.write_scope = vec!["ours.txt".to_string()];
-    crate::artifacts::seal(
-        &attempt_dir,
-        "request.json",
-        &crate::db::bytes(&canonical_req)?,
-        crate::RECORD_LIMIT,
-    )?;
-
-    // Run budget stop commit
-    let result = launch.commit_budget_stop(&attempt_dir, GitOid::parse(&base)?)?;
-    let committed = result.committed.ok_or("expected commit")?;
-    // Only ours.txt was committed
-    assert_eq!(committed.paths, vec!["ours.txt".to_string()]);
-    // Sibling's uncommitted edit is preserved intact
+    assert_eq!(std::fs::read_to_string(wt.join("ours.txt"))?, "our edit\n");
     assert_eq!(
         std::fs::read_to_string(wt.join("sibling.txt"))?,
-        "sibling uncommitted edit\n"
+        "sibling edit\n"
     );
 
-    // A sibling advances the shared ref after our snapshot. A stale CAS must
-    // leave that sibling commit intact.
+    let mut outside_scope = budget_stop_case(&["declared.txt"], true)?;
+    let wt = &outside_scope.fixture.writer.worktree;
+    std::fs::write(wt.join("outside.txt"), "outside declared paths\n")?;
+    let result = outside_scope
+        .launch
+        .commit_budget_stop(&outside_scope.attempt, outside_scope.launch.base)?;
+    assert!(result.committed.is_none());
+    assert!(
+        result
+            .note
+            .contains("dirty files exist only outside declared paths"),
+        "{}",
+        result.note
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("outside.txt"))?,
+        "outside declared paths\n"
+    );
+
+    let mut shared_scoped = budget_stop_case(&["ours.txt"], true)?;
+    let wt = &shared_scoped.fixture.writer.worktree;
+    std::fs::write(wt.join("ours.txt"), "our edit\n")?;
+    std::fs::write(wt.join("sibling.txt"), "sibling edit\n")?;
+    let base = shared_scoped.launch.base;
+    let result = shared_scoped
+        .launch
+        .commit_budget_stop(&shared_scoped.attempt, base)?;
+    let committed = result
+        .committed
+        .ok_or("expected path-scoped budget commit")?;
+    assert_eq!(committed.paths, vec!["ours.txt".to_owned()]);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("sibling.txt"))?,
+        "sibling edit\n"
+    );
+
+    // Git's own compare-and-swap keeps a later sibling commit if this attempt
+    // tries to update from its stale base.
     std::fs::write(wt.join("committed-sibling.txt"), "sibling commit\n")?;
-    private_git(&fixture, &scratch, &git, &["add", "committed-sibling.txt"])?;
-    private_git(&fixture, &scratch, &git, &["commit", "-qm", "sibling"])?;
-    let sibling_tip = private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?;
-    let source = crate::objects::bound_source(&attempt_dir)?.ok_or("source")?;
-    let old_tip = GitOid::parse(&base)?;
+    private_git(
+        &shared_scoped.fixture,
+        &shared_scoped.scratch,
+        &shared_scoped.git,
+        &["add", "committed-sibling.txt"],
+    )?;
+    private_git(
+        &shared_scoped.fixture,
+        &shared_scoped.scratch,
+        &shared_scoped.git,
+        &["commit", "-qm", "sibling"],
+    )?;
+    let sibling_tip = private_git(
+        &shared_scoped.fixture,
+        &shared_scoped.scratch,
+        &shared_scoped.git,
+        &["rev-parse", "HEAD"],
+    )?;
+    let source =
+        crate::objects::bound_source(&shared_scoped.attempt)?.ok_or("bound shared source")?;
     assert!(
         crate::objects::update_private_tip(
-            &git,
+            &shared_scoped.git,
             &source,
-            &repo,
+            shared_scoped.launch.worktree.repo(),
             "refs/heads/lane",
-            old_tip,
-            old_tip,
+            base,
+            base,
         )
         .is_err()
     );
     assert_eq!(
-        private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?,
+        private_git(
+            &shared_scoped.fixture,
+            &shared_scoped.scratch,
+            &shared_scoped.git,
+            &["rev-parse", "HEAD"]
+        )?,
         sibling_tip
     );
-    assert_eq!(
-        std::fs::read_to_string(wt.join("committed-sibling.txt"))?,
-        "sibling commit\n"
-    );
 
+    // The caller's own live holder is excluded, so an unscoped lone lane can
+    // still commit its files when there is no sibling holder.
+    let mut lone = budget_stop_case(&[], false)?;
+    let wt = &lone.fixture.writer.worktree;
+    std::fs::write(wt.join("lone.txt"), "lone edit\n")?;
+    let result = lone
+        .launch
+        .commit_budget_stop(&lone.attempt, lone.launch.base)?;
+    let committed = result.committed.ok_or("expected commit for lone lane")?;
+    assert_eq!(committed.paths, vec!["lone.txt".to_owned()]);
+    assert!(
+        private_git(
+            &lone.fixture,
+            &lone.scratch,
+            &lone.git,
+            &["show", "HEAD:lone.txt"]
+        )?
+        .contains("lone edit")
+    );
     Ok(())
 }
 

@@ -340,7 +340,8 @@ impl Fixture {
         }
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
         provenant_os::fixture::private_state_dir(&state)?;
-        let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let executable =
+            provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         let host_git = |args: &[&str]| git(&executable, &home, &project, None, args);
         host_git(&[
             "init",
@@ -682,7 +683,11 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
             &scratch,
             "refs/heads/lane",
             base,
-            &shared_root,
+            crate::objects::SharedViewLaunch {
+                root: &shared_root,
+                custody_slot: None,
+                current_attempt: None,
+            },
         )?;
         Ok((attempt_path, attempt, scratch))
     };
@@ -795,7 +800,11 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
             &other_branch_scratch,
             "refs/heads/other",
             fixture.base,
-            &shared_root,
+            crate::objects::SharedViewLaunch {
+                root: &shared_root,
+                custody_slot: None,
+                current_attempt: None
+            },
         )
         .is_err()
     );
@@ -819,7 +828,11 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
             &replacement_scratch,
             "refs/heads/lane",
             fixture.base,
-            &shared_root,
+            crate::objects::SharedViewLaunch {
+                root: &shared_root,
+                custody_slot: None,
+                current_attempt: None
+            },
         )
         .is_err()
     );
@@ -3039,78 +3052,211 @@ fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResul
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
-fn shared_view_reuse_after_base_moved() -> TestResult {
-    let fixture = Fixture::new("sha1")?;
-    provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
-    let shared_root = fixture.root.join("shared-view-base-moved");
-    fs::create_dir_all(&shared_root)?;
-    for component in ["git-common", "git-objects"] {
-        let path = shared_root.join(component);
-        fs::create_dir(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let prepare = |name: &str, base: GitOid| -> TestResult<(PathBuf, Directory, PathBuf)> {
-        let attempt_path = fixture.root.join(name);
-        let scratch = attempt_path.join("tmp/candidate-0");
-        fs::create_dir_all(&scratch)?;
-        let attempt = Directory::open_anchor(&attempt_path)?;
-        super::prepare_shared_bound(
+fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
+    for scenario in [
+        "equal",
+        "host_merge",
+        "child",
+        "diverged_live",
+        "cancelled",
+        "diverged_idle",
+        "missing_object",
+    ] {
+        let fixture = Fixture::new("sha1")?;
+        git(
             &fixture.git,
-            fixture.worktree.repo(),
-            &attempt,
-            &scratch,
-            "refs/heads/lane",
-            base,
-            &shared_root,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["reset", "--hard", &fixture.base.to_string()],
         )?;
-        Ok((attempt_path, attempt, scratch))
-    };
-
-    let (_first_path, first_attempt, _) = prepare("shared-attempt-1", fixture.base)?;
-    let first_source = super::bound_source(&first_attempt)?.ok_or("first shared source")?;
-    fs::write(fixture.lane.join("file"), "commit 1\n")?;
-    fixture.git_shared(&shared_root, &["add", "file"])?;
-    fixture.git_shared(&shared_root, &["commit", "-qm", "commit 1"])?;
-    let tip1 = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
-    assert_eq!(super::private_tip(&first_source, "refs/heads/lane")?, tip1);
-
-    // Host base moves forward: new commit on base in project repo
-    fs::write(fixture.project.join("upstream-file"), "upstream commit\n")?;
-    let _ = Command::new(&fixture.git)
-        .arg("-C")
-        .arg(&fixture.project)
-        .args(["add", "upstream-file"])
-        .output()?;
-    let output = Command::new(&fixture.git)
-        .arg("-C")
-        .arg(&fixture.project)
-        .args(["commit", "-qm", "upstream commit"])
-        .output()?;
-    assert!(output.status.success());
-    let new_base = oid(Command::new(&fixture.git)
-        .arg("-C")
-        .arg(&fixture.project)
-        .args(["rev-parse", "HEAD"])
-        .output()?)?;
-    assert_ne!(new_base, fixture.base);
-
-    // A moved base must not rewrite a live sibling's shared ref or index.
-    assert!(matches!(
-        prepare("shared-attempt-2", new_base),
-        Err(error) if error.downcast_ref::<crate::RunError>().is_some_and(|e| matches!(e, crate::RunError::SharedViewBaseMismatch))
-    ));
-    assert_eq!(super::private_tip(&first_source, "refs/heads/lane")?, tip1);
-    // A reset back behind the shared tip is also ambiguous and must be refused.
-    assert!(matches!(
-        prepare("shared-attempt-3", fixture.base),
-        Err(error) if error.downcast_ref::<crate::RunError>().is_some_and(|e| matches!(e, crate::RunError::SharedViewBaseMismatch))
-    ));
-    assert_eq!(
-        oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
-        tip1
-    );
-
+        provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
+        let shared_root = fixture.root.join("shared-view");
+        fs::create_dir(&shared_root)?;
+        fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
+        for component in ["git-common", "git-objects"] {
+            let path = shared_root.join(component);
+            fs::create_dir(&path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        let slot_path = fixture.root.join("occupancy");
+        fs::create_dir(&slot_path)?;
+        let slot = Directory::open_anchor(&slot_path)?;
+        // The launching child holds occupancy too; it must not count itself.
+        for name in ["child", "parent"] {
+            fs::create_dir(slot_path.join(name))?;
+        }
+        let child = slot.open_verified_directory(OsStr::new("child"))?;
+        let _own = child.try_lock(
+            OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let parent = slot.open_verified_directory(OsStr::new("parent"))?;
+        let live = matches!(scenario, "equal" | "host_merge" | "child" | "diverged_live");
+        let _parent_holder = live
+            .then(|| {
+                parent.try_lock(
+                    OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
+                    provenant_os::fs::LockMode::Exclusive,
+                )
+            })
+            .transpose()?;
+        let prepare = |name: &str, base: GitOid| {
+            let attempt_path = fixture.root.join(name);
+            let scratch = attempt_path.join("tmp/candidate-0");
+            fs::create_dir_all(&scratch)?;
+            super::prepare_shared_bound(
+                &fixture.git,
+                fixture.worktree.repo(),
+                &Directory::open_anchor(&attempt_path)?,
+                &scratch,
+                "refs/heads/lane",
+                base,
+                crate::objects::SharedViewLaunch {
+                    root: &shared_root,
+                    custody_slot: Some(&slot),
+                    current_attempt: Some("child"),
+                },
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+        };
+        let first = prepare("first", fixture.base)?;
+        assert_eq!(first.base, fixture.base);
+        assert_eq!(first.recovered, None);
+        let host = |args: &[&str]| git(&fixture.git, &fixture.home, &fixture.project, None, args);
+        let mut shared_tip = fixture.base;
+        let mut base = fixture.base;
+        if scenario != "equal" {
+            fs::write(fixture.lane.join("parent-work"), "parent commit\n")?;
+            fixture.git_shared(&shared_root, &["add", "parent-work"])?;
+            fixture.git_shared(&shared_root, &["commit", "-qm", "parent commit"])?;
+            shared_tip = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
+        }
+        if scenario == "host_merge" {
+            // Import the shared parent commit, then let the host merge main into
+            // the checked-out lane. The shared view remains at the parent tip.
+            super::settle(
+                &fixture.git,
+                fixture.worktree.repo(),
+                Some(&Directory::open_anchor(&shared_root.join("git-objects"))?),
+                shared_tip,
+            )?;
+            git(
+                &fixture.git,
+                &fixture.home,
+                &fixture.lane,
+                None,
+                &["reset", "--hard", &shared_tip.to_string()],
+            )?;
+            fs::write(fixture.project.join("host-work"), "host branch advanced\n")?;
+            host(&["add", "host-work"])?;
+            host(&["commit", "-qm", "host main commit"])?;
+            git(
+                &fixture.git,
+                &fixture.home,
+                &fixture.lane,
+                None,
+                &["merge", "--no-edit", "main"],
+            )?;
+            base = oid(git(
+                &fixture.git,
+                &fixture.home,
+                &fixture.lane,
+                None,
+                &["rev-parse", "HEAD"],
+            )?)?;
+        } else if scenario.starts_with("diverged") {
+            fs::write(fixture.project.join("host-work"), "divergent host commit\n")?;
+            host(&["add", "host-work"])?;
+            host(&["commit", "-qm", "divergent host base"])?;
+            base = oid(host(&["rev-parse", "HEAD"])?)?;
+        }
+        if scenario == "missing_object" {
+            base = GitOid::parse("1111111111111111111111111111111111111111")?;
+        }
+        // A deliberately different staged index makes reset-vs-preserve visible.
+        fs::write(fixture.lane.join("staged"), "staged sibling work\n")?;
+        fixture.git_shared(&shared_root, &["add", "staged"])?;
+        let staged_tree = oid(fixture.git_shared(&shared_root, &["write-tree"])?)?;
+        let prepared = prepare("second", base);
+        if scenario == "missing_object" {
+            assert!(
+                matches!(prepared, Err(e) if matches!(e.downcast_ref::<crate::RunError>(), Some(crate::RunError::OperationIo { .. })))
+            );
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
+                shared_tip
+            );
+            continue;
+        }
+        if scenario == "diverged_live" {
+            assert!(
+                matches!(prepared, Err(e) if matches!(e.downcast_ref::<crate::RunError>(), Some(crate::RunError::SharedViewBaseMismatch)))
+            );
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
+                shared_tip
+            );
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
+                staged_tree
+            );
+            continue;
+        }
+        let prepared = prepared?;
+        let expected = if scenario == "child" {
+            shared_tip
+        } else {
+            base
+        };
+        assert_eq!(prepared.base, expected, "{scenario}");
+        assert_eq!(
+            oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
+            expected
+        );
+        if matches!(scenario, "equal" | "child") {
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
+                staged_tree
+            );
+        } else {
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
+                oid(fixture
+                    .git_shared(&shared_root, &["rev-parse", &format!("{base}^{{tree}}")])?)?
+            );
+        }
+        if matches!(scenario, "cancelled" | "diverged_idle") {
+            assert_eq!(prepared.recovered, Some(shared_tip));
+            let reference = format!("refs/provenant/recovery/{shared_tip}");
+            assert_eq!(
+                oid(fixture.git_shared(&shared_root, &["rev-parse", &reference])?)?,
+                shared_tip
+            );
+            // The retained commit and its content remain readable after reseeding.
+            assert_eq!(
+                fixture
+                    .git_shared(&shared_root, &["show", &format!("{reference}:parent-work")])?
+                    .stdout,
+                b"parent commit\n"
+            );
+            // Reseeding the same displaced tip again reuses its recovery pin.
+            fixture.git_shared(
+                &shared_root,
+                &["update-ref", "refs/heads/lane", &shared_tip.to_string()],
+            )?;
+            let retry = prepare("retry", base)?;
+            assert_eq!(retry.recovered, Some(shared_tip));
+        } else {
+            assert_eq!(prepared.recovered, None);
+        }
+        assert_eq!(
+            fs::read(fixture.lane.join("staged"))?,
+            b"staged sibling work\n"
+        );
+    }
     Ok(())
 }
 
@@ -3137,7 +3283,11 @@ fn host_git_rejects_planted_commondir() -> TestResult {
         &scratch,
         "refs/heads/lane",
         fixture.base,
-        &shared_root,
+        crate::objects::SharedViewLaunch {
+            root: &shared_root,
+            custody_slot: None,
+            current_attempt: None,
+        },
     )?;
 
     // Plant a commondir file in git-common pointing to a rogue directory
@@ -3159,7 +3309,11 @@ fn host_git_rejects_planted_commondir() -> TestResult {
             &scratch2,
             "refs/heads/lane",
             fixture.base,
-            &shared_root,
+            crate::objects::SharedViewLaunch {
+                root: &shared_root,
+                custody_slot: None,
+                current_attempt: None
+            },
         )
         .is_err()
     );

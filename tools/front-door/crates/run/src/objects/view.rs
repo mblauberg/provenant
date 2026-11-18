@@ -354,7 +354,112 @@ pub(crate) fn update_private_tip(
             ..Execution::default()
         },
     )
-    .map_err(|_| RunError::Validation("budget commit CAS ref update failed"))?;
+    .map_err(|_| RunError::Validation("lane Git CAS ref update failed"))?;
+    Ok(())
+}
+
+fn shared_is_ancestor(
+    git: &Path,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    ancestor: GitOid,
+    head: GitOid,
+) -> Result<bool> {
+    let refs_path = source.refs.current_path()?;
+    let objects_path = source.objects.current_path()?;
+    let alternate = repo.common_git_dir().join("objects");
+    // Unlike merge-base --is-ancestor, rev-list succeeds for both answers,
+    // allowing command failures to propagate instead of implying divergence.
+    let uncontained = execute_bounded(
+        git,
+        &refs_path,
+        repo.root_path(),
+        &args(&[
+            "rev-list",
+            "--max-count=1",
+            &ancestor.to_string(),
+            "--not",
+            &head.to_string(),
+        ]),
+        None,
+        Execution {
+            object_directory: Some(&objects_path),
+            alternate_directory: Some(&alternate),
+            common_directory: Some(&refs_path),
+            ..Execution::default()
+        },
+    )?;
+    Ok(uncontained.is_empty())
+}
+
+fn reset_shared_index(
+    git: &Path,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    base: GitOid,
+) -> Result<()> {
+    let refs_path = source.refs.current_path()?;
+    let objects_path = source.objects.current_path()?;
+    let alternate = repo.common_git_dir().join("objects");
+    let index_path = refs_path.join("index");
+    execute_bounded(
+        git,
+        &refs_path,
+        repo.root_path(),
+        &args(&["read-tree", &base.to_string()]),
+        None,
+        Execution {
+            object_directory: Some(&objects_path),
+            alternate_directory: Some(&alternate),
+            common_directory: Some(&refs_path),
+            index_file: Some(&index_path),
+            ..Execution::default()
+        },
+    )
+    .map_err(|_| RunError::Validation("shared view index reset failed"))?;
+    Ok(())
+}
+
+fn save_recovery_ref(
+    git: &Path,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    tip: GitOid,
+) -> Result<()> {
+    let refs_path = source.refs.current_path()?;
+    let objects_path = source.objects.current_path()?;
+    let alternate = repo.common_git_dir().join("objects");
+    let recovery = format!("refs/provenant/recovery/{tip}");
+    let expected = match private_ref(source, &recovery) {
+        Ok(Some(existing)) if existing == tip => tip.to_string(),
+        Ok(Some(_)) => {
+            return Err(RunError::Validation(
+                "shared recovery ref conflicts with retained tip",
+            ));
+        }
+        Ok(None) => "0".repeat(tip.to_string().len()),
+        Err(error) => return Err(error),
+    };
+    execute_bounded(
+        git,
+        &refs_path,
+        repo.root_path(),
+        &args(&[
+            "update-ref",
+            "--no-deref",
+            &recovery,
+            &tip.to_string(),
+            &expected,
+        ]),
+        None,
+        Execution {
+            object_directory: Some(&objects_path),
+            alternate_directory: Some(&alternate),
+            common_directory: Some(&refs_path),
+            ..Execution::default()
+        },
+    )
+    .map_err(|_| RunError::Validation("shared view recovery ref creation failed"))?;
     Ok(())
 }
 
@@ -363,6 +468,10 @@ pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid>
     if std::str::from_utf8(&head).map(str::trim).ok() != Some(format!("ref: {branch}").as_str()) {
         return Err(invalid());
     }
+    private_ref(source, branch)?.ok_or_else(invalid)
+}
+
+fn private_ref(source: &ObjectSource, branch: &str) -> Result<Option<GitOid>> {
     let read_loose = || -> Result<Vec<u8>> {
         let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
         let mut directory = source.refs.try_clone()?;
@@ -374,9 +483,14 @@ pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid>
     let bytes = match read_loose() {
         Ok(bytes) => bytes,
         Err(RunError::Filesystem(error)) if error.is_not_found() => {
-            let packed = source
+            let packed = match source
                 .refs
-                .read_stable(OsStr::new("packed-refs"), 1024 * 1024)?;
+                .read_stable(OsStr::new("packed-refs"), 1024 * 1024)
+            {
+                Ok(packed) => packed,
+                Err(error) if error.is_not_found() => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
             let mut found = None;
             for line in packed.split(|byte| *byte == b'\n') {
                 if let Some(index) = line.iter().position(|byte| *byte == b' ')
@@ -388,11 +502,16 @@ pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid>
                     found = Some(line[..index].to_vec());
                 }
             }
-            found.ok_or_else(invalid)?
+            let Some(found) = found else {
+                return Ok(None);
+            };
+            found
         }
         Err(error) => return Err(error),
     };
-    GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
+    GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim())
+        .map(Some)
+        .map_err(|_| invalid())
 }
 
 #[cfg(any(test, feature = "fixture"))]
@@ -688,13 +807,20 @@ fn verify_shared_view(receipt: &SharedViewReceipt) -> Result<(Directory, Directo
     Ok((root, refs, objects))
 }
 
+pub(crate) struct SharedPreparation {
+    pub base: GitOid,
+    pub recovered: Option<GitOid>,
+}
+
 fn open_or_create_shared_view(
     git: &Path,
     repo: &VerifiedRepo,
     shared_root: &Path,
     branch: &str,
     base: GitOid,
-) -> Result<SharedViewBinding> {
+    custody_slot: Option<&Directory>,
+    current_attempt: Option<&str>,
+) -> Result<(SharedViewBinding, SharedPreparation)> {
     repo.revalidate().map_err(|_| invalid())?;
     if !shared_root.is_absolute() {
         return Err(invalid());
@@ -746,13 +872,55 @@ fn open_or_create_shared_view(
             }
             let (_, refs, objects) = verify_shared_view(&receipt)?;
             let source = ObjectSource { objects, refs };
-            // A tip ahead of the launch base may be a live sibling commit or
-            // history deliberately dropped by a reset. They are indistinguishable
-            // here, so never adopt or overwrite it as this attempt's work.
-            if private_tip(&source, branch)? != base {
+            let current_tip = private_tip(&source, branch)?;
+            if current_tip == base {
+                return Ok((
+                    SharedViewBinding { receipt },
+                    SharedPreparation {
+                        base,
+                        recovered: None,
+                    },
+                ));
+            }
+            if shared_is_ancestor(git, &source, repo, current_tip, base)? {
+                update_private_tip(git, &source, repo, branch, base, current_tip)?;
+                reset_shared_index(git, &source, repo, base)?;
+                return Ok((
+                    SharedViewBinding { receipt },
+                    SharedPreparation {
+                        base,
+                        recovered: None,
+                    },
+                ));
+            }
+            let live = custody_slot
+                .map(|slot| {
+                    provenant_supervisor::custody::other_holders_live(slot, current_attempt)
+                })
+                .transpose()?
+                .unwrap_or(false);
+            if live {
+                if shared_is_ancestor(git, &source, repo, base, current_tip)? {
+                    return Ok((
+                        SharedViewBinding { receipt },
+                        SharedPreparation {
+                            base: current_tip,
+                            recovered: None,
+                        },
+                    ));
+                }
                 return Err(RunError::SharedViewBaseMismatch);
             }
-            return Ok(SharedViewBinding { receipt });
+            save_recovery_ref(git, &source, repo, current_tip)?;
+            update_private_tip(git, &source, repo, branch, base, current_tip)?;
+            reset_shared_index(git, &source, repo, base)?;
+            return Ok((
+                SharedViewBinding { receipt },
+                SharedPreparation {
+                    base,
+                    recovered: Some(current_tip),
+                },
+            ));
         }
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
@@ -820,7 +988,13 @@ fn open_or_create_shared_view(
     root.sync()?;
     verify_shared_view(&receipt)?;
     repo.revalidate().map_err(|_| invalid())?;
-    Ok(SharedViewBinding { receipt })
+    Ok((
+        SharedViewBinding { receipt },
+        SharedPreparation {
+            base,
+            recovered: None,
+        },
+    ))
 }
 
 fn valid_candidate(name: &str) -> bool {
@@ -880,6 +1054,12 @@ fn prepare_candidate(
     Ok((held, refs, objects))
 }
 
+pub(crate) struct SharedViewLaunch<'a> {
+    pub root: &'a Path,
+    pub custody_slot: Option<&'a Directory>,
+    pub current_attempt: Option<&'a str>,
+}
+
 pub(crate) fn prepare_shared_bound(
     git: &Path,
     repo: &VerifiedRepo,
@@ -887,13 +1067,22 @@ pub(crate) fn prepare_shared_bound(
     scratch: &Path,
     branch: &str,
     base: GitOid,
-    shared_root: &Path,
-) -> Result<()> {
+    launch: SharedViewLaunch<'_>,
+) -> Result<SharedPreparation> {
     repo.revalidate().map_err(|_| invalid())?;
+    let (shared, effective_base) = open_or_create_shared_view(
+        git,
+        repo,
+        launch.root,
+        branch,
+        base,
+        launch.custody_slot,
+        launch.current_attempt,
+    )?;
     let (held, private_refs, private_objects) =
-        prepare_candidate(git, repo, attempt, scratch, branch, base)?;
-    let shared = open_or_create_shared_view(git, repo, shared_root, branch, base)?;
-    bind_shared(attempt, &held, &private_refs, &private_objects, shared)
+        prepare_candidate(git, repo, attempt, scratch, branch, effective_base.base)?;
+    bind_shared(attempt, &held, &private_refs, &private_objects, shared)?;
+    Ok(effective_base)
 }
 
 pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding>> {
@@ -921,10 +1110,6 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
         return Err(invalid());
     }
     Ok(Some(binding))
-}
-
-pub(crate) fn is_shared_binding(attempt: &Directory) -> Result<bool> {
-    Ok(object_binding(attempt)?.is_some_and(|binding| binding.shared.is_some()))
 }
 
 pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> {

@@ -341,6 +341,23 @@ pub struct WriterLaunch {
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    pub(crate) fn other_holders_live(&self, attempt: Option<&Directory>) -> Result<bool> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(false);
+        };
+        let current_attempt = attempt
+            .map(|a| a.current_path())
+            .transpose()?
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+        Ok(provenant_supervisor::custody::other_holders_live(
+            slot,
+            current_attempt.as_deref(),
+        )?)
+    }
+
     /// The verified checkout that owns project configuration, if one exists.
     pub fn project_root(&self) -> Option<&Path> {
         self.layout.project()
@@ -605,32 +622,6 @@ impl WriterLaunch {
         if let Some(source) = crate::objects::bound_source(attempt)? {
             let private = crate::objects::private_tip(&source, self.branch.as_str())?;
             if private != base {
-                let repo = self.worktree.repo();
-                let refs = source.refs.current_path()?;
-                let objects = source.objects.current_path()?;
-                let alternate = repo.common_git_dir().join("objects");
-                let descends = crate::objects::execute_bounded(
-                    &git,
-                    &refs,
-                    repo.root_path(),
-                    &[
-                        "merge-base".into(),
-                        "--is-ancestor".into(),
-                        base.to_string().into(),
-                        private.to_string().into(),
-                    ],
-                    None,
-                    crate::objects::Execution {
-                        object_directory: Some(&objects),
-                        alternate_directory: Some(&alternate),
-                        common_directory: Some(&refs),
-                        ..Default::default()
-                    },
-                )
-                .is_ok();
-                if !descends {
-                    return Err(RunError::SharedViewBaseMismatch);
-                }
                 return Ok((private, false));
             }
         }
@@ -650,6 +641,10 @@ impl WriterLaunch {
         let source = crate::objects::bound_source(attempt)?.ok_or(RunError::Validation(
             "budget commit needs private Git state",
         ))?;
+        // A native commit may have advanced the host branch while the bound
+        // private ref still names the launch base. CAS that ref's observed value,
+        // rather than the independently selected commit parent.
+        let expected_private_tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         let (tip, native) = self.effective_head(attempt, base)?;
         let index_dir = if native {
             repo.private_dir()
@@ -731,11 +726,12 @@ impl WriterLaunch {
                     .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok())
                     .map(|req| req.task.profile.write_scope)
                     .unwrap_or_default();
-            if scope.is_empty() && crate::objects::is_shared_binding(attempt)? {
+            if scope.is_empty() && self.other_holders_live(Some(attempt))? {
                 return Ok(BudgetCommit::note(
                     "budget stop: no owned paths declared; worktree left intact",
                 ));
             }
+            let any_dirty = !paths.is_empty();
             let owned_paths: Vec<String> = if scope.is_empty() {
                 paths
             } else {
@@ -751,7 +747,12 @@ impl WriterLaunch {
                     .collect()
             };
             if owned_paths.is_empty() {
-                return Ok(BudgetCommit::note("budget stop: worktree already clean"));
+                let note = if !any_dirty {
+                    "budget stop: worktree already clean"
+                } else {
+                    "budget stop: dirty files exist only outside declared paths"
+                };
+                return Ok(BudgetCommit::note(note));
             }
             let message = budget_commit_message(&owned_paths);
             let mut add_args = vec!["add", "-A", "--"];
@@ -784,7 +785,7 @@ impl WriterLaunch {
                 repo,
                 self.branch.as_str(),
                 head,
-                tip,
+                expected_private_tip,
             )?;
             Ok(BudgetCommit {
                 note: "work committed on its branch",
@@ -914,6 +915,21 @@ struct GitPins {
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     base: GitOid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_base: Option<GitOid>,
+}
+
+fn shared_launch_base(attempt: &Directory, host_base: GitOid) -> Result<GitOid> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(host_base);
+    };
+    let pins: GitPins = crate::db::decode(&raw)?;
+    if pins.schema_version != 1 || pins.base != host_base {
+        return Err(RunError::Validation("writer Git pins base mismatch"));
+    }
+    Ok(pins.shared_base.unwrap_or(host_base))
 }
 
 /// Remove only this attempt's host-owned retention ref after terminal commit.
@@ -3040,12 +3056,24 @@ impl WriterLaunch {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(
         &self,
         state: &Path,
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
         policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
+        self.snapshot_shared(state, attempt, scope, policy, None)
+    }
+
+    pub(crate) fn snapshot_shared(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        policy: &provenant_records::policy::Policy,
+        shared_base: Option<GitOid>,
     ) -> Result<()> {
         seal_writer_ownership(attempt, &self.worktree)?;
         let utility = runtime(state)?;
@@ -3087,6 +3115,7 @@ impl WriterLaunch {
                 schema_version: 1,
                 scope,
                 base: self.base,
+                shared_base: shared_base.filter(|tip| *tip != self.base),
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -3418,9 +3447,13 @@ impl WriterLaunch {
             None => self.effective_head(attempt, base)?.0,
         };
         settlement.set_head(verified_tip)?;
-        if let Err(error) =
-            self.report_write_scope(attempt, base, verified_tip, source.as_ref(), enforcement)
-        {
+        if let Err(error) = self.report_write_scope(
+            attempt,
+            shared_launch_base(attempt, base)?,
+            verified_tip,
+            source.as_ref(),
+            enforcement,
+        ) {
             if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
                 return Err(error);
             }
@@ -3753,10 +3786,11 @@ impl WriterLaunch {
             let location = format!(
                 "the lane's work is commit {tip} on branch {branch}, retained in its private Git"
             );
-            if tip == self.base || held != self.base {
+            let launch_base = shared_launch_base(attempt, self.base)?;
+            if tip == launch_base || held != self.base {
                 return Ok(String::new());
             }
-            if crate::objects::is_shared_binding(attempt)? {
+            if self.other_holders_live(Some(attempt))? {
                 return Ok(format!("shared worktree left intact; {location}"));
             }
             let scratch = source.refs.current_path()?;
@@ -3769,12 +3803,12 @@ impl WriterLaunch {
                     objects: Some(&objects),
                 },
                 tip,
-                self.base,
+                launch_base,
             )?;
             crate::objects::worktree::seal_reverted(attempt, tip)?;
             let mut note = format!(
                 "worktree restored to {} ({} files); {location}",
-                self.base, moved.moved
+                launch_base, moved.moved
             );
             if !moved.kept.is_empty() {
                 let listed: Vec<_> = moved
@@ -3985,6 +4019,7 @@ mod stored_shape_tests {
             schema_version: 1,
             scope,
             base: oid,
+            shared_base: None,
         })?;
         unknown_field_survives(MergeRestored {
             extra: Default::default(),
