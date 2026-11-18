@@ -33,8 +33,10 @@ and [test tiers](test-tiers.md).
 
 ## Toolchain updates
 
-Dependabot updates the Rust toolchain pin. Its change requests a full suite run
-and auto-merges on green `ci-status`. New Clippy lints appear in the lint job
+Dependabot updates the Rust toolchain pin, moving the root copy and
+`tools/front-door/rust-toolchain.toml` in one grouped pull request; CI fails if
+they differ. Its change requests a full suite run and auto-merges on green
+`ci-status`. New Clippy lints appear in the lint job
 summary; fix them on the Dependabot branch.
 
 ## Required native test inventory
