@@ -267,6 +267,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         // never launched an attempt (blocked, skipped and admission failures).
         for field in [
             "attempt_number",
+            "warnings",
             "work_key",
             "branch",
             "pr",
@@ -3320,12 +3321,14 @@ mod tests {
         assert!(line.contains("cause=budget_exhausted"), "{line}");
     }
 
+    // Spec: docs/specs/cli.md#status-selection
     #[test]
     fn unified_status_uses_one_row_contract_and_selects_attempts() {
         // A projection may omit earlier rows; each displayed handle must still
         // resolve to the WorkKey and reference that produced it.
         let mut projected = checkpoint("g");
         projected.nodes[0].attempts[0].key.attempt = 7;
+        projected.nodes[0].warnings.push("retry warning".into());
         let run = graph_snapshot(projected);
         let graph = GraphTarget {
             graph: "g".into(),
@@ -3338,6 +3341,13 @@ mod tests {
             rows.iter()
                 .all(|row| row.as_object().unwrap().keys().collect::<Vec<_>>() == keys)
         );
+        for row in &rows {
+            if row["kind"] == "node" && row["node_id"] == "parent" {
+                assert_eq!(row["warnings"], json!(["retry warning"]));
+            } else if row["kind"] != "node" {
+                assert!(row["warnings"].is_null());
+            }
+        }
         assert_eq!(rows[0]["kind"], "graph");
         assert_eq!(rows[1]["id"], "g/parent");
         for row in rows.iter().filter(|row| row["kind"] == "attempt") {

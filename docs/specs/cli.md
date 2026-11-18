@@ -130,6 +130,8 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+Graph status rows share the same keys across graph, node and attempt kinds.
+Node warnings are present on node rows and null on graph and attempt rows.
 The graph-listing AGE column measures elapsed time since graph creation, even
 when the graph's state changed more recently.
 For graph nodes with a typed review result, the digest shows execution state
