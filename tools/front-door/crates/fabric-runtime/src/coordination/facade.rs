@@ -1550,6 +1550,18 @@ impl From<&super::CoordinationError> for FacadeError {
 impl From<&provenant_fabric_store::Error> for FacadeError {
     fn from(error: &provenant_fabric_store::Error) -> Self {
         use provenant_fabric_store::Error;
+        if let Error::Decode(decode) = error
+            && let provenant_records::DecodeError::UnsupportedVersion { found, .. } =
+                decode.root_cause()
+            && *found > 1
+        {
+            return Self::UpgradeRequired {
+                reader_release: env!("CARGO_PKG_VERSION").into(),
+                writer_release: "unknown".into(),
+                record: "record schema".into(),
+                version: *found,
+            };
+        }
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
@@ -1558,16 +1570,6 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
             Error::PathEncoding => Self::InvalidInput { detail: None },
-            Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
-                if *found > 1 =>
-            {
-                Self::UpgradeRequired {
-                    reader_release: env!("CARGO_PKG_VERSION").into(),
-                    writer_release: "unknown".into(),
-                    record: "record schema".into(),
-                    version: *found,
-                }
-            }
             Error::SchemaVersion(version)
                 if *version > provenant_fabric_store::CURRENT_SCHEMA_VERSION as i64 =>
             {
@@ -1777,6 +1779,8 @@ mod diagnostic_tests {
         let error = provenant_fabric_store::Error::Decode(provenant_records::DecodeError::Typed {
             line: 2,
             column: 3,
+            field: None,
+            schema_version: None,
         });
         let facade = FacadeError::from(&error);
         assert_eq!(facade.code(), "state_corrupt");
@@ -1799,6 +1803,14 @@ mod diagnostic_tests {
                 line: 1,
                 column: 1,
             }),
+            Error::Decode(
+                provenant_records::DecodeError::UnsupportedVersion {
+                    found: 3,
+                    line: 1,
+                    column: 1,
+                }
+                .with_context("/state/attempts/example/launch.json", "LaunchRecord"),
+            ),
         ];
         for error in errors {
             let facade = FacadeError::from(&error);

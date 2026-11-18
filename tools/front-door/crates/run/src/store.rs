@@ -6,9 +6,10 @@ use crate::{
 use provenant_core::{AttemptId, OperationId, WallTime};
 use provenant_os::{exec::Termination, fs::LockMode};
 use provenant_records::{AttemptFile, CanonicalV1};
-use provenant_supervisor::custody::ExitObservation;
+use provenant_supervisor::custody::{ExitObservation, StoredExit};
 use rusqlite::{OptionalExtension, params};
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 #[cfg(test)]
 thread_local! {
@@ -159,6 +160,23 @@ pub(crate) struct Withdrawal<'a> {
     pub failure: Option<provenant_records::run::PreparationFailure>,
 }
 
+fn decode_stored_v1<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    path: PathBuf,
+    record_type: &'static str,
+    limit: u64,
+) -> Result<T> {
+    Ok(provenant_records::decode_stored_record_v1(
+        bytes,
+        provenant_records::Limits {
+            max_bytes: limit,
+            ..Default::default()
+        },
+        path,
+        record_type,
+    )?)
+}
+
 impl RunStore {
     /// Mark a frozen refusal's notice complete after its idempotent inbox write.
     pub fn complete_refusal_notice(
@@ -179,7 +197,12 @@ impl RunStore {
                 )
                 .optional()?
                 .ok_or(RunError::NotFound)?;
-            let mut current: OperationRecord = decode(&raw)?;
+            let mut current: OperationRecord = decode_stored_v1(
+                &raw,
+                self.context.state_root.as_path().join("run.sqlite3"),
+                "OperationRecord",
+                RECORD_LIMIT,
+            )?;
             if current.project_id != self.context.project_id
                 || current.actor_id != self.context.actor_id
                 || current.kind != expected.kind
@@ -359,7 +382,12 @@ impl RunStore {
                 )
                 .optional()?;
             if let Some(prior) = prior {
-                let prior: OperationRecord = decode(&prior)?;
+                let prior: OperationRecord = decode_stored_v1(
+                    &prior,
+                    self.context.state_root.as_path().join("run.sqlite3"),
+                    "OperationRecord",
+                    RECORD_LIMIT,
+                )?;
                 if prior.project_id != self.context.project_id
                     || prior.actor_id != self.context.actor_id
                     || prior.kind != operation.kind
@@ -380,7 +408,12 @@ impl RunStore {
                 if prior_digest != digest.to_string() {
                     return Err(RunError::OperationConflict);
                 }
-                return decode(&raw);
+                return decode_stored_v1(
+                    &raw,
+                    self.context.state_root.as_path().join("run.sqlite3"),
+                    "OperationRecord",
+                    RECORD_LIMIT,
+                );
             }
             tx.execute(
                 "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,number,refused,operation_record,revision,terminal,record,tmp_retained) \
@@ -432,10 +465,17 @@ impl RunStore {
         ) {
             return Ok(false);
         }
-        if receipts.git_import == EffectDisposition::Pending
-            && let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)?
-        {
-            let effects: TerminalEffects = decode(&raw)?;
+        if receipts.git_import == EffectDisposition::Pending {
+            let effects_path = attempt.current_path()?.join("terminal-effects.json");
+            let Some(raw) =
+                read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT).map_err(|error| {
+                    error.with_record_context(effects_path.clone(), "TerminalEffects")
+                })?
+            else {
+                return Ok(true);
+            };
+            let effects: TerminalEffects =
+                decode_stored_v1(&raw, effects_path, "TerminalEffects", RECORD_LIMIT)?;
             if effects.schema_version != 1 || effects.scope != Self::scope(record) {
                 return Err(RunError::Conflict);
             }
@@ -650,8 +690,15 @@ impl RunStore {
             self.artifact_bytes(result, RESULT_LIMIT)?;
         }
         if let Some(exit) = &pending.exit_evidence {
-            let raw = self.artifact_bytes(exit, RECORD_LIMIT)?;
-            let stored: SealedExit = decode(&raw)?;
+            let path = self
+                .root
+                .current_path()?
+                .join(exit.path.to_relative_path()?.as_path());
+            let raw = self
+                .artifact_bytes(exit, RECORD_LIMIT)
+                .map_err(|error| error.with_record_context(path.clone(), "StoredExit"))?;
+            let stored: StoredExit =
+                decode_stored_v1(raw.as_slice(), path, "StoredExit", RECORD_LIMIT)?;
             let AttemptState::Terminal { exit_code, .. } = pending.state else {
                 return Err(RunError::Conflict);
             };
@@ -883,7 +930,12 @@ impl RunStore {
             // the attempt's identity.
             let prior: Option<(Vec<u8>, String)> = tx.query_row("SELECT operation_record,id FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             if let Some((prior, id)) = prior {
-                let prior: OperationRecord = decode(&prior)?;
+                let prior: OperationRecord = decode_stored_v1(
+                    &prior,
+                    self.context.state_root.as_path().join("run.sqlite3"),
+                    "OperationRecord",
+                    RECORD_LIMIT,
+                )?;
                 if prior.request_digest != digest { return Err(RunError::OperationConflict); }
                 if prior.state == OperationState::Refused {
                     return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
@@ -911,7 +963,12 @@ impl RunStore {
             if let Some((prior_digest, refused, raw, id)) = existing {
                 if prior_digest != digest.to_string() { return Err(RunError::OperationConflict); }
                 if refused {
-                    let prior: OperationRecord = decode(&raw)?;
+                    let prior: OperationRecord = decode_stored_v1(
+                        &raw,
+                        self.context.state_root.as_path().join("run.sqlite3"),
+                        "OperationRecord",
+                        RECORD_LIMIT,
+                    )?;
                     return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
                 }
                 return Ok(Some(AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?));
@@ -1631,20 +1688,44 @@ impl RunStore {
                 _ => {}
             }
         }
-        if let Some(raw) = read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)? {
-            let writer: crate::writer::WriterTerminal = decode(&raw)?;
+        let writer_terminal_path = attempt.current_path()?.join("writer-terminal.json");
+        if let Some(raw) =
+            read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT).map_err(|error| {
+                error.with_record_context(writer_terminal_path.clone(), "WriterTerminal")
+            })?
+        {
+            let writer: crate::writer::WriterTerminal =
+                decode_stored_v1(&raw, writer_terminal_path, "WriterTerminal", RECORD_LIMIT)?;
             next.head = Some(writer.head);
             next.stop_work = writer.stop_work;
         }
         if classification.outcome == Outcome::Succeeded {
             // Recovery reports uncertainty from the sealed start marker without
             // repeating an external effect or inferring success from prose.
-            let raw = match read_sealed(&attempt, "delivery.json", RECORD_LIMIT)? {
-                Some(raw) => Some(raw),
-                None => read_sealed(&attempt, "delivery-started.json", RECORD_LIMIT)?,
-            };
-            if let Some(raw) = raw {
-                let receipt: WriterDeliveryReceipt = decode(&raw)?;
+            let delivery_path = attempt.current_path()?.join("delivery.json");
+            let started_path = attempt.current_path()?.join("delivery-started.json");
+            let raw =
+                match read_sealed(&attempt, "delivery.json", RECORD_LIMIT).map_err(|error| {
+                    error.with_record_context(delivery_path.clone(), "WriterDeliveryReceipt")
+                })? {
+                    Some(raw) => Some(("delivery.json", raw)),
+                    None => read_sealed(&attempt, "delivery-started.json", RECORD_LIMIT)
+                        .map_err(|error| {
+                            error.with_record_context(started_path.clone(), "WriterDeliveryReceipt")
+                        })?
+                        .map(|raw| ("delivery-started.json", raw)),
+                };
+            if let Some((name, raw)) = raw {
+                let receipt: WriterDeliveryReceipt = decode_stored_v1(
+                    &raw,
+                    if name == "delivery.json" {
+                        delivery_path
+                    } else {
+                        started_path
+                    },
+                    "WriterDeliveryReceipt",
+                    RECORD_LIMIT,
+                )?;
                 if receipt.head.is_some() && (next.head.is_none() || next.head == receipt.head) {
                     next.head = receipt.head;
                     next.delivery = Some(receipt);
@@ -2002,7 +2083,7 @@ impl RunStore {
             .exit_evidence
             .as_ref()
             .and_then(|evidence| self.artifact_bytes(evidence, RECORD_LIMIT).ok())
-            .and_then(|raw| decode::<SealedExit>(&raw).ok());
+            .and_then(|raw| decode::<StoredExit>(&raw).ok());
         let live = self.steer_session_ready(child.attempt_id, call)?;
         let sealed_route_digest = child
             .applied_route
@@ -2092,8 +2173,12 @@ impl RunStore {
             cancellation: next.cancellation_disposition,
             ..Default::default()
         };
-        if let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)? {
-            let effects: TerminalEffects = decode(&raw)?;
+        let effects_path = attempt.current_path()?.join("terminal-effects.json");
+        if let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)
+            .map_err(|error| error.with_record_context(effects_path.clone(), "TerminalEffects"))?
+        {
+            let effects: TerminalEffects =
+                decode_stored_v1(&raw, effects_path, "TerminalEffects", RECORD_LIMIT)?;
             if effects.schema_version != 1 || effects.scope != Self::scope(old) {
                 return Err(RunError::Conflict);
             }
@@ -2246,23 +2331,8 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
     Ok(())
 }
 
-// Supervisor owns this extensible file. Run decodes the fields it consumes;
+// Supervisor owns this extensible file. Run shares its DTO directly so readers cannot drift;
 // the bounded codec still rejects duplicate members and malformed records.
-#[derive(serde::Deserialize)]
-struct SealedExit {
-    scope: provenant_records::custody::Scope,
-    termination: Option<Termination>,
-    never_spawned: bool,
-    stop_reason: Option<provenant_supervisor::machine::StopReason>,
-    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
-    cancel_delivered_before_exit: Option<bool>,
-    provider_identity_conflict: bool,
-    provider_identity_evidence_incomplete: bool,
-    provider_identity_eof_fragment: bool,
-    terminal_observed: bool,
-    unresolved_cleanup: bool,
-    settlement_evidence: provenant_supervisor::custody::SettlementEvidence,
-}
 fn sealed_exit(
     dir: &provenant_os::fs::Directory,
     exit: &ExitObservation,
@@ -2276,13 +2346,21 @@ fn sealed_exit(
         ));
     }
     let name = OsStr::new(AttemptFile::ProcessExit.name());
-    let mut file = dir.open_read(name)?;
-    let meta = file.metadata()?;
+    let exit_path = dir.current_path()?.join(AttemptFile::ProcessExit.name());
+    let mut file = dir.open_read(name).map_err(|error| {
+        RunError::from(error).with_record_context(exit_path.clone(), "StoredExit")
+    })?;
+    let meta = file.metadata().map_err(|error| {
+        RunError::from(error).with_record_context(exit_path.clone(), "StoredExit")
+    })?;
     if let Some(check) = PathCheck::file(meta) {
         return Err(RunError::unsafe_entry(dir, name, check));
     }
-    let raw = file.read_bounded(RECORD_LIMIT)?;
-    let stored: SealedExit = decode(&raw)?;
+    let raw = file.read_bounded(RECORD_LIMIT).map_err(|error| {
+        RunError::from(error).with_record_context(exit_path.clone(), "StoredExit")
+    })?;
+    let stored: StoredExit =
+        decode_stored_v1(raw.as_slice(), exit_path, "StoredExit", RECORD_LIMIT)?;
     if stored.scope != exit.scope
         || stored.termination != exit.termination
         || stored.never_spawned != exit.never_spawned
@@ -2305,8 +2383,12 @@ fn sealed_exit(
     // Cleanup may later replace process-exit.json. The outcome names its own
     // immutable provider snapshot so crash replay never follows mutable bytes.
     let name = AttemptFile::ProviderExit.name();
-    let saved = if let Some(saved) = read_sealed(dir, name, RECORD_LIMIT)? {
-        let snapshot: SealedExit = decode(&saved)?;
+    let provider_path = dir.current_path()?.join(AttemptFile::ProviderExit.name());
+    let saved = read_sealed(dir, name, RECORD_LIMIT)
+        .map_err(|error| error.with_record_context(provider_path.clone(), "StoredExit"))?;
+    let saved = if let Some(saved) = saved {
+        let snapshot: StoredExit =
+            decode_stored_v1(saved.as_slice(), provider_path, "StoredExit", RECORD_LIMIT)?;
         if snapshot.scope != stored.scope
             || snapshot.termination != stored.termination
             || snapshot.never_spawned != stored.never_spawned

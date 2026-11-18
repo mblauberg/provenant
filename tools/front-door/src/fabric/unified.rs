@@ -3401,7 +3401,12 @@ mod tests {
         mark_unreadable_attempt(
             &mut rows[0],
             "attempt-id",
-            &provenant_records::DecodeError::Typed { line: 2, column: 3 },
+            &provenant_records::DecodeError::Typed {
+                line: 2,
+                column: 3,
+                field: None,
+                schema_version: None,
+            },
         );
         assert_eq!(rows[0]["state"], "unreadable");
         assert!(

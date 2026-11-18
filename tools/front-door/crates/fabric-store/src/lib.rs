@@ -141,7 +141,11 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         },
     );
     match decoded {
-        Err(provenant_records::DecodeError::Typed { line, column }) => {
+        Err(error) => {
+            let (line, column) = match error.root_cause() {
+                provenant_records::DecodeError::Typed { line, column, .. } => (*line, *column),
+                _ => return Err(error.into()),
+            };
             // Store records carry their version in a nested header. Inspect only
             // that header, not version fields in embedded application data.
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
@@ -158,9 +162,9 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
                 }
                 .into());
             }
-            Err(provenant_records::DecodeError::Typed { line, column }.into())
+            Err(error.into())
         }
-        result => Ok(result?),
+        Ok(result) => Ok(result),
     }
 }
 fn text(value: &str, field: &'static str) -> Result<()> {

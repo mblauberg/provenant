@@ -1988,6 +1988,31 @@ fn writer_exclusion_gate_contention_is_busy_independent_of_writer_budget() -> Te
 }
 
 #[test]
+fn zero_budget_writer_recovery_inspects_an_unheld_stale_lock() -> TestResult {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("writer.lock"), b"left by an older process")?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(0)?,
+        provenant_core::MonoTime::from_micros(0),
+    );
+
+    let lease = lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )?;
+    drop(lease);
+    assert!(
+        directory
+            .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
 fn writer_exclusion_distinct_gate_failure_remains_unknown() -> TestResult {
     let root = tempfile::tempdir()?;
     std::fs::create_dir(root.path().join("writer-probe.lock"))?;
@@ -2178,6 +2203,63 @@ fn stored_custody_shapes_round_trip_additive_fields_through_bounded_decode() -> 
             "future_capture": marker,
         }),
         "future_capture"
+    );
+    Ok(())
+}
+
+#[test]
+fn reservation_holder_presence_is_independent_of_settlement_phase() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let lease = crate::fixture::acquire_writer(
+        Directory::open_anchor(root.path())?,
+        scope(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let mut record = lease.reservation.clone();
+    let guardian = ProcessIdentity {
+        boot: record.boot.clone(),
+        pid: 10,
+        native_start: 1,
+        group_id: 10,
+        session_id: 10,
+    };
+    record.launch_state = LaunchState::Settling;
+    record.guardian = Some(guardian.clone());
+    for (observation, expected) in [
+        (
+            ProcessObservation::Present(process_fact(guardian.clone())),
+            Some(true),
+        ),
+        (ProcessObservation::Absent, Some(false)),
+        (
+            ProcessObservation::Unknown(crate::census::ObservationIssue::Io),
+            None,
+        ),
+        (
+            ProcessObservation::Present(process_fact(ProcessIdentity {
+                native_start: 2,
+                ..guardian.clone()
+            })),
+            Some(false),
+        ),
+    ] {
+        let observer = HolderWorld {
+            boot: "fixture-recorded-boot-v1",
+            observations: [(guardian.pid, observation)].into(),
+            census_facts: vec![],
+            census_complete: false,
+        };
+        assert_eq!(reservation_holder_live(&record, &observer), expected);
+    }
+    record.guardian = None;
+    assert_eq!(reservation_holder_live(&record, &EmptyNativeWorld), None);
+    record.boot = "earlier-boot".into();
+    assert_eq!(
+        reservation_holder_live(&record, &EmptyNativeWorld),
+        Some(false)
     );
     Ok(())
 }

@@ -637,6 +637,13 @@ pub enum RunError {
     Sqlite(rusqlite::Error),
     #[error(transparent)]
     Decode(#[from] provenant_records::DecodeError),
+    #[error("stored record {} (record type {record_type}): {source}", path.display())]
+    StoredRecordRead {
+        path: std::path::PathBuf,
+        record_type: String,
+        #[source]
+        source: Box<RunError>,
+    },
     #[error(transparent)]
     Canonical(#[from] provenant_records::CanonicalError),
     #[error("run filesystem I/O failed: {0}")]
@@ -671,6 +678,23 @@ impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {
+    pub(crate) fn with_record_context(
+        self,
+        path: impl Into<std::path::PathBuf>,
+        record_type: impl Into<String>,
+    ) -> Self {
+        let path = path.into();
+        let record_type = record_type.into();
+        match self {
+            Self::Decode(error) => Self::Decode(error.with_context(path, record_type)),
+            source => Self::StoredRecordRead {
+                path,
+                record_type,
+                source: Box::new(source),
+            },
+        }
+    }
+
     /// A refusal whose inputs do not change on retry. Settlement seals it as a
     /// failed, non-retryable import instead of looping on it.
     pub(crate) fn import_refusal_is_final(&self) -> bool {
@@ -702,6 +726,17 @@ impl RunError {
         &self,
         destination: provenant_records::diagnostic::Destination<'_>,
     ) -> provenant_records::diagnostic::Diagnostic {
+        if let Self::StoredRecordRead { source, .. } = self {
+            let diagnostic = source.diagnostic(destination);
+            return if matches!(
+                destination,
+                provenant_records::diagnostic::Destination::Local
+            ) {
+                diagnostic.detail(self.to_string())
+            } else {
+                diagnostic
+            };
+        }
         if let Self::RecordedRefusal(diagnostic) = self {
             return diagnostic.as_ref().clone();
         }
@@ -710,6 +745,20 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::Decode(error)
+                if matches!(
+                    destination,
+                    provenant_records::diagnostic::Destination::Local
+                ) =>
+            {
+                diagnostic = diagnostic.detail(error.to_string()).next(
+                    if kind == ErrorKind::UpgradeRequired {
+                        "upgrade Provenant to read the named stored record"
+                    } else {
+                        "inspect the named stored record before retrying reconciliation"
+                    },
+                );
+            }
             Self::AbandonBlocked(evidence) => {
                 diagnostic = diagnostic.detail(if matches!(destination, provenant_records::diagnostic::Destination::Local) {
                     evidence.to_string()
@@ -848,6 +897,16 @@ impl RunError {
                     diagnostic = diagnostic
                         .detail(format!("branch at {head} does not contain base {base}"))
                         .next("omit --base to reuse the branch");
+                }
+                if let WorktreeError::WriterLeaseHeld { .. } = error
+                    && matches!(
+                        destination,
+                        provenant_records::diagnostic::Destination::Local
+                    )
+                {
+                    diagnostic = diagnostic
+                        .detail(error.to_string())
+                        .next("reconcile the holding attempt before retrying writer binding");
                 }
                 if let WorktreeError::WriterBusy {
                     holder: Some(holder),
@@ -1043,6 +1102,88 @@ mod diagnostic_projection_tests {
     use super::*;
     use provenant_records::diagnostic::{BoundaryClass, Destination};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn stored_read_failure_keeps_context_and_underlying_kind() {
+        let original = RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
+            path: "/fixture/process-exit.json".into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "fixture"),
+        });
+        let kind = ErrorKind::from(&original);
+        let error = original.with_record_context("/fixture/process-exit.json", "StoredExit");
+        assert_eq!(ErrorKind::from(&error), kind);
+        let detail = error.diagnostic(Destination::Local).detail.unwrap();
+        assert!(detail.contains("/fixture/process-exit.json"));
+        assert!(detail.contains("StoredExit"));
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert!(remote.detail.is_none());
+    }
+
+    #[test]
+    fn unreadable_record_diagnostic_names_the_local_file() {
+        #[derive(serde::Deserialize)]
+        struct ExitFixture {
+            #[serde(rename = "required")]
+            _required: bool,
+        }
+        let error = provenant_records::decode::<ExitFixture, _>(
+            br#"{"schema_version":1}"#.as_slice(),
+            Default::default(),
+        )
+        .err()
+        .unwrap()
+        .with_context("/fixture/process-exit.json", "ExitFixture");
+        let error = RunError::Decode(error);
+        let local = error.diagnostic(Destination::Local);
+        let detail = local.detail.unwrap();
+        for fact in [
+            "/fixture/process-exit.json",
+            "ExitFixture",
+            "required",
+            "schema version 1",
+        ] {
+            assert!(detail.contains(fact), "missing {fact}: {detail}");
+        }
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert!(remote.detail.is_none());
+    }
+
+    #[test]
+    fn writer_lease_refusal_keeps_kind_and_local_holder_details() {
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld {
+                holder: provenant_core::AttemptId::from_bytes([53; 16]),
+                branch: "refs/heads/holder-branch".into(),
+                worktree: "/private/holder-worktree".into(),
+                age: "4d 1h".into(),
+                live: Some(false),
+            },
+        );
+        assert_eq!(ErrorKind::from(&error), ErrorKind::WriterLeaseHeld);
+        let local = error.diagnostic(Destination::Local);
+        assert_eq!(local.code, "writer_lease_held");
+        let detail = local.detail.unwrap();
+        for fact in [
+            "35353535353535353535353535353535",
+            "holder-branch",
+            "/private/holder-worktree",
+            "4d 1h",
+            "live: false",
+        ] {
+            assert!(detail.contains(fact), "missing {fact}: {detail}");
+        }
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert!(remote.detail.is_none());
+    }
 
     #[test]
     fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
