@@ -137,7 +137,7 @@ fn parse_diagnosis(output: &str) -> Diagnosis {
 }
 const TIMER: &str = "provenant-tick.timer";
 /// Seconds between ticks on both platforms.
-const INTERVAL: u32 = 60;
+pub(crate) const INTERVAL: u32 = 60;
 
 /// Whether this platform has a tick scheduler: launchd on macOS, systemd on Linux.
 pub fn supported() -> bool {

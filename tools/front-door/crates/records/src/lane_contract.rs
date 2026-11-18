@@ -114,6 +114,7 @@ pub enum Coverage {
 #[serde(rename_all = "snake_case")]
 pub enum ObservationKind {
     LaneLifecycle,
+    GraphCheckpoint,
     Note,
     CheckRun,
     CheckSuite,
@@ -327,6 +328,7 @@ mod tests {
     fn contract_observation_roundtrip_and_unknown_fields() {
         for kind in [
             ObservationKind::LaneLifecycle,
+            ObservationKind::GraphCheckpoint,
             ObservationKind::Note,
             ObservationKind::CheckRun,
             ObservationKind::CheckSuite,

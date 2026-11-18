@@ -198,6 +198,15 @@ impl RunStore {
         Ok(())
     }
 
+    /// Restore the observation reaction for retained settlements predating the
+    /// journal index, including rows whose other reactions already completed.
+    pub fn requeue_unindexed_observations(&self, call: &Request<'_>) -> Result<usize> {
+        self.write(call, |tx| Ok(tx.execute(
+            "UPDATE reactions SET pending=1 WHERE project=?1 AND pending=0 AND coalesce(json_extract(CAST(payload AS TEXT),'$.observation_done'),0)=0",
+            params![self.context.project_id.to_string()],
+        )?))
+    }
+
     /// Whether the attempt still owes reactions.
     pub fn reaction_pending(&self, attempt: AttemptId, call: &Request<'_>) -> Result<bool> {
         call.check()?;

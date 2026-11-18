@@ -346,6 +346,34 @@ impl Store {
                     );
                     events::append(tx, &record, Some(&dedup))?;
                 }
+                // Source cursor, ordinary run history and shared observations
+                // commit together. Replay can backfill a pre-index cursor.
+                use provenant_records::lane_contract::{
+                    Coverage, ObservationCursor, ObservationEvent, ObservationKind,
+                    ObservationLineage,
+                };
+                let state = serde_json::to_value(&event.change).map_err(|_| Error::Invalid("run observation encoding"))?;
+                let observation = ObservationEvent {
+                    header: provenant_records::RecordHeader::V1,
+                    id: format!("run:{host}:{sequence}"),
+                    cursor: ObservationCursor { project, seq: 0 },
+                    lineage: ObservationLineage {
+                        attempt: Some(event.attempt_id),
+                        parent_attempt: None,
+                        work: None,
+                        extra: Default::default(),
+                    },
+                    kind: ObservationKind::LaneLifecycle,
+                    coverage: Coverage::Partial,
+                    // Observation edges carry state and identity, not provider
+                    // prose, local diagnostics or unknown extension fields.
+                    detail: serde_json::json!({"host":host,"source_project":event.project_id,
+                        "sequence":event.sequence,"revision":event.revision,"state":state["state"],
+                        "outcome":state["outcome"],"exit_code":state["exit_code"],
+                        "finished_at":state["finished_at"],"terminal_cause":state["terminal_cause"]}),
+                    extra: Default::default(),
+                };
+                events::append_observation(tx, &observation, WallTime::from_micros(0)?)?;
                 latest = latest.max(sequence);
             }
             if latest > current {
@@ -496,7 +524,13 @@ mod tests {
         let request = fixture.request();
         let project = local_project();
         let host = HostId::from_bytes([5; 16]);
-        let event = run_event(1, 1);
+        let mut event = run_event(1, 1);
+        if let AttemptState::Running { extra, .. } = &mut event.change {
+            extra.insert(
+                "source_prose".into(),
+                serde_json::json!("private provider detail"),
+            );
+        }
         store
             .db
             .execute_batch(
@@ -540,8 +574,21 @@ mod tests {
             1
         );
         let page = store.events(project, 0, 100, &request).expect("events");
-        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].record.kind, EventKind::RunChanged);
+        assert_eq!(page.items[1].record.kind, EventKind::Observation);
+        let observations = store
+            .observations(project, 0, 100, &request)
+            .expect("observations");
+        assert_eq!(observations.items.len(), 1);
+        assert_eq!(
+            observations.items[0].lineage.attempt,
+            Some(event.attempt_id)
+        );
+        assert_eq!(
+            observations.items[0].detail["state"],
+            serde_json::to_value(&event.change).unwrap()["state"]
+        );
         assert!(page.items[0].record.detail.contains(&host.to_string()));
         assert!(
             page.items[0]
@@ -550,6 +597,12 @@ mod tests {
                 .contains(&event.project_id.to_string())
         );
 
+        assert!(
+            !observations.items[0]
+                .detail
+                .to_string()
+                .contains("private provider detail")
+        );
         let changed = run_event(1, 2);
         assert!(matches!(
             store.ingest_run_events(project, host, &[changed], &request),
@@ -567,7 +620,7 @@ mod tests {
                 .expect("events")
                 .items
                 .len(),
-            1
+            2
         );
     }
 }

@@ -1147,6 +1147,14 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
             };
             if let Some(store) = provenant_run::RunStore::open_disk_read_only(&execution, &call)? {
                 let store = store.with_writer_registry(resolved.roots.state.as_path());
+                provenant_run::RunStore::open(&execution, &call)?
+                    .requeue_unindexed_observations(&call)?;
+                crate::event_delivery::ingest_lifecycle(
+                    &resolved.roots,
+                    binding.project_id(),
+                    context.identity.host,
+                    &store,
+                )?;
                 match &census {
                     Some(census) => {
                         store.reap_with_census(&call, census)?;
@@ -1260,6 +1268,11 @@ fn tick(
         target_seed,
         steward::run(&config.domains.steward, &resolved, workers),
         settlement,
+        Task::run("forge_events", || {
+            crate::event_delivery::tick(&resolved)
+                .map(|()| "observed")
+                .map_err(|error| error.to_string())
+        }),
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
     ];

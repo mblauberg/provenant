@@ -3212,6 +3212,47 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
     Ok(())
 }
 
+// Spec: docs/specs/lane-contracts.md#observation-events
+#[test]
+fn completed_legacy_reactions_are_requeued_for_journal_indexing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let mut reaction = store.reaction(input.attempt_id, &call)?.ok_or("row")?;
+    reaction.graph_done = true;
+    reaction.notice_done = true;
+    reaction.log_done = true;
+    reaction.ledger_done = true;
+    let mut legacy = serde_json::to_value(&reaction)?;
+    legacy
+        .as_object_mut()
+        .ok_or("object")?
+        .remove("observation_done");
+    store.db.execute(
+        "UPDATE reactions SET payload=?1,pending=0 WHERE attempt=?2",
+        rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
+    )?;
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
+    assert_eq!(store.requeue_unindexed_observations(&call)?, 1);
+    assert!(store.reaction_pending(input.attempt_id, &call)?);
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
+        assert!(
+            reaction.graph_done
+                && reaction.notice_done
+                && reaction.log_done
+                && reaction.ledger_done
+        );
+        reaction.observation_done = true;
+        Ok(())
+    })?;
+    assert_eq!(store.requeue_unindexed_observations(&call)?, 0);
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
+    Ok(())
+}
+
 #[test]
 fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
     let temp = tempfile::tempdir()?;

@@ -1107,6 +1107,10 @@ pub enum Internal {
     },
     /// Detached cargo-seed refresh queued by the daily collector.
     TickSeed,
+    /// Host-owned forge forwarder; one instance per repository.
+    EventListen {
+        repository: String,
+    },
     /// Run Cargo through the selected build admission backend (the lane's cargo shim). Backend and source come from `PROVENANT_BUILD_ADMISSION_BACKEND` and `PROVENANT_BUILD_ADMISSION_SOURCE`; builtin slot directory/count use `PROVENANT_BUILD_SLOT_STATE` and `PROVENANT_BUILD_SLOTS`, never lane arguments.
     BuildSlot {
         /// The real cargo, then its arguments.

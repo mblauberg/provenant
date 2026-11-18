@@ -1,4 +1,4 @@
-//! Read-only JSON-lines edge for project observations.
+//! JSON-lines edge for project observations and durable consumer cursors.
 use provenant_cli::Globals;
 use provenant_core::{ActorId, CancelToken};
 use provenant_fabric_store::{Request, Store};
@@ -31,11 +31,21 @@ fn stream(
         crate::roots::Workspace::Project,
         crate::roots::Product::Required,
     )?;
-    let context = provenant_cli::fabric::Context::open_inspection(
-        resolved.roots.clone(),
-        &resolved.home,
-        &resolved.project,
-    )?;
+    // Following registers the project so the existing host tick can discover
+    // its source. Snapshot reads need no registration.
+    let context = if follow {
+        provenant_cli::fabric::Context::open(
+            resolved.roots.clone(),
+            &resolved.home,
+            &resolved.project,
+        )?
+    } else {
+        provenant_cli::fabric::Context::open_inspection(
+            resolved.roots.clone(),
+            &resolved.home,
+            &resolved.project,
+        )?
+    };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let request = Request {

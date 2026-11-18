@@ -80,6 +80,28 @@ pub(crate) fn event(
         at,
     }
 }
+pub(crate) fn append_observation(
+    tx: &rusqlite::Connection,
+    observation: &ObservationEvent,
+    at: WallTime,
+) -> Result<i64> {
+    if observation.cursor.seq != 0 {
+        return Err(Error::Invalid("unassigned observation cursor"));
+    }
+    text(&observation.id, "observation identity")?;
+    let detail = String::from_utf8(encode(observation)?)
+        .map_err(|_| Error::Invalid("observation encoding"))?;
+    let record = event(
+        observation.cursor.project,
+        None,
+        EventKind::Observation,
+        None,
+        detail,
+        at,
+    );
+    let dedup = format!("observation:{}", observation.id);
+    append(tx, &record, Some(&dedup))
+}
 impl Store {
     /// Index a source observation. The source supplies a stable identity and
     /// timestamp; the store assigns the project cursor on replay.
@@ -89,22 +111,16 @@ impl Store {
         at: WallTime,
         request: &Request<'_>,
     ) -> Result<i64> {
-        if observation.cursor.seq != 0 {
-            return Err(Error::Invalid("unassigned observation cursor"));
-        }
-        text(&observation.id, "observation identity")?;
-        let detail = String::from_utf8(encode(observation)?)
-            .map_err(|_| Error::Invalid("observation encoding"))?;
-        let record = event(
-            observation.cursor.project,
-            None,
-            EventKind::Observation,
-            None,
-            detail,
-            at,
-        );
-        let dedup = format!("observation:{}", observation.id);
-        self.write(request, |tx| append(tx, &record, Some(&dedup)))
+        self.write(request, |tx| append_observation(tx, observation, at))
+    }
+
+    /// Latest project observation cursor, captured before a subscriber reconciles.
+    pub fn observation_tip(&self, project: ProjectId, request: &Request<'_>) -> Result<i64> {
+        request.check()?;
+        Ok(self.db.query_row(
+            "SELECT coalesce(max(seq),0) FROM events WHERE project=?1 AND json_extract(CAST(record AS TEXT),'$.kind')='observation'",
+            params![project.to_string()], |row| row.get(0),
+        )?)
     }
 
     /// Replay only observation records, in store sequence order. Repeating a

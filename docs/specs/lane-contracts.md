@@ -28,7 +28,7 @@ normalised detail identifies repository, PR, head and check where available.
 Unknown and partial coverage remain explicit.
 
 The delivery slice appends the shared stream to the existing project event store
-(`fabric-store/src/events.rs`) and uses its replay and per-consumer cursor
+(`tools/front-door/crates/fabric-store/src/events.rs`) and uses its replay and per-consumer cursor
 pattern. Lane lifecycle comes from attempt settlement and the existing graph
 `*.events.jsonl` journal; notes retain their append-only state files; forge
 check_run, check_suite, workflow_run, pull_request and issue_comment originate
@@ -39,7 +39,45 @@ assigns the project cursor on replay. `provenant events --from SEQ [--follow]`
 emits those observations as JSON lines. `--consumer NAME` resumes the stored
 cursor and advances it after each line is flushed; a crash before the cursor
 write can redeliver that line. The cursor records delivery to stdout, not the
-consumer’s processing. Source ingestion and the listener remain separate work.
+consumer’s processing.
+
+The existing host tick owns ingestion. `domains.wait.forge_source` selects
+`auto`, `webhook` or `poll`; source diagnostics and the cached selection retain
+its configuration origin. `auto` and `webhook` try the official `gh-webhook`
+extension with repository admin permission, warning and falling back to one
+shared conditional poller when either is unavailable. The tick starts one
+locked host forwarder per project/repository; chairs never own a listener.
+Conditional ETag responses preserve the cached resource on HTTP 304. Failed
+passes retain progress and back off; a successful pass restores cadence.
+
+`event_delivery::Journal` captures a cursor before reconciliation, then wakes
+waiters from replayed records. Named PR interests survive waiter expiry; the
+host continues indexing their outcomes. `pr watch` pins its head, reconciles
+checks initially and after a quiet-period gap, and revalidates the PR head at
+the end. A watch timeout reports its last check buckets as a timeout, not a CI
+failure. `status_wait`, provider lens waits and owner-side lane waits subscribe
+before their initial read. Graph markers index committed checkpoint digests
+(`GraphCheckpoint`), and retained run-event ingestion indexes queued, running and terminal
+`LaneLifecycle` transitions. Its source cursor and observations commit together;
+terminal reactions also retain their independently retryable settlement notice.
+Identifier-only local markers trigger a targeted authoritative read; unrelated
+events do not trigger one. A gap triggers reconciliation at least every minute,
+and timeout retains the last known state. Successful host reads refresh a local
+receipt even when HTTP 304 produces no new observation, so quiet, healthy
+sources do not cause each waiter to poll GitHub. Peer-owned state still uses its
+owner transport, with its declared paced fallback when local events are not
+available; a shared journal never widens access to another host.
+
+Forge repository feeds and snapshots are bounded, partial observations, not a
+claim of complete GitHub history. The fallback discovers the first page of
+open PRs, recent repository events and workflow runs, then retains named PR
+subscriptions to track their CI and closure. Settled closed PRs stop active
+polling without deleting the subscription or outcome; discovery re-arms a
+reopened PR. Comments retain identifiers and
+state only, never their text. A consumer reconciles source state after a gap;
+it cannot reconstruct comments that fell outside GitHub's retained feed.
+The notes event kind is defined here; its source indexing is owned by the notes
+slice.
 
 ## Result projection
 
