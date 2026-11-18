@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Test diagnostic aggregation at the cargo JSON boundary."""
+import json
+from pathlib import Path
+import subprocess
+
+script = Path(__file__).with_name('summarise-clippy')
+# Spec: docs/specs/ci.md#one-required-check
+lint = {'reason': 'compiler-message', 'message': {'code': {'code': 'clippy::example'}, 'level': 'error', 'spans': [{'is_primary': True, 'file_name': 'src/a.rs', 'line_start': 7}]}}
+other = {'reason': 'compiler-message', 'message': {'code': None, 'level': 'warning', 'spans': []}}
+
+def run(messages):
+    return subprocess.run([script], input='\n'.join(json.dumps(x) for x in messages), text=True, capture_output=True, check=True).stdout
+
+output = run([lint, lint, other])
+assert '`clippy::example` | 2 | `src/a.rs:7`' in output
+assert 'Other warnings/errors: 1' in output
+assert 'No Clippy lints fired.' in run([])
+print('Clippy summary fixtures passed.')

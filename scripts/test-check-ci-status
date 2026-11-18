@@ -1,36 +1,54 @@
 #!/usr/bin/env python3
-"""Exercise the CI aggregation gate using job results, not workflow text."""
-import importlib.machinery
-import importlib.util
+"""Exercise gate results and evidence at the process boundary."""
+import json
+import os
+import subprocess
+import tempfile
+import tomllib
 from pathlib import Path
 
-path = Path(__file__).with_name("check-ci-status")
-loader = importlib.machinery.SourceFileLoader("check_ci_status", str(path))
-spec = importlib.util.spec_from_loader(loader.name, loader)
-module = importlib.util.module_from_spec(spec)
-loader.exec_module(module)
-
-needs = {name: {"result": "success"} for name in module.REQUIRED}
-assert not module.failures(needs, "true")
-# Every required producer, consumer and evidence gate fails closed, even when
-# the filter permits a skip; a missing job is never an intentional skip.
-for name in module.REQUIRED:
-    for result in ("failure", "cancelled", "skipped"):
-        changed = {**needs, name: {"result": result}}
-        assert module.failures(changed, "true")
-        if result != "skipped":
-            assert module.failures(changed, "false", "false")
-    missing = dict(needs)
-    del missing[name]
-    assert module.failures(missing, "false", "false")
-for name in module.MACOS:
-    needs[name] = {"result": "skipped"}
-assert not module.failures(needs, "false")
-assert module.failures(needs, "true")
-for name in module.RUST:
-    needs[name] = {"result": "skipped"}
-assert not module.failures(needs, "false", "false")
-assert module.failures(needs, "false", "true")
-needs["rust"] = {"result": "failure"}
-assert module.failures(needs, "false", "false")
-print("CI aggregation fixtures passed.")
+root = Path(__file__).resolve().parent.parent
+config = tomllib.loads((root / 'config/ci-suites.toml').read_text())
+names = [s['name'] for s in config['suite']]
+jobs = config['jobs']['always'] + [j for s in config['suite'] for j in s['jobs']]
+sha = 'a' * 40
+selection = {'schema_version': 1, 'tested': sha, 'head': sha, 'pr_number': 1, 'event': 'pull_request', 'full': False, 'full_reason': None,
+             'evidence': {'main': sha, 'pr': None}, 'rust_base': sha, 'base': 'b' * 40, 'tree': 'c' * 40,
+             'suites': {n: {'state': 'run', 'reason': 'changed', 'evidence': None} for n in names}}
+needs = {j: {'result': 'success'} for j in jobs}
+with tempfile.TemporaryDirectory() as tmp:
+    evidence = Path(tmp) / 'evidence.json'
+    def run(n, s, ok):
+        evidence.unlink(missing_ok=True)
+        env = {**os.environ, 'NEEDS_JSON': json.dumps(n), 'SELECTION_JSON': json.dumps(s), 'CI_EVIDENCE_FILE': str(evidence)}
+        result = subprocess.run([root / 'scripts/check-ci-status'], env=env, capture_output=True, text=True)
+        assert (result.returncode == 0) == ok, result.stderr
+        assert evidence.exists() == ok
+        if ok:
+            written = json.loads(evidence.read_text())
+            assert written['suites'] == {k: v['state'] for k, v in s['suites'].items()}
+            assert (written['base'], written['tree']) == (s['base'], s['tree'])
+        else:
+            assert 'Blocking job results:' in result.stderr
+    # Spec: docs/specs/ci.md#one-required-check
+    run(needs, selection, True)
+    for job in jobs:
+        for result in ('failure', 'cancelled', 'skipped'):
+            run({**needs, job: {'result': result}}, selection, False)
+        run({k: v for k, v in needs.items() if k != job}, selection, False)
+    run({**needs, 'unknown': {'result': 'success'}}, selection, False)
+    run(needs, {}, False)
+    malformed = json.loads(json.dumps(selection))
+    del malformed['event']
+    run(needs, malformed, False)
+    malformed = json.loads(json.dumps(selection))
+    malformed['suites'][names[0]] = {'state': 'covered', 'reason': 'claimed', 'evidence': 'b' * 40}
+    run(needs, malformed, False)
+    for state in ('covered', 'deferred'):
+        for suite in config['suite']:
+            changed = json.loads(json.dumps(selection))
+            changed['suites'][suite['name']] = {'state': state, 'reason': 'unchanged', 'evidence': sha if state == 'covered' else None}
+            skipped = {**needs, **{j: {'result': 'skipped'} for j in suite['jobs']}}
+            run(skipped, changed, True)
+            run({**skipped, suite['jobs'][0]: {'result': 'failure'}}, changed, False)
+print('CI gate fixtures passed.')

@@ -1,0 +1,29 @@
+name: Install pinned Rust toolchain
+description: Install the repository toolchain and requested components
+inputs:
+  components:
+    description: Space-separated Rust components
+    required: false
+    default: ''
+outputs:
+  channel:
+    description: Installed toolchain channel
+    value: ${{ steps.install.outputs.channel }}
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      id: install
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        channel=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$GITHUB_WORKSPACE/tools/front-door/rust-toolchain.toml")
+        test -n "$channel"
+        args=()
+        read -r -a requested <<< "$COMPONENTS"
+        for component in "${requested[@]}"; do
+          args+=(--component "$component")
+        done
+        rustup toolchain install "$channel" --profile minimal "${args[@]}"
+        printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
