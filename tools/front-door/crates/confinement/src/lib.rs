@@ -30,7 +30,7 @@ pub use plan::{
     CodexPolicy, ConfinedPlan, ExtensionPolicy, MAX_READ_ONLY_WRITABLE, PlanError, PlanRequest,
     valid_read_only_writable,
 };
-pub use redact::{JsonlRedactor, Redactor};
+pub use redact::Redactor;
 pub use repo::{ReadOnlyRepo, VerifiedRepo, VerifiedWorktree, verify_worktree};
 pub use utility::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility, run_utility};
 pub mod push;

@@ -225,7 +225,8 @@ fn walk_handoff_value(
 }
 
 fn validate_handoff(handoff: &Handoff) -> Result<Handoff> {
-    let bytes = serde_json::to_vec(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
+    let bytes =
+        serde_json::to_vec(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
     Handoff::from_json(&bytes).map_err(RunError::Handoff)
 }
 
@@ -659,8 +660,9 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     #[test]
-    fn provider_death_retains_sanitised_progress() -> TestResult {
+    fn provider_death_retains_raw_progress() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
         let cancel = provenant_core::CancelToken::new();
@@ -735,7 +737,11 @@ mod tests {
         let handoff = store.handoff(&terminal)??.ok_or("missing snapshot")?;
         assert_eq!(
             handoff.remaining,
-            ["Finish renderer", &format!("\n{secret_shape}"), &format!("\t{secret_shape}")]
+            [
+                "Finish renderer",
+                &format!("\n{secret_shape}"),
+                &format!("\t{secret_shape}")
+            ]
         );
         assert_eq!(
             handoff.extra["future"]["nested"][1]["token"],
@@ -751,6 +757,7 @@ mod tests {
         );
         Ok(())
     }
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     #[test]
     fn final_handoff_preserves_decoded_strings_and_validates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {
@@ -787,7 +794,10 @@ mod tests {
         }
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
         handoff.note = "x".repeat(provenant_records::handoff::NOTE_BYTES + 1);
-        assert!(matches!(validate_handoff(&handoff), Err(RunError::Handoff(_))));
+        assert!(matches!(
+            validate_handoff(&handoff),
+            Err(RunError::Handoff(_))
+        ));
         Ok(())
     }
 
@@ -971,6 +981,7 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     #[test]
     fn malformed_final_retains_fields_and_never_uses_stale_progress() -> TestResult {
         for complete in [true, false] {
@@ -1010,7 +1021,7 @@ mod tests {
                 error.retained["remaining"],
                 serde_json::json!(["Unfinished work"])
             );
-            assert!(!serde_json::to_string(error)?.contains(secret));
+            assert!(serde_json::to_string(error)?.contains(secret));
             assert_eq!(store.handoff(&record)?, captured.handoff);
             result.result = Handoff::from_json(&snapshot("done"))?.fenced();
             assert_eq!(store.capture_handoff(&attempt, &record, &result)?, captured);

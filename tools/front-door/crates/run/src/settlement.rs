@@ -611,8 +611,7 @@ impl Driver<'_> {
     }
     pub(crate) fn record_failure(&mut self, reason: &str) -> Result<()> {
         self.update(|journal| {
-            journal.blocking_reason =
-                Some(provenant_core::bounded_line(reason, 4096));
+            journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
             Ok(())
         })
     }

@@ -2161,11 +2161,8 @@ impl RunStore {
                                     diagnostic.next.unwrap_or_default()
                                 ))
                             }
-                            // The refusal's own message, redacted and bounded.
-                            None => Some(provenant_core::bounded_line(
-                                &refusal.message,
-                                240,
-                            )),
+                            // The refusal's own message, bounded for local diagnostics.
+                            None => Some(provenant_core::bounded_line(&refusal.message, 240)),
                         },
                     };
                     let terminal_note = if continuation_reason.is_some() {

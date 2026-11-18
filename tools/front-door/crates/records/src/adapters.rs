@@ -518,7 +518,7 @@ const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 
-/// Framing declared by the adapter, shared by capture redaction and replay.
+/// Framing declared by the adapter for provider stream decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamContract {
     ProviderJsonl,

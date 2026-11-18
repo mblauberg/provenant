@@ -1,5 +1,5 @@
 //! Launch refusals survive settlement with a specific cause; a refusal's own
-//! message reaches the reason only redacted and bounded.
+//! message reaches local reasons bounded and unchanged.
 use super::tests::{call, clock, context, input};
 use super::*;
 use provenant_core::CancelToken;
@@ -149,8 +149,11 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             // With no fixed note, the refusal's own message is sealed.
             assert!(reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         }
-        // Whatever the reason carries, a secret-shaped value never reaches it.
-        assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
+        // Only the untyped refusal uses the original provider message.
+        assert_eq!(
+            reason.contains(PROVIDER_TOKEN),
+            !disk && !source_overlap && !typed
+        );
         assert!(!label.contains(PROVIDER_TOKEN), "{label}");
     }
     Ok(())

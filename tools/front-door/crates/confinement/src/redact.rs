@@ -1,12 +1,11 @@
-//! Streaming redaction for bytes retained by supervisor capture.
+//! Streaming redaction for disclosure projections.
 //!
 //! Exact literal prefixes and incomplete token markers stay buffered across
 //! chunks. The capture filter's EOF hook releases any unmatched tail.
 //! `key=value` credential assignments are scanned byte by byte: keys stream
 //! through unchanged and only the value is withheld, so no replay is needed.
-use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError, PROVIDER_LINE_LIMIT};
+use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 use std::collections::{BTreeMap, VecDeque};
-use std::ops::Range;
 use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";
@@ -593,32 +592,6 @@ impl AssignmentScanner {
         }
         self.run.clear();
         self.after_backslash = false;
-    }
-
-    fn finish_value(&mut self, output: &mut DecisionQueue) {
-        match std::mem::take(&mut self.state) {
-            Assignment::Scheme { word } => {
-                self.mask_bytes(&word, output);
-                self.run.clear();
-                self.after_backslash = false;
-            }
-            Assignment::Value {
-                quote: Some(_),
-                pending_slashes,
-                ..
-            } => {
-                self.mask_slashes(pending_slashes, output);
-                self.run.clear();
-                self.after_backslash = false;
-            }
-            Assignment::Value { quote: None, .. } => {
-                self.run.clear();
-                self.after_backslash = false;
-            }
-            other => {
-                self.state = other;
-            }
-        }
     }
 
     fn keep(&mut self, byte: u8, masked: bool, output: &mut DecisionQueue) {
@@ -1272,128 +1245,10 @@ impl Redactor {
         }
         Ok(())
     }
-
-    pub(crate) fn filter_json_frame_constrained(
-        &mut self,
-        line: &[u8],
-        ranges: &[Range<usize>],
-        sink: &mut dyn FnMut(&[u8]),
-    ) -> Result<(), FilterError> {
-        if self.failed {
-            return Err(FilterError);
-        }
-        let mut literals = Vec::with_capacity(line.len());
-        self.literals.filter(line, &mut literals);
-        self.literals.finish(&mut literals);
-        let mut tokens = Vec::with_capacity(line.len());
-        self.tokens.filter(line, &mut tokens)?;
-        self.tokens.finish(&mut tokens)?;
-
-        let mut range_idx = 0;
-        for (i, byte) in line.iter().enumerate() {
-            while range_idx < ranges.len() && ranges[range_idx].end < i {
-                range_idx += 1;
-            }
-            if range_idx < ranges.len() && ranges[range_idx].end == i {
-                self.assignments.finish_value(&mut self.decisions[2]);
-            }
-            self.assignments.step(*byte, &mut self.decisions[2]);
-        }
-        self.assignments.finish(&mut self.decisions[2]);
-        let assignments: Vec<bool> = self.decisions[2]
-            .runs
-            .iter()
-            .flat_map(|run| std::iter::repeat_n(run.masked, run.count))
-            .collect();
-        if literals.len() != line.len()
-            || tokens.len() != line.len()
-            || assignments.len() != line.len()
-        {
-            return Err(FilterError);
-        }
-        let mut masked: Vec<bool> = literals
-            .iter()
-            .zip(&tokens)
-            .zip(assignments)
-            .map(|((literal, token), assignment)| literal.1 || token.1 || assignment)
-            .collect();
-        // Align masks to source characters and escapes, without decoding them
-        // for detection. Removing part of an escape would corrupt the frame.
-        for range in ranges {
-            let mut i = range.start;
-            while i < range.end {
-                let width = match line[i] {
-                    b'\\' if line.get(i + 1) == Some(&b'u') => {
-                        let high_surrogate =
-                            line.get(i + 2) == Some(&b'D') || line.get(i + 2) == Some(&b'd');
-                        let high_surrogate = high_surrogate
-                            && matches!(
-                                line.get(i + 3),
-                                Some(b'8'..=b'9' | b'A'..=b'B' | b'a'..=b'b')
-                            );
-                        if high_surrogate { 12 } else { 6 }
-                    }
-                    b'\\' => 2,
-                    0xc0..=0xdf => 2,
-                    0xe0..=0xef => 3,
-                    0xf0..=0xf4 => 4,
-                    _ => 1,
-                };
-                let end = (i + width).min(range.end);
-                let mask = masked[i..end].iter().any(|mask| *mask);
-                masked[i..end].fill(mask);
-                i = end;
-            }
-        }
-        let mut emitter = FrameEmitter::new(sink);
-        let mut range_index = 0;
-        let mut i = 0;
-        let mut redaction_run = false;
-        while i < line.len() {
-            while range_index < ranges.len() && i >= ranges[range_index].end {
-                range_index += 1;
-            }
-            if ranges
-                .get(range_index)
-                .is_some_and(|range| range.contains(&i))
-            {
-                if masked[i] {
-                    if !redaction_run {
-                        emitter.push_bytes(REDACTED);
-                    }
-                    self.has_redacted = true;
-                } else {
-                    emitter.push_bytes(&line[i..i + 1]);
-                }
-                redaction_run = masked[i];
-                i += 1;
-            } else if line[i].is_ascii_alphanumeric() || line[i] == b'-' {
-                // A masked scalar must remain a JSON value, rather than
-                // leaking it or emitting an unquoted redaction marker.
-                let start = i;
-                while i < line.len() && !b",]} \t\r\n".contains(&line[i]) {
-                    i += 1;
-                }
-                if masked[start..i].iter().any(|mask| *mask) {
-                    emitter.push_bytes(b"\"[REDACTED]\"");
-                    self.has_redacted = true;
-                } else {
-                    emitter.push_bytes(&line[start..i]);
-                }
-                redaction_run = false;
-            } else {
-                emitter.push_bytes(&line[i..i + 1]);
-                redaction_run = false;
-                i += 1;
-            }
-        }
-        emitter.flush();
-        Ok(())
-    }
 }
 
 /// Filter one bounded in-memory message or artifact using the same known
-/// credential shapes as capture. Filter before paging to preserve token context.
+/// credential shapes. Filter before paging to preserve token context.
 pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
     let mut safe = Vec::new();
@@ -1477,151 +1332,9 @@ impl CaptureFilter for Redactor {
     }
 }
 
-fn json_string_ranges(line: &[u8]) -> Option<Vec<Range<usize>>> {
-    if serde_json::from_slice::<serde::de::IgnoredAny>(line).is_err() {
-        return None;
-    }
-    let mut ranges = Vec::new();
-    let mut in_string = false;
-    let mut start = 0;
-    let mut slashes = 0;
-    for (i, &byte) in line.iter().enumerate() {
-        if !in_string {
-            if byte == b'"' {
-                in_string = true;
-                start = i + 1;
-                slashes = 0;
-            }
-        } else if byte == b'\\' {
-            slashes += 1;
-        } else if byte == b'"' {
-            if slashes % 2 == 0 {
-                ranges.push(start..i);
-                in_string = false;
-            }
-            slashes = 0;
-        } else {
-            slashes = 0;
-        }
-    }
-    Some(ranges)
-}
-
-/// Stateful filter for JSONL provider streams.
-///
-/// Preserves JSON frame structure by constraining credential redactions to
-/// string value contents, preventing masking runs from destroying delimiters
-/// or trailing structural frames. Non-JSON lines and lines exceeding
-/// `PROVIDER_LINE_LIMIT` fall back to the standard redactor.
-pub struct JsonlRedactor {
-    secrets: Vec<Vec<u8>>,
-    buffer: Vec<u8>,
-    oversized: bool,
-    inner: Redactor,
-    has_redaction: bool,
-}
-
-impl JsonlRedactor {
-    pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
-        let secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
-        let inner = Redactor::new(secrets.clone())?;
-        Ok(Self {
-            secrets,
-            buffer: Vec::new(),
-            oversized: false,
-            inner,
-            has_redaction: false,
-        })
-    }
-
-    pub fn has_redaction(&self) -> bool {
-        self.has_redaction || self.inner.has_redaction()
-    }
-
-    fn finish_inner(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        self.inner.finish(sink)?;
-        self.has_redaction |= self.inner.has_redaction();
-        self.inner = Redactor::new(self.secrets.clone()).map_err(|_| FilterError)?;
-        Ok(())
-    }
-
-    fn filter_single_line(
-        &mut self,
-        line: &[u8],
-        sink: &mut dyn FnMut(&[u8]),
-    ) -> Result<(), FilterError> {
-        if let Some(ranges) = json_string_ranges(line) {
-            let mut redactor = Redactor::new(self.secrets.clone()).map_err(|_| FilterError)?;
-            redactor.filter_json_frame_constrained(line, &ranges, sink)?;
-            self.has_redaction |= redactor.has_redaction();
-        } else {
-            for chunk in line.chunks(FRAME_LIMIT) {
-                self.inner.filter(chunk, sink)?;
-            }
-            self.finish_inner(sink)?;
-        }
-        Ok(())
-    }
-}
-
-impl CaptureFilter for JsonlRedactor {
-    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        if bytes.len() > FRAME_LIMIT {
-            return Err(FilterError);
-        }
-        let mut remaining = bytes;
-        while !remaining.is_empty() {
-            if self.oversized {
-                let count = remaining
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(remaining.len(), |i| i + 1);
-                self.inner.filter(&remaining[..count], sink)?;
-                if remaining[count - 1] == b'\n' {
-                    self.finish_inner(sink)?;
-                    self.oversized = false;
-                }
-                remaining = &remaining[count..];
-                continue;
-            }
-            let count = remaining
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(remaining.len(), |i| i + 1);
-            let room = (PROVIDER_LINE_LIMIT + 1) - self.buffer.len();
-            if count > room {
-                self.buffer.extend_from_slice(&remaining[..room]);
-                let buffered = std::mem::take(&mut self.buffer);
-                for chunk in buffered.chunks(FRAME_LIMIT) {
-                    self.inner.filter(chunk, sink)?;
-                }
-                self.oversized = true;
-                remaining = &remaining[room..];
-            } else {
-                self.buffer.extend_from_slice(&remaining[..count]);
-                remaining = &remaining[count..];
-                if self.buffer.last() == Some(&b'\n') {
-                    let line = std::mem::take(&mut self.buffer);
-                    self.filter_single_line(&line, sink)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            self.filter_single_line(&line, sink)?;
-        }
-        self.finish_inner(sink)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
 
     fn joined(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {
         let mut output = Vec::new();
@@ -2394,116 +2107,5 @@ mod tests {
             Redactor::new([vec![b'x'; MAX_SECRET_LENGTH + 1]]).err(),
             Some(RedactorError::SecretTooLong)
         );
-    }
-
-    fn joined_jsonl(redactor: &mut JsonlRedactor, chunks: &[&[u8]]) -> Vec<u8> {
-        let mut output = Vec::new();
-        let mut sink = |frame: &[u8]| {
-            assert!(frame.len() <= FRAME_LIMIT);
-            output.extend_from_slice(frame);
-        };
-        for chunk in chunks {
-            redactor.filter(chunk, &mut sink).expect("bounded input");
-        }
-        redactor.finish(&mut sink).expect("bounded finish");
-        output
-    }
-
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    #[test]
-    fn jsonl_redaction_preserves_frame_structure_on_unclosed_inner_quote() {
-        let mut redactor = JsonlRedactor::new([]).expect("valid secrets");
-        let input = b"{\"type\":\"item.started\",\"item\":{\"id\":\"item_30\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc \\\"rg -n 'fn scan|credential-shaped|password='\\\"\",\"aggregated_output\":\"\"}}\n";
-        let filtered = joined_jsonl(&mut redactor, &[input]);
-        assert!(redactor.has_redaction());
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&filtered).expect("valid json after redaction");
-        assert_eq!(parsed["type"], "item.started");
-        assert_eq!(parsed["item"]["id"], "item_30");
-        assert_eq!(parsed["item"]["type"], "command_execution");
-        assert_eq!(parsed["item"]["aggregated_output"], "");
-        let cmd = parsed["item"]["command"].as_str().unwrap();
-        assert!(cmd.contains("password="));
-        assert!(cmd.contains("[REDACTED]"));
-    }
-
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    #[test]
-    fn jsonl_redaction_masks_inside_field_values_and_preserves_json_keys() {
-        for value in ["\"super_secret_123\"", "123456789"] {
-            let mut redactor = JsonlRedactor::new([]).expect("valid secrets");
-            let input = format!("{{\"password\":{value},\"keep\":\"value\"}}\n");
-            let filtered = joined_jsonl(&mut redactor, &[input.as_bytes()]);
-            assert!(redactor.has_redaction());
-            let parsed: serde_json::Value = serde_json::from_slice(&filtered).expect("valid json");
-            assert_eq!(parsed["password"], "[REDACTED]");
-            assert_eq!(parsed["keep"], "value");
-        }
-    }
-
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    #[test]
-    fn jsonl_redaction_falls_back_on_non_json_lines() {
-        let mut redactor = JsonlRedactor::new([]).expect("valid secrets");
-        let input = b"plain text with password=secret_value_456\n";
-        let filtered = joined_jsonl(&mut redactor, &[input]);
-        assert!(redactor.has_redaction());
-        assert_eq!(filtered, b"plain text with password=[REDACTED]\n");
-    }
-
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    #[test]
-    fn jsonl_fallback_flushes_before_following_frame_across_chunk_boundaries() {
-        let mut input = vec![b'x'; FRAME_LIMIT + 1];
-        input.extend_from_slice(b" password=secret_value_456\n{\"type\":\"turn.completed\"}\n");
-        let mut baseline = JsonlRedactor::new([]).unwrap();
-        let expected = joined_jsonl(
-            &mut baseline,
-            &input.chunks(FRAME_LIMIT).collect::<Vec<_>>(),
-        );
-        assert!(expected.ends_with(b" password=[REDACTED]\n{\"type\":\"turn.completed\"}\n"));
-        for width in [1, 127, FRAME_LIMIT - 1] {
-            let mut redactor = JsonlRedactor::new([]).unwrap();
-            assert_eq!(
-                joined_jsonl(&mut redactor, &input.chunks(width).collect::<Vec<_>>()),
-                expected
-            );
-        }
-    }
-
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    #[test]
-    fn jsonl_redaction_splits_across_chunks_cleanly() {
-        let inputs = [
-            serde_json::json!({"command": "/bin/zsh -lc \"password='unclosed\"", "keep": "value"})
-                .to_string(),
-            serde_json::json!({"command": "password=\"X\\\"secret\" tail", "keep": "value"})
-                .to_string(),
-            format!(
-                "{{\"command\":\"{} password='secret\",\"keep\":\"value\"}}",
-                "x".repeat(FRAME_LIMIT)
-            ),
-        ];
-        for input in inputs {
-            let mut baseline = JsonlRedactor::new([]).unwrap();
-            let expected = joined_jsonl(
-                &mut baseline,
-                &input.as_bytes().chunks(FRAME_LIMIT).collect::<Vec<_>>(),
-            );
-            assert!(baseline.has_redaction());
-            let parsed: serde_json::Value =
-                serde_json::from_slice(&expected).expect("valid JSON after masking");
-            assert_eq!(parsed["keep"], "value");
-            for width in [1, 127, FRAME_LIMIT] {
-                let mut redactor = JsonlRedactor::new([]).unwrap();
-                assert_eq!(
-                    joined_jsonl(
-                        &mut redactor,
-                        &input.as_bytes().chunks(width).collect::<Vec<_>>()
-                    ),
-                    expected
-                );
-            }
-        }
     }
 }

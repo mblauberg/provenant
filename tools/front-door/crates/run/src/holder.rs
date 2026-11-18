@@ -3348,8 +3348,6 @@ pub const EMPTY_WRITER_REASON: &str =
     "the provider ended with an empty final message; its commit is kept for review";
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
-/// Stored instead of the provider's answer when settlement cannot filter it.
-
 /// Captured text can suggest a denial, but cannot establish its source or
 /// supply a path safe for a remote diagnostic. The operation is a closed fact;
 /// the path stays in the captured output.

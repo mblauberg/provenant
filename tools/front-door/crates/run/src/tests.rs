@@ -1276,6 +1276,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     Ok(())
 }
 
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
 fn streamed_result_is_verified_and_raw_across_chunks() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -1506,6 +1507,7 @@ fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult 
     Ok(())
 }
 
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
 fn transcript_part_reads_the_raw_tail_of_the_provider_transcript() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -2249,6 +2251,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
     Ok(())
 }
 
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
 fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
     for (text, redacted) in [
@@ -2849,6 +2852,7 @@ fn a_store_failure_omits_source_text_at_every_destination() {
     }
 }
 
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
 #[test]
 fn output_slices_raw_bytes_and_keeps_artifact_binding() -> TestResult {
     let temp = tempfile::tempdir()?;

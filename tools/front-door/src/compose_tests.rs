@@ -24,14 +24,21 @@ fn guardian_capture_retains_split_output_losslessly() {
                 .map_err(std::io::Error::other)?;
             let mut stderr = StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, None)
                 .map_err(std::io::Error::other)?;
-            for bytes in [b"credential gh".as_slice(), b"p_abcdefghijklmnop", b"qrstuvwxyz0123456789 end"] {
+            for bytes in [
+                b"credential gh".as_slice(),
+                b"p_abcdefghijklmnop",
+                b"qrstuvwxyz0123456789 end",
+            ] {
                 assert!(stdout.push(bytes).is_ok());
                 assert!(stderr.push(bytes).is_ok());
             }
             stdout.finish();
             stderr.finish();
             for capture in [&stdout, &stderr] {
-                assert_eq!(capture.outcome().bytes, b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end");
+                assert_eq!(
+                    capture.outcome().bytes,
+                    b"credential ghp_abcdefghijklmnopqrstuvwxyz0123456789 end"
+                );
                 assert!(!capture.outcome().filter_failed);
             }
             Ok(())
