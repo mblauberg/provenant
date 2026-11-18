@@ -424,8 +424,10 @@ decoded and projected as text, or withheld when they cannot be inspected. Peer
 output projects the complete verified text before paging, with published lengths
 and digests. Cross-host projection selects declared free-text fields (prompts,
 decoded attachments, output text and messages), preserving envelope keys, tags,
-identifiers and metadata. Already projected output pages pass through response
-encoding untouched, including pages split inside a mask or a word. Binary output, over-bound projections
+identifiers and metadata. A projected stop handoff retains its sealed cause and
+passes the existing stop validation; the retained stop stays raw. Already projected
+output pages pass through response encoding untouched, including pages split
+inside a mask or a word. Binary output, over-bound projections
 and event pages that cannot be fully projected are withheld on projection failure.
 
 ### Checkpoint before launch

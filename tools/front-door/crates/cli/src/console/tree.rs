@@ -262,6 +262,7 @@ mod tests {
         assert_eq!(tree["unfetched_children"], json!([]));
         Ok(())
     }
+    // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn host_tree_preserves_lineage_detail_and_usage() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -290,6 +291,8 @@ mod tests {
         let mut request: CanonicalRequest = serde_json::from_value(
             json!({"schema_version":1,"task":{"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},"parent":null,"lane_depth":1}),
         )?;
+        let raw_title = "shared-tree-secret token: it; it stays";
+        request.task.title = Some(raw_title.into());
         // A launch names its own work key; a continuation takes its parent's.
         let prepared = |attempt: u8,
                         mut request: CanonicalRequest|
@@ -380,6 +383,49 @@ mod tests {
         let detailed = read(&roots, None, 3, 100, true)?;
         assert!(detailed["nodes"][0]["metadata"]["operation"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());
+        // Exercise the actual compact and detailed producer shapes through transport.
+        let projector =
+            provenant_confinement::publication::Projector::new([b"shared-tree-secret".to_vec()])?;
+        for raw in [&tree, &detailed] {
+            let mut expected = raw.clone();
+            let mut found = false;
+            for node in expected["nodes"].as_array_mut().ok_or("nodes")? {
+                if node["title"].as_str() == Some(raw_title) {
+                    found = true;
+                    let title = "[REDACTED] token: [REDACTED]; it stays";
+                    node["title"] = json!(title);
+                    if let Some(metadata) = node.get_mut("metadata") {
+                        metadata["attempt"]["title"] = json!(title);
+                    }
+                }
+            }
+            assert!(found);
+            let response = provenant_fabric_runtime::hosts::PeerResponse {
+                extra: Default::default(),
+                version: 1,
+                protocol: provenant_fabric_runtime::hosts::PROTOCOL,
+                host: provenant_core::HostId::from_bytes([8; 16]),
+                project: provenant_fabric_runtime::identity::CrossHostProjectKey::from_home(
+                    &base.join("home"),
+                    &base.join("home/repo/.git"),
+                )?,
+                result: provenant_fabric_runtime::hosts::PeerResult::Console {
+                    data: raw.clone(),
+                    extra: Default::default(),
+                },
+            };
+            let bytes =
+                provenant_fabric_runtime::hosts::encode_peer_response(response, &projector)?;
+            let encoded: Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(encoded["result"]["data"], expected);
+        }
+        assert_eq!(
+            store
+                .record(AttemptId::from_bytes([1; 16]), &call)?
+                .title
+                .as_deref(),
+            Some(raw_title)
+        );
         let detail =
             super::super::detail::read(&roots, &AttemptId::from_bytes([2; 16]).to_string())?;
         assert_eq!(detail["status"], "found");

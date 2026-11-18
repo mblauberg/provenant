@@ -710,6 +710,12 @@ impl Stop {
         &self.handoff
     }
 
+    /// Derive a view with a new handoff while preserving the cause and extensions.
+    /// The retained stop is untouched and the usual sealed-stop checks still apply.
+    pub fn with_handoff(&self, handoff: HandoffResult) -> Result<Self, StopError> {
+        Self::with_extra(self.cause, handoff, self.extra.clone())
+    }
+
     /// The writer's own one-line account, such as what blocks a `blocked`
     /// stop, for `status` and `output`.
     pub fn note(&self) -> Option<&str> {

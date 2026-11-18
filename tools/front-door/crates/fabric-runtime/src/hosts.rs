@@ -939,18 +939,68 @@ fn human_request_texts<'a>(
     texts.extend(request.closure_reason.iter_mut());
 }
 
-fn attempt_state_texts<'a>(
-    state: &'a mut provenant_records::run::AttemptState,
+type StopViews<'a> = Vec<(
+    &'a mut provenant_records::Stop,
+    provenant_records::handoff::HandoffResult,
+)>;
+
+fn handoff_texts<'a>(
+    handoff: &'a mut provenant_records::handoff::HandoffResult,
     texts: &mut Vec<&'a mut String>,
+) {
+    match handoff {
+        Ok(Some(handoff)) => {
+            texts.push(&mut handoff.note);
+            texts.extend(handoff.remaining.iter_mut());
+            texts.extend(handoff.decisions.iter_mut());
+            texts.extend(handoff.verify.iter_mut());
+            for concern in &mut handoff.spec_concerns {
+                texts.extend([
+                    &mut concern.criterion,
+                    &mut concern.claim,
+                    &mut concern.evidence,
+                    &mut concern.proposed_change,
+                ]);
+            }
+        }
+        Err(error) => {
+            for dropped in &mut error.dropped {
+                texts.push(&mut dropped.error);
+            }
+            for (key, value) in &mut error.retained {
+                let paths: &[&str] = match key.as_str() {
+                    "note" => &[""],
+                    "remaining" | "decisions" | "verify" => &["*"],
+                    "spec_concerns" => {
+                        &["*/criterion", "*/claim", "*/evidence", "*/proposed_change"]
+                    }
+                    _ => &[],
+                };
+                report_texts(value, paths, texts);
+            }
+        }
+        Ok(None) => {}
+    }
+}
+
+fn attempt_state_texts<'a, 's: 'a>(
+    state: &'s mut provenant_records::run::AttemptState,
+    texts: &mut Vec<&'a mut String>,
+    stops: &mut StopViews<'s>,
 ) {
     if let provenant_records::run::AttemptState::Terminal {
         reason,
         terminal_note,
+        stop,
         ..
     } = state
     {
         texts.extend(reason.iter_mut());
         texts.extend(terminal_note.iter_mut());
+        if let Some(stop) = stop {
+            let handoff = stop.handoff_result().clone();
+            stops.push((stop, handoff));
+        }
     }
 }
 
@@ -993,13 +1043,14 @@ fn route_texts<'a>(
     }
 }
 
-fn attempt_texts<'a>(
-    attempt: &'a mut provenant_records::run::AttemptRecord,
+fn attempt_texts<'a, 's: 'a>(
+    attempt: &'s mut provenant_records::run::AttemptRecord,
     texts: &mut Vec<&'a mut String>,
+    stops: &mut StopViews<'s>,
 ) {
     texts.extend(attempt.title.iter_mut());
     texts.extend(attempt.publication_error.iter_mut());
-    attempt_state_texts(&mut attempt.state, texts);
+    attempt_state_texts(&mut attempt.state, texts, stops);
     for route in [
         &mut attempt.resolved_route,
         &mut attempt.applied_route,
@@ -1072,6 +1123,7 @@ pub fn encode_peer_response(
     use crate::inbox::{InboxReply, InboxResult};
     use crate::runs::RunResult;
     let mut texts = Vec::new();
+    let mut stops = Vec::new();
     match &mut response.result {
         PeerResult::Inbox { data, .. } => match data {
             InboxReply::Error { message, .. } => texts.push(message),
@@ -1112,7 +1164,7 @@ pub fn encode_peer_response(
             }
             RunResult::Status { attempt, .. }
             | RunResult::Cancel { attempt, .. }
-            | RunResult::Resume { attempt, .. } => attempt_texts(attempt, &mut texts),
+            | RunResult::Resume { attempt, .. } => attempt_texts(attempt, &mut texts, &mut stops),
             RunResult::Wait {
                 observation,
                 attempts,
@@ -1120,18 +1172,18 @@ pub fn encode_peer_response(
             } => {
                 texts.extend(observation.iter_mut());
                 for attempt in attempts {
-                    attempt_texts(attempt, &mut texts);
+                    attempt_texts(attempt, &mut texts, &mut stops);
                 }
             }
         },
         PeerResult::RunStatuses { data, .. } => {
             for attempt in data {
-                attempt_texts(attempt, &mut texts);
+                attempt_texts(attempt, &mut texts, &mut stops);
             }
         }
         PeerResult::RunEvents { data, .. } => {
             for event in &mut data.items {
-                attempt_state_texts(&mut event.change, &mut texts);
+                attempt_state_texts(&mut event.change, &mut texts, &mut stops);
             }
         }
         PeerResult::Coordination { data, .. } => match data {
@@ -1200,22 +1252,27 @@ pub fn encode_peer_response(
             let mut paths: Vec<String> = [
                 "reason",
                 "lanes/*/metadata/attempt/title",
-                "lanes/*/metadata/attempt/state/reason",
-                "lanes/*/metadata/attempt/state/terminal_note",
-                "lanes/*/metadata/attempt/publication_error",
+                "lanes/*/metadata/attempt/reason",
+                "lanes/*/metadata/attempt/settlement/reason",
+                "lanes/*/metadata/attempt/git_import_failure/reason",
+                "lanes/*/metadata/attempt/waiting_for",
+                "lanes/*/metadata/attempt/provider_error",
                 "lanes/*/metadata/attempt/skipped_routes/*/detail",
                 "lanes/*/metadata/operation/blocked_reason",
                 "lanes/*/metadata/operation/refusal/detail",
                 "lanes/*/metadata/operation/refusal/next",
                 "nodes/*/metadata/attempt/title",
-                "nodes/*/metadata/attempt/state/reason",
-                "nodes/*/metadata/attempt/state/terminal_note",
-                "nodes/*/metadata/attempt/publication_error",
+                "nodes/*/metadata/attempt/reason",
+                "nodes/*/metadata/attempt/settlement/reason",
+                "nodes/*/metadata/attempt/git_import_failure/reason",
+                "nodes/*/metadata/attempt/waiting_for",
+                "nodes/*/metadata/attempt/provider_error",
                 "nodes/*/metadata/attempt/skipped_routes/*/detail",
                 "nodes/*/metadata/operation/blocked_reason",
                 "nodes/*/metadata/operation/refusal/detail",
                 "nodes/*/metadata/operation/refusal/next",
-                "unfetched/*/detail",
+                "nodes/*/title",
+                "unfetched_children/*/detail",
                 "delivery/state/reason",
                 "linked_inbox_requests/*/title",
                 "items/*/request/title",
@@ -1230,7 +1287,22 @@ pub fn encode_peer_response(
             .collect();
             for prefix in ["lanes/*/metadata/attempt", "nodes/*/metadata/attempt"] {
                 paths.push(format!("{prefix}/delivery/state/reason"));
-                for route in ["resolved_route", "applied_route", "observed_route"] {
+                paths.push(format!("{prefix}/handoff/Err/dropped/*/error"));
+                for handoff in ["Ok", "Err/retained"] {
+                    for field in [
+                        "note",
+                        "remaining/*",
+                        "decisions/*",
+                        "verify/*",
+                        "spec_concerns/*/criterion",
+                        "spec_concerns/*/claim",
+                        "spec_concerns/*/evidence",
+                        "spec_concerns/*/proposed_change",
+                    ] {
+                        paths.push(format!("{prefix}/handoff/{handoff}/{field}"));
+                    }
+                }
+                for route in ["applied_route", "observed_route"] {
                     for field in [
                         "availability_warning",
                         "launch_warnings/*",
@@ -1257,9 +1329,16 @@ pub fn encode_peer_response(
         | PeerResult::SubmissionCancelled { .. }
         | PeerResult::LaneWaits { .. } => {}
     }
+    for (_, handoff) in &mut stops {
+        handoff_texts(handoff, &mut texts);
+    }
     provenant_confinement::publication::CrossHostTransport::new(projector)
         .texts(&mut texts)
         .map_err(|_| PeerError::Frame)?;
+    drop(texts);
+    for (stop, handoff) in stops {
+        *stop = stop.with_handoff(handoff).map_err(|_| PeerError::Frame)?;
+    }
     let bytes = serde_json::to_vec(&response).map_err(|_| PeerError::Frame)?;
     if bytes.len() >= MAX_FRAME {
         return Err(PeerError::Frame);
@@ -2038,10 +2117,13 @@ mod tests {
         let data = serde_json::json!({
             "lanes":[{"metadata":{"attempt":{
                 "title":r#"{"token":"submit-test"}"#,
-                "state":{"state":"terminal", "reason":"submit-test token: it; it remains"},
+                "state":"failed", "reason":"submit-test token: it; it remains",
                 "applied_route":{"account_key":"submit-test", "launch_warnings":["submit-test"]},
                 "extension":{"title":"submit-test"}
             }}}],
+            "nodes":[{"title":"submit-test", "status":"failed", "lane_id":{"attempt_id":"submit-test"}}],
+            "unfetched_children":[{"reason":"unavailable", "detail":"submit-test"}],
+            "unfetched":[{"detail":"submit-test"}],
             "delivery":{"state":{"state":"failed", "reason":"submit-test"}},
             "extension":{"reason":"submit-test"}
         });
@@ -2059,14 +2141,81 @@ mod tests {
         let mut expected = serde_json::to_value(&response).unwrap();
         let attempt = &mut expected["result"]["data"]["lanes"][0]["metadata"]["attempt"];
         attempt["title"] = serde_json::json!(r#"{"token":"[REDACTED]"}"#);
-        attempt["state"]["reason"] = serde_json::json!("[REDACTED] token: [REDACTED]; it remains");
+        attempt["reason"] = serde_json::json!("[REDACTED] token: [REDACTED]; it remains");
         attempt["applied_route"]["launch_warnings"][0] = serde_json::json!("[REDACTED]");
         expected["result"]["data"]["delivery"]["state"]["reason"] = serde_json::json!("[REDACTED]");
+        expected["result"]["data"]["nodes"][0]["title"] = serde_json::json!("[REDACTED]");
+        expected["result"]["data"]["unfetched_children"][0]["detail"] =
+            serde_json::json!("[REDACTED]");
         let wire = encode_peer_response(response, &projector).unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
             expected
         );
+        // Sealed stop metadata survives while its handoff prose shares the inventory.
+        let handoff = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "status":"stopped_early", "note":r#"{"token":"stopped_early"}"#,
+            "remaining":["stopped_early"], "decisions":[], "verify":["stopped_early"]
+        }))
+        .unwrap();
+        let stop =
+            provenant_records::Stop::new(provenant_records::StopCause::StoppedEarly, Some(handoff))
+                .unwrap();
+        let mut raw_stop = serde_json::to_value(stop).unwrap();
+        raw_stop["stopped_early"] = serde_json::json!("stopped_early");
+        let stop: provenant_records::Stop = serde_json::from_value(raw_stop.clone()).unwrap();
+        let event = provenant_records::run::RunEvent {
+            extra: Default::default(),
+            schema_version: 1,
+            sequence: 1,
+            project_id: provenant_core::ProjectId::from_bytes([3; 16]),
+            attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
+            revision: 1,
+            trace: Default::default(),
+            change: provenant_records::run::AttemptState::Terminal {
+                extra: Default::default(),
+                terminal_cause: None,
+                terminal_note: None,
+                stop: Some(stop.clone()),
+                outcome: provenant_records::run::Outcome::Failed,
+                exit_code: Some(1),
+                finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+                reason: Some("stopped_early".into()),
+            },
+        };
+        let response = PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: PROTOCOL,
+            host: remote,
+            project: project_key(Path::new("/h")),
+            result: PeerResult::RunEvents {
+                extra: Default::default(),
+                data: crate::runs::RunEventsPage {
+                    extra: Default::default(),
+                    items: vec![event],
+                    cursor: 1,
+                    truncated: false,
+                },
+            },
+        };
+        let mut expected = serde_json::to_value(&response).unwrap();
+        let state = &mut expected["result"]["data"]["items"][0]["change"];
+        state["reason"] = serde_json::json!("[REDACTED]");
+        let handoff = &mut state["stop"]["handoff"]["Ok"];
+        handoff["note"] = serde_json::json!(r#"{"token":"[REDACTED]"}"#);
+        handoff["remaining"][0] = serde_json::json!("[REDACTED]");
+        handoff["verify"][0] = serde_json::json!("[REDACTED]");
+        let wire = encode_peer_response(response, &projector).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
+            expected
+        );
+        serde_json::from_slice::<PeerResponse>(&wire).unwrap();
+        assert_eq!(serde_json::to_value(&stop).unwrap(), raw_stop);
+        let mut incompatible = stop.handoff().unwrap().clone();
+        incompatible.status = provenant_records::handoff::HandoffStatus::Done;
+        assert!(stop.with_handoff(Ok(Some(incompatible))).is_err());
     }
 
     #[test]

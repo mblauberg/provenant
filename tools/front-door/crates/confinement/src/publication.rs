@@ -419,18 +419,29 @@ impl Projector {
         for arg in &args {
             visit_documents(arg, &mut |value| collect(value, &mut secrets));
         }
-        for (index, arg) in args.iter().enumerate() {
-            let (flag, value) = arg.split_once('=').map_or_else(
-                || (arg.as_str(), args.get(index + 1).map(String::as_str)),
-                |(flag, value)| (flag, Some(value)),
-            );
-            if matches!(flag, "-f" | "-F" | "--field" | "--raw-field") {
+        let mut index = 0;
+        while index < args.len() {
+            let (flag, inline) = args[index]
+                .split_once('=')
+                .map_or((args[index].as_str(), None), |(flag, value)| {
+                    (flag, Some(value))
+                });
+            let value = inline.or_else(|| args.get(index + 1).map(String::as_str));
+            if Self::field_flag(flag) {
                 if let Some((key, value)) = value.and_then(|value| value.split_once('=')) {
                     if secret_field(key) {
                         secrets.push(value.as_bytes().to_vec());
                     }
                 }
             }
+            // A value that happens to spell a flag is still content, not a declaration.
+            index += if Self::header_flag(flag)
+                || (inline.is_none() && Self::argument_takes_value(flag))
+            {
+                2
+            } else {
+                1
+            };
         }
         if let Some(bytes) = &input {
             let text = std::str::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
@@ -438,6 +449,29 @@ impl Projector {
         }
         let projector = Self::new(secrets)?;
         projector.project_arguments(args, input, project, destination)
+    }
+
+    fn field_flag(flag: &str) -> bool {
+        matches!(flag, "--field" | "--raw-field" | "-f" | "-F")
+    }
+
+    fn header_flag(flag: &str) -> bool {
+        matches!(flag, "-H" | "--header")
+    }
+
+    fn argument_takes_value(flag: &str) -> bool {
+        Self::field_flag(flag)
+            || matches!(
+                flag,
+                "--body"
+                    | "-b"
+                    | "--title"
+                    | "-t"
+                    | "--body-file"
+                    | "--template"
+                    | "-T"
+                    | "--input"
+            )
     }
 
     fn project_arguments(
@@ -467,23 +501,9 @@ impl Projector {
                 .split_once('=')
                 .map_or((args[index].as_str(), None), |(k, v)| (k, Some(v)));
             let flag = flag.to_owned();
-            let takes_value = matches!(
-                flag.as_str(),
-                "--body"
-                    | "-b"
-                    | "--title"
-                    | "-t"
-                    | "--body-file"
-                    | "--template"
-                    | "-T"
-                    | "-F"
-                    | "--field"
-                    | "-f"
-                    | "--raw-field"
-                    | "--input"
-            );
+            let takes_value = Self::argument_takes_value(&flag);
             if !takes_value {
-                if matches!(flag.as_str(), "-H" | "--header") {
+                if Self::header_flag(&flag) {
                     if args.get(index + 1).is_none() {
                         return Err(ProjectionError::Operation);
                     }
@@ -516,7 +536,7 @@ impl Projector {
                     input = Some(projection.into_bytes());
                     "-".to_owned()
                 }
-                "-f" | "--raw-field" | "-F" | "--field" => {
+                field if Self::field_flag(field) => {
                     let (key, val) = value.split_once('=').ok_or(ProjectionError::Operation)?;
                     let bytes = if matches!(flag.as_str(), "-F" | "--field") && val.starts_with('@')
                     {
@@ -689,12 +709,14 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if !bytes[i].is_ascii_alphabetic() {
+        if !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_' {
             i += 1;
             continue;
         }
         let start = i;
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        while i < bytes.len()
+            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'-'))
+        {
             i += 1;
         }
         if !secret_field(&text[start..i]) {
@@ -825,6 +847,31 @@ mod tests {
             assert!(arguments.contains(&"ordinary"));
             assert!(arguments.contains(&"copy [REDACTED]; token: [REDACTED]; ordinary stays"));
         }
+        let temp = tempfile::tempdir().unwrap();
+        let content = br#"{"ordinary":"ordinary"}"#;
+        std::fs::write(temp.path().join("--field"), content).unwrap();
+        let operation = Projector::new([])
+            .unwrap()
+            .forge(
+                ForgeOperation::Cli {
+                    arguments: ["api", "--input", "--field", "token=ordinary"]
+                        .map(OsString::from)
+                        .into(),
+                    input: None,
+                },
+                temp.path(),
+            )
+            .unwrap();
+        let ForgeOperation::Cli {
+            input: Some(input), ..
+        } = operation
+        else {
+            panic!("projected input")
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&input).unwrap(),
+            serde_json::from_slice::<Value>(content).unwrap()
+        );
         projection.bytes.push(b'!');
         assert!(!projection.matches_source(Destination::PeerPublication, raw));
     }
@@ -853,6 +900,25 @@ mod tests {
             projected.bytes(),
             b"token: [REDACTED]; ordinary stays outside its span, as does it"
         );
+        for (raw, expected) in [
+            (
+                "api-key=private-value; copy private-value",
+                "api-key=[REDACTED]; copy private-value",
+            ),
+            (
+                "X-API-Key: private-value; copy private-value",
+                "X-API-Key: [REDACTED]; copy private-value",
+            ),
+            (
+                "not-a-token=ordinary; 7token=ordinary",
+                "not-a-token=ordinary; 7token=ordinary",
+            ),
+        ] {
+            let projected = projector
+                .project(Destination::CrossHostTransport, raw.as_bytes())
+                .unwrap();
+            assert_eq!(projected.bytes(), expected.as_bytes());
+        }
         assert_eq!(projection.raw.bytes, raw.len() as u64);
         assert_eq!(projection.published.bytes, projection.bytes().len() as u64);
     }
