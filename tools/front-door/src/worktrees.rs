@@ -2175,13 +2175,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::Budget)?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(idle_seconds) * 1_000_000_000),
-        // The profile-level Cargo target sweep owns global disk pressure and
-        // reclaims both lane and shared targets under one budget.
-        free_floor_bytes: None,
-        // The lane and shared Cargo targets have one profile-level budget in
-        // build_directories. This pass remains responsible for idle whole-cache
-        // reclamation and the free-space floor.
-        max_total_bytes: None,
+        // build_directories owns the shared lane/target budget and disk floor.
+        // This pass reclaims only idle or orphaned whole private caches.
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
