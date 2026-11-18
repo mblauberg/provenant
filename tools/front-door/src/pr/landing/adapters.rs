@@ -1069,6 +1069,9 @@ impl Repo for GitRepo<'_> {
             std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )
         .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
+        provenant_confinement::publication::install_forge(
+            &mut forge, self.project.clone(), provenant_confinement::publication::Projector::ambient(),
+        );
         let execution = forge
             .execute_with(
                 provenant_config::ForgeOperation::Land { intent: input },
