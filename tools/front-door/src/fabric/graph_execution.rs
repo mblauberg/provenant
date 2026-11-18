@@ -44,10 +44,8 @@ fn writer_dirty_setting(
 ) -> provenant_run::writer_dirty::ResolvedWriterDirty {
     use provenant_config::KnobSource;
     use std::io::Write;
-    let (value, source) = match provenant_cli::config_reads::read_for(
-        &factory.context.roots,
-        "writer dirty preflight",
-    ) {
+    let (value, source) = match provenant_cli::config_reads::read_for(&factory.context.roots, "run")
+    {
         Ok(config) => match config.knobs.get(provenant_run::writer_dirty::KNOB) {
             Some(knob) => {
                 let source = match knob.source {

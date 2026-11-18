@@ -53,7 +53,7 @@ reads! {
     "tracker" => [], "verify" => [], "check" => [], "check install" => ["accounts"],
     "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr"],
     "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward", "wait"],
-    "knobs" => []
+    "knobs" => [], "admit" => []
 }
 
 pub fn declaration(path: &str) -> Option<&'static ConfigRead> {

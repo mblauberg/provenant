@@ -875,7 +875,7 @@ fn ordinary_status_shows_standalone_admission_holders_and_waiters() -> Result {
     let proj_dir = tempfile::tempdir()?;
     let proj = fs::canonicalize(proj_dir.path())?;
     assert!(
-        Command::new("git")
+        provenant_os::fixture::git_command()
             .args(["init", "-q"])
             .current_dir(&proj)
             .status()?
