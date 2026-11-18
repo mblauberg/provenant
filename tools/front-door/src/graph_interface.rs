@@ -746,10 +746,7 @@ pub(crate) fn templates_summary(
 ) -> Option<provenant_cli::Summary> {
     let entries = data.get("templates")?.as_array()?;
     if let Some(target) = show_target {
-        let entry = entries
-            .iter()
-            .find(|e| e["name"] == target)
-            .or_else(|| entries.first())?;
+        let entry = entries.iter().find(|e| e["name"] == target)?;
         let name = entry["name"].as_str().unwrap_or(target);
         let layer = entry["layer"].as_str().unwrap_or("unknown");
         let template = &entry["template"];
@@ -786,11 +783,15 @@ pub(crate) fn templates_summary(
                 if let Some(def) = pval.get("default").filter(|v| !v.is_null()) {
                     let def_str = serde_json::to_string(def).unwrap_or_else(|_| def.to_string());
                     param_parts.push(format!("{pname}={def_str}"));
+                } else if !pval.is_object() && !pval.is_null() {
+                    let def_str = serde_json::to_string(pval).unwrap_or_else(|_| pval.to_string());
+                    param_parts.push(format!("{pname}={def_str}"));
                 } else {
                     param_parts.push(format!("{pname} (no default)"));
                 }
             }
         }
+        param_parts.sort();
         let params_str = if param_parts.is_empty() {
             "none".to_string()
         } else {

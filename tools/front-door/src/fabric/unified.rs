@@ -586,6 +586,47 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
     line
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StateRank {
+    Failed = 0,
+    Blocked = 1,
+    Attention = 2,
+    Live = 3,
+    Done = 4,
+    Other = 5,
+}
+
+impl StateRank {
+    pub(crate) fn of(state: &str) -> Self {
+        match state {
+            "failed" | "unreadable" | "unresolved" => Self::Failed,
+            "blocked" => Self::Blocked,
+            "paused" | "input_required" | "refused" | "attention" => Self::Attention,
+            "running" | "starting" | "pending" | "launched" => Self::Live,
+            "succeeded" | "complete" => Self::Done,
+            _ => Self::Other,
+        }
+    }
+
+    pub(crate) fn needs_attention(self) -> bool {
+        matches!(self, Self::Failed | Self::Blocked | Self::Attention)
+    }
+
+    pub(crate) fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
+fn ranked_tally<'a, I: Iterator<Item = &'a str>>(states: I) -> String {
+    let mut counts_map = std::collections::BTreeMap::<&'a str, usize>::new();
+    for state in states {
+        *counts_map.entry(state).or_default() += 1;
+    }
+    let mut counts_vec: Vec<(&'a str, usize)> = counts_map.into_iter().collect();
+    counts_vec.sort_by_key(|(s, _)| StateRank::of(s));
+    provenant_cli::Summary::tally(&counts_vec)
+}
+
 pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
     let nodes: Vec<_> = rows.iter().filter(|row| row["kind"] == "node").collect();
     let lines: Vec<(&Value, Option<&Value>)> = if nodes.is_empty() {
@@ -607,25 +648,10 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
             .collect()
     };
 
-    let mut counts_map = std::collections::BTreeMap::<String, usize>::new();
-    for (node, _) in &lines {
-        let state = node["state"].as_str().unwrap_or("unknown");
-        *counts_map.entry(state.to_string()).or_default() += 1;
-    }
-    let mut counts_vec: Vec<(String, usize)> = counts_map.into_iter().collect();
-    counts_vec.sort_by_key(|(s, _)| match s.as_str() {
-        "failed" | "unreadable" | "unresolved" => 0,
-        "blocked" => 1,
-        "paused" | "input_required" | "refused" | "attention" => 2,
-        "running" | "starting" | "pending" | "launched" => 3,
-        "succeeded" | "complete" => 4,
-        _ => 5,
-    });
-    let tally = provenant_cli::Summary::tally(
-        &counts_vec
+    let tally = ranked_tally(
+        lines
             .iter()
-            .map(|(s, n)| (s.as_str(), *n))
-            .collect::<Vec<_>>(),
+            .map(|(node, _)| node["state"].as_str().unwrap_or("unknown")),
     );
     let headline = if tally.is_empty() {
         "no rows".to_string()
@@ -635,17 +661,7 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
 
     let is_failed_attention_blocked = |node: &Value, attempt: Option<&Value>| -> bool {
         let state = node["state"].as_str().unwrap_or("");
-        if matches!(
-            state,
-            "failed"
-                | "unreadable"
-                | "unresolved"
-                | "blocked"
-                | "paused"
-                | "input_required"
-                | "refused"
-                | "attention"
-        ) {
+        if StateRank::of(state).needs_attention() {
             return true;
         }
         if matches!(state, "complete" | "succeeded" | "terminal")
@@ -671,7 +687,7 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
 
     let is_live = |node: &Value| -> bool {
         let state = node["state"].as_str().unwrap_or("");
-        matches!(state, "running" | "starting" | "pending" | "launched")
+        StateRank::of(state).is_live()
     };
 
     let digests = super::graph_status::node_digests(rows);
@@ -1547,7 +1563,7 @@ pub(crate) fn unified_graph_command(
                 globals,
                 &human,
                 false,
-                summary.as_ref(),
+                summary.as_ref().filter(|_| !globals.full),
             )
         }
         Err(error) => command_fail(name, error.as_ref(), globals),
@@ -2133,7 +2149,7 @@ pub(crate) fn graph_listing(
                 globals,
                 &human,
                 true,
-                Some(&summary),
+                (!globals.full).then_some(&summary),
             )
         }
         Err(error) => command_fail("status", error.as_ref(), globals),
@@ -2141,25 +2157,7 @@ pub(crate) fn graph_listing(
 }
 
 fn listing_summary(listing: &Listing, command_limit: u64) -> provenant_cli::Summary {
-    let mut counts_map = std::collections::BTreeMap::<String, usize>::new();
-    for graph in &listing.rows {
-        *counts_map.entry(graph.state.clone()).or_default() += 1;
-    }
-    let mut counts_vec: Vec<(String, usize)> = counts_map.into_iter().collect();
-    counts_vec.sort_by_key(|(s, _)| match s.as_str() {
-        "failed" | "unreadable" | "unresolved" => 0,
-        "blocked" => 1,
-        "paused" | "input_required" | "refused" | "attention" => 2,
-        "running" | "starting" | "pending" | "launched" => 3,
-        "succeeded" | "complete" => 4,
-        _ => 5,
-    });
-    let tally = provenant_cli::Summary::tally(
-        &counts_vec
-            .iter()
-            .map(|(s, n)| (s.as_str(), *n))
-            .collect::<Vec<_>>(),
-    );
+    let tally = ranked_tally(listing.rows.iter().map(|g| g.state.as_str()));
     let headline = if tally.is_empty() {
         "no graphs".to_string()
     } else {
@@ -2170,13 +2168,7 @@ fn listing_summary(listing: &Listing, command_limit: u64) -> provenant_cli::Summ
     let mut shown_indices = std::collections::BTreeSet::new();
 
     for (i, graph) in listing.rows.iter().enumerate() {
-        let is_failed = matches!(graph.state.as_str(), "failed" | "unreadable" | "unresolved");
-        let is_blocked = graph.state == "blocked";
-        let is_attention = matches!(
-            graph.state.as_str(),
-            "paused" | "input_required" | "refused" | "attention"
-        );
-        if is_failed || is_blocked || is_attention {
+        if StateRank::of(&graph.state).needs_attention() {
             let mut line = format!(
                 "{} {} {} {}",
                 graph.name,
@@ -2197,12 +2189,7 @@ fn listing_summary(listing: &Listing, command_limit: u64) -> provenant_cli::Summ
     if live_slots > 0 {
         let mut added = 0;
         for (i, graph) in listing.rows.iter().enumerate() {
-            if !shown_indices.contains(&i)
-                && matches!(
-                    graph.state.as_str(),
-                    "running" | "starting" | "pending" | "launched"
-                )
-            {
+            if !shown_indices.contains(&i) && StateRank::of(&graph.state).is_live() {
                 summary_rows.push(format!(
                     "{} {} {} {}",
                     graph.name,
@@ -2425,9 +2412,8 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
         let verdict = row["review_verdict"]
             .as_str()
             .or_else(|| attempt.and_then(|a| a["review_verdict"].as_str()));
-        let result_path = row["result_path"]
-            .as_str()
-            .or_else(|| attempt.and_then(|a| a["result_path"].as_str()));
+        let result_path = super::graph_status::path_text(&row["result_path"])
+            .or_else(|| attempt.and_then(|a| super::graph_status::path_text(&a["result_path"])));
 
         let mut parts = Vec::new();
         parts.push(format!("{}: {}", field("id"), outcome));
@@ -4496,8 +4482,7 @@ mod tests {
     #[test]
     fn compact_output_never_dumps_raw_json_braces_and_status_retains_failed_rows()
     -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Table test over commands: templates, templates show, status, result
-        // Verify compact output never contains raw JSON brace dumps.
+        let mut compact_cases = Vec::new();
 
         // Case A: templates (list)
         let templates_data = json!({
@@ -4536,34 +4521,48 @@ mod tests {
             &mut out,
         )?;
         let text = String::from_utf8(out)?;
-        assert!(
-            !text.contains('{') && !text.contains('}'),
-            "templates dump: {text}"
-        );
+        compact_cases.push(("templates", text.clone()));
         assert!(text.contains("bundled task: Do the brief."));
         assert!(text.contains("bundled repair: Repair qualified findings."));
 
         // Case B: templates show
+        let templates_data_with_params = json!({
+            "templates": [
+                {
+                    "name": "repair",
+                    "layer": "bundled",
+                    "template": {
+                        "doc": "Repair qualified findings.",
+                        "nodes": [{"id": "fix", "use": "implement.fix"}],
+                        "parameters": {
+                            "branch": {"default": "main"},
+                            "retries": 3,
+                            "review_base": {"type": "string"}
+                        }
+                    }
+                }
+            ]
+        });
         let show_sum =
-            crate::graph_interface::templates_summary(&templates_data, Some("repair")).unwrap();
+            crate::graph_interface::templates_summary(&templates_data_with_params, Some("repair"))
+                .unwrap();
         let mut out = Vec::new();
         provenant_cli::render(
             &cmd_res,
             provenant_cli::RenderMode::Compact {
-                text: &serde_json::to_string_pretty(&templates_data)?,
+                text: &serde_json::to_string_pretty(&templates_data_with_params)?,
                 read_only: true,
                 summary: Some(&show_sum),
             },
             &mut out,
         )?;
         let text = String::from_utf8(out)?;
-        assert!(
-            !text.contains('{') && !text.contains('}'),
-            "templates show dump: {text}"
-        );
+        compact_cases.push(("templates show", text.clone()));
         assert!(text.contains("repair (bundled)"));
         assert!(text.contains("nodes: fix (implement.fix)"));
-        assert!(text.contains("parameters: none"));
+        assert!(text.contains("branch=\"main\""));
+        assert!(text.contains("retries=3"));
+        assert!(text.contains("review_base (no default)"));
 
         // Case C: status
         let status_rows = vec![
@@ -4587,10 +4586,7 @@ mod tests {
             &mut out,
         )?;
         let text = String::from_utf8(out)?;
-        assert!(
-            !text.contains('{') && !text.contains('}'),
-            "status dump: {text}"
-        );
+        compact_cases.push(("status", text.clone()));
         assert!(text.contains("1 failed, 1 running"));
         assert!(text.contains("g/a failed"));
 
@@ -4603,7 +4599,7 @@ mod tests {
             "outcome": "failed",
             "cause_code": "budget_exhausted",
             "review_verdict": "VERDICT: FAIL",
-            "result_path": "error.txt",
+            "result_path": provenant_records::StructuredPathWire::from_path(std::path::Path::new("/tmp/error.txt"))?,
             "branch": "feat/fix",
             "head": "def456",
             "handoff": null
@@ -4620,20 +4616,77 @@ mod tests {
             &mut out,
         )?;
         let text = String::from_utf8(out)?;
-        assert!(
-            !text.contains('{') && !text.contains('}'),
-            "result dump: {text}"
-        );
+        compact_cases.push(("result", text.clone()));
         assert!(text.contains("g/parent: failed"));
         assert!(text.contains("cause: budget_exhausted"));
         assert!(text.contains("verdict: VERDICT: FAIL"));
-        assert!(text.contains("result: error.txt"));
+        assert!(text.contains("result: /tmp/error.txt"));
 
-        // 2. Fixture with 150 rows, 3 failed: all 3 present in compact output
+        // Case E: listing (status across graphs)
+        let listing = Listing {
+            rows: vec![
+                ListedGraph {
+                    name: "g-fail".to_string(),
+                    state: "failed".to_string(),
+                    template: Some("task".to_string()),
+                    nodes: 2,
+                    settled: false,
+                    created_micros: None,
+                    changed_micros: None,
+                    reason: Some("worker timed out".to_string()),
+                    digests: vec![],
+                    open_asks: vec![],
+                },
+                ListedGraph {
+                    name: "g-run".to_string(),
+                    state: "running".to_string(),
+                    template: Some("repair".to_string()),
+                    nodes: 1,
+                    settled: false,
+                    created_micros: None,
+                    changed_micros: None,
+                    reason: None,
+                    digests: vec![],
+                    open_asks: vec![],
+                },
+            ],
+            next: None,
+            omitted: Default::default(),
+        };
+        let list_sum = listing_summary(&listing, 50);
+        let list_res =
+            provenant_records::CommandResult::new("status", provenant_records::Outcome::Ok, ());
+        let mut out = Vec::new();
+        provenant_cli::render(
+            &list_res,
+            provenant_cli::RenderMode::Compact {
+                text: "g-fail failed\ng-run running\n",
+                read_only: true,
+                summary: Some(&list_sum),
+            },
+            &mut out,
+        )?;
+        let text = String::from_utf8(out)?;
+        compact_cases.push(("status listing", text.clone()));
+        assert!(text.contains("1 failed, 1 running"));
+        assert!(text.contains("g-fail failed task 2: worker timed out"));
+
+        for (command, output) in compact_cases {
+            assert!(
+                !output.contains('{') && !output.contains('}'),
+                "{command}: {output}"
+            );
+        }
+
+        // Fixture with 150 rows includes failures, attention and blocked rows.
         let mut large_rows = Vec::new();
         for i in 0..150 {
             let state = if i == 10 || i == 50 || i == 120 {
                 "failed"
+            } else if i == 140 {
+                "attention"
+            } else if i == 149 {
+                "blocked"
             } else {
                 "succeeded"
             };
@@ -4647,7 +4700,7 @@ mod tests {
             }));
         }
         let large_sum = status_summary(&large_rows);
-        assert_eq!(large_sum.omitted, 147);
+        assert_eq!(large_sum.omitted, 145);
         let large_res = provenant_records::CommandResult::new(
             "status",
             provenant_records::Outcome::Ok,
@@ -4665,7 +4718,10 @@ mod tests {
         )?;
         let text = String::from_utf8(out)?;
         assert!(!text.contains('{') && !text.contains('}'));
-        assert!(text.contains("3 failed, 147 succeeded"), "headline: {text}");
+        assert!(
+            text.contains("3 failed, 1 blocked, 1 attention, 145 succeeded"),
+            "headline: {text}"
+        );
         assert!(text.contains("g/node_10 failed"), "node 10 missing: {text}");
         assert!(text.contains("g/node_50 failed"), "node 50 missing: {text}");
         assert!(
@@ -4673,11 +4729,14 @@ mod tests {
             "node 120 missing: {text}"
         );
         assert!(
-            text.contains("147 more not shown; use --full for all detail"),
+            text.contains("145 more not shown; use --full for all detail"),
             "{text}"
         );
 
-        // 3. --json output is byte-identical for the same fixture before and after
+        assert!(text.contains("g/node_140 attention"), "{text}");
+        assert!(text.contains("g/node_149 blocked"), "{text}");
+
+        // --json output is byte-identical for the same fixture before and after
         let mut json_out = Vec::new();
         provenant_cli::render(&large_res, provenant_cli::RenderMode::Json, &mut json_out)?;
         let mut direct_json = serde_json::to_vec(&large_res)?;
@@ -4685,5 +4744,68 @@ mod tests {
         assert_eq!(json_out, direct_json);
 
         Ok(())
+    }
+
+    #[test]
+    fn state_ranking_and_predicates_behave_consistently() {
+        // Ranking order: failed (0) < blocked (1) < attention (2) < live (3) < done (4) < other (5)
+        assert_eq!(StateRank::of("failed"), StateRank::Failed);
+        assert_eq!(StateRank::of("unreadable"), StateRank::Failed);
+        assert_eq!(StateRank::of("unresolved"), StateRank::Failed);
+        assert_eq!(StateRank::of("blocked"), StateRank::Blocked);
+        assert_eq!(StateRank::of("paused"), StateRank::Attention);
+        assert_eq!(StateRank::of("input_required"), StateRank::Attention);
+        assert_eq!(StateRank::of("refused"), StateRank::Attention);
+        assert_eq!(StateRank::of("attention"), StateRank::Attention);
+        assert_eq!(StateRank::of("running"), StateRank::Live);
+        assert_eq!(StateRank::of("starting"), StateRank::Live);
+        assert_eq!(StateRank::of("pending"), StateRank::Live);
+        assert_eq!(StateRank::of("launched"), StateRank::Live);
+        assert_eq!(StateRank::of("succeeded"), StateRank::Done);
+        assert_eq!(StateRank::of("complete"), StateRank::Done);
+        assert_eq!(StateRank::of("custom_state"), StateRank::Other);
+
+        assert!(StateRank::Failed < StateRank::Blocked);
+        assert!(StateRank::Blocked < StateRank::Attention);
+        assert!(StateRank::Attention < StateRank::Live);
+        assert!(StateRank::Live < StateRank::Done);
+        assert!(StateRank::Done < StateRank::Other);
+
+        // Predicates
+        for state in [
+            "failed",
+            "unreadable",
+            "unresolved",
+            "blocked",
+            "paused",
+            "input_required",
+            "refused",
+            "attention",
+        ] {
+            assert!(
+                StateRank::of(state).needs_attention(),
+                "expected needs_attention for {state}"
+            );
+            assert!(
+                !StateRank::of(state).is_live(),
+                "expected not is_live for {state}"
+            );
+        }
+
+        for state in ["running", "starting", "pending", "launched"] {
+            assert!(
+                !StateRank::of(state).needs_attention(),
+                "expected not needs_attention for {state}"
+            );
+            assert!(
+                StateRank::of(state).is_live(),
+                "expected is_live for {state}"
+            );
+        }
+
+        for state in ["succeeded", "complete", "unknown"] {
+            assert!(!StateRank::of(state).needs_attention());
+            assert!(!StateRank::of(state).is_live());
+        }
     }
 }
