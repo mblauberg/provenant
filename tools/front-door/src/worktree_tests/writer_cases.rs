@@ -578,13 +578,17 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
     assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
     let terminal = store.record(attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
-    assert!(matches!(
-        terminal.settlement_receipts,
-        Some(provenant_run::SettlementReceipts {
-            git_import: provenant_run::EffectDisposition::Failed { ref reason, retryable: false },
-            ..
-        }) if reason.contains("in-progress Git operation")
-    ));
+    assert!(
+        matches!(
+            terminal.settlement_receipts,
+            Some(provenant_run::SettlementReceipts {
+                git_import: provenant_run::EffectDisposition::Failed { ref reason, retryable: false },
+                ..
+            }) if reason.contains("in-progress Git operation")
+        ),
+        "unexpected settlement receipts: {:?}",
+        terminal.settlement_receipts
+    );
     assert!(attempt_path.join("release.json").is_file());
     assert!(store.writer_fences()?.is_empty());
     cleanup.disarm();

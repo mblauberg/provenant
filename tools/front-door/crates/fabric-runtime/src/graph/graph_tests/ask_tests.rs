@@ -846,6 +846,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let context = patch::PatchContext {
                 library: &library,
                 resolvers: &resolvers,
+
                 journal: None,
                 limits: &limits,
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -914,6 +915,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let context = patch::PatchContext {
                 library: &library,
                 resolvers: &resolvers,
+
                 journal: None,
                 limits: &limits,
                 worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -985,6 +987,7 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

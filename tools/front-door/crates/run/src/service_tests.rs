@@ -431,38 +431,21 @@ fn dispatch_replay_output_and_cancel_share_the_service() -> TestResult {
 
 // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn secret_shaped_dispatch_warns_and_strict_policy_leaves_no_operation() -> TestResult {
+fn secret_shaped_input_is_accepted_losslessly() -> TestResult {
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let example = "password=fixture-example-service-3391";
-    let record = Service::new(&store).dispatch(submission(example), temp.path(), &call)?;
-    let warnings = record.extra["warnings"]
-        .as_array()
-        .ok_or("visible warnings")?;
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.to_string().contains("prompt looks like a credential"))
-    );
-    assert!(
-        warnings
-            .iter()
-            .all(|w| !w.to_string().contains("fixture-example-service-3391"))
-    );
-    let mut strict = submission(example);
-    rename(&mut strict, "strict-example");
-    strict.task.profile.policy_overrides.insert(
-        "SECRET_SHAPED_INPUT".into(),
-        provenant_records::policy::Strength::Refuse,
-    );
-    let operation = strict.operation_id.clone();
-    assert!(
-        matches!(Service::new(&store).dispatch(strict, temp.path(), &call),
-        Err(RunError::RecordedRefusal(diagnostic)) if diagnostic.code == "SECRET_SHAPED_INPUT")
-    );
-    assert!(store.operation(&operation, &call)?.is_none());
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    let receipt = Service::new(&store).dispatch(submission(secret), temp.path(), &call)?;
+    let output = Service::new(&store).output(
+        receipt.attempt_id,
+        ArtifactPart::Prompt,
+        ByteRange::default(),
+        &call,
+    )?;
+    assert_eq!(output.bytes, secret.as_bytes());
     Ok(())
 }
 

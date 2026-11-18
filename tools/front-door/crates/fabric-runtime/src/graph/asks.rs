@@ -519,6 +519,17 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                 .filter(|node| node.state == NodeState::Running)
                 .filter_map(|node| node.launch_retry.as_ref().and_then(|retry| retry.wake_at)),
         )
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| {
+                    node.fallback_evidence_retry
+                        .as_ref()
+                        .map(|retry| retry.wake_at)
+                }),
+        )
         .min()
 }
 

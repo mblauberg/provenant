@@ -55,6 +55,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
                 let context = patch::PatchContext {
                     library: &library,
                     resolvers: &resolvers,
+
                     journal: None,
                     limits: &limits,
 

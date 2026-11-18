@@ -228,6 +228,7 @@ fn pinned_depletion_document() -> GraphDocument {
         "nodes": [{
             "id": "writer", "access":"worktree_write", "prompt":"work",
             "worktree":".worktrees/writer",
+            "attempt":{"account":"pinned"},
             "route":{"adapter":"claude","model":"claude/claude-sonnet-5-5",
                      "account":"pinned","tier":"senior"}
         }]
@@ -235,147 +236,184 @@ fn pinned_depletion_document() -> GraphDocument {
     .unwrap()
 }
 
+// Spec: docs/specs/routing.md#accounts-and-credentials
 #[test]
 fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     use provenant_records::StopCause;
     use provenant_routing::{ModelId, Readiness, ReadinessFact, Stopped};
-    let document = pinned_depletion_document();
-    let limits = crate::config::GraphLimits::default();
-    let (plan, _) = validate_flat_plan(&document, &limits).unwrap();
-    let mut checkpoint =
-        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
-    checkpoint.nodes[0].state = NodeState::Failed;
-    checkpoint.nodes[0].attempts.push(GraphAttempt {
-        placement_host: None,
-        placement_host_id: None,
-        extra: Default::default(),
-        host_refused_before_acceptance: false,
-        launched: true,
-        review_substitution: false,
-        key: AttemptKey {
-            extra: Default::default(),
-            retry_generation: None,
-            previous_attempt_ref: None,
-            graph_id: document.graph_id.clone(),
-            node_id: "writer".into(),
-            route_index: 0,
-            attempt: 1,
-        },
-        route: plan.nodes[0].routes[0].clone(),
-        state: AttemptState::Terminal,
-        attempt_ref: Some("provider/1".into()),
-        outcome: Some(AttemptOutcome::UsageLimited),
-        launch_actor: "chair".into(),
-        input_cap: None,
-        input_cap_source: None,
-        input_manifest: None,
-        usage: None,
-        settled: 1,
-        stop: Some(StopCause::UsageLimited),
-    });
-    let same_model = ModelId::parse("claude/claude-sonnet-5-5").unwrap();
-    let higher_model = ModelId::parse("claude/claude-opus-5-5").unwrap();
-    let config: provenant_routing::RoutingConfig = serde_json::from_value(json!({
-        "pools": {
-            "senior": [{"model":"claude/claude-sonnet-5-5","weight":1,"efforts":[]}],
-            "principal": [{"model":"claude/claude-opus-5-5","weight":1,"efforts":[]}]
-        },
-        "depletion": {
-            "rungs":["same_model_other_account","adjacent_tier"],
-            "tiers":["senior","principal"],
-            "adjacent":["higher"]
+    for pinned in [true, false] {
+        let mut document = pinned_depletion_document();
+        if !pinned {
+            document.nodes[0].attempt = None;
+            let first = document.nodes[0].route.take().unwrap();
+            document.nodes[0].routes = Some(vec![
+                first,
+                serde_json::from_value(json!({
+                    "adapter":"codex", "model":"codex/gpt-6.1-terra", "account":"next-account"
+                }))
+                .unwrap(),
+            ]);
         }
-    }))
-    .unwrap();
-    let facts = next_step::DepletionFacts {
-        catalogue: provenant_routing::Catalogue::bundled().unwrap(),
-        config,
-        stopped: Stopped {
-            model: same_model.clone(),
-            account: Some("pinned".into()),
-            effort: None,
-            tier: Some("senior".into()),
-            family: None,
-        },
-        readiness: vec![
-            ReadinessFact {
-                model: same_model,
-                account: Some("other".into()),
-                state: Readiness::Ready,
+        let limits = crate::config::GraphLimits::default();
+        let (plan, _) = validate_flat_plan(&document, &limits).unwrap();
+        let mut checkpoint =
+            transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+        checkpoint.nodes[0].state = NodeState::Failed;
+        checkpoint.nodes[0].attempts.push(GraphAttempt {
+            placement_host: None,
+            placement_host_id: None,
+            extra: Default::default(),
+            host_refused_before_acceptance: false,
+            launched: true,
+            review_substitution: false,
+            key: AttemptKey {
+                extra: Default::default(),
+                retry_generation: None,
+                previous_attempt_ref: None,
+                graph_id: document.graph_id.clone(),
+                node_id: "writer".into(),
+                route_index: 0,
+                attempt: 1,
             },
-            ReadinessFact {
-                model: higher_model.clone(),
+            route: plan.nodes[0].routes[0].clone(),
+            state: AttemptState::Terminal,
+            attempt_ref: Some("provider/1".into()),
+            outcome: Some(AttemptOutcome::UsageLimited),
+            launch_actor: "chair".into(),
+            input_cap: None,
+            input_cap_source: None,
+            input_manifest: None,
+            usage: None,
+            settled: 1,
+            stop: Some(StopCause::UsageLimited),
+        });
+        let same_model = ModelId::parse("claude/claude-sonnet-5-5").unwrap();
+        let higher_model = ModelId::parse("claude/claude-opus-5-5").unwrap();
+        let config: provenant_routing::RoutingConfig = serde_json::from_value(json!({
+            "pools": {
+                "senior": [{"model":"claude/claude-sonnet-5-5","weight":1,"efforts":[]}],
+                "principal": [{"model":"claude/claude-opus-5-5","weight":1,"efforts":[]}]
+            },
+            "depletion": {
+                "rungs":["same_model_other_account","adjacent_tier"],
+                "tiers":["senior","principal"],
+                "adjacent":["higher"]
+            }
+        }))
+        .unwrap();
+        let facts = next_step::DepletionFacts {
+            catalogue: provenant_routing::Catalogue::bundled().unwrap(),
+            config,
+            stopped: Stopped {
+                model: same_model.clone(),
                 account: Some("pinned".into()),
-                state: Readiness::Ready,
+                effort: None,
+                tier: Some("senior".into()),
+                family: None,
             },
-        ],
-        tried: Vec::new(),
-        host_native: Vec::new(),
-        exclusions: Vec::new(),
-        intent: Default::default(),
-        confidential: false,
-        now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
-    };
-    let eligible = |facts: &next_step::DepletionFacts| {
-        provenant_routing::next_after_depletion(&provenant_routing::DepletionInput {
-            catalogue: &facts.catalogue,
-            config: &facts.config,
-            stopped: &facts.stopped,
-            cause: provenant_routing::DepletionCause::UsageLimited,
-            facts: &facts.readiness,
-            tried: &facts.tried,
-            host_native: &facts.host_native,
-            exclusions: &facts.exclusions,
-            intent: facts.intent,
-            confidential: facts.confidential,
-            now: facts.now,
-        })
-    };
-    let mut no_pin = facts.clone();
-    no_pin.stopped.account = None;
-    assert!(
-        matches!(
-            eligible(&no_pin),
-            provenant_routing::DepletionStep::Handoff(_)
-        ),
-        "the spare account is an otherwise eligible candidate"
-    );
-    let mut high_only = facts.clone();
-    high_only
-        .readiness
-        .retain(|fact| fact.model == higher_model);
-    high_only.stopped.account = None;
-    assert!(
-        matches!(
-            eligible(&high_only),
-            provenant_routing::DepletionStep::Handoff(_)
-        ),
-        "the higher tier is an otherwise eligible candidate"
-    );
+            readiness: vec![
+                ReadinessFact {
+                    model: same_model,
+                    account: Some("other".into()),
+                    state: Readiness::Ready,
+                },
+                ReadinessFact {
+                    model: higher_model.clone(),
+                    account: Some("pinned".into()),
+                    state: Readiness::Ready,
+                },
+            ],
+            tried: Vec::new(),
+            host_native: Vec::new(),
+            exclusions: Vec::new(),
+            intent: Default::default(),
+            confidential: false,
+            now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
+        };
+        let eligible = |facts: &next_step::DepletionFacts| {
+            provenant_routing::next_after_depletion(&provenant_routing::DepletionInput {
+                catalogue: &facts.catalogue,
+                config: &facts.config,
+                stopped: &facts.stopped,
+                cause: provenant_routing::DepletionCause::UsageLimited,
+                facts: &facts.readiness,
+                tried: &facts.tried,
+                host_native: &facts.host_native,
+                exclusions: &facts.exclusions,
+                intent: facts.intent,
+                confidential: facts.confidential,
+                now: facts.now,
+            })
+        };
+        let mut no_pin = facts.clone();
+        no_pin.stopped.account = None;
+        assert!(
+            matches!(
+                eligible(&no_pin),
+                provenant_routing::DepletionStep::Handoff(_)
+            ),
+            "the spare account is an otherwise eligible candidate"
+        );
+        let mut high_only = facts.clone();
+        high_only
+            .readiness
+            .retain(|fact| fact.model == higher_model);
+        high_only.stopped.account = None;
+        assert!(
+            matches!(
+                eligible(&high_only),
+                provenant_routing::DepletionStep::Handoff(_)
+            ),
+            "the higher tier is an otherwise eligible candidate"
+        );
 
-    let mut reads = 0;
-    let mut lookup = |_request: next_step::DepletionRequest<'_>| {
-        reads += 1;
-        Ok(Some(facts.clone()))
-    };
-    let (_, settled) = next_step::settle_stop(
-        &document,
-        &plan,
-        &checkpoint,
-        &limits,
-        &provenant_config::PortTable::builtin().worktree_layout,
-        &mut lookup,
-    )
-    .expect("depletion stop must settle");
-    assert_eq!(reads, 1);
-    assert_eq!(settled.nodes[0].state, NodeState::Failed);
-    assert!(settled.nodes[0].stop_fence);
-    assert!(settled.expansions.iter().all(|e| {
-        e.patch
-            .as_ref()
-            .and_then(|patch| patch.restart.as_ref())
-            .is_none()
-    }));
+        let mut reads = 0;
+        let mut lookup = |_request: next_step::DepletionRequest<'_>| {
+            reads += 1;
+            Ok(Some(facts.clone()))
+        };
+        let (_, settled) = next_step::settle_stop(
+            &document,
+            &plan,
+            &checkpoint,
+            &limits,
+            &provenant_config::PortTable::builtin().worktree_layout,
+            &mut lookup,
+        )
+        .expect("depletion stop must settle");
+        assert_eq!(reads, 1);
+        if pinned {
+            assert_eq!(settled.nodes[0].state, NodeState::Failed);
+            assert!(settled.nodes[0].stop_fence);
+            assert!(settled.expansions.iter().all(|e| {
+                e.patch
+                    .as_ref()
+                    .and_then(|patch| patch.restart.as_ref())
+                    .is_none()
+            }));
+        } else {
+            let patch = settled
+                .expansions
+                .iter()
+                .find_map(|expansion| expansion.patch.as_ref())
+                .expect("depletion restarts with the other account");
+            let replacement = patch.replaced.first().expect("replacement node");
+            let routes = replacement.routes.as_ref().expect("replacement routes");
+            assert_eq!(routes[0].account.as_deref(), Some("other"));
+            assert!(
+                routes
+                    .iter()
+                    .any(|route| route.account.as_deref() == Some("next-account")),
+                "an untried route keeps its own account selector"
+            );
+            assert!(
+                routes
+                    .iter()
+                    .all(|route| route.tier.as_deref() != Some("principal")),
+                "depletion cannot silently spend a higher tier"
+            );
+        }
+    }
 }
 
 fn review_shape_minima(with: Value) -> std::collections::BTreeMap<String, usize> {
@@ -549,6 +587,7 @@ fn retry_context<'a>(
     patch::PatchContext {
         library,
         resolvers,
+
         journal: None,
         limits,
 

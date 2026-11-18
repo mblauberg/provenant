@@ -225,6 +225,11 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
             std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )?;
+        provenant_confinement::publication::install_forge(
+            &mut forge,
+            project.clone(),
+            provenant_confinement::publication::Projector::ambient(),
+        );
         Ok(forge
             .request(
                 provenant_config::ForgeOperation::Open {

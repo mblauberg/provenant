@@ -81,9 +81,7 @@ fn effect_identifier(kind: &str, value: Option<&str>) -> Option<Value> {
     if value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
         return None;
     }
-    let safe = provenant_redact::publication_text(value.as_bytes(), []).ok()?;
-    let safe = String::from_utf8(safe).ok()?;
-    Some(serde_json::json!({"effect":kind,"identifier":safe}))
+    Some(serde_json::json!({"effect":kind,"identifier":value}))
 }
 
 pub(in crate::graph) fn name(id: &str) -> OsString {

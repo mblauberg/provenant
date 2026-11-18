@@ -6352,6 +6352,35 @@ mod tests {
     }
 
     #[test]
+    fn graph_context_secret_is_retained_in_authorised_preview() -> Result {
+        // Spec: docs/specs/fabric.md#checkpoint-envelope
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let secret = "sk-abcdefghijklmnopqrstuvwx";
+        let context = json!({(secret):"retained note"});
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "explain":true,
+                "document":{"graph_id":"metadata-secret", "context":context,
+                    "nodes":[{"id":"inspect", "use":"task", "prompt":"Inspect code"}]}
+            }),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(response["document"]["context"], context);
+        assert!(
+            FileJournal::graph_ids(
+                &factory.context.roots.state,
+                factory.context.identity.project
+            )?
+            .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn generated_graph_id_preserves_document_binding_and_settings() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;

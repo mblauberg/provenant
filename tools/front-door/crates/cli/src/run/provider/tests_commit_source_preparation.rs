@@ -331,3 +331,106 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
     }
     Ok(())
 }
+
+// Spec: docs/specs/routing.md#unknown-never-means-ready
+#[test]
+fn consecutive_preparations_skip_the_account_after_its_first_login_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::Clock;
+    let mut fixture = CommitSourcePreparation::new()?;
+    let account_home = fixture.home.join("codex-signed-out");
+    std::fs::create_dir(&account_home)?;
+    std::fs::write(
+        fixture.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.accounts.entries.work]\nadapter='codex'\nlabel='work'\nkey='signed-out'\ndirectory='{}'\n[[domains.routing.pools.trial]]\nmodel='codex/gpt-6-luna'\nweight=1\nefforts=[]\n[[domains.routing.pools.trial]]\nmodel='cursor/composer-2.5'\nweight=0\nefforts=[]\n",
+            account_home.display()
+        ),
+    )?;
+    fixture.task.route = run::RequestedRoute::Named {
+        extra: Default::default(),
+        name: "trial".into(),
+        effort: None,
+        required_family: None,
+    };
+    for _ in 0..2 {
+        let launch = prepare_with(
+            &fixture.registry(),
+            &fixture.task,
+            "independent launch",
+            &fixture.paths,
+            None,
+            |name| {
+                if name == "codex" || name == "cursor" {
+                    Ok(fixture.executable.clone())
+                } else {
+                    Err("fixture provider unavailable".into())
+                }
+            },
+            None,
+        )?;
+        assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
+        let scope = provenant_quota::ReadinessScope {
+            extra: Default::default(),
+            host: provenant_quota::LOCAL_HOST.into(),
+            adapter: "codex".into(),
+            account_key: "signed-out".into(),
+            route: "codex/gpt-6-luna".into(),
+        };
+        let observed = crate::quota::read_readiness(
+            &fixture.state,
+            &scope,
+            provenant_os::clock::SystemClock::new().unix_seconds(),
+        );
+        assert_eq!(observed.state, provenant_quota::ReadinessState::Unavailable);
+        assert_eq!(
+            observed.reason,
+            Some(provenant_quota::ReadinessReason::SignedOut)
+        );
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#unknown-never-means-ready
+#[test]
+fn successful_login_probe_recovers_an_expired_preparation_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::Clock;
+    let fixture = CommitSourcePreparation::new()?;
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    let account = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "default".into(),
+    };
+    crate::quota::persist_preparation_login_failure(
+        &fixture.state,
+        &account,
+        provenant_quota::ReadinessReason::SignedOut,
+        now - 1000,
+    )?;
+    let scope = provenant_quota::ReadinessScope {
+        extra: Default::default(),
+        host: provenant_quota::LOCAL_HOST.into(),
+        adapter: account.adapter.clone(),
+        account_key: account.account_key.clone(),
+        route: "cursor/composer-2.5".into(),
+    };
+    assert_eq!(
+        crate::quota::read_readiness(&fixture.state, &scope, now).state,
+        provenant_quota::ReadinessState::Unavailable
+    );
+    let launch = fixture.prepare()?;
+    assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
+    assert_eq!(
+        crate::quota::read_readiness(
+            &fixture.state,
+            &scope,
+            provenant_os::clock::SystemClock::new().unix_seconds()
+        )
+        .reason,
+        Some(provenant_quota::ReadinessReason::ProbedNoFigures)
+    );
+    Ok(())
+}

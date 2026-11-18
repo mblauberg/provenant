@@ -873,7 +873,7 @@ fn lane_port_allocation(
             match effect {
                 Effect::Proceed => return Ok((None, None)),
                 Effect::Warn(message) => return Ok((None, Some(message))),
-                Effect::Refuse(_) => {}
+                Effect::Refuse(_) | Effect::Stop(_) => {}
             }
             use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {

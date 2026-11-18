@@ -94,16 +94,23 @@ fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
     let boundary: GraphCheckpoint =
         serde_json::from_slice(&serde_json::to_vec(&boundary).unwrap()).unwrap();
     assert_eq!(
-        boundary.nodes.iter().find(|node| node.id == "task").unwrap().state,
+        boundary
+            .nodes
+            .iter()
+            .find(|node| node.id == "task")
+            .unwrap()
+            .state,
         NodeState::Pending
     );
-    assert!(boundary
-        .nodes
-        .iter()
-        .find(|node| node.id == "task")
-        .unwrap()
-        .outputs
-        .is_none());
+    assert!(
+        boundary
+            .nodes
+            .iter()
+            .find(|node| node.id == "task")
+            .unwrap()
+            .outputs
+            .is_none()
+    );
 
     // Loading the exact patch boundary validates the composite/member pairing
     // before it can launch the successor route, then continuation is idempotent.
@@ -122,10 +129,7 @@ fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
     let resumed = advance(&document, &mut resumed_owner, &mut resumed_journal).unwrap();
     assert_eq!(resumed.status, GraphStatus::Complete);
     assert_eq!(resumed_owner.calls.len(), 1);
-    assert_eq!(
-        resumed_owner.calls[0].1.adapter.as_deref(),
-        Some("second")
-    );
+    assert_eq!(resumed_owner.calls[0].1.adapter.as_deref(), Some("second"));
     advance(&document, &mut resumed_owner, &mut resumed_journal).unwrap();
     assert_eq!(resumed_owner.calls.len(), 1);
 }
@@ -185,6 +189,7 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -326,6 +331,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

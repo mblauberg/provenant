@@ -280,12 +280,7 @@ fn depletion_successor(
     let pinned_account = node
         .attempt
         .as_ref()
-        .and_then(|attempt| attempt.account.as_deref())
-        .or_else(|| {
-            node.routes
-                .get(usize::from(attempt.key.route_index))
-                .and_then(|route| route.account.as_deref())
-        });
+        .and_then(|attempt| attempt.account.as_deref());
     let readiness: Vec<_> = facts
         .readiness
         .iter()
@@ -575,6 +570,7 @@ pub(super) fn settle_stop(
         &PatchContext {
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
+
             journal: None,
             limits,
             worktree_layout: worktree_layout.clone(),

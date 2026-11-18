@@ -179,7 +179,7 @@ pub fn input_warnings(
             // stale or otherwise unsupported strict policy directly. Exact
             // credential matches are handled by their owning publication
             // boundary before any mutation.
-            Effect::Refuse(_) => {
+            Effect::Refuse(_) | Effect::Stop(_) => {
                 let rule = policy.rule("SECRET_SHAPED_INPUT");
                 warnings.push(format!(
                     "[SECRET_SHAPED_INPUT] {path} looks like a credential (strength=Warn, source={:?}, knob={})",

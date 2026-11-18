@@ -4,7 +4,7 @@ use std::io::Write;
 #[cfg(test)]
 thread_local! {
     static TEST_UNCERTAIN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static TEST_LOCAL_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_HANDOFF_FAILURE: std::cell::RefCell<Option<RunError>> = const { std::cell::RefCell::new(None) };
 }
 
 fn typed_local(
@@ -248,9 +248,11 @@ impl RunStore {
             };
         }
         #[cfg(test)]
-        if TEST_LOCAL_HANDOFF.with(|fault| fault.replace(false)) {
-            local_or_withdraw!(Err::<(), _>(HandOff::Local(
-                "injected local handoff".into()
+        if let Some(error) = TEST_HANDOFF_FAILURE.with(|fault| fault.borrow_mut().take()) {
+            local_or_withdraw!(Err::<(), _>(typed_local(
+                &policy,
+                "injected handoff",
+                &error
             )));
         }
         if let Some(writer) = plan
@@ -863,6 +865,39 @@ mod tests {
                 ..
             }
         ));
+        // Spec: docs/specs/routing.md#accounts-and-credentials
+        for safety in [
+            crate::HelperSafety::UnsupportedSshCommand,
+            crate::HelperSafety::OpaqueShellCommand,
+            crate::HelperSafety::NonPlainExecutable,
+            crate::HelperSafety::LaneLocalPath,
+            crate::HelperSafety::Unavailable,
+        ] {
+            let error = RunError::DeliveryPrepare {
+                step: crate::DeliveryPrepareStep::CredentialHelper,
+                refusal: Some(crate::DeliveryPrepareRefusal::CredentialHelper(safety)),
+                reason: "fixture helper refusal".into(),
+            };
+            let handoff = typed_local(&test_policy(), "delivery", &error);
+            if safety == crate::HelperSafety::Unavailable {
+                assert!(matches!(
+                    handoff,
+                    HandOff::TypedLocal {
+                        cause: TerminalCause::DeliveryPrepareCredentialHelper,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    handoff,
+                    HandOff::Boundary {
+                        class: BoundaryClass::Credentials,
+                        cause: Some(TerminalCause::DeliveryPrepareCredentialHelper),
+                        ..
+                    }
+                ));
+            }
+        }
         let retained = RunError::RetainedWriterImport {
             fence: Box::new(custody::PendingImport {
                 scope: provenant_records::custody::Scope {
@@ -1228,6 +1263,90 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+    #[test]
+    fn local_handoff_failure_retains_preparation_fallback_evidence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for safety in [
+            None,
+            Some(crate::HelperSafety::Unavailable),
+            Some(crate::HelperSafety::OpaqueShellCommand),
+        ] {
+            for cancelled in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let (clock, cancel) = (clock(), CancelToken::new());
+                let call = call(&clock, &cancel);
+                let context = context(temp.path())?;
+                let store = RunStore::open(&context, &call)?;
+                let request = input();
+                store.create(&request, &call)?;
+                let acquire = |directory, scope: Scope, binding| {
+                    if cancelled {
+                        let attempt = store
+                            .attempt_dir(scope.attempt, false)
+                            .expect("attempt directory");
+                        let cancellation = crate::db::bytes(&serde_json::json!({
+                        "schema_version": 1,
+                        "scope": scope,
+                        "requester": context.actor_id,
+                        "request_id": "fixture-cancel",
+                        "reason": provenant_supervisor::machine::StopReason::ExplicitCancellation
+                    }))
+                    .expect("cancel bytes");
+                        artifacts::seal(&attempt, "cancel.json", &cancellation, RECORD_LIMIT)
+                            .expect("seal cancellation");
+                    }
+                    custody::acquire_writer(
+                        directory,
+                        scope,
+                        binding,
+                        call.lock_budget(),
+                        call.cancel,
+                        call.clock,
+                    )
+                };
+                let error = match safety {
+                    None => RunError::GitUnavailable,
+                    Some(safety) => RunError::DeliveryPrepare {
+                        step: crate::DeliveryPrepareStep::CredentialHelper,
+                        refusal: Some(crate::DeliveryPrepareRefusal::CredentialHelper(safety)),
+                        reason: "fixture helper refusal".into(),
+                    },
+                };
+                TEST_HANDOFF_FAILURE.with(|fault| *fault.borrow_mut() = Some(error));
+                let result = store.start_inner(
+                    request.attempt_id,
+                    &crate::dispatch_tests::Ready,
+                    &|_, _| Ok(Vec::new()),
+                    &acquire,
+                    None,
+                    &call,
+                )?;
+                assert!(matches!(result.as_slice(), [Started::Refused { .. }]));
+                let record = store.record(request.attempt_id, &call)?;
+                assert_eq!(record.provider_launched, Some(false));
+                assert_eq!(
+                    record.preparation_failure,
+                    (!cancelled && safety != Some(crate::HelperSafety::OpaqueShellCommand))
+                        .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+                );
+                assert!(
+                    matches!(record.state, AttemptState::Terminal { outcome, .. }
+            if outcome == if cancelled { Outcome::Cancelled } else { Outcome::Rejected })
+                );
+                assert!(store.custody_released(&record, &call)?);
+                let reopened = RunStore::open(&context, &call)?;
+                assert_eq!(
+                    reopened
+                        .record(request.attempt_id, &call)?
+                        .preparation_failure,
+                    record.preparation_failure
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn local_handoff_write_failure_returns_error_without_reporting_withdrawal()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -1252,7 +1371,7 @@ mod tests {
             store.db.execute_batch("CREATE TEMP TRIGGER fail_handoff_withdraw BEFORE UPDATE ON attempts BEGIN SELECT RAISE(ABORT, 'injected withdrawal write'); END;").expect("inject write failure");
             Ok(lease)
         };
-        TEST_LOCAL_HANDOFF.with(|fault| fault.set(true));
+        TEST_HANDOFF_FAILURE.with(|fault| *fault.borrow_mut() = Some(RunError::GitUnavailable));
         let result = store.start_inner(
             request.attempt_id,
             &crate::dispatch_tests::Ready,

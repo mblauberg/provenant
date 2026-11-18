@@ -134,6 +134,48 @@ fn provider_account_and_model_selectors_remove_only_their_members()
     Ok(())
 }
 
+#[test]
+fn all_excluded_preferred_provider_routes_fall_back_with_a_recorded_reason()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (catalogue, records) = exclusion_fixture()?;
+    let config = RoutingConfig::default();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let exclusion = ExclusionRule {
+        selector: ExclusionSelector::Provider("codex".into()),
+        source: ExclusionSource::Graph,
+    };
+
+    let route = resolve_for_account_with_seed_excluding(
+        &query,
+        &ctx,
+        None,
+        "cross-provider-exclusion",
+        0,
+        &[],
+        &[exclusion],
+    )?;
+
+    assert_eq!(route.adapter, "claude");
+    let claude = &catalogue.pools["trial"][0].model;
+    let codex = &catalogue.pools["trial"][1].model;
+    assert_eq!(route.model, claude.model());
+    let receipt = route.pool_selection.ok_or("pool selection receipt")?;
+    let skipped = receipt
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == codex.as_str())
+        .ok_or("excluded preferred-provider candidate")?;
+    assert_eq!(
+        skipped.exclusion.as_deref(),
+        Some("excluded by graph: provider codex")
+    );
+    assert_eq!(receipt.pick, claude.as_str());
+    Ok(())
+}
+
 // Spec: docs/specs/routing.md#provider-model-scope
 #[test]
 fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
@@ -148,7 +190,7 @@ fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
     ];
     let error = trial_picks(&catalogue, &records, &rules).unwrap_err();
     assert_eq!(error.code(), "no_eligible_pool_member");
-    let RoutingError::NoEligiblePoolMember { exclusions } = error else {
+    let RoutingError::NoEligiblePoolMember { exclusions, .. } = error else {
         return Err("pool exclusion must be a typed no-eligible-member refusal".into());
     };
     assert!(!exclusions.is_empty());

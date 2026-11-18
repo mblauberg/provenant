@@ -281,6 +281,7 @@ pub(super) fn correct_verdict(
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
             limits,
+
             journal: None,
             worktree_layout: worktree_layout.clone(),
         },

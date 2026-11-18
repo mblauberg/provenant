@@ -49,6 +49,7 @@ fn add(
         journal: None,
         library: &library,
         resolvers: &resolvers,
+
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -442,7 +443,7 @@ fn child_decision_inherits_the_graph_chair_session() {
 /// Small: a refused child cannot consume a revision or leave a partial node or
 /// receipt that would turn a corrected relay request into an idempotency clash.
 #[test]
-fn child_admission_refusals_leave_the_graph_unchanged() {
+fn child_admission_refusals_are_atomic_and_shape_only_ids_are_allowed() {
     let library = template::TemplateLibrary::bundled();
     let resolvers = Default::default();
     let limits = plans::generous();
@@ -450,6 +451,7 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         journal: None,
         library: &library,
         resolvers: &resolvers,
+
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -477,6 +479,25 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         assert_eq!(checkpoint, before, "{}", request.idempotency_key);
         assert_eq!(patch::revision(&checkpoint), 0);
     }
+
+    let (document, mut checkpoint) = live(None);
+    let identifier = "AKIAIOSFODNN7EXAMPLE";
+    let request = child(identifier, "secret-child");
+    let receipt = relay::admit_child_bound(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+        Some(("parent-branch", "1111111111111111111111111111111111111111")),
+    )
+    .unwrap();
+    assert_eq!(receipt.node, format!("a--{identifier}"));
+    assert!(!receipt.replayed);
+    assert_eq!(patch::revision(&checkpoint), 1);
+    assert!(ids(&document, &checkpoint).contains(&receipt.node));
 }
 
 #[test]
@@ -856,6 +877,7 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
+
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -947,6 +969,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
+
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1026,6 +1049,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
+
         journal: Some(&journal),
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1059,6 +1083,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
+
         journal: None,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
@@ -1514,6 +1539,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
         worktree_layout: ports.worktree_layout.clone(),
@@ -1559,6 +1585,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     let changed_context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
         worktree_layout: ports.worktree_layout,
@@ -1736,6 +1763,7 @@ fn bound_direct_and_planned_child_preserves_explicit_worktree_and_upstream_sourc
             journal: None,
             library: &library,
             resolvers: &resolvers,
+
             limits: &limits,
             worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         };
@@ -1960,6 +1988,7 @@ nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]
         journal: None,
         library: &library,
         resolvers: &resolvers,
+
         limits: &limits,
 
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

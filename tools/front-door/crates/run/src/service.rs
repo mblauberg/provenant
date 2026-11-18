@@ -99,7 +99,7 @@ impl<'a> Service<'a> {
         };
         let mut contribution_branch = None;
         let mut nested_refusal = None;
-        // Validate launch capabilities and input policy before preparing a writer.
+        // Refuse unsupported launches before preparing a writer.
         {
             let task = &input.task;
             let route = Self::route(task.route.clone())?;
@@ -110,19 +110,9 @@ impl<'a> Service<'a> {
                 nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
-        let policy = provenant_config::policy::read(
-            self.store.writer_registry(),
-            &self.store.context.project_id.to_string(),
-            &provenant_config::policy::dispatch(&input.task.profile),
-        );
-        let input_warning = Self::input_warning(&input.task.prompt, &policy)?;
+        Self::warn_for_secrets("task.prompt", &input.task.prompt);
         let (request, prompt) = {
             let mut task = input.task;
-            task.prompt = String::from_utf8(
-                provenant_redact::publication_text(task.prompt.as_bytes(), [])
-                    .map_err(|_| RunError::Validation("prompt redaction failed"))?,
-            )
-            .map_err(|_| RunError::Validation("prompt redaction is not UTF-8"))?;
             if task
                 .context
                 .as_ref()
@@ -391,12 +381,7 @@ impl<'a> Service<'a> {
                     .ok_or(RunError::Validation("refusal diagnostic missing"))?,
             )));
         }
-        let mut record = self.store.create(&prepared, call)?;
-        if let Some(warning) = input_warning {
-            record
-                .extra
-                .insert("warnings".into(), serde_json::json!([warning]));
-        }
+        let record = self.store.create(&prepared, call)?;
         if let Some((branch, role)) = contribution_branch {
             // Capture the accepted attempt, including on operation replay. A
             // newly generated candidate ID is not authoritative after create.
@@ -562,21 +547,13 @@ impl<'a> Service<'a> {
             )),
         }
     }
-    fn input_warning(
-        prompt: &str,
-        policy: &provenant_records::policy::Policy,
-    ) -> Result<Option<String>> {
-        use provenant_records::policy::{Effect, Facts};
-        if provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).is_ok() {
-            return Ok(None);
-        }
-        match policy.check(
-            "SECRET_SHAPED_INPUT",
-            Facts::violation("prompt looks like a credential"),
-        ) {
-            Effect::Proceed => Ok(None),
-            Effect::Warn(message) => Ok(Some(message)),
-            Effect::Refuse(diagnostic) => Err(RunError::RecordedRefusal(diagnostic)),
+    fn warn_for_secrets(field: &str, prompt: &str) {
+        if provenant_confinement::disclosure::scan_snapshot(prompt.as_bytes(), &[]).is_err() {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "provenant: warning: field={field} rule=known_secret_shape"
+            );
         }
     }
     pub fn status(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
@@ -660,26 +637,8 @@ impl<'a> Service<'a> {
             .start_checked(attempt, expected, providers, holder, call)
     }
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<AttemptRecord> {
-        let request = self.store.request(input.prior, call)?;
-        let policy = crate::launch_policy(
-            self.store.writer_registry(),
-            &self.store.context.project_id.to_string(),
-            &request.task,
-        );
-        let warning = Self::input_warning(&input.prompt, &policy)?;
-        let mut input = input.clone();
-        input.prompt = String::from_utf8(
-            provenant_redact::publication_text(input.prompt.as_bytes(), [])
-                .map_err(|_| RunError::Validation("prompt redaction failed"))?,
-        )
-        .map_err(|_| RunError::Validation("prompt redaction is not UTF-8"))?;
-        let mut record = self.store.resume(&input, call)?;
-        if let Some(warning) = warning {
-            record
-                .extra
-                .insert("warnings".into(), serde_json::json!([warning]));
-        }
-        Ok(record)
+        Self::warn_for_secrets("resume.prompt", &input.prompt);
+        self.store.resume(input, call)
     }
     pub fn events(
         &self,
@@ -766,6 +725,7 @@ error_kinds! {
     UnknownAccount => "UNKNOWN_ACCOUNT", "The requested account is not registered.";
     DuplicatePacingProfile => "DUPLICATE_PACING_PROFILE", "Multiple pacing profiles resolve to the same account.";
     Git => "GIT", "Git is unavailable or a Git query failed.";
+    SecretInput => "SECRET_INPUT", "The prompt or input appears to contain a secret.";
     WorktreeRequired => "WORKTREE_REQUIRED", "The requested mode needs a worktree.";
     WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE", "A worktree was given for a mode that does not use one.";
     ParentAttempt => "PARENT_ATTEMPT", "The parent attempt is missing or cannot start children.";
@@ -863,6 +823,7 @@ impl ErrorKind {
             | Self::Conflict
             | Self::LaneDepth
             | Self::QueueFull
+            | Self::SecretInput
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
             _ => "error",

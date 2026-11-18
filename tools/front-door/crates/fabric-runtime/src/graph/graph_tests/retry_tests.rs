@@ -251,14 +251,7 @@ fn redo_container_after_checkpoint_crash(
         .iter()
         .find(|node| node.id == "sibling")
         .unwrap();
-    retry_id(
-        &document,
-        &mut checkpoint,
-        container,
-        None,
-        None,
-    )
-    .unwrap();
+    retry_id(&document, &mut checkpoint, container, None, None).unwrap();
     assert_eq!(
         checkpoint
             .nodes
@@ -597,14 +590,7 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
     }));
     // A settled consumer keeps what it observed until it is redone itself.
     let mut checkpoint = run.checkpoint;
-    retry_id(
-        &document,
-        &mut checkpoint,
-        "sibling",
-        None,
-        None,
-    )
-    .unwrap();
+    retry_id(&document, &mut checkpoint, "sibling", None, None).unwrap();
     let mut owner = FakeOwner {
         observations: [done_as("sibling")].into(),
         ..Default::default()
@@ -743,13 +729,7 @@ fn node_redo_reopens_only_the_selected_node_of_a_cancelled_graph() {
     .unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Skipped);
     assert_eq!(checkpoint.nodes[0].attempts[0].state, AttemptState::Running);
-    retry(
-        &document,
-        &mut checkpoint,
-        Some("redo selected work"),
-        None,
-    )
-    .unwrap();
+    retry(&document, &mut checkpoint, Some("redo selected work"), None).unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
     assert_eq!(checkpoint.nodes[1].state, NodeState::Skipped);
     assert!(!checkpoint.cancelled);
@@ -976,13 +956,7 @@ fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() 
             .iter()
             .any(|n| n.id == "work--first" && n.state == NodeState::Succeeded)
     );
-    retry(
-        &document,
-        &mut checkpoint,
-        Some("Plan another slice"),
-        None,
-    )
-    .unwrap();
+    retry(&document, &mut checkpoint, Some("Plan another slice"), None).unwrap();
     let mut owner = FakeOwner {
         observations: [
             terminal_from(&fragment("second"), "second-plan"),
@@ -1091,13 +1065,7 @@ fn node_redo_repeated_planner_fallbacks_have_distinct_nodes_and_replay_without_r
     for generation in 0..3 {
         if generation > 0 {
             let checkpoint = journal.0.as_mut().unwrap();
-            retry(
-                &document,
-                checkpoint,
-                Some("Try planning again"),
-                None,
-            )
-            .unwrap();
+            retry(&document, checkpoint, Some("Try planning again"), None).unwrap();
         }
         let mut owner = FakeOwner {
             observations: [
@@ -1453,6 +1421,7 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
 
@@ -1652,6 +1621,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
                 &patch::PatchContext {
                     library: &template::TemplateLibrary::bundled(),
                     resolvers: &Default::default(),
+
                     journal: None,
                     limits: &plans::generous(),
 
@@ -1671,6 +1641,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
             &patch::PatchContext {
                 library: &template::TemplateLibrary::bundled(),
                 resolvers: &Default::default(),
+
                 journal: None,
                 limits: &plans::generous(),
 
@@ -1763,6 +1734,7 @@ fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the
         &patch::PatchContext {
             library: &template::TemplateLibrary::bundled(),
             resolvers: &Default::default(),
+
             journal: None,
             limits: &plans::generous(),
 
@@ -1806,6 +1778,7 @@ fn public_retry_preserves_live_spawn_only_children() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
 
@@ -2414,12 +2387,8 @@ fn no_work_stop_is_never_saved_without_its_restart() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
-    // Registered credentials are masked before continuation; unregistered
-    // credential-shaped examples remain intact.
-    let _scope = provenant_redact::publication_scope([
-        b"ghp_abcdefghijklmnopqrstuvwxyz0123456789".to_vec(),
-    ]).unwrap();
+fn no_work_restart_preserves_raw_handoff_and_the_stop() {
+    // Retained handoff text reaches the continuation without shape filtering.
     let mut work = node("work", route("first"));
     work.route = None;
     work.routes = Some(vec![route("first"), route("second")]);
@@ -2440,8 +2409,7 @@ fn no_work_restart_uses_normalised_handoff_and_preserves_the_stop() {
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 2);
     assert!(owner.prompts[1].contains("Finish renderer"));
-    assert!(!owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
-    assert!(owner.prompts[1].contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(owner.prompts[1].contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
     assert_eq!(
         run.checkpoint.nodes[0].previous_attempts[0].outcome,
@@ -2576,14 +2544,7 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
                 .unwrap(),
         ),
     });
-    let error = retry_id(
-        &document,
-        &mut checkpoint,
-        "work",
-        Some("Redo it"),
-        None,
-    )
-    .unwrap_err();
+    let error = retry_id(&document, &mut checkpoint, "work", Some("Redo it"), None).unwrap_err();
     let refusal = error
         .parameter
         .clone()
@@ -2611,13 +2572,7 @@ fn attempt_numbers_increase_across_retries_and_replay_is_stable() {
         let mut launches: Vec<(AttemptKey, u32)> = Vec::new();
         for generation in 0..generations {
             if generation > 0 {
-                retry(
-                    &document,
-                    journal.0.as_mut().unwrap(),
-                    None,
-                    None,
-                )
-                .unwrap();
+                retry(&document, journal.0.as_mut().unwrap(), None, None).unwrap();
             }
             // Replay each launch through the pre-reference crash window;
             // explicit retries below allocate the next attempt number.

@@ -484,7 +484,6 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                 &PatchContext {
                     library: &library,
                     resolvers: &Default::default(),
-
                     journal: None,
                     limits: &Default::default(),
 

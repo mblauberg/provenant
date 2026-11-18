@@ -424,8 +424,8 @@ fn normalise_fragment(json: &str) -> Result<String, String> {
         serde_json::from_str(json).map_err(|_| "patch JSON is invalid".to_owned())?;
     prompt_text::validate_identities(&raw, prompt_text::Context::Patch).map_err(str::to_owned)?;
     let value = super::patch::Patch::from_fragment(json)?;
-    let value = prompt_text::normalise_capture(&value, prompt_text::Context::Patch)
-        .map_err(str::to_owned)?;
+    let value =
+        prompt_text::normalise(&value, prompt_text::Context::Patch).map_err(str::to_owned)?;
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
@@ -1215,6 +1215,7 @@ fn fragment(
     let context = super::patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits,
         worktree_layout: worktree_layout.clone(),
@@ -2016,7 +2017,7 @@ pub(super) fn settle(
             Some((preview, plan, positions))
         }
         Err(reason) => {
-            let reason = provenant_redact::bounded_line(&reason, MAX_ADVANCE_ERROR_BYTES);
+            let reason = provenant_records::diagnostic::safe_text(&reason);
             if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                 let warning = bounded(&format!("patch refused: {reason}"), WARNING_BYTES);
                 if !outputs.warnings.contains(&warning) {

@@ -1584,7 +1584,7 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
 }
 
 #[test]
-fn untyped_dispatch_refusal_retains_projection_or_message_without_secrets() {
+fn untyped_dispatch_refusal_retains_projection_or_message_locally() {
     use provenant_records::diagnostic::Diagnostic;
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     for projection in [
@@ -1610,7 +1610,7 @@ fn untyped_dispatch_refusal_retains_projection_or_message_without_secrets() {
                 .unwrap()
                 .contains("setup script failed: missing dependency")
         );
-        assert!(!wire.contains(secret));
+        assert!(wire.contains(secret));
         assert!(!diagnostic.next.unwrap().contains("receipt"));
     }
 }
@@ -1625,11 +1625,7 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
         },
     ));
     assert!(fail.message.contains("setup anchor changed"));
-    assert!(
-        !fail
-            .message
-            .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
-    );
+    assert!(fail.message.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     let error = dispatch_refused(fail);
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();

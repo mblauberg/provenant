@@ -259,10 +259,22 @@ pub struct PatchContext<'a> {
     pub worktree_layout: provenant_config::WorktreeLayoutPort,
 }
 
-/// Detect credential-shaped text for advisory input policy and safe diagnostics.
+/// Detect a credential shape for advisory warnings only.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
     provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
         .map_err(|_| "input looks like a credential".to_owned())
+}
+
+/// Advisory content inspection. Field and rule are host-owned labels; matched
+/// bytes are never included in a warning or used as an admission predicate.
+pub fn warn_for_secrets(field: &str, text: &str) {
+    if provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[]).is_err() {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "provenant: warning: field={field} rule=known_secret_shape"
+        );
+    }
 }
 
 /// A running graph: its submitted document and its checkpoint.
@@ -540,6 +552,9 @@ fn retry_node_scope(
         .transpose()
         .map_err(PatchError::invalid)?;
     let brief = normalised_brief.as_deref();
+    if let Some(brief) = brief {
+        warn_for_secrets("graph.patch", brief);
+    }
     let expanded = plans::expand(
         graph.document,
         &graph.checkpoint.extensions,
@@ -755,7 +770,11 @@ fn retry_node_scope(
     if let Some(routes) = replacement_routes {
         node.route = None;
         let routes: Vec<GraphRoute> =
-            prompt_text::normalise(&routes.to_vec()).map_err(PatchError::invalid)?;
+            prompt_text::normalise(&routes.to_vec(), prompt_text::Context::Route)
+                .map_err(PatchError::invalid)?;
+        let text =
+            serde_json::to_string(&routes).map_err(|e| PatchError::invalid(e.to_string()))?;
+        warn_for_secrets("graph.patch", &text);
         node.routes = Some(routes);
     }
     // A reset removes its expansion-pause marker. Move the graph pause to
@@ -933,7 +952,8 @@ pub fn submission(
     limits: &crate::config::GraphLimits,
     worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
-    *document = prompt_text::normalise(document).map_err(PatchError::invalid)?;
+    *document = prompt_text::normalise(document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
     for node in &mut document.nodes {
         node.template.get_or_insert_with(|| "raw".into());
     }
@@ -1001,6 +1021,7 @@ pub fn submission(
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits,
         worktree_layout,
@@ -1028,14 +1049,17 @@ pub fn submit(
     integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
     let document = compile_submission(graph_id, patch, context, integration_branch)?;
-    let document: GraphDocument = prompt_text::normalise(&document).map_err(PatchError::invalid)?;
+    let document: GraphDocument = prompt_text::normalise(&document, prompt_text::Context::Document)
+        .map_err(PatchError::invalid)?;
+    let text = serde_json::to_string(&document).map_err(|e| PatchError::invalid(e.to_string()))?;
+    warn_for_secrets("graph.patch", &text);
     admit_submission(&document, context)?;
     Ok(document)
 }
 
 /// Build a new submission before host binding. This intermediate document is
 /// not admitted text: the host must call `submission` after binding, which
-/// normalises, scans and admits the complete document exactly once.
+/// inspects and admits the complete document exactly once.
 pub fn compile_submission(
     graph_id: &str,
     patch: &Patch,
@@ -1171,6 +1195,13 @@ pub(super) struct Admission {
     pub warnings: Vec<String>,
 }
 
+fn scan(patch: &Patch, _context: &PatchContext<'_>) -> Result<(), PatchError> {
+    let text =
+        serde_json::to_string(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
+    warn_for_secrets("graph.patch", &text);
+    Ok(())
+}
+
 /// Compile and check a patch against the current expansion without changing
 /// the checkpoint.
 pub(super) enum Preparation<'a> {
@@ -1195,7 +1226,11 @@ pub(super) fn prepare(
     // the steer boundary. Captured fragments were normalised before storage.
     // Only a live patch still carries unprocessed ingress text.
     let normalised = if matches!(mode, Preparation::Live { retry: None }) {
-        Some(prompt_text::normalise(patch).map_err(PatchError::invalid)?)
+        scan(patch, context)?;
+        Some(
+            prompt_text::normalise(patch, prompt_text::Context::Patch)
+                .map_err(PatchError::invalid)?,
+        )
     } else {
         None
     };
@@ -1503,6 +1538,14 @@ pub(super) fn prepare(
     };
     if matches!(mode, Preparation::FinalFragment) {
         expansion.final_fragment = true;
+    }
+    // Compilation, item expansion and namespacing can join separately safe
+    // fragments. Scan only this admission's final product, never the stored
+    // document or prior expansions, and never rewrite their digested bytes.
+    if retry.is_none() {
+        let text = serde_json::to_string(&expansion)
+            .map_err(|error| PatchError::invalid(error.to_string()))?;
+        warn_for_secrets("graph.patch", &text);
     }
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);

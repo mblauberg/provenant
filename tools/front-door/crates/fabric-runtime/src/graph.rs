@@ -1537,7 +1537,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &patch::PatchContext {
                         library: &library,
                         resolvers: &resolvers,
-
                         journal: None,
                         limits,
                         worktree_layout: worktree_layout.clone(),
@@ -2126,7 +2125,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let context = patch::PatchContext {
                                         library: &library,
                                         resolvers: &resolvers,
-
                                         journal: None,
                                         limits,
                                         worktree_layout: worktree_layout.clone(),
@@ -2307,6 +2305,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .map_err(GraphError::Run)?
                 {
                     NextAttempt::WaitRetryWake => break,
+                    NextAttempt::WaitFallbackEvidence(retry) => {
+                        checkpoint.nodes[node_index].fallback_evidence_retry = Some(retry);
+                        asks::refresh_wake(&mut checkpoint);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                     NextAttempt::LaunchRetryExhausted { reason } => {
                         transitions::retry_exhausted(&mut checkpoint.nodes[node_index], &reason);
                         asks::refresh_wake(&mut checkpoint);
@@ -2319,6 +2323,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             code.map(Into::into),
                             message,
                         );
+                        checkpoint.nodes[node_index].fallback_evidence_retry = None;
+                        asks::refresh_wake(&mut checkpoint);
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
@@ -3150,6 +3156,43 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .unwrap_or_default(),
                     _ => Vec::new(),
                 };
+                let fallback_evidence_retry = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        outcome,
+                        launched: false,
+                        ..
+                    } if fallback_candidate(*outcome, node.access, false) => {
+                        let review_limit_reached = next_attempt::review_member(node)
+                            && checkpoint.nodes[node_index]
+                                .attempts
+                                .iter()
+                                .filter(|attempt| attempt.review_substitution)
+                                .count()
+                                >= limits.review_substitutions;
+                        let waitable = next_attempt::custody_release_pending(
+                            node,
+                            route_index,
+                            *outcome,
+                            false,
+                            next_step::FallbackEvidence {
+                                preparation: fallback_evidence,
+                                unreadable: evidence_unreadable,
+                                review_limit_reached,
+                                cause: fallback_cause.as_ref(),
+                                skipped_accounts: &skipped_accounts,
+                            },
+                        );
+                        if waitable {
+                            owner.wall_now().and_then(|now| {
+                                next_attempt::initial_fallback_evidence_retry(&key, reference, now)
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 let quota_redraw = match &observation {
                     AttemptObservation::Terminal {
                         attempt_ref: Some(reference),
@@ -3300,6 +3343,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usage,
                         fallback_evidence,
                         evidence_unreadable,
+                        fallback_evidence_retry,
                         fallback_cause,
                         skipped_accounts,
                         review_range,

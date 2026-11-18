@@ -85,7 +85,6 @@ impl RunStore {
             // Never substitute an older progress declaration for it.
             handoff => handoff,
         };
-        let handoff = sanitise_handoff_result(handoff);
         if handoff != Ok(None) {
             seal(
                 attempt,
@@ -159,7 +158,7 @@ impl RunStore {
 /// Redact decoded handoff values before a graph consumes local or peer output.
 pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
-        let safe = provenant_redact::publication_text(text.as_bytes(), [])
+        let safe = provenant_redact::known_shapes(text.as_bytes())
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
         String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
     })
@@ -191,13 +190,13 @@ pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Res
     let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
     let mut full = handoff.clone();
     full.write_scope = Some(report.clone());
-    if let Ok(safe) = sanitise_handoff(&full) {
-        return Ok(safe);
+    if let Ok(validated) = validate_handoff(&full) {
+        return Ok(validated);
     }
 
     let mut compact = handoff.clone();
     compact.write_scope = Some(report.compact());
-    sanitise_handoff(&compact)
+    validate_handoff(&compact)
 }
 
 fn walk_handoff_value(
@@ -213,11 +212,11 @@ fn walk_handoff_value(
         }
         serde_json::Value::Object(fields) => {
             for (key, mut value) in std::mem::take(fields) {
-                if transform(&key)? != key {
-                    return Err(RunError::Validation("credential in handoff object key"));
-                }
+                let key = transform(&key)?;
                 walk_handoff_value(&mut value, transform)?;
-                fields.insert(key, value);
+                if fields.insert(key, value).is_some() {
+                    return Err(RunError::Validation("handoff field collision"));
+                }
             }
         }
         _ => {}
@@ -225,8 +224,14 @@ fn walk_handoff_value(
     Ok(())
 }
 
-/// Transform decoded values, including nested forward fields, refusing keys
-/// that would change, then revalidate bounds after any replacement growth.
+fn validate_handoff(handoff: &Handoff) -> Result<Handoff> {
+    let bytes =
+        serde_json::to_vec(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
+    Handoff::from_json(&bytes).map_err(RunError::Handoff)
+}
+
+/// Transform decoded values and object keys, including nested forward fields,
+/// then revalidate both field and total bounds after any replacement growth.
 pub(crate) fn transform_handoff(
     handoff: &Handoff,
     mut transform: impl FnMut(&str) -> Result<String>,
@@ -263,8 +268,8 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
     .transpose()
 }
 
-/// Errors and retained fields are provider output too: refuse credential keys
-/// and redact values before persistence or disclosure, as for a complete handoff.
+/// Errors and retained fields are provider output too: redact their keys and
+/// values before persistence or disclosure, just as for a complete handoff.
 pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
     match handoff {
         Ok(Some(handoff)) => sanitise_handoff(&handoff)
@@ -277,7 +282,7 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
         Err(error) => {
             let mut value = serde_json::json!(error);
             let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_redact::publication_text(text.as_bytes(), [])
+                let safe = provenant_redact::known_shapes(text.as_bytes())
                     .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
                 String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
             });
@@ -644,8 +649,9 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     #[test]
-    fn provider_death_retains_sanitised_progress() -> TestResult {
+    fn provider_death_retains_raw_progress() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
         let cancel = provenant_core::CancelToken::new();
@@ -667,7 +673,6 @@ mod tests {
         let root = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&root, OsStr::new("candidate-1"), true)?;
         let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
-        let _scope = provenant_redact::publication_scope([secret_shape.as_bytes().to_vec()])?;
         let mut progress: serde_json::Value = serde_json::from_slice(&snapshot("stopped_early"))?;
         progress["note"] = serde_json::json!(format!(
             "Parser committed; renderer remains.\n{secret_shape}"
@@ -721,14 +726,17 @@ mod tests {
         let handoff = store.handoff(&terminal)??.ok_or("missing snapshot")?;
         assert_eq!(
             handoff.remaining,
-            ["Finish renderer", "\n[REDACTED]", "\t[REDACTED]"]
+            [
+                "Finish renderer",
+                &format!("\n{secret_shape}"),
+                &format!("\t{secret_shape}")
+            ]
         );
         assert_eq!(
             handoff.extra["future"]["nested"][1]["token"],
-            "\t[REDACTED]"
+            format!("\t{secret_shape}")
         );
-        assert!(!handoff.fenced().contains(secret_shape));
-        assert!(handoff.fenced().contains("[REDACTED]"));
+        assert!(handoff.fenced().contains(secret_shape));
         // Progress survives temporary cleanup and provider history expiry.
         crate::artifacts::remove_entry_tree(&attempt, OsStr::new("provider-state"))?;
         assert_eq!(store.handoff(&old)??, Some(handoff.clone()));
@@ -738,35 +746,9 @@ mod tests {
         );
         Ok(())
     }
-    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     #[test]
-    fn captured_handoff_credential_keys_refuse_without_rewriting() -> TestResult {
-        let registered = "registered-handoff-key-3391";
-        let _scope = provenant_redact::publication_scope([registered.as_bytes().to_vec()])?;
-        let embedded = format!("prefix-{registered}-suffix");
-        for key in [registered, embedded.as_str()] {
-            let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
-            value["future"] = serde_json::json!({"nested": {key: "value"}});
-            let handoff: Handoff = serde_json::from_value(value)?;
-            let before = handoff.clone();
-            assert!(sanitise_handoff(&handoff).is_err());
-            assert_eq!(handoff, before);
-            let error = sanitise_handoff_result(Ok(Some(handoff))).unwrap_err();
-            assert!(!serde_json::to_string(&error)?.contains(key));
-        }
-        let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
-        value["future"] = serde_json::json!({"AKIAIOSFODNN7EXAMPLE": "password=\"example\""});
-        let handoff: Handoff = serde_json::from_value(value)?;
-        assert_eq!(sanitise_handoff(&handoff)?, handoff);
-        Ok(())
-    }
-
-    #[test]
-    fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
-        let _scope = provenant_redact::publication_scope([
-            b"sk-abcdefghijklmnopqrstuvwx".to_vec(),
-            b"a:b".to_vec(),
-        ])?;
+    fn final_handoff_preserves_decoded_strings_and_validates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {
             for field in ["note", "remaining", "decisions", "verify", "future"] {
                 let temp = tempfile::tempdir()?;
@@ -783,7 +765,7 @@ mod tests {
                 value[field] = match field {
                     "note" => serde_json::json!(secret),
                     "future" => {
-                        serde_json::json!({"extension":[secret.clone(),{"value":secret}]})
+                        serde_json::json!({secret.clone():[secret.clone(),{"value":secret}]})
                     }
                     _ => serde_json::json!([secret]),
                 };
@@ -795,33 +777,14 @@ mod tests {
                     .capture_handoff(&attempt, &record, &result)?
                     .handoff?
                     .ok_or("final snapshot")?;
-                assert!(!safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
-                assert!(safe.fenced().contains("[REDACTED]"));
+                assert!(safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
                 assert_eq!(store.handoff(&record)??, Some(safe));
             }
         }
-        // Redacting short URL credentials expands the note past its byte cap.
-        let url = "\nhttps://a:b@h";
-        let note = format!(
-            "{}{url}",
-            "x".repeat(provenant_records::handoff::NOTE_BYTES - url.len())
-        );
         let mut handoff = Handoff::from_json(&snapshot("done"))?;
-        handoff.note = note;
-        let redact = |text: &str| {
-            let safe = provenant_redact::publication_text(text.as_bytes(), [])
-                .map_err(|_| RunError::Validation("redaction"))?;
-            String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
-        };
-        let invalid = transform_handoff(&handoff, redact);
-        assert!(matches!(invalid, Err(RunError::Handoff(_))));
-        let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
-        value["future"] = serde_json::json!({"url":url,"padding":""});
-        let padding = HANDOFF_BYTES - serde_json::to_vec(&value)?.len();
-        value["future"]["padding"] = serde_json::json!("x".repeat(padding));
-        let handoff = Handoff::from_json(&serde_json::to_vec(&value)?)?;
+        handoff.note = "x".repeat(provenant_records::handoff::NOTE_BYTES + 1);
         assert!(matches!(
-            transform_handoff(&handoff, redact),
+            validate_handoff(&handoff),
             Err(RunError::Handoff(_))
         ));
         Ok(())
@@ -1007,6 +970,7 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     #[test]
     fn malformed_final_retains_fields_and_never_uses_stale_progress() -> TestResult {
         for complete in [true, false] {
@@ -1034,7 +998,6 @@ mod tests {
                 HANDOFF_BYTES as u64,
             )?;
             let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-            let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()])?;
             let value = serde_json::json!({"schema_version":2,"status":"done","note":format!("New note {secret}"),"remaining":["Unfinished work"],"decisions":[],"verify":[false]});
             let mut result = decoded();
             result.complete = complete;
@@ -1047,7 +1010,7 @@ mod tests {
                 error.retained["remaining"],
                 serde_json::json!(["Unfinished work"])
             );
-            assert!(!serde_json::to_string(error)?.contains(secret));
+            assert!(serde_json::to_string(error)?.contains(secret));
             assert_eq!(store.handoff(&record)?, captured.handoff);
             result.result = Handoff::from_json(&snapshot("done"))?.fenced();
             assert_eq!(store.capture_handoff(&attempt, &record, &result)?, captured);

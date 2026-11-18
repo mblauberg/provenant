@@ -229,7 +229,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                 // Only execution entries without a provider API are entirely
                 // offline in provider-only mode; provider adapters retain API reach.
                 assert_eq!(
-                    launch.profile.spec.deny_network,
+                    launch.profile.spec.confinement.network() == provenant_confinement::permissions::NetworkPolicy::Offline,
                     network == NetworkAccess::Provider
                         && launch.profile.spec.provider_api.is_empty(),
                     "{context}"

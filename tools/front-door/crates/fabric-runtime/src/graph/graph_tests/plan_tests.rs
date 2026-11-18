@@ -2017,9 +2017,7 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(
         run.checkpoint.plan_digest,
-        plan_digest(&base)
-            .unwrap()
-            .to_string()
+        plan_digest(&base).unwrap().to_string()
     );
 }
 
@@ -3025,7 +3023,7 @@ fn admit_patch_refuses_cycles_and_conflicts() {
     );
     assert!(
         checkpoint.expansions.is_empty(),
-        "refused patches leave no journal entry"
+        "structural refusal is atomic"
     );
 }
 
@@ -3084,13 +3082,7 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
         json!({"schema_version":1, "replace":[{"id":"b", "use":"task", "prompt":"Replacement"}]}),
     ] {
         let mut refused = checkpoint.clone();
-        let error = admit_with(
-            &document,
-            &mut refused,
-            Some("a"),
-            edit.clone(),
-        )
-        .unwrap_err();
+        let error = admit_with(&document, &mut refused, Some("a"), edit.clone()).unwrap_err();
         assert_eq!(error.code, "edit_scope");
         assert!(error.message.contains("b"));
         assert_eq!(refused, checkpoint);
@@ -3215,6 +3207,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: Some(&sink),
         limits: &limits,
 
@@ -3245,6 +3238,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: Some(&failing),
         limits: &limits,
 
@@ -3274,7 +3268,7 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn submission_normalises_free_form_fields_once() {
-    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let secret = "token=local-private-value";
     let doc = format!("template documentation {secret}");
     let parameter_doc = format!("parameter documentation {secret}");
     let prompt = format!("new submission {secret}");
@@ -3317,16 +3311,22 @@ fn submission_normalises_free_form_fields_once() {
     );
     assert!(document.nodes[0].prompt.contains(secret));
     let mut journal = MemoryJournal::default();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("submission-once".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
     let (_, calls) = prompt_text::trace(|| {
-        let mut owner = FakeOwner {
-            observations: [AttemptObservation::Pending {
-                attempt_ref: Some("submission-once".into()),
-            }]
-            .into(),
-            ..Default::default()
-        };
         advance(&document, &mut owner, &mut journal).unwrap();
     });
+    assert!(
+        owner
+            .prompts
+            .iter()
+            .any(|submitted| submitted.contains(secret))
+    );
     assert!(
         calls.is_empty(),
         "initial patch admission rewrote stored text: {calls:?}"
@@ -3375,15 +3375,83 @@ fn live_patch_normalises_docs_and_extensions_once() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
-fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
-    // The former placeholder search rescanned this entire suffix once per X
-    // and took about a minute at 128 KiB. Fixed-size scanner state visits each
-    // byte a bounded number of times; the suite's per-test timeout is the
-    // bound, so no wall-clock assertion makes this flaky under load.
-    for size in [32 * 1024, 128 * 1024, 256 * 1024] {
-        let text = format!("PROVENANTMASK{} [REDACTED]", "X".repeat(size));
-        assert!(patch::scan_for_secrets(&text).is_ok());
-    }
+fn secret_shaped_patch_is_accepted_without_changing_local_bytes() {
+    let (document, mut checkpoint) = running_graph();
+    let prompt = "token=[REDACTED]secret AKIAIOSFODNN7EXAMPLE";
+    admit(
+        &document,
+        &mut checkpoint,
+        json!({"schema_version":1, "nodes":[{
+            "id":"raw", "use":"task", "prompt":prompt
+        }]}),
+    )
+    .unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    assert_eq!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "raw")
+            .unwrap()
+            .prompt,
+        prompt
+    );
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn large_marker_input_is_retained_losslessly() {
+    let text = format!("PROVENANTMASK{} [REDACTED]", "X".repeat(256 * 1024));
+    assert_eq!(prompt_text::normalise_prompt_text(&text).unwrap(), text);
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn split_credentials_are_retained_after_live_and_captured_patch_compilation() {
+    let token = format!("AKIA{}", "Z".repeat(16));
+    let patch = json!({"schema_version":1,
+        "templates":{"joined":{"brief":"${prefix}${suffix}", "parameters":{
+            "prefix":{"type":"string"}, "suffix":{"type":"string"}
+        }}},
+        "nodes":[{"id":"child", "use":"joined", "with":{"prefix":"AKIA", "suffix":"Z".repeat(16)}}]});
+    let (document, mut checkpoint) = running_graph();
+    admit(&document, &mut checkpoint, patch.clone()).unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    assert_eq!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "child")
+            .unwrap()
+            .prompt,
+        token
+    );
+    let document = planner(8);
+    let output = format!(
+        "```fragment
+{patch}
+```"
+    );
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
+    assert!(!run.checkpoint.expansions.is_empty());
+    assert!(
+        serde_json::to_string(&run.checkpoint)
+            .unwrap()
+            .contains(&token)
+    );
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
@@ -3410,10 +3478,11 @@ fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
         )
         .unwrap()
     });
-    prompt_text::assert_once_captured(&calls, prompt);
-    prompt_text::assert_once_captured(&calls, doc);
+    prompt_text::assert_once(&calls, prompt);
+    prompt_text::assert_once(&calls, doc);
     let stored = run.checkpoint.nodes[0].fragment.as_ref().unwrap().clone();
-    assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(stored.contains(prompt));
+    assert!(stored.contains(doc));
     let (replayed, calls) = prompt_text::trace(|| {
         resume_with_budget(
             &document,
@@ -3440,6 +3509,7 @@ fn submit_compiles_a_patch_into_a_new_graph() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
 
@@ -3874,18 +3944,12 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
 }
 
 #[test]
-fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() {
+fn ordinary_agent_patch_refusal_retains_raw_text_and_replays_without_growth() {
     let secret = "sk-abcdefghijklmnopqrstuvwx";
     let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
     for payload in [
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
         json!({"schema_version":secret, "nodes":[{"id":"child", "use":"task"}]}),
-        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "worktree":secret}]}),
-        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "review_base":secret}]}),
-        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "route":{"model":secret}}]}),
-        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "context":{"graph_id":secret}}]}),
-        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "attempt":{"new_worktree":{"branch":secret}}}]}),
-        json!({"schema_version":1, "templates":{"unused":{"brief":"work", "parameters":{secret:{"type":"string"}}}}, "nodes":[]}),
     ] {
         let mut document = planner(8);
         document.nodes[0].plan = None;
@@ -3895,19 +3959,19 @@ fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() 
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.expansions.is_empty());
         let refusal = run.checkpoint.pause_reason().unwrap();
-        assert!(!refusal.contains(secret), "{refusal}");
-        assert!(run.checkpoint.nodes.iter().all(|node| {
-            node.fragment
-                .as_deref()
-                .is_none_or(|fragment| !fragment.contains(secret))
-        }));
+        assert!(refusal.contains("invalid fragment"), "{refusal}");
+        assert_eq!(
+            serde_json::to_string(&run.checkpoint)
+                .unwrap()
+                .contains(secret),
+            payload.to_string().contains(secret)
+        );
         let warnings = &run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings;
         assert!(
             warnings
                 .iter()
                 .any(|warning| warning.contains("patch refused"))
         );
-        assert!(warnings.iter().all(|warning| !warning.contains(secret)));
         for _ in 0..3 {
             journal.0 = Some(
                 serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap(),
@@ -4046,6 +4110,7 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
     let context = PatchContext {
         library: &library,
         resolvers: &resolvers,
+
         journal: None,
         limits: &limits,
 

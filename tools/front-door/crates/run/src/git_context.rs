@@ -305,13 +305,10 @@ fn lane_roots(
                 host_state,
             )
         }
-        // An unreadable port table (for example inside a lane) narrows the
-        // lane areas to the run state rather than refusing the advertisement.
-        _ => Ok(match host_state {
+        _ => match host_state {
             Some(host_state) => transport::LaneRoots::project(cwd, host_state),
             None => transport::LaneRoots::project_without_host_state(cwd),
-        }
-        .unwrap_or(extra)),
+        },
     }
 }
 
@@ -1344,6 +1341,43 @@ mod tests {
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
     const OID: &str = "1111111111111111111111111111111111111111";
+
+    #[test]
+    fn lane_roots_refuse_an_unreadable_host_port_table() -> TestResult {
+        let project = tempfile::tempdir()?;
+        let host_state = tempfile::tempdir()?;
+        std::fs::write(host_state.path().join("ports.json"), b"{not json")?;
+
+        let error = lane_roots(
+            &SystemExecutor::new(1)?,
+            Path::new("/unused/git"),
+            project.path(),
+            &[],
+            Some(host_state.path()),
+        )
+        .expect_err("a corrupt host port table must not narrow lane roots");
+
+        assert_eq!(error, transport::TransportError::Unreadable);
+        Ok(())
+    }
+
+    #[test]
+    fn lane_roots_accept_a_missing_host_port_table() -> TestResult {
+        let project = tempfile::tempdir()?;
+        let host_state = tempfile::tempdir()?;
+
+        assert!(
+            lane_roots(
+                &SystemExecutor::new(1)?,
+                Path::new("/unused/git"),
+                project.path(),
+                &[],
+                Some(host_state.path()),
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
 
     struct InspectGit(Mutex<Vec<Vec<OsString>>>);
     impl Executor for InspectGit {

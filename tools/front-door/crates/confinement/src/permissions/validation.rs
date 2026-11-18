@@ -666,7 +666,9 @@ pub(super) fn filtered_native_controls_with_policy(
         ) {
             Effect::Proceed => {}
             Effect::Warn(message) => crate::permissions::probe::report_policy_message(message),
-            Effect::Refuse(_) => panic!("native-control filtering is a warning-only decision"),
+            Effect::Refuse(_) | Effect::Stop(_) => {
+                panic!("native-control filtering is a warning-only decision")
+            }
         }
     }
     filtered

@@ -145,19 +145,20 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
 
 #[test]
 // Spec: docs/specs/cli.md#results
-fn scanner_warning_names_rule_without_echoing_brief() -> Result {
+fn scanner_shape_keeps_local_brief_without_refusal() -> Result {
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
-    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    let (output, value) = rig.run(&["run", "task", "--brief", secret, "--explain"])?;
+    let shaped = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (output, value) = rig.run(&["run", "task", "--brief", shaped, "--explain"])?;
     assert!(output.status.success(), "{value}");
-    let warnings = value["data"]["warnings"].to_string();
+    assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], shaped);
+    let warning = String::from_utf8_lossy(&output.stderr);
     assert!(
-        warnings.contains("brief") && warnings.contains("looks like a credential"),
-        "{warnings}"
+        warning.contains("field=graph.") && warning.contains("rule=known_secret_shape"),
+        "{warning}"
     );
-    assert!(!warnings.contains(secret), "warning echoed the brief");
-    assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], secret);
+    assert!(!warning.contains(shaped), "warning disclosed matched value");
+    assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
 
@@ -636,6 +637,81 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         .ok_or("graphs after stop")?;
     assert!(!rows.iter().any(|row| row["name"] == "broken"), "{after}");
     assert!(rows.iter().any(|row| row["name"] == "healthy"), "{after}");
+    Ok(())
+}
+
+#[test]
+fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    // Explain is a host-local read, not publication. Token shape alone must
+    // neither rewrite identities nor bypass graph-handle validation.
+    let shaped = format!("ghp_{}", "a1".repeat(18));
+    for source in ["graph_id", "node_id", "route", "context_key", "template"] {
+        let rig = GraphProject::new()?;
+        let mut document = json!({
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id":"safe-graph", "nodes":[{
+                "id":"safe-node", "prompt":"Inspect", "access":"read_only",
+                "route":{"alias":"junior"}
+            }]
+        });
+        match source {
+            "graph_id" => document["graph_id"] = shaped.clone().into(),
+            "node_id" => document["nodes"][0]["id"] = shaped.clone().into(),
+            "route" => document["nodes"][0]["route"]["alias"] = shaped.clone().into(),
+            "context_key" => document["context"] = json!({(shaped.clone()):"note"}),
+            "template" => {
+                document = json!({"nodes":[{"id":"x","use":shaped}],
+                    "templates":{(shaped.clone()):{"brief":"Inspect","tier":"senior"}}});
+            }
+            _ => unreachable!(),
+        }
+        let path = rig.document(&document)?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(&path)
+            .arg("--explain")
+            .output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
+            document,
+            "explain rewrote local source"
+        );
+        assert!(
+            !value.to_string().contains("credential token"),
+            "{source}: {value}"
+        );
+        if source == "graph_id" {
+            // A ghp_ value is not a valid graph handle (underscores are
+            // forbidden). This schema check remains mandatory, independently
+            // of shape. Explain retains aliases for later route resolution.
+            assert!(
+                !output.status.success(),
+                "schema validation must still fail: {source}: {value}"
+            );
+        } else {
+            assert!(output.status.success(), "{source}: {value}");
+            if source == "template" {
+                // A shorthand document lowers into a composite. Its member
+                // retains both the authored template identity and prompt.
+                let member = &value["data"]["document"]["nodes"][0]["composite"]["nodes"][0];
+                assert_eq!(member["prompt"], "Inspect");
+                assert_eq!(member["template"], shaped);
+            } else {
+                assert!(
+                    value["data"]["document"].to_string().contains(&shaped),
+                    "{source}: {value}"
+                );
+            }
+        }
+        assert!(graph_records(&rig.state())?.is_empty(), "{source}");
+        assert!(
+            graph_records(&rig.project.join(".provenant/scratch"))?.is_empty(),
+            "{source}"
+        );
+    }
     Ok(())
 }
 
@@ -2037,7 +2113,7 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
 
 // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn strict_shape_policy_warns_and_exact_retry_credentials_refuse_atomically() -> Result {
+fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
     let rig = GraphProject::new()?;
     let id = settled_task_graph(&rig)?;
     fn snapshot_tree(
@@ -2062,9 +2138,9 @@ fn strict_shape_policy_warns_and_exact_retry_credentials_refuse_atomically() -> 
     let before = snapshot()?;
     std::fs::write(
         rig.state().join("config.toml"),
-        "schema_version=1\n[knobs]\n'policy.SECRET_SHAPED_INPUT'='refuse'\n",
+        "schema_version=1\n[knobs]\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
     )?;
-    let shape = "password=fixture-strict-3391";
+    let shape = "password=fixture-shape-3391";
     let (output, reply) = rig.run(&["retry", &id, "--brief", shape])?;
     assert!(
         output.status.success(),
@@ -2079,7 +2155,7 @@ fn strict_shape_policy_warns_and_exact_retry_credentials_refuse_atomically() -> 
     assert!(
         !reply["data"]["warnings"]
             .to_string()
-            .contains("fixture-strict-3391")
+            .contains("fixture-shape-3391")
     );
     let after_shape = snapshot()?;
     assert_ne!(

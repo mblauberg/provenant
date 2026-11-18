@@ -523,7 +523,7 @@ impl ProviderFailureFact {
                 "provider denied an action; check account access and inspect the result"
             }
             Self::AuthRequired => {
-                "provider requires login; sign in to the selected account and run `provenant quota tick`"
+                "provider requires login; sign in to the selected account and run `provenant quota tick`; if login cannot be checked, retry after readiness expires"
             }
             Self::EarlyStop => "provider stopped early; inspect the result and resume if needed",
             Self::CodexIdentity => {
@@ -742,7 +742,9 @@ pub fn safe_text(value: &str) -> String {
     output
 }
 
-/// A local CLI may show absolute paths. Other edges need an approved anchor.
+/// Destination is selected by the audience, not the transport. Local includes
+/// authorised execution context; Remote denotes disclosure outside that authority
+/// and needs a publication projection as well as approved path anchors.
 #[derive(Debug, Clone, Copy)]
 pub enum Destination<'a> {
     Local,
@@ -750,6 +752,13 @@ pub enum Destination<'a> {
         repository: Option<&'a Path>,
         home: Option<&'a Path>,
     },
+}
+
+/// A publication implementation must project for the selected audience before
+/// sending bytes. Failure withholds that publication; it does not alter input.
+pub trait PublicationProjection {
+    type Error;
+    fn project(&self, destination: Destination<'_>, raw: &[u8]) -> Result<Vec<u8>, Self::Error>;
 }
 
 pub fn safe_path(path: &Path, destination: Destination<'_>) -> Option<String> {

@@ -561,12 +561,8 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     use std::os::unix::ffi::OsStrExt;
     let git = git.as_os_str().as_bytes();
     if git.contains(&0) {
-        return Err(Policy::default().boundary_error(
-            "LANE_GIT_WRAPPER_AUTHORITY",
-            Facts::violation(
-                "the Git executable contains a NUL byte and cannot identify a command",
-            ),
-            ProviderError::InvalidPath,
+        return Err(ProviderError::InvalidInvocation(
+            "the Git executable contains a NUL byte",
         ));
     }
     let wrapper_error = |detail| {
@@ -760,7 +756,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
             .map(|(i, word)| format!("[ \"${{{}}}\" = {} ]", i + 1, shell_quote(word)))
             .collect::<Vec<_>>()
             .join(" && ");
-        guard.push_str(&format!("if [ \"$#\" -ge {} ] && {conditions}; then\n  printf '%s\\n' 'github.deny_verbs' >&2; exit 1\nfi\n", words.len()));
+        guard.push_str(&format!("if [ \"$#\" -ge {} ] && {conditions}; then\n  printf '%s\\n' 'warning: github.deny_verbs (advisory)' >&2\nfi\n", words.len()));
     }
     if !policy.deny_labels.is_empty() {
         guard.push_str("check_labels() {\n  short=false\n  case \"$1 $2\" in\n    'pr create'|'issue create') flag=--label; short=true ;;\n    'pr edit'|'issue edit') flag=--add-label ;;\n    *) return ;;\n  esac\n  shift 2\n  while [ \"$#\" -gt 0 ]; do\n    case \"$1\" in\n      --) break ;;\n      \"$flag\") shift; [ \"$#\" -gt 0 ] || break; value=$1 ;;\n      \"$flag\"=*) value=${1#*=} ;;\n      -l) if $short; then shift; [ \"$#\" -gt 0 ] || break; value=$1; else shift; continue; fi ;;\n      -l=*) if $short; then value=${1#-l=}; else shift; continue; fi ;;\n      -l?*) if $short; then value=${1#-l}; else shift; continue; fi ;;\n      *) shift; continue ;;\n    esac\n    while :; do\n      item=${value%%,*}\n      item=${item#\"${item%%[![:space:]]*}\"}\n      item=${item%\"${item##*[![:space:]]}\"}\n");
@@ -768,7 +764,7 @@ fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_
             // Quoting the literal keeps shell metacharacters in labels inert.
             let label = label.trim();
             if !label.is_empty() {
-                guard.push_str(&format!("      if [ \"$item\" = {} ]; then printf '%s\\n' 'github.deny_labels' >&2; exit 1; fi\n", shell_quote(label)));
+                guard.push_str(&format!("      if [ \"$item\" = {} ]; then printf '%s\\n' 'warning: github.deny_labels (advisory)' >&2; fi\n", shell_quote(label)));
             }
         }
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
@@ -1987,7 +1983,7 @@ mod tests {
     }
 
     #[test]
-    fn github_policy_guards_labels_and_verb_prefixes() -> Result<(), Box<dyn std::error::Error>> {
+    fn github_policy_warns_and_preserves_invocations() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
         use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
         let temp = tempfile::tempdir()?;
@@ -2035,12 +2031,23 @@ mod tests {
             vec!["pr", "create", "--label", "docs, needs review "],
         ] {
             let output = run(&args)?;
-            assert_eq!(output.termination, Termination::Exit(1));
-            assert_eq!(output.stderr.bytes, b"github.deny_labels\n");
+            assert_eq!(output.termination, Termination::Exit(0));
+            let forwarded = args
+                .iter()
+                .map(|arg| format!("<{arg}>\n"))
+                .collect::<String>();
+            assert_eq!(output.stdout.bytes, forwarded.as_bytes());
+            assert_eq!(
+                output.stderr.bytes,
+                b"warning: github.deny_labels (advisory)\n"
+            );
         }
         let output = run(&["release", "create", "v1"])?;
-        assert_eq!(output.termination, Termination::Exit(1));
-        assert_eq!(output.stderr.bytes, b"github.deny_verbs\n");
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert_eq!(
+            output.stderr.bytes,
+            b"warning: github.deny_verbs (advisory)\n"
+        );
         let output = run(&["pr", "create", "--title", "hello world", "-l", "docs"])?;
         assert_eq!(output.termination, Termination::Exit(0));
         assert_eq!(
@@ -2991,6 +2998,13 @@ mod tests {
     #[test]
     fn unrepresentable_git_paths_are_rejected() -> Result<(), ProviderError> {
         use std::os::unix::ffi::OsStringExt;
+        let nul = PathBuf::from(OsString::from_vec(b"/fixture/git\0".to_vec()));
+        let error = git_wrapper(&nul, &GitWrapper::default()).unwrap_err();
+        assert!(matches!(error, ProviderError::InvalidInvocation(_)));
+        assert_eq!(
+            error.boundary_class(),
+            provenant_records::diagnostic::BoundaryClass::None
+        );
         let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         assert!(matches!(
             fixture_lane(&bad, 1).pinned_environment(),

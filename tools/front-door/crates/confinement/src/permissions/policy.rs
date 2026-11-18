@@ -561,11 +561,16 @@ impl OptionalPolicy {
     /// A host network setting is a ceiling. It never widens explicit lane
     /// network authority, nor bypasses an adapter's offline restriction.
     pub fn network_for(&self, requested: NetworkAccess) -> NetworkAccess {
-        match (self.network, requested) {
-            (NetworkAccess::Provider, _) | (_, NetworkAccess::Provider) => NetworkAccess::Provider,
-            (NetworkAccess::Local, _) | (_, NetworkAccess::Local) => NetworkAccess::Local,
-            _ => NetworkAccess::Open,
-        }
+        network_ceiling(self.network, requested)
+    }
+}
+
+/// The single intersection used by preflight selection and resolved profiles.
+pub(super) fn network_ceiling(left: NetworkAccess, right: NetworkAccess) -> NetworkAccess {
+    match (left, right) {
+        (NetworkAccess::Provider, _) | (_, NetworkAccess::Provider) => NetworkAccess::Provider,
+        (NetworkAccess::Local, _) | (_, NetworkAccess::Local) => NetworkAccess::Local,
+        _ => NetworkAccess::Open,
     }
 }
 

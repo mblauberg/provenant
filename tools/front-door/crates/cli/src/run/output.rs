@@ -707,7 +707,7 @@ fn fallback_reason_for_graph(
     })
 }
 
-/// The last non-empty stderr line of a failed attempt, redacted as reasons are.
+/// The last non-empty stderr line of a failed attempt, bounded as reasons are.
 /// The tail is read so a long capture still shows its final error.
 pub(super) fn provider_error_line(
     session: &Session,
@@ -717,7 +717,7 @@ pub(super) fn provider_error_line(
     provider_error_with(|part, range| session.service().output(id, part, range, call).ok())
 }
 
-/// Shared bounded, redacted provider evidence for output and status readers.
+/// Shared bounded provider evidence for output and status readers.
 pub(super) fn provider_error_with(
     mut read: impl FnMut(run::ArtifactPart, run::ByteRange) -> Option<run::OutputChunk>,
 ) -> Option<String> {
@@ -753,7 +753,7 @@ pub(super) fn provider_error_with(
 const PROVIDER_ERROR_BYTES: usize = 1024;
 
 /// The provider's whole error message from a failed attempt's result, with its
-/// lines joined and the text redacted and bounded.
+/// lines joined and the text bounded.
 fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(bytes);
     let joined = text
@@ -765,9 +765,8 @@ fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     if joined.is_empty() {
         return None;
     }
-    let redacted = provenant_redact::publication_text(joined.as_bytes(), [])
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    let redacted =
+        String::from_utf8(provenant_redact::known_shapes(joined.as_bytes()).ok()?).ok()?;
     Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
 }
 
@@ -779,9 +778,7 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
-    let redacted = provenant_redact::publication_text(line.as_bytes(), [])
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    let redacted = String::from_utf8(provenant_redact::known_shapes(line.as_bytes()).ok()?).ok()?;
     Some(crate::bounded_text(&redacted, 160))
 }
 
@@ -1215,7 +1212,7 @@ mod tests {
 
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     #[test]
-    fn provider_errors_preserve_shapes_and_mask_registered_values() {
+    fn provider_errors_mask_credential_shapes_and_registered_values() {
         let secret = b"descriptor-credential-3391";
         let _scope = provenant_redact::publication_scope([secret.to_vec()]).unwrap();
         let text = b"provider failed: descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
@@ -1223,23 +1220,23 @@ mod tests {
             provider_error_from_result(text),
             provider_error_from_stderr(text),
         ] {
-            assert_eq!(
-                reason.as_deref(),
-                Some(
-                    "provider failed: [REDACTED] sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\""
-                )
-            );
+            let reason = reason.unwrap();
+            assert!(reason.contains("[REDACTED]"));
+            assert!(!reason.contains("descriptor-credential-3391"));
+            assert!(!reason.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+            assert!(!reason.contains("printed-value"));
         }
     }
 
     #[test]
-    fn provider_error_from_result_keeps_the_whole_multiline_message() {
+    fn provider_error_keeps_multiline_context_while_masking_assignments() {
         let message = provider_error_from_result(
-            b"Model not recognized: gemini-3.8-pro\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
+            b"Model not recognized: gemini-3.8-pro\npass: fix the code\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
         )
         .unwrap();
         assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
         assert!(message.ends_with("GPT-OSS 120B (Medium)"));
+        assert!(message.contains("pass: [REDACTED] the code"));
         assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 
@@ -1256,8 +1253,8 @@ mod tests {
     #[test]
     fn provider_error_keeps_non_warning_lines_that_mention_warn() {
         assert_eq!(
-            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
-            Some("test-failed WARN: assertion failed")
+            provider_error_from_stderr(b"test-failed WARN: pass: fix the code\n").as_deref(),
+            Some("test-failed WARN: pass: [REDACTED] the code")
         );
     }
 

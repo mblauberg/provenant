@@ -448,7 +448,7 @@ fn parse_findings_mode(
         if ingress {
             let wrapper = serde_json::json!({"findings": [entry]});
             let mut wrapper =
-                prompt_text::normalise_capture(&wrapper["findings"], prompt_text::Context::Finding)
+                prompt_text::normalise(&wrapper["findings"], prompt_text::Context::Finding)
                     .map_err(str::to_owned)?;
             entry = wrapper[0]
                 .take()
@@ -1625,6 +1625,7 @@ pub(super) fn upstream_results(
                 label,
                 attempt_ref: None,
                 attempt_key: None,
+                launch_actor: None,
                 inline_findings: Some(findings),
                 finding_prefix: None,
             })
@@ -1707,6 +1708,7 @@ pub(super) fn upstream_results(
             label: id.to_owned(),
             attempt_ref: source.and_then(|attempt| attempt.attempt_ref.clone()),
             attempt_key: source.map(|attempt| attempt.key.clone()),
+            launch_actor: source.map(|attempt| attempt.launch_actor.clone()),
             inline_findings,
             finding_prefix: include_findings.then(|| prefix.to_owned()),
         });

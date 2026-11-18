@@ -296,7 +296,10 @@ delimiter-complete frames, unreadable output, or drain-truncated live output
 also seal incomplete identity evidence. By default settlement warns with the
 policy source and uses the observed exit and result; `policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE`
 can suppress the warning or refuse settlement and continuation. An observed
-identity conflict remains fatal at every setting. The guardian
+identity conflict remains fatal at every setting. Undecodable protocol frames, including
+final fragments, report a one-based line-numbered `MalformedFrame` evidence
+defect during replay. Settlement leaves that result
+unsettled instead of admitting a same-session continuation. The guardian
 immediately routes a live identity conflict through its existing protocol
 rejection stop path while preserving the separate conflict evidence for
 settlement. It separately records an incomplete JSON record in the final bytes
@@ -451,6 +454,36 @@ Oversized findings use content-addressed graph text while the checkpoint retains
 
 - Why: dependants need evidence without copying or trusting transcripts.
 
+### Publication boundary
+
+Local execution, graph inputs and retained state are intended to remain raw and
+lossless under their existing custody and integrity controls. Disclosure masking
+belongs at an external publication destination, including graph and peer
+exports, forge content and fixture exports. `publication::Projector` protects
+known exact credential values and typed secret fields. Exact-value matching
+uses typed-field and ambient credentials of at least eight bytes; prose
+assignments mask only their own value spans. Its projection binds the
+raw and published byte lengths and digests separately. A projection error withholds
+the affected publication and never substitutes raw bytes.
+
+`PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
+not authorisation: the receiver must bind the authenticated actor, retained
+launch receipt, origin work key and requested attempt before allowing graph
+transport. The sender derives the claim from the retained upstream attempt and
+the receiver checks its actor namespace, launch receipt, origin and target.
+All cross-host payloads, including authenticated execution submissions and
+results, pass through `CrossHostTransport`; authentication never exempts
+disclosure. Same-host execution stays raw. Encoded hand-off attachments are
+decoded and projected as text, or withheld when they cannot be inspected. Peer
+output projects the complete verified text before paging, with published lengths
+and digests. Cross-host projection selects declared free-text fields (prompts,
+decoded attachments, output text and messages), preserving envelope keys, tags,
+identifiers and metadata. A projected stop handoff retains its sealed cause and
+passes the existing stop validation; the retained stop stays raw. Already projected
+output pages pass through response encoding untouched, including pages split
+inside a mask or a word. Binary output, over-bound projections
+and event pages that cannot be fully projected are withheld on projection failure.
+
 ### Checkpoint before launch
 
 Transitions are pure reducers; the scheduler saves the checkpoint under a stable
@@ -460,45 +493,17 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-`redact::known_values` masks explicitly supplied credential values while
-preserving other text. Publication helpers combine typed values with non-empty
-ambient credential variables, using the existing credential-key vocabulary;
-they do not open credential stores or broaden access. The launch carries ambient
-values across the private guardian handoff in a redacted-debug wrapper, separate
-from the provider environment. A thread-bound, memory-only publication scope
-also supplies descriptor credentials through capture and settlement, then clears
-on every exit. Literal and JSON-escaped
-spellings are masked in stored prompts, checkpoints, events, captured outputs
-and diagnostics. Stored content preserves unregistered secret-shaped examples.
-Warning projections retain schema paths and policy facts only.
-
 Admission bounds the worst-case checkpoint before saving the plan.
-Authored launch inputs (briefs, prompt text, live patches) warn on credential-shaped
-input (`policy.SECRET_SHAPED_INPUT`) and mask registered credential values,
-preserving unregistered examples. All decoded strings and object keys in authored
-inputs use literal masking; a masked object-key collision refuses publication rather
-than silently overwriting data. Live patches, retry briefs and steers use this
-representation before planning or hashing. A steer normalises only its new brief and
-replacement routes, preserving stored nodes.
-
-Captured output is normalised before storage or consumption. `prompt_text::Context`
-enumerates identity positions (review_base, worktree, branch, route fields, finding
-IDs, files and propagation markers, repair item IDs, node references, template names,
-work provenance, attempt placement and new-worktree branch/base fields, and sources).
-Identity fields and all object keys are scanned across each new
-structured capture, including fields omitted by typed projections. An exact registered credential
-in an identity or key refuses that capture as invalid output; it is never rewritten. Shape-only
-matches preserve their bytes. Only
-declared scalar identity fields retain their bytes: a route or source object does not
-exempt its extension values. Content fields in captured output, including handoff fields,
-repair item extensions and findings summaries, mask exact registered values while
-preserving unregistered credential-shaped examples and assignments. Captured findings are parsed
-and normalised before merging stored upstream evidence; the remaining fresh capture
-projection is normalised once before becoming graph outputs. Stored fragments are
-replayed without rewriting their digested bytes. Typed handoffs are normalised at capture
-before any consumer retains them. Checkpoints persist the normalised form. Compaction
-retains parsed, normalised findings as typed values in content-addressed storage. Resume
-never fills templates or rewrites a sealed submission. A resume path or document hash selects the retained graph
+Graph text, identity fields and object keys retain their exact bytes in local
+state and execution context. Heuristic content inspection warns with the field
+and rule, without revealing matched values or refusing admission. Captured
+fragments, retries, template substitutions and expansions retain the same
+property. Schema, cycle, conflict and journal-integrity checks remain mandatory.
+Content-addressed storage externalises bytes without rewriting them, and digest
+checks verify the stored bytes. Publication requires a destination-aware disclosure
+projection; cross-host execution transport is projected as well. Resume
+never fills templates or rewrites a
+sealed submission. A resume path or document hash selects the retained graph
 identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
 another normalisation pass. Every strict read and every digest check verifies the
 stored bytes as stored and never normalises again. Normalising is idempotent.

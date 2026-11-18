@@ -223,7 +223,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn stored_prompts_preserve_normalised_bytes_and_digest() {
+    fn stored_prompts_preserve_raw_bytes_and_digest() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let secret = "AKIAIOSFODNN7EXAMPLE";
@@ -231,7 +231,7 @@ mod tests {
         let mut value = json!({"execution": {"document": {"nodes": [
             {"id": "a", "prompt": format!("deploy with {secret} now")}
         ]}}});
-        value = prompt_text::normalise(&value).unwrap();
+        value = prompt_text::normalise(&value, prompt_text::Context::Document).unwrap();
         externalise(&directory, "g", &mut value).unwrap();
         let digest = value[STORED_TEXT]["/execution/document/nodes/0/prompt"]
             .as_str()
@@ -241,7 +241,7 @@ mod tests {
             .read_stable(&OsString::from(format!("{}{digest}", prefix("g"))), 1 << 20)
             .unwrap();
         let stored = String::from_utf8(stored).unwrap();
-        assert!(!stored.contains(secret), "{stored}");
+        assert_eq!(stored, format!("deploy with {secret} now"));
         assert_eq!(hex(stored.as_bytes()), digest);
         let persisted = serde_json::to_vec(&value).unwrap();
         let restored = rehydrate(&directory, "g", &persisted).unwrap();
