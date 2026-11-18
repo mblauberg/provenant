@@ -609,7 +609,7 @@ pub fn collect_with_progress(
         }
         let mut current_protection = protection.clone();
         current_protection.merge(&refresh_protection());
-        let mut report = prune_with_progress(
+        let report = prune_with_progress(
             survey,
             limits,
             true,
@@ -2256,8 +2256,8 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("cleanup deferred"))
         );
-        assert!(directory.join(active).is_file());
-        assert!(directory.join(unrelated).is_file());
+        assert!(directory.join(&active).is_file());
+        assert!(directory.join(&unrelated).is_file());
         assert!(
             stale_names
                 .iter()
@@ -2272,8 +2272,8 @@ mod tests {
                 .iter()
                 .all(|stale| !directory.join(stale).exists())
         );
-        assert!(directory.join(active).is_file());
-        assert!(directory.join(unrelated).is_file());
+        assert!(directory.join(&active).is_file());
+        assert!(directory.join(&unrelated).is_file());
     }
 
     #[test]
@@ -3083,7 +3083,10 @@ mod tests {
         assert_eq!(report.removed, vec![idle_a.clone(), idle_b.clone()]);
         assert_eq!(report.busy, vec![busy_a.clone(), busy_b.clone()]);
         assert!(busy_a.exists() && busy_b.exists());
-        assert!(report.cache_bytes > one, "stays over the cap");
+        assert!(
+            report.cache_bytes > survey.total - idle_bytes,
+            "stays over the cap"
+        );
     }
 
     #[test]
