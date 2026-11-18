@@ -103,13 +103,6 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    if input.confined.codex_policy() != CodexPolicy::Clean {
-        return Err(input.boundary_error(
-            "CODEX_PREPARE_AUTHORITY",
-            "Codex requires its clean configuration policy",
-            ProviderError::UnsupportedPolicy,
-        ));
-    }
     if plan.selected_authentication.as_deref() != Some("login") {
         return Err(input.boundary_error(
             "CODEX_PREPARE_CREDENTIALS",
@@ -158,7 +151,7 @@ fn prepare(
         ]
         .map(OsString::from),
     );
-    if input.sandboxed() {
+    if input.sandboxed() && input.confined.codex_policy() == CodexPolicy::Clean {
         argv.push("--ignore-user-config".into());
     } else {
         argv.extend([

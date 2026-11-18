@@ -707,7 +707,7 @@ fn fallback_reason_for_graph(
     })
 }
 
-/// The last non-empty stderr line of a failed attempt, redacted as reasons are.
+/// The last non-empty stderr line of a failed attempt, bounded as reasons are.
 /// The tail is read so a long capture still shows its final error.
 pub(super) fn provider_error_line(
     session: &Session,
@@ -717,7 +717,7 @@ pub(super) fn provider_error_line(
     provider_error_with(|part, range| session.service().output(id, part, range, call).ok())
 }
 
-/// Shared bounded, redacted provider evidence for output and status readers.
+/// Shared bounded provider evidence for output and status readers.
 pub(super) fn provider_error_with(
     mut read: impl FnMut(run::ArtifactPart, run::ByteRange) -> Option<run::OutputChunk>,
 ) -> Option<String> {
@@ -753,7 +753,7 @@ pub(super) fn provider_error_with(
 const PROVIDER_ERROR_BYTES: usize = 1024;
 
 /// The provider's whole error message from a failed attempt's result, with its
-/// lines joined and the text redacted and bounded.
+/// lines joined and the text bounded.
 fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(bytes);
     let joined = text
@@ -765,10 +765,7 @@ fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     if joined.is_empty() {
         return None;
     }
-    let redacted = provenant_confinement::redact::known_shapes(joined.as_bytes())
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())?;
-    Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
+    Some(crate::bounded_text(&joined, PROVIDER_ERROR_BYTES))
 }
 
 /// Select a cause from captured stderr without promoting known Codex skill
@@ -779,10 +776,7 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
-    let redacted = provenant_confinement::redact::known_shapes(line.as_bytes())
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())?;
-    Some(crate::bounded_text(&redacted, 160))
+    Some(crate::bounded_text(line, 160))
 }
 
 /// Warning-level lines start with `warn`/`warning` (optionally bracketed or

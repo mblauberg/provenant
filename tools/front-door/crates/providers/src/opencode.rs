@@ -533,8 +533,7 @@ fn parse_failure_diagnostic(stderr: &[u8]) -> Option<ServerFailureDiagnostic> {
                 }
             })
             .collect();
-        let cause =
-            provenant_confinement::redact::bounded_line(&printable, SERVER_FAILURE_CAUSE_LIMIT);
+        let cause = provenant_core::bounded_line(&printable, SERVER_FAILURE_CAUSE_LIMIT);
         let status = digits.parse().ok()?;
         (!cause.is_empty()).then_some(ServerFailureDiagnostic { status, cause })
     })
@@ -617,7 +616,7 @@ pub fn stdout_error_diagnostic(
                     && (message.contains("not supported") || message.contains("not found")))
         });
         let guidance = if invalid_reference { "; choose a supported model and variant (check the route's effort)" } else { "" };
-        Some(provenant_confinement::redact::bounded_line(
+        Some(provenant_core::bounded_line(
             &format!("opencode provider error: model={}, variant={}, type={kind}, status={status}, code={code}{guidance}", selector(model), selector(variant.or(Some("default")))),
             640,
         ))
@@ -1923,8 +1922,8 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         assert!(diagnostic.cause.chars().count() <= SERVER_FAILURE_CAUSE_LIMIT);
         let secret =
             "level=INFO cause=\"fetch https://user:secret@example.invalid/x\" http.status=500\n";
-        let redacted = parse_failure_diagnostic(secret.as_bytes()).unwrap();
-        assert!(!redacted.cause.contains("secret"));
+        let diagnostic = parse_failure_diagnostic(secret.as_bytes()).unwrap();
+        assert!(diagnostic.cause.contains("user:secret"));
         for unrelated in [
             "level=INFO cause=\"boom\" http.status=404\n",
             "level=INFO message=\"ok\" http.status=500\n",

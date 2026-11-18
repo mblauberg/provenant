@@ -232,7 +232,7 @@ impl From<run::RunError> for Fail {
                 projection
                     .fact
                     .is_none()
-                    .then(|| provenant_confinement::redact::bounded_line(&error.to_string(), 4096))
+                    .then(|| provenant_core::bounded_line(&error.to_string(), 4096))
             } else {
                 safe_cause(&error)
             };
@@ -1433,7 +1433,7 @@ impl Registry<'_> {
             } else {
                 format!(
                     "unclassified provider error: {}",
-                    provenant_confinement::redact::bounded_line(message, 512)
+                    provenant_core::bounded_line(message, 512)
                 )
             });
         }
@@ -1859,7 +1859,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
         }
         _ => return None,
     };
-    Some(provenant_confinement::redact::bounded_line(&cause, 512))
+    Some(provenant_core::bounded_line(&cause, 512))
 }
 
 /// Partial-signal counts, or a named unavailable field with its cause.

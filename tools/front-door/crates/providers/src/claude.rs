@@ -1288,9 +1288,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     .map(str::to_owned)
             });
         match message.filter(|message| !message.is_empty()) {
-            Some(message) => ProviderError::MalformedResult(
-                provenant_confinement::redact::bounded_line(&message, 2048),
-            ),
+            Some(message) => {
+                ProviderError::MalformedResult(provenant_core::bounded_line(&message, 2048))
+            }
             None => error,
         }
     })?;

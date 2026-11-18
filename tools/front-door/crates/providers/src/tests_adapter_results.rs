@@ -140,7 +140,7 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     assert!(matches!(
         adapter.prepare(input),
-        Err(ProviderError::UnsupportedPolicy)
+        Err(ProviderError::InvalidInvocation(_))
     ));
     route.model = "invented-model".into();
     input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
@@ -151,7 +151,7 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
     });
     assert!(matches!(
         adapter.prepare(input),
-        Err(ProviderError::UnsupportedPolicy)
+        Err(ProviderError::CapabilityUnavailable(_))
     ));
 }
 

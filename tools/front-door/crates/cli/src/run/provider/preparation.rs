@@ -425,7 +425,7 @@ pub(super) fn dependency_preparation_event(
     match result {
         Ok(event) => Some(event),
         Err(error) => {
-            let warning = provenant_confinement::redact::bounded_line(
+            let warning = provenant_core::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
@@ -448,7 +448,7 @@ pub(super) fn dependency_preparation_event(
 }
 
 #[test]
-fn dependency_setup_failure_warns_and_retains_redacted_reason() {
+fn dependency_setup_failure_warns_and_retains_reason() {
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let policy = provenant_records::policy::Policy::default();
     let event = dependency_preparation_event(
@@ -460,7 +460,7 @@ fn dependency_setup_failure_warns_and_retains_redacted_reason() {
     .expect("warning policy retains the event");
     assert_eq!(event["outcome"], "warning");
     let reason = event["reason"].as_str().unwrap();
-    assert!(!reason.contains(secret));
+    assert!(reason.contains(secret));
     let success = serde_json::json!({"outcome": "installed"});
     assert_eq!(
         dependency_preparation_event(
@@ -585,7 +585,7 @@ fn prepare_writer_dependencies_with_policy(
 ) -> Result<serde_json::Value, String> {
     let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
     if let Err(error) = &result {
-        let detail = provenant_confinement::redact::bounded_line(
+        let detail = provenant_core::bounded_line(
             &dependency_preparation_warning(error.clone(), enabled, profile),
             4096,
         );
@@ -948,12 +948,10 @@ impl PrepareError {
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => {
-                let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                let refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::HandoffRefused,
                     error.to_string(),
                 );
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
-                refusal.policy_code = Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY".into());
                 refusal
             }
             Self::ContinuationRequest(error) => {
@@ -1177,7 +1175,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         field: provenant_records::LaunchField::Write,
     })
     .into_refusal();
-    assert_eq!(unsupported.boundary_class, BoundaryClass::Authority);
+    assert_eq!(unsupported.boundary_class, BoundaryClass::None);
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
