@@ -31,6 +31,7 @@ pub(crate) enum Kind {
     Enum,
     Int,
     Fraction,
+    CargoTarget,
 }
 #[derive(Deserialize)]
 pub(crate) struct Spec {
@@ -332,6 +333,16 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
             .contains(text)
             .then_some(())
             .ok_or("unknown_value"),
+        Value::String(text) if spec.kind == Kind::CargoTarget => {
+            if text == "shared"
+                || text == "private"
+                || (std::path::Path::new(text).is_absolute() && !text.contains('\0'))
+            {
+                Ok(())
+            } else {
+                Err("unknown_value")
+            }
+        }
         Value::Number(number) if spec.kind == Kind::Int => {
             let n = number.as_i64().ok_or("type")?;
             if spec.min.is_some_and(|min| n < min) || spec.max.is_some_and(|max| n > max) {

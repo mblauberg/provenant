@@ -3888,6 +3888,7 @@ pub(super) fn prepare_candidates_inner(
         );
         let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
         let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
@@ -3897,6 +3898,7 @@ pub(super) fn prepare_candidates_inner(
                 slots: lanes.build_limit(total),
                 source: lanes.build_limit_source(),
             }),
+            cargo_target: Some(cargo_target.clone()),
         };
         let text = format!(
             "{}\n{text}",
@@ -4087,6 +4089,16 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
+        let common_git_dir = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+            AccessMode::ReadOnly => None,
+        };
+        let private_cache = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
+            AccessMode::ReadOnly => &plan.permissions().scratch.path,
+        };
+        let (cargo_target_dir, cargo_target_lint) =
+            cargo_target.target_paths(&home, common_git_dir, private_cache);
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -4107,6 +4119,10 @@ pub(super) fn prepare_candidates_inner(
                         Some(sandbox.env_value().into())
                     } else if key == "PATH" {
                         Some(lane_path.path().to_os_string())
+                    } else if key == "CARGO_TARGET_DIR" || key == "CARGO_BUILD_BUILD_DIR" {
+                        Some(cargo_target_dir.as_os_str().to_os_string())
+                    } else if key == provenant_core::consumer_env::LANE_CARGO_LINT_TARGET {
+                        Some(cargo_target_lint.as_os_str().to_os_string())
                     } else {
                         host_provider_var(registry, key)
                     }
@@ -4769,6 +4785,7 @@ pub(super) fn prepare_candidates_inner(
                 state_root: roots.state.as_path().to_path_buf(),
                 sandbox,
                 backend: None,
+                cargo_target: cargo_target.clone(),
             }),
         });
     }

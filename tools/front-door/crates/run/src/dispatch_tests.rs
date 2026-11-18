@@ -189,6 +189,7 @@ impl Providers for Confined {
                 warning: None,
             },
             backend: None,
+            cargo_target: Default::default(),
         });
         Ok(launch)
     }

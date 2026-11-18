@@ -1180,10 +1180,17 @@ pub(crate) fn finalise_provider_env(
             binding
         }
     };
+    let target = (input.host_var)("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target"));
+    let lint_target = (input.host_var)(provenant_core::consumer_env::LANE_CARGO_LINT_TARGET)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target-lint"));
     cargo_environment(
         &binding,
         input.home,
-        cache,
+        &target,
+        &lint_target,
         access,
         !input.sandboxed(),
         &mut spec.env,
@@ -1831,13 +1838,18 @@ fn rust_toolchain(
     let cargo = input.home.join(".cargo");
     let rustup = input.home.join(".rustup");
     let cache = lane_cache(input);
-    let target = cache.join("target");
+    let target = (input.host_var)("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("target"));
     // The host prepares the writer cache itself under custody. Cargo
     // creates target/ after launch, so anchor the cache.
     // A read-only lane's cache is its scratch, which rustdoc also uses (via
     // TMPDIR) for the doc-test binaries it compiles and runs. The lane can
     // already execute everything it builds and its read-only worktree.
     tool_exec_roots.push(subtree(cache));
+    if target != cache.join("target") {
+        tool_exec_roots.push(subtree(&target));
+    }
     runtime_reads.extend([subtree(cargo.join("bin")), subtree(&rustup)]);
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
@@ -1846,7 +1858,7 @@ fn rust_toolchain(
     for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
         add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
     }
-    if access == Access::ReadOnly {
+    if access == Access::ReadOnly || target != cache.join("target") {
         setup.push(SetupStep::CreateDir(target));
     }
 }
@@ -1856,7 +1868,8 @@ fn rust_toolchain(
 fn cargo_environment(
     binding: &provenant_confinement::cargo::CargoHome,
     home: &Path,
-    cache: &Path,
+    target: &Path,
+    lint_target: &Path,
     access: Access,
     native: bool,
     env: &mut Vec<(OsString, OsString)>,
@@ -1878,14 +1891,14 @@ fn cargo_environment(
             }
         }
     }
-    binding.lane_cargo_environment(home, cache, env);
+    binding.lane_cargo_environment_with_target(home, target, env);
     if access == Access::WorktreeWrite {
         // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
         // this sibling. Cargo locks the build directory, so they then do not
         // queue behind test and build runs in the lane's own target/.
         env.push((
             provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-            cache.join("target-lint").into_os_string(),
+            lint_target.as_os_str().to_os_string(),
         ));
     }
 }
