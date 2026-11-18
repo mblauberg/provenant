@@ -350,7 +350,7 @@ impl crate::LaunchSpec {
     /// Put the counting `gh` wrapper first on an unsandboxed lane's PATH. The
     /// lane keeps the user's own gh configuration and login, exactly as a CLI
     /// started by hand would; the wrapper only counts, advises and applies the
-    /// project's advisory deny list before running the host-selected `gh`.
+    /// project's advisory deny-list warnings before running the host-selected `gh`.
     pub fn configure_gh_shim(
         &mut self,
         scratch: &Path,

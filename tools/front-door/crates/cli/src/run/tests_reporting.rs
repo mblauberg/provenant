@@ -168,13 +168,14 @@ fn cli_recorded_remedies_preserve_typed_causes() {
     }
 }
 #[test]
+// Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
 fn malformed_claude_result_preserves_provider_error_in_settlement() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
         model: Some("claude/fixture".into()),
         ..Default::default()
     };
-    let message = "Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set";
+    let message = "Permission mode forced to default; pass: fix the code password=fixture-token";
     let result =
         serde_json::json!({"type":"result", "is_error":true, "errors":[message]}).to_string();
     let earlier = r#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"earlier answer"}"#;

@@ -519,7 +519,8 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
         let repo = root.join("repo café: '\"\\\nend");
         let other = root.join("other");
         let linked = root.join("linked");
-        let git = provenant_os::git::git_executable().ok_or("Git is unavailable on PATH")?;
+        // Exercise this fixture's private binding, not an outer lane's selected wrapper.
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
         let host_git = |cwd: &Path, args: &[&std::ffi::OsStr]| {
             let output = provenant_os::fixture::git_command_at(&git)
                 .current_dir(cwd)

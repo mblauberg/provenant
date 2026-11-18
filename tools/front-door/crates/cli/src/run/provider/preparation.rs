@@ -278,6 +278,64 @@ pub(super) fn provider_preparation_fallback(
     }
 }
 
+/// Resolve the provider preference and its explanation together, so the launch
+/// and its diagnostic cannot disagree about a read-only authority requirement.
+fn codex_configuration<D>(
+    config: &provenant_config::ResolvedConfig<D>,
+    writer: bool,
+) -> (provenant_confinement::CodexPolicy, &'static str) {
+    use provenant_confinement::CodexPolicy;
+    if !writer {
+        return (CodexPolicy::Clean, "read-only extension authority");
+    }
+    let policy = if config
+        .providers
+        .get("codex")
+        .is_some_and(|settings| settings.clean_config)
+    {
+        CodexPolicy::Clean
+    } else {
+        CodexPolicy::Inherited
+    };
+    let source = match config.origins.get("providers.codex.clean_config") {
+        Some(provenant_config::Origin::User { .. }) => "host configuration",
+        _ => "compiled default",
+    };
+    (policy, source)
+}
+
+#[test]
+// Spec: docs/specs/routing.md#provider-configuration-and-local-diagnostics
+fn codex_configuration_resolves_host_preference_and_authority_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::CodexPolicy;
+    let temp = tempfile::tempdir()?;
+    let roots = provenant_test_support::test_roots(temp.path())?
+        .resolve(&provenant_test_support::IdentityPathResolver)?;
+    for (setting, expected, source) in [
+        ("", CodexPolicy::Inherited, "compiled default"),
+        (
+            "[providers.codex]\nclean_config=false",
+            CodexPolicy::Inherited,
+            "host configuration",
+        ),
+        (
+            "[providers.codex]\nclean_config=true",
+            CodexPolicy::Clean,
+            "host configuration",
+        ),
+    ] {
+        let text = format!("schema_version=1\n{setting}");
+        let config = provenant_config::load(&roots, Some(text.as_bytes()))?;
+        assert_eq!(codex_configuration(&config, true), (expected, source));
+        assert_eq!(
+            codex_configuration(&config, false),
+            (CodexPolicy::Clean, "read-only extension authority")
+        );
+    }
+    Ok(())
+}
+
 /// Refresh failures retain login guidance only when the credential owner has
 /// classified the cause. Other provider errors cannot supply diagnostic text.
 pub(super) fn credential_failure_skip(
@@ -2772,6 +2830,7 @@ pub(super) fn prepare_candidates(
     let credential_roots = credential_roots(registry, &home, &settings, &lane_roots)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
+    let codex_settings = codex_configuration(&config, writer.is_some());
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -3798,17 +3857,9 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        if adapter.id() == "codex" {
-            request.codex = if writer.is_none()
-                || config
-                    .providers
-                    .get("codex")
-                    .is_some_and(|settings| settings.clean_config)
-            {
-                provenant_confinement::CodexPolicy::Clean
-            } else {
-                provenant_confinement::CodexPolicy::Inherited
-            };
+        let codex_configuration = (adapter.id() == "codex").then_some(codex_settings);
+        if let Some((policy, _)) = codex_configuration {
+            request.codex = policy;
         }
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
@@ -4586,15 +4637,7 @@ pub(super) fn prepare_candidates(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
-        if adapter.id() == "codex" {
-            let source = if writer.is_none() {
-                "read-only extension authority"
-            } else {
-                match config.origins.get("providers.codex.clean_config") {
-                    Some(provenant_config::Origin::User { .. }) => "host configuration",
-                    _ => "compiled default",
-                }
-            };
+        if let Some((_, source)) = codex_configuration {
             provider.launch_warnings.push(format!(
                 "Codex clean_config={} (providers.codex.clean_config; source: {source})",
                 plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,

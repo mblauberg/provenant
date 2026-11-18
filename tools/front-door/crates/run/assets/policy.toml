@@ -617,21 +617,7 @@ code = "COMMAND_PREPARE_AUTHORITY"
 site = "providers/src/command.rs#prepare"
 boundary = "authority"
 strength = "refuse"
-justification = "A configured command cannot silently ignore a requested continuation, model, effort or account selection."
-
-[[rule]]
-code = "COMMAND_PREPARE_AUTHORITY_2"
-site = "providers/src/command.rs#prepare"
-boundary = "authority"
-strength = "refuse"
-justification = "A configured command must have non-empty argv and an absolute host-resolved executable to launch the selected invocation."
-
-[[rule]]
-code = "COMMAND_PREPARE_AUTHORITY_3"
-site = "providers/src/command.rs#prepare"
-boundary = "authority"
-strength = "refuse"
-justification = "The command adapter only implements read-only access and cannot claim writer authority."
+justification = "A configured command cannot silently ignore a requested continuation or account selection."
 
 [[rule]]
 code = "CURSOR_PREPARE_CREDENTIALS"
@@ -681,7 +667,7 @@ code = "CODEX_PREPARE_AUTHORITY"
 site = "providers/src/codex.rs#prepare"
 boundary = "authority"
 strength = "refuse"
-justification = "A resumed invocation requires its validated continuation identity, and Codex must use its clean configuration policy."
+justification = "A resumed invocation requires its validated continuation identity. Read-only extension authority is enforced by the confinement plan; writer clean configuration is a sourced provider preference."
 
 [[rule]]
 code = "CLAUDE_PREPARE_CREDENTIALS"
@@ -804,13 +790,6 @@ strength = "refuse"
 justification = "The host home must be absolute so credential exclusions are evaluated against the selected host identity."
 
 [[rule]]
-code = "LAUNCH_ADMIT_AUTHORITY_2"
-site = "providers/src/launch.rs#admit"
-boundary = "authority"
-strength = "refuse"
-justification = "Executable and working-directory paths must be absolute to bind the launch to the selected executable and granted working directory."
-
-[[rule]]
 code = "LAUNCH_TOOL_SEARCH_PATH_NONE"
 site = "providers/src/launch.rs#tool_search_path"
 boundary = "none"
@@ -876,7 +855,7 @@ code = "LANE_GIT_WRAPPER_AUTHORITY"
 site = "providers/src/lane.rs#git_wrapper"
 boundary = "authority"
 strength = "refuse"
-justification = "A Git executable containing a NUL cannot identify an executable to launch; native non-UTF-8 and shell-special bytes are preserved."
+justification = "The Git wrapper must retain the selected executable and required private Git configuration bindings; malformed executable syntax is an ordinary invocation error."
 
 [[rule]]
 code = "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
