@@ -371,8 +371,37 @@ impl InvalidInputDetail {
                 field: clean(field),
                 assignment: *assignment,
             },
-            Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.redacted())),
+            Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.bounded())),
             other => other.clone(),
+        }
+    }
+
+    /// Mutable text carried by a refusal until its destination applies the
+    /// appropriate disclosure projection.
+    pub(crate) fn strings_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Self::GraphReason(text)
+            | Self::CutoverFindings(text)
+            | Self::UnresolvableBase(text)
+            | Self::Field(text)
+            | Self::FieldTitle(text)
+            | Self::Configuration(text) => vec![text],
+            Self::RetryNode { graph, node } => vec![graph, node],
+            Self::Parameter(refusal) => refusal.strings_mut(),
+            Self::FieldDecode { field, .. }
+            | Self::FieldTooLarge { field, .. }
+            | Self::ContentScan { field, .. } => vec![field],
+            Self::CloudPlacementRemoved
+            | Self::OperationIdRetired
+            | Self::OperationFailed
+            | Self::TemplateInvalid
+            | Self::UpgradeDrainRequired
+            | Self::Schema
+            | Self::InputUnreadable
+            | Self::InputTooLarge
+            | Self::InputInvalidUtf8
+            | Self::GraphDocumentTooLarge
+            | Self::GraphRelayCause(_) => Vec::new(),
         }
     }
 
@@ -390,7 +419,7 @@ impl InvalidInputDetail {
                 safe_template_name_error(reason)
                     .unwrap_or_else(|| "graph input could not be processed".into()),
             ),
-            Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
+            Self::Parameter(refusal) => Some(refusal.bounded().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::RetryNode { graph, node } => {
                 if safe_retry_name(graph).is_some() && safe_retry_name(node).is_some() {
@@ -717,8 +746,8 @@ fn serialise_grant_access<S: serde::Serializer>(
     })
 }
 
-/// Keep typed projections authoritative, and retain redacted preparation detail
-/// when no typed fact exists. Persist the same reason used by local diagnostics.
+/// Preserve the refusal detail through serialization. The enclosing peer
+/// response applies the destination projection before it leaves the host.
 fn dispatch_refused_wire<S: serde::Serializer>(
     reason: &str,
     disk: &Option<DiskPressure>,
@@ -940,7 +969,8 @@ impl FacadeError {
         }
     }
 
-    /// Prefer typed facts; redact untyped refusal reasons before disclosure.
+    /// Local diagnostics preserve shape-only text. Peer publication applies
+    /// its destination-aware projection to declared free-text fields.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
@@ -974,7 +1004,7 @@ impl FacadeError {
                 projected = projected.detail(detail).next(next);
             }
             Self::InvalidInput { detail: Some(InvalidInputDetail::Parameter(refusal)) } => {
-                let refusal = refusal.redacted();
+                let refusal = refusal.bounded();
                 let next = refusal.example().unwrap_or_else(|| {
                     "pass only the accepted template parameters, each with a value of the shape shown, and retry".into()
                 });
@@ -1346,8 +1376,8 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
     None
 }
 
-// Keep the human-readable wire field while carrying the independently typed
-// fact used for disclosure decisions. Peer-supplied prose is never a fact.
+// Keep source text and its independently typed fact together until the peer
+// response encoder applies its destination-aware disclosure projection.
 mod invalid_detail_wire {
     use super::InvalidInputDetail;
     use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
@@ -2021,7 +2051,7 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn parameter_refusal_redacts_every_string_before_disclosure() {
+    fn parameter_refusal_retains_shape_only_identifiers_until_projection() {
         use crate::graph::template::{ParameterFault, ParameterRefusal};
         let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         for fault in [
@@ -2049,17 +2079,17 @@ mod diagnostic_tests {
                 },
             )));
             let diagnostic = error.diagnostic();
-            assert!(!error.to_string().contains(secret));
-            assert!(!serde_json::to_string(&diagnostic).unwrap().contains(secret));
+            assert!(error.to_string().contains(secret));
+            assert!(serde_json::to_string(&diagnostic).unwrap().contains(secret));
             let wire = serde_json::to_string(&error).unwrap();
-            assert!(!wire.contains(secret), "{wire}");
+            assert!(wire.contains(secret), "{wire}");
             let restored: FacadeError = serde_json::from_str(&wire).unwrap();
             assert_eq!(restored.diagnostic(), diagnostic);
         }
     }
 
     #[test]
-    fn dispatch_refusal_reason_is_redacted_and_survives_transport() {
+    fn dispatch_refusal_retains_shape_only_reason_for_destination_projection() {
         let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let error = FacadeError::DispatchRefused {
             fact: None,
@@ -2072,14 +2102,14 @@ mod diagnostic_tests {
         assert_eq!(received.diagnostic(), projected);
         let detail = projected.detail.unwrap();
         assert!(detail.contains("worktree setup failed: missing pnpm"));
-        assert!(!detail.contains(secret));
-        assert!(!wire.contains(secret));
+        assert!(detail.contains(secret));
+        assert!(wire.contains(secret));
         assert!(!detail.chars().any(char::is_control));
         assert!(!projected.next.unwrap().contains("receipt"));
     }
 
     #[test]
-    fn graph_plan_refusal_redacts_token_shaped_node_identifiers() {
+    fn graph_plan_refusal_retains_token_shaped_node_identifier_as_metadata() {
         let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let error = FacadeError::DispatchRefused {
             fact: Some(super::DispatchRefusalFact::GraphPlan),
@@ -2087,20 +2117,16 @@ mod diagnostic_tests {
             reason: format!("node {secret}: writer worktree is required"),
         };
         assert!(
-            !serde_json::to_string(&error.diagnostic())
+            serde_json::to_string(&error.diagnostic())
                 .unwrap()
                 .contains(secret)
         );
         let wire = serde_json::to_string(&error).unwrap();
-        assert!(!wire.contains(secret));
+        assert!(wire.contains(secret));
         let received: FacadeError = serde_json::from_str(&wire).unwrap();
-        assert!(
-            received
-                .diagnostic()
-                .detail
-                .unwrap()
-                .contains("writer worktree")
-        );
+        let detail = received.diagnostic().detail.unwrap();
+        assert!(detail.contains(secret));
+        assert!(detail.contains("writer worktree"));
     }
 
     #[test]

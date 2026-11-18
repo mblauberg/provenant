@@ -77,7 +77,7 @@ fn steer_normalises_only_the_new_brief_once() {
         .as_ref()
         .unwrap()
         .replaced[0];
-    assert!(!replaced.prompt.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(replaced.prompt.contains("AKIAIOSFODNN7EXAMPLE"));
     assert_eq!(replaced.extra["comment"], old);
 }
 

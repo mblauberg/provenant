@@ -3312,7 +3312,12 @@ fn submission_normalises_free_form_fields_once() {
     let (_, calls) = prompt_text::trace(|| {
         advance(&document, &mut owner, &mut journal).unwrap();
     });
-    assert!(owner.prompts.iter().any(|submitted| submitted.contains(secret)));
+    assert!(
+        owner
+            .prompts
+            .iter()
+            .any(|submitted| submitted.contains(secret))
+    );
     assert!(
         calls.is_empty(),
         "initial patch admission rewrote stored text: {calls:?}"
@@ -3929,7 +3934,7 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
 }
 
 #[test]
-fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() {
+fn ordinary_agent_patch_refusal_retains_raw_text_and_replays_without_growth() {
     let secret = "sk-abcdefghijklmnopqrstuvwx";
     for payload in [
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
@@ -3943,19 +3948,23 @@ fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() 
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.expansions.is_empty());
         let refusal = run.checkpoint.pause_reason().unwrap();
-        assert!(!refusal.contains(secret), "{refusal}");
-        assert!(run.checkpoint.nodes.iter().all(|node| {
-            node.fragment
-                .as_deref()
-                .is_none_or(|fragment| !fragment.contains(secret))
-        }));
+        assert_eq!(
+            refusal.contains(secret),
+            payload.to_string().contains(secret),
+            "{refusal}"
+        );
+        assert_eq!(
+            serde_json::to_string(&run.checkpoint)
+                .unwrap()
+                .contains(secret),
+            payload.to_string().contains(secret)
+        );
         let warnings = &run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings;
         assert!(
             warnings
                 .iter()
                 .any(|warning| warning.contains("patch refused"))
         );
-        assert!(warnings.iter().all(|warning| !warning.contains(secret)));
         for _ in 0..3 {
             journal.0 = Some(
                 serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap(),

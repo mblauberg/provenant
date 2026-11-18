@@ -250,7 +250,7 @@ impl TemplateParameter {
 }
 
 /// A supplied parameter that a template cannot bind. Names and shape descriptions
-/// remain untrusted and must be redacted before disclosure.
+/// remain untrusted and pass through the destination's disclosure projection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParameterRefusal {
     /// The graph node whose `with` failed, when it is known.
@@ -326,7 +326,9 @@ impl ParameterRefusal {
         }
     }
 
-    pub(crate) fn redacted(&self) -> Self {
+    /// Bound displayed text and strip controls; destination projection owns
+    /// credential masking.
+    pub(crate) fn bounded(&self) -> Self {
         let clean = |text: &str| provenant_core::bounded_line(text, 4096);
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
@@ -366,6 +368,43 @@ impl ParameterRefusal {
             }
         }
         safe
+    }
+
+    pub(crate) fn strings_mut(&mut self) -> Vec<&mut String> {
+        let mut texts = Vec::new();
+        if let Some(node) = &mut self.node {
+            texts.push(node);
+        }
+        texts.push(&mut self.template);
+        match &mut self.fault {
+            ParameterFault::NotTable => {}
+            ParameterFault::Unknown {
+                key,
+                accepted,
+                suggestion,
+            } => {
+                texts.extend(key.iter_mut());
+                texts.extend(accepted.iter_mut());
+                texts.extend(suggestion.iter_mut());
+            }
+            ParameterFault::Missing { key, keys, example } => {
+                texts.push(key);
+                texts.extend(keys.iter_mut());
+                if let Some(example) = example {
+                    texts.push(&mut example.0);
+                }
+            }
+            ParameterFault::Shape { key, expected } => {
+                texts.push(key);
+                texts.push(expected);
+            }
+            ParameterFault::When(refusal) => {
+                texts.extend(refusal.key.iter_mut());
+                texts.extend(refusal.accepted.iter_mut());
+                texts.extend(refusal.suggestion.iter_mut());
+            }
+        }
+        texts
     }
 }
 

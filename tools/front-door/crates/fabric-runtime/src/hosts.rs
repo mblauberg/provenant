@@ -1236,6 +1236,14 @@ pub fn encode_peer_response(
                 texts.extend(diagnostic.detail.iter_mut());
                 texts.extend(diagnostic.next.iter_mut());
             }
+            facade::FacadeError::DispatchRefused { reason, .. } => texts.push(reason),
+            facade::FacadeError::InvalidInput {
+                detail: Some(detail),
+            }
+            | facade::FacadeError::GraphRelayRefused {
+                detail: Some(detail),
+                ..
+            } => texts.extend(detail.strings_mut()),
             facade::FacadeError::StateCorruptDetail { detail } => texts.push(detail),
             _ => {}
         },
@@ -2081,6 +2089,65 @@ mod tests {
     }
 
     // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn cross_host_errors_project_declared_credentials_and_preserve_shape_only_ids() {
+        use crate::graph::template::{ParameterFault, ParameterRefusal};
+
+        let remote = HostId::from_bytes([2; 16]);
+        let exact = "declared-credential-value";
+        let shaped_identifier = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let projector =
+            provenant_confinement::publication::Projector::new([exact.as_bytes().to_vec()])
+                .unwrap();
+        let response = |error| PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: PROTOCOL,
+            host: remote,
+            project: project_key(Path::new("/h")),
+            result: PeerResult::Error {
+                data: PeerResultError {
+                    error,
+                    extra: Default::default(),
+                },
+                extra: Default::default(),
+            },
+        };
+
+        let refusal = facade::FacadeError::DispatchRefused {
+            reason: format!("node {shaped_identifier}: validator saw {exact}"),
+            disk: None,
+            fact: Some(facade::DispatchRefusalFact::GraphPlan),
+        };
+        let bytes = encode_peer_response(response(refusal), &projector).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = &value["result"]["data"]["error"];
+        let reason = error["reason"].as_str().unwrap();
+        assert_eq!(error["fact"], "graph_plan");
+        assert!(reason.contains(shaped_identifier));
+        assert!(!reason.contains(exact));
+
+        let parameter = facade::FacadeError::invalid(facade::InvalidInputDetail::Parameter(
+            Box::new(ParameterRefusal {
+                node: Some("implement".into()),
+                template: "task".into(),
+                fault: ParameterFault::Shape {
+                    key: "mode".into(),
+                    expected: exact.into(),
+                },
+            }),
+        ));
+        let bytes = encode_peer_response(response(parameter), &projector).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = &value["result"]["data"]["error"];
+        assert_eq!(error["code"], "invalid_input");
+        assert!(!value.to_string().contains(exact));
+        assert_eq!(
+            error["detail_fact"]["value"]["fault"]["expected"],
+            "[REDACTED]"
+        );
+    }
+
     #[test]
     fn cross_host_response_projects_only_declared_text_fields() {
         let remote = HostId::from_bytes([2; 16]);

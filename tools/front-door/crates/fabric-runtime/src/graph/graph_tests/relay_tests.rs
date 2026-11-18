@@ -443,7 +443,7 @@ fn child_decision_inherits_the_graph_chair_session() {
 /// Small: a refused child cannot consume a revision or leave a partial node or
 /// receipt that would turn a corrected relay request into an idempotency clash.
 #[test]
-fn child_admission_refusals_leave_the_graph_unchanged() {
+fn child_admission_refusals_are_atomic_and_shape_only_ids_are_allowed() {
     let library = template::TemplateLibrary::bundled();
     let resolvers = Default::default();
     let limits = plans::generous();
@@ -460,11 +460,6 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         ("missing", child("child", "unknown-parent"), "invalid"),
         ("b", child("child", "settled-parent"), "parent_settled"),
         ("a", child("child", "depth-limit"), "child_depth"),
-        (
-            "a",
-            { child("AKIAIOSFODNN7EXAMPLE", "secret-child") },
-            "invalid",
-        ),
     ] {
         let (document, mut checkpoint) =
             live((expected == "child_depth").then(|| json!({"child_depth":0})));
@@ -484,6 +479,25 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         assert_eq!(checkpoint, before, "{}", request.idempotency_key);
         assert_eq!(patch::revision(&checkpoint), 0);
     }
+
+    let (document, mut checkpoint) = live(None);
+    let identifier = "AKIAIOSFODNN7EXAMPLE";
+    let request = child(identifier, "secret-child");
+    let receipt = relay::admit_child_bound(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+        Some(("parent-branch", "1111111111111111111111111111111111111111")),
+    )
+    .unwrap();
+    assert_eq!(receipt.node, format!("a--{identifier}"));
+    assert!(!receipt.replayed);
+    assert_eq!(patch::revision(&checkpoint), 1);
+    assert!(ids(&document, &checkpoint).contains(&receipt.node));
 }
 
 #[test]
