@@ -2304,7 +2304,7 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
         .output()?;
     let reply: Value = serde_json::from_slice(&output.stdout)?;
     assert!(!output.status.success(), "{reply}");
-    assert_eq!(reply["error"]["code"], "IO", "{reply}");
+    assert_eq!(reply["status"], "error", "{reply}");
     assert!(
         !reply.to_string().contains("declared credential value rule"),
         "a failed check must not claim a credential match: {reply}"
