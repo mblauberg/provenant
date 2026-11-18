@@ -9,6 +9,7 @@ import sys
 
 FULL_RUN_PATHS = (
     "tools/front-door/Cargo.toml",
+    "rust-toolchain.toml",
     "tools/front-door/rust-toolchain.toml",
     "tools/front-door/.config/nextest.toml",
     ".github/workflows/ci.yml",

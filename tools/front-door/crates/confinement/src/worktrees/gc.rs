@@ -1073,16 +1073,13 @@ pub(super) fn verify_retirement_landing_evidence(
                     reference: None,
                     tip: *merge_commit,
                 };
-                if !matches!(
+                Ok(matches!(
                     landed::landing_on(context, head, &merge, cancel)?,
                     Landing::Landed(_)
-                ) || !matches!(
+                ) && matches!(
                     landed::landing_on(context, *merge_commit, &target, cancel)?,
                     Landing::Landed(_)
-                ) {
-                    return Ok(false);
-                }
-                Ok(true)
+                ))
             } else {
                 Ok(matches!(
                     landed::landing_on(context, head, &target, cancel)?,

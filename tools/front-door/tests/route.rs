@@ -273,6 +273,7 @@ fn valid_pairs_and_policy_preview_are_pure() -> Result {
             .is_empty()
     );
     for pair in pairs {
+        assert_eq!(pair["source"], "bundled");
         let model = pair["model"].as_str().ok_or("model")?;
         let mut args = vec!["route", "resolve", model];
         if let Some(effort) = pair["effort"].as_str() {
@@ -1198,6 +1199,33 @@ fn unresolved_names_list_close_matches_and_examples() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/routing.md#one-resolution-bounded-alternatives
+fn duplicate_primary_fallback_warns_and_is_dropped() -> Result {
+    let rig = rig()?.without_state()?;
+    let output = rig.command(&[
+        "--json",
+        "route",
+        "resolve",
+        "--model",
+        "codex/a",
+        "--fallback",
+        "codex/a",
+    ])?;
+    assert_eq!(code(&output), 0);
+    let resolved = support::json(&output)?;
+    assert_eq!(resolved["data"]["adapter"], "codex");
+    assert_eq!(resolved["data"]["model"], "a");
+    assert_eq!(resolved["data"]["alternatives"], serde_json::json!([]));
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(stderr.contains("ROUTING_ALTERNATIVES"), "{stderr}");
+    assert!(!rig.home.join("provider-started").exists());
+    rig.assert_v1_root_untouched()?;
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#parsing
 fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     let rig = rig()?.without_state()?;
     for args in [
@@ -1212,14 +1240,6 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
             "codex/a",
             "--fallback",
             "claude/a,agy/b,opencode/c",
-        ],
-        vec![
-            "route",
-            "resolve",
-            "--model",
-            "codex/a",
-            "--fallback",
-            "codex/a",
         ],
         vec!["route", "resolve", "--route", "missing"],
         vec!["route", "resolve", "missing-route"],
@@ -1260,5 +1280,25 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     assert_eq!(unlisted["data"]["effort"], "high");
     assert!(unlisted["data"]["supported_efforts"].is_null());
     assert!(!rig.state.exists());
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn route_list_includes_sources_in_json_and_human_views() -> Result {
+    let rig = rig()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.routing.routes.custom]\nmodel = 'codex/gpt-6-luna'\n",
+    )?;
+    let json = call(&rig, &["route", "list"], 0)?;
+    assert_eq!(json["data"]["named_routes"]["custom"]["source"], "user");
+    let human = rig.command(&["route", "list"])?;
+    assert!(
+        String::from_utf8_lossy(&human.stdout.bytes)
+            .contains("route custom = codex/gpt-6-luna source=user")
+    );
+    let valid = rig.command(&["route", "list", "--valid", "--adapter", "codex"])?;
+    assert!(String::from_utf8_lossy(&valid.stdout.bytes).contains("source=bundled effort="));
     Ok(())
 }

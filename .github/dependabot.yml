@@ -24,3 +24,23 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+
+  # Keep the Rust toolchain pin current. The root copy lets rustup resolve the
+  # pin for commands run from the repository root; CI requires the two to match,
+  # so one grouped pull request moves both.
+  - package-ecosystem: rust-toolchain
+    directories:
+      - /
+      - /tools/front-door
+    groups:
+      rust-toolchain:
+        patterns:
+          - "*"
+        group-by: dependency-name
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies

@@ -60,6 +60,13 @@ fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn st
         "/Users/me/.local/bin/provenant"
     )));
     assert!(!is_test_harness(Path::new("target/debug/provenant")));
+    assert!(is_test_harness(Path::new(
+        "target/debug/deps/provenant_os-0123456789abcdef"
+    )));
+    assert!(is_test_harness(Path::new(
+        "target/debug/build/provenant-os/0123456789abcdef/out/provenant_os-0123456789abcdef"
+    )));
+    assert!(!is_test_harness(Path::new("target/debug/out/provenant")));
     Ok(())
 }
 

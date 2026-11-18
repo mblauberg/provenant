@@ -883,6 +883,7 @@ code = "LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
 site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
 justification = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
 
