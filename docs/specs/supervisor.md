@@ -364,8 +364,9 @@ available from `provenant config show`.
 
 ### Disclosure and safe Git evidence
 
-A prompt snapshot with a known secret is refused before sealing, and output is
-redacted across chunk boundaries before it reaches disk. Quoted credential values
+A prompt snapshot with a known secret is refused before sealing. Host-local
+provider captures preserve raw bytes for settlement replay; decoded results and
+artifact text are redacted at publication and disclosure boundaries. Quoted credential values
 are masked until a definite closing quote: one that every plausible escape layer,
 from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than

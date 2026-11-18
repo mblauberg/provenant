@@ -879,18 +879,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
         let disk = disk_guard::LaneDisk::default();
-        let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
-            provenant_confinement::redact::Redactor::new([]),
-            provenant_confinement::redact::Redactor::new([]),
-        ) else {
-            return fail(
-                "internal supervise",
-                Outcome::Error,
-                "REDACTION",
-                "cannot initialise capture redaction",
-                globals,
-            );
-        };
         let (resource_sample_interval, resource_sample_interval_source) =
             match roots::resolve(globals, Workspace::Project, Product::Optional) {
                 Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
@@ -932,8 +920,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
-            stdout_filter: Some(&mut stdout_filter),
-            stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
         };
         match process.supervise(&descriptors, hooks) {

@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn budget_completion_never_overrides_unsettled_provider_evidence() -> TestResult {
+    // Spec: docs/specs/run-settlement.md#outcome-before-release
+    use provenant_os::exec::Termination;
+    for (stop, clean) in [
+        (None, false),
+        (
+            Some(provenant_supervisor::machine::StopReason::TokenBudget),
+            false,
+        ),
+        (
+            Some(provenant_supervisor::machine::StopReason::TokenBudget),
+            true,
+        ),
+        (
+            Some(provenant_supervisor::machine::StopReason::WallDeadline),
+            false,
+        ),
+    ] {
+        for termination in [
+            Termination::Exit(0),
+            Termination::Exit(1),
+            Termination::Signal(9),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let run = input();
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let dir = store.attempt_dir(id, false)?;
+            artifacts::seal(&dir, "stdout.log", b"damaged capture", CAPTURE_LIMIT)?;
+            if clean {
+                artifacts::seal(
+                    &dir,
+                    provenant_records::AttemptFile::BudgetCleanPoint.name(),
+                    b"{\"schema_version\":1,\"clean\":true}",
+                    RECORD_LIMIT,
+                )?;
+            }
+            let mut observed = exit();
+            observed.scope = RunStore::scope(&store.record(id, &call)?);
+            observed.stop_reason = stop;
+            observed.termination = Some(termination);
+            seal_exit(&store, &observed)?;
+            let fake = Fake {
+            observed: Some(route()),
+            outcome: Some(Outcome::Unsettled),
+            terminal_cause: Some(TerminalCause::ProviderCaptureDefect { line: 3 }),
+            reason: Some("provider capture evidence defect at stdout.log line 3; replay incomplete".into()),
+            complete: Some(false),
+            // Even a done declaration cannot repair missing provider evidence.
+            answer: Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into()),
+            ..Fake::default()
+        };
+            let record = store.finish(id, &dir, &observed, &fake, &call)?;
+            assert!(
+                matches!(
+                    record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Unsettled,
+                        terminal_cause: Some(TerminalCause::ProviderCaptureDefect { line: 3 }),
+                        ..
+                    }
+                ),
+                "stop={stop:?}, clean={clean}, termination={termination:?}: {:?}",
+                record.state
+            );
+            assert!(!record.result.ok_or("result")?.complete);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
     for (answer, expected) in [
         ("plain answer", "plain answer"),

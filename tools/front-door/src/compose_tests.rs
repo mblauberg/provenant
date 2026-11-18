@@ -8,7 +8,8 @@ use std::{
 };
 
 #[test]
-fn guardian_capture_masks_split_credentials_before_retention() {
+fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
+    // Spec: docs/specs/run-settlement.md#retention-and-disclosure
     struct Capture;
     impl super::Process for Capture {
         fn supervise(
@@ -17,33 +18,47 @@ fn guardian_capture_masks_split_credentials_before_retention() {
             hooks: provenant_supervisor::GuardianHooks<'_>,
         ) -> provenant_supervisor::custody::Result<()> {
             use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
-            let stdout = hooks
-                .stdout_filter
-                .ok_or_else(|| std::io::Error::other("stdout redaction"))?;
-            let stderr = hooks
-                .stderr_filter
-                .ok_or_else(|| std::io::Error::other("stderr redaction"))?;
-            let mut stdout =
-                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stdout))
-                    .map_err(std::io::Error::other)?;
-            let mut stderr =
-                StreamCapture::new(StreamPolicy::Capture { limit: 1024 }, None, Some(stderr))
-                    .map_err(std::io::Error::other)?;
-            // Interleave streams and split the token marker and body. EOF
-            // must flush safe trailing text without leaking pending bytes.
-            for bytes in [
-                b"credential gh".as_slice(),
-                b"p_abcdefghijklmnop",
-                b"qrstuvwxyz0123456789 end",
-            ] {
-                assert!(stdout.push(bytes).is_ok());
-                assert!(stderr.push(bytes).is_ok());
+            let frames = [
+                serde_json::json!({"type":"item.completed", "item":{
+                    "type":"command_execution", "aggregated_output":
+                    "TOKEN=\"unterminated credential\nnext line"}}),
+                serde_json::json!({"type":"item.completed", "item":{
+                    "type":"agent_message", "text":"Final review answer"}}),
+                serde_json::json!({"type":"turn.completed"}),
+            ]
+            .map(|frame| format!("{frame}\n"))
+            .concat();
+            // Exercise production hook composition, interleaving both streams
+            // with splits inside escaped strings and credential markers.
+            let mut stdout = StreamCapture::new(
+                StreamPolicy::Capture { limit: 4096 },
+                None,
+                hooks.stdout_filter,
+            )
+            .map_err(std::io::Error::other)?;
+            let mut stderr = StreamCapture::new(
+                StreamPolicy::Capture { limit: 4096 },
+                None,
+                hooks.stderr_filter,
+            )
+            .map_err(std::io::Error::other)?;
+            for bytes in frames.as_bytes().chunks(7) {
+                stdout.push(bytes).map_err(std::io::Error::other)?;
+                stderr.push(bytes).map_err(std::io::Error::other)?;
             }
             stdout.finish();
             stderr.finish();
             for capture in [&stdout, &stderr] {
-                assert_eq!(capture.outcome().bytes, b"credential [REDACTED] end");
+                assert_eq!(capture.outcome().bytes, frames.as_bytes());
                 assert!(!capture.outcome().filter_failed);
+                for line in capture
+                    .outcome()
+                    .bytes
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                {
+                    assert!(serde_json::from_slice::<serde_json::Value>(line).is_ok());
+                }
             }
             Ok(())
         }
