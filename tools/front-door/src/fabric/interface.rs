@@ -2432,8 +2432,9 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-        let has_resumable_work = checkpoint.cancelled
-            || checkpoint.pause.is_some()
+        // The cancel flag alone restores nothing: only nodes cancelled out of a
+        // live state (Skipped with the cancel reason) are resumable.
+        let has_resumable_work = checkpoint.pause.is_some()
             || checkpoint.nodes.iter().any(|node| {
                 node.expansion_pause.is_some()
                     || node.loop_pause.is_some()

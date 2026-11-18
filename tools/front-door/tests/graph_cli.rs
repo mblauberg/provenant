@@ -1908,6 +1908,57 @@ fn cancelled_graph_retry_resumes_without_refusal() -> Result {
 }
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+// A cancel flag on a graph with nothing left to restore resumes nothing, so a
+// retry that does nothing must still be refused (#3456).
+#[test]
+fn cancelled_flag_without_restorable_work_is_still_refused() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        &id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let (output, retried) = rig.run(&["retry", &id])?;
+    assert!(
+        !output.status.success(),
+        "a retry that restores nothing must not exit 0: {retried}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
 #[test]
 fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
