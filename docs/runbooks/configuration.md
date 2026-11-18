@@ -135,3 +135,47 @@ quota only: stale, missing or unknown quota cannot establish
 headroom, so refresh with `provenant quota tick --adapter claude`. The hook
 saves a private checkpoint, then prints the launch command, and the source session stops; the new session injects the hand-off once. Read the checkpoint's lane IDs and collect finished results
 rather than dispatching them again.
+
+## Named admission classes
+
+Heavy commands coordinate across lanes and processes through named admission
+classes configured under `[admission.<class>]`:
+
+```toml
+[admission.build]
+slots = 2
+wait_seconds = 15
+memory_per_slot = "4 GiB"
+disk_floor = "10 GiB"
+trim_action = "cargo clean --package test-artifacts"
+
+[admission.heavy]
+slots = 1
+wait_seconds = 30
+```
+
+- `slots`: Maximum concurrent processes admitted for the class. For `build`,
+  defaults to host hardware capacity (`max_concurrent_builds`, derived from CPU
+  cores and RAM).
+- `memory_per_slot`: Optional memory per slot. Admission samples RSS through the
+  process-tree sampler.
+- `disk_floor`: Optional minimum free disk floor required before running.
+- `trim_action`: Optional shell command executed to free resources if limits are
+  exceeded before re-sampling.
+- `wait_seconds`: Maximum wait time before emitting a warning and proceeding
+  (default 15 seconds). A saturated class never deadlocks or refuses commands.
+
+Settings layer with provenance: Host `<state>/config.toml`, then project
+`.provenant/config.toml`, falling back to compiled defaults.
+
+Commands acquire slots via the CLI:
+```sh
+provenant admit <CLASS> -- <COMMAND> [ARGS...]
+```
+
+Every lane's `cargo`, `cargo-nextest`, and `nextest` commands are automatically
+routed through the `build` admission class during both compilation and test
+execution phases. Nested invocations within an admitted command detect the
+inherited slot lease and pass through without re-acquiring or deadlocking.
+Holders, waiters, elapsed wait durations, and admission classes are visible in
+`provenant status`.

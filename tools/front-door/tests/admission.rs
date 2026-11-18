@@ -1,10 +1,10 @@
-//! The lane's `cargo` shim end to end: `internal build-slot` takes a host build
-//! advisory slot if free, runs its child and keeps the slot until
-//! that exits. A fake cargo stands in for the compiler; nothing here needs a
+//! Named admission classes end to end: `provenant admit <CLASS>` takes a host
+//! admission slot if free, runs its child and keeps the slot until
+//! that exits. A fake binary stands in for heavy commands; nothing here needs a
 //! sandbox. The slot directory and count reach the shim through its
 //! environment, as the host's shim script supplies them.
 #![allow(clippy::disallowed_methods)]
-use provenant_os::build_slots::{BuildSlots, DIRECTORY};
+use provenant_os::admission::{AdmissionSlots, DIRECTORY};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -34,7 +34,7 @@ impl Rig {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         fs::write(&log, "")?;
         let binary = env!("CARGO_BIN_EXE_provenant");
-        let slot_dir = state.join(DIRECTORY.join("/"));
+        let slot_dir = state.join(DIRECTORY.join("/")).join("build");
         fs::write(
             &cargo,
             format!(
@@ -45,7 +45,8 @@ impl Rig {
                  check) echo \"hung $$\" >> '{log}'; exec /bin/sleep 60 ;;\n\
                  bg) /bin/sleep 60 >/dev/null 2>&1 </dev/null & echo \"bg $!\" >> '{log}' ;;\n\
                  tamper) rm -f '{slots}/slot-0.lock' 2>/dev/null; echo \"rm $?\" >> '{log}'; /usr/bin/touch '{slots}/slot-9.lock' 2>/dev/null; echo \"create $?\" >> '{log}'; echo \"start $$\" >> '{log}'; echo \"end $$\" >> '{log}' ;;\n\
-                 test) echo \"outer $$\" >> '{log}'; '{binary}' internal build-slot -- \"$0\" build ;;\n\
+                 test) echo \"outer $$\" >> '{log}'; '{binary}' admit build -- \"$0\" build ;;\n\
+                 nested_class) echo \"outer $$\" >> '{log}'; '{binary}' admit \"$2\" -- \"$0\" build ;;\n\
                  esac\n",
                 log = log.display(),
                 slots = slot_dir.display(),
@@ -62,18 +63,33 @@ impl Rig {
 
     /// Host side: create the slot files, as `provenant run` does at launch.
     fn provision(&self, slots: u64) -> Result {
-        BuildSlots::provision(&self.state, slots)?;
+        AdmissionSlots::provision(&self.state, "build", slots)?;
+        Ok(())
+    }
+
+    fn provision_class(&self, class: &str, slots: u64) -> Result {
+        AdmissionSlots::provision(&self.state, class, slots)?;
         Ok(())
     }
 
     fn command(&self, slots: u64, args: &[&str]) -> Result<Command> {
+        self.command_class("build", slots, args)
+    }
+
+    fn command_class(&self, class: &str, slots: u64, args: &[&str]) -> Result<Command> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
         command
-            .args(["internal", "build-slot", "--"])
+            .args(["admit", class, "--"])
             .arg(&self.cargo)
             .args(args)
-            .env("PROVENANT_BUILD_SLOT_STATE", &self.state)
-            .env("PROVENANT_BUILD_SLOTS", slots.to_string())
+            .env("PROVENANT_ADMISSION_SLOT_STATE", &self.state)
+            .env("PROVENANT_ADMISSION_SLOTS", slots.to_string())
+            .env_remove(format!("PROVENANT_ADMISSION_SLOT_{class}"))
+            .env_remove(format!(
+                "PROVENANT_ADMISSION_SLOT_{}",
+                class.to_ascii_uppercase()
+            ))
+            .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
             .env_remove(provenant_core::consumer_env::BUILD_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -83,6 +99,10 @@ impl Rig {
 
     fn shim(&self, slots: u64, args: &[&str]) -> Result<Child> {
         Ok(self.command(slots, args)?.spawn()?)
+    }
+
+    fn shim_class(&self, class: &str, slots: u64, args: &[&str]) -> Result<Child> {
+        Ok(self.command_class(class, slots, args)?.spawn()?)
     }
 
     fn log(&self) -> Result<Vec<String>> {
@@ -101,11 +121,11 @@ impl Rig {
 fn set_builtin_admission(command: &mut Command) -> Result {
     command
         .env(
-            provenant_core::consumer_env::BUILD_ADMISSION_BACKEND,
+            provenant_core::consumer_env::ADMISSION_BACKEND,
             serde_json::to_string(&provenant_config::PortBackend::Builtin)?,
         )
         .env(
-            provenant_core::consumer_env::BUILD_ADMISSION_SOURCE,
+            provenant_core::consumer_env::ADMISSION_SOURCE,
             serde_json::to_string(&provenant_config::PortSource::Builtin)?,
         );
     Ok(())
@@ -158,7 +178,7 @@ fn a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot() ->
         .ok_or("the grandchild started")?;
     assert!(alive(&pid), "the grandchild outlives the build");
     // The slot is free the moment the direct child exits.
-    let slots = BuildSlots::open(&rig.state)?;
+    let slots = AdmissionSlots::open(&rig.state, "build")?;
     assert_eq!(slots.held(1), 0);
     let mut second = rig.shim(1, &["build"])?;
     assert!(finish(&mut second, Duration::from_secs(10))?);
@@ -167,9 +187,6 @@ fn a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot() ->
     Ok(())
 }
 
-/// The marker names a live ancestor with its true pid and start time, but that
-/// ancestor is a shell, not a provenant shim, so the gate still applies.
-
 #[test]
 fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
     for signal in ["TERM", "HUP", "INT"] {
@@ -177,7 +194,7 @@ fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
         rig.provision(1)?;
         let mut shim = rig.shim(1, &["check"])?;
         assert!(provenant_test_support::wait_for(
-            "build slot readiness",
+            "admission slot readiness",
             Duration::from_secs(20),
             || rig.started("hung"),
             |ready| *ready
@@ -195,7 +212,7 @@ fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
         assert!(!status.success(), "{signal}: the build was interrupted");
         assert!(
             provenant_test_support::wait_for(
-                "build slot readiness",
+                "admission slot readiness",
                 Duration::from_secs(10),
                 || !alive(&pid),
                 |ready| *ready
@@ -210,8 +227,8 @@ fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
 fn nested_cargo_does_not_queue_behind_its_parent() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
-    // A build that itself runs cargo must not wait for a second slot: the
-    // outer shim is a live ancestor of the inner one.
+    // A command that itself runs the same admission class must not wait for a second slot:
+    // re-entrancy is detected and passes through.
     let mut outer = rig.shim(1, &["test"])?;
     assert!(finish(&mut outer, Duration::from_secs(10))?);
     assert!(rig.started("outer"));
@@ -225,20 +242,14 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let scratch = rig.state.join("scratch");
-    fs::create_dir_all(scratch.join(provenant_os::build_slots::SHIM_DIRECTORY))?;
-    fs::write(
-        scratch
-            .join(provenant_os::build_slots::SHIM_DIRECTORY)
-            .join(provenant_os::build_slots::WAIT_FILE),
-        "",
-    )?;
+    fs::create_dir_all(scratch.join(provenant_os::admission::SHIM_DIRECTORY))?;
     let shim = scratch
-        .join(provenant_os::build_slots::SHIM_DIRECTORY)
+        .join(provenant_os::admission::SHIM_DIRECTORY)
         .join("cargo");
     fs::write(
         &shim,
         format!(
-            "#!/bin/sh\nexec '{}' internal build-slot -- '{}' \"$@\"\n",
+            "#!/bin/sh\nexec '{}' admit build -- '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_provenant"),
             rig.cargo.display()
         ),
@@ -251,11 +262,14 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
             .current_dir(cwd)
             .env(
                 "PATH",
-                scratch.join(provenant_os::build_slots::SHIM_DIRECTORY),
+                scratch.join(provenant_os::admission::SHIM_DIRECTORY),
             )
-            .env("PROVENANT_BUILD_SLOT_STATE", &rig.state)
-            .env("PROVENANT_BUILD_SLOTS", "1")
-            .env(provenant_core::consumer_env::BUILD_WAIT_DIR, &scratch)
+            .env("PROVENANT_ADMISSION_SLOT_STATE", &rig.state)
+            .env("PROVENANT_ADMISSION_SLOTS", "1")
+            .env(provenant_core::consumer_env::ADMISSION_WAIT_DIR, &scratch)
+            .env_remove("PROVENANT_ADMISSION_SLOT_build")
+            .env_remove("PROVENANT_ADMISSION_SLOT_BUILD")
+            .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
             .env_remove(provenant_core::consumer_env::BUILD_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -272,9 +286,17 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
     let mut second = agent_command("exec cargo build", &scratch)?.spawn()?;
     let mut stderr = std::io::BufReader::new(second.stderr.take().ok_or("stderr")?);
     let mut line = String::new();
-    stderr.read_line(&mut line)?;
+    loop {
+        line.clear();
+        if stderr.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.contains("waiting for a host build slot") {
+            break;
+        }
+    }
     assert!(line.contains("waiting for a host build slot"), "{line}");
-    assert!(provenant_os::build_slots::is_waiting(&scratch));
+    assert!(provenant_os::admission::is_waiting(&scratch).is_some());
     assert!(!rig.started("start"), "the second build must wait");
     assert!(
         Command::new("/bin/kill")
@@ -284,7 +306,7 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
     );
     first.wait()?;
     assert!(finish(&mut second, Duration::from_secs(10))?);
-    assert!(!provenant_os::build_slots::is_waiting(&scratch));
+    assert!(provenant_os::admission::is_waiting(&scratch).is_none());
     assert!(rig.started("end"));
     Ok(())
 }
@@ -294,7 +316,7 @@ fn read_only_slot_files_cannot_be_unlinked_or_created_by_the_build() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     // The lane's access: read the directory and its files, write neither.
-    let dir = rig.state.join(DIRECTORY.join("/"));
+    let dir = rig.state.join(DIRECTORY.join("/")).join("build");
     fs::set_permissions(dir.join("slot-0.lock"), fs::Permissions::from_mode(0o400))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o500))?;
     let mut build = rig.shim(1, &["tamper"])?;
@@ -322,7 +344,8 @@ fn read_only_slot_files_cannot_be_unlinked_or_created_by_the_build() -> Result {
 fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
     let rig = Rig::new()?;
     // A regular file where the slot directory belongs.
-    let slots = rig.state.join(DIRECTORY.join("/"));
+    let slots = rig.state.join(DIRECTORY.join("/")).join("build");
+    fs::create_dir_all(slots.parent().unwrap())?;
     fs::write(&slots, b"not a directory")?;
     let mut child = rig.shim(1, &["build"])?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
@@ -336,11 +359,10 @@ fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
 #[test]
 fn missing_builtin_slot_settings_still_run_the_build() -> Result {
     let rig = Rig::new()?;
-    // The test clears inherited state, then supplies only the typed backend
-    // metadata and verifies that absent Builtin slot settings do not queue Cargo.
+    // Absent slot settings run without slot acquisition.
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     command
-        .args(["internal", "build-slot", "--"])
+        .args(["admit", "build", "--"])
         .arg(&rig.cargo)
         .arg("build")
         .env_clear()
@@ -350,7 +372,7 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
     set_builtin_admission(&mut command)?;
     let mut child = command.spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
-    assert!(rig.started("end"), "Cargo ran without a slot grant");
+    assert!(rig.started("end"), "Command ran without a slot grant");
     Ok(())
 }
 
@@ -368,7 +390,7 @@ fn absent_or_malformed_port_metadata_does_not_start_cargo() -> Result {
     for (backend, source) in cases {
         let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
         command
-            .args(["internal", "build-slot", "--"])
+            .args(["admit", "build", "--"])
             .arg(&rig.cargo)
             .arg("build")
             .env_clear()
@@ -376,13 +398,10 @@ fn absent_or_malformed_port_metadata_does_not_start_cargo() -> Result {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Some(backend) = backend {
-            command.env(
-                provenant_core::consumer_env::BUILD_ADMISSION_BACKEND,
-                backend,
-            );
+            command.env(provenant_core::consumer_env::ADMISSION_BACKEND, backend);
         }
         if let Some(source) = source {
-            command.env(provenant_core::consumer_env::BUILD_ADMISSION_SOURCE, source);
+            command.env(provenant_core::consumer_env::ADMISSION_SOURCE, source);
         }
         assert!(
             !command.status()?.success(),
@@ -403,8 +422,9 @@ fn the_shims_exit_code_is_the_builds() -> Result {
     assert!(status.success());
     let mut failing_command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     failing_command
-        .args(["internal", "build-slot", "--", "/bin/sh", "-c", "exit 7"])
-        .env_remove("PROVENANT_BUILD_SLOT_STATE")
+        .args(["admit", "build", "--", "/bin/sh", "-c", "exit 7"])
+        .env_remove("PROVENANT_ADMISSION_SLOT_STATE")
+        .env_remove(provenant_core::consumer_env::BUILD_SLOT)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     set_builtin_admission(&mut failing_command)?;
@@ -441,7 +461,10 @@ fn disk_policy_applies_before_starting_a_new_build() -> Result {
             );
             let mut child = rig
                 .command(1, &["build"])?
-                .env("PROVENANT_BUILD_DISK_LIMITS", serde_json::to_string(&gate)?)
+                .env(
+                    "PROVENANT_ADMISSION_DISK_LIMITS",
+                    serde_json::to_string(&gate)?,
+                )
                 .spawn()?;
             let starts = !(below && effective == Strength::Refuse);
             let completed = finish(&mut child, Duration::from_secs(10))?;
@@ -490,7 +513,10 @@ fn disk_refusal_allows_non_build_commands() -> Result {
     for command in ["clean", "metadata", "fmt", "--version"] {
         let mut child = rig
             .command(1, &[command])?
-            .env("PROVENANT_BUILD_DISK_LIMITS", serde_json::to_string(&gate)?)
+            .env(
+                "PROVENANT_ADMISSION_DISK_LIMITS",
+                serde_json::to_string(&gate)?,
+            )
             .spawn()?;
         assert!(
             finish(&mut child, Duration::from_secs(10))?,
@@ -498,5 +524,73 @@ fn disk_refusal_allows_non_build_commands() -> Result {
             stderr_of(&mut child)?
         );
     }
+    Ok(())
+}
+
+#[test]
+fn distinct_admission_classes_are_isolated() -> Result {
+    let rig = Rig::new()?;
+    rig.provision_class("build", 1)?;
+    rig.provision_class("heavy", 1)?;
+
+    // Hold the "build" class slot
+    let mut build_hold = rig.shim_class("build", 1, &["check"])?;
+    assert!(provenant_test_support::wait_for(
+        "build class slot held",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+
+    // "heavy" class slot is free and starts immediately despite "build" being occupied
+    let mut heavy = rig.shim_class("heavy", 1, &["build"])?;
+    assert!(finish(&mut heavy, Duration::from_secs(10))?);
+    assert!(rig.started("start"));
+    assert!(rig.started("end"));
+
+    // Clean up held process
+    Command::new("/bin/kill")
+        .args(["-TERM", &build_hold.id().to_string()])
+        .status()?;
+    build_hold.wait()?;
+    Ok(())
+}
+
+#[test]
+fn bounded_wait_warns_and_proceeds() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+
+    // Occupy the only slot
+    let mut hold = rig.shim(1, &["check"])?;
+    assert!(provenant_test_support::wait_for(
+        "slot held",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
+
+    // Run second command with a 1-second timeout
+    let mut waiting_cmd = rig.command(1, &["build"])?;
+    waiting_cmd.env("PROVENANT_ADMISSION_WAIT_SECONDS", "1");
+    let mut child = waiting_cmd.spawn()?;
+
+    assert!(finish(&mut child, Duration::from_secs(15))?);
+    let stderr = stderr_of(&mut child)?;
+    assert!(
+        stderr.contains("build slot unavailable, building without one")
+            || stderr.contains("admission slot unavailable, proceeding without one"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("bounded wait ended with every build slot busy"),
+        "stderr: {stderr}"
+    );
+
+    // Clean up held process
+    Command::new("/bin/kill")
+        .args(["-TERM", &hold.id().to_string()])
+        .status()?;
+    hold.wait()?;
     Ok(())
 }

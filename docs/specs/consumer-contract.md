@@ -162,14 +162,17 @@ locations may also differ from `HOME`.
 | `PROVENANT_ROOT` | lane | internal | Installed release assets. | every lane |
 | `PROVENANT_CARGO_SOURCE_WRITES` | lane | internal | Whether lane Cargo may write registry sources; the cargo shim explains offline failures with it. | lanes with a Cargo home |
 | `PROVENANT_CARGO_SOURCE_WRITES_SOURCE` | lane | internal | Where the Cargo source-write setting came from. | lanes with a Cargo home |
-| `PROVENANT_BUILD_ADMISSION_BACKEND` | lane | internal | Encoded build admission backend selected by the host. | only for the cargo child of the lane's cargo shim |
-| `PROVENANT_BUILD_ADMISSION_SOURCE` | lane | internal | Source of the selected build admission backend. | only for the cargo child of the lane's cargo shim |
-| `PROVENANT_BUILD_SLOT` | lane | internal | Marks a cargo process that holds a host build slot. | only for the cargo child of the lane's cargo shim |
-| `PROVENANT_BUILD_SLOT_STATE` | lane | internal | The host build-slot directory. | only for the cargo child of the lane's cargo shim |
-| `PROVENANT_BUILD_SLOTS` | lane | internal | The host build-slot count. | only for the cargo child of the lane's cargo shim |
-| `PROVENANT_BUILD_WAIT_DIR` | lane | internal | The lane scratch directory for the build-slot wait signal. | only for the cargo child of the lane's cargo shim |
+| `PROVENANT_ADMISSION_CLASS` | lane | internal | The admission class name (e.g. `build`). | only for admitted commands |
+| `PROVENANT_ADMISSION_SLOT` | lane | internal | Marks a process that holds an admission class slot. | only for admitted commands |
+| `PROVENANT_ADMISSION_SLOT_STATE` | lane | internal | The host admission state directory. | only for admitted commands |
+| `PROVENANT_ADMISSION_SLOTS` | lane | internal | The host admission class slot count. | only for admitted commands |
+| `PROVENANT_ADMISSION_WAIT_DIR` | lane | internal | The lane scratch directory for admission wait signal. | only for admitted commands |
+| `PROVENANT_ADMISSION_BACKEND` | lane | internal | Encoded admission backend selected by the host. | only for admitted commands |
+| `PROVENANT_ADMISSION_SOURCE` | lane | internal | Source of the selected admission backend. | only for admitted commands |
+| `PROVENANT_ADMISSION_DISK_LIMITS` | lane | internal | Encoded admission disk limits. | only for admitted commands |
+| `PROVENANT_ADMISSION_MEMORY_LIMIT` | lane | internal | Admission memory limit in bytes. | only for admitted commands |
+| `PROVENANT_ADMISSION_TRIM_ACTION` | lane | internal | Trim action executed on disk floor or memory pressure. | only for admitted commands |
 | `PROVENANT_LOCAL_CARGO` | lane | internal | The real cargo the shim runs. | only for the cargo child of the lane's cargo shim |
-| `PROVENANT_BUILD_DISK_LIMITS` | lane | internal | Encoded build disk limits. | only for the cargo child of the lane's cargo shim |
 
 - Why: a repository's scripts detect and adapt to a lane only through these names.
 - Owner: `crates/core/src/consumer_env.rs`

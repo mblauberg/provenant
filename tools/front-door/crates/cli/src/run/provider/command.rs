@@ -509,12 +509,12 @@ pub(super) fn local_cargo(
 }
 
 // A nested lane inherits the outer lane's PATH. Recognise generated shims by
-// their script contents so a real Cargo in a similarly named directory works.
-fn real_cargo_on_path(path: &std::ffi::OsStr, scratch: &Path) -> Option<PathBuf> {
+// their script contents so a real binary in a similarly named directory works.
+fn real_binary_on_path(binary: &str, path: &std::ffi::OsStr, scratch: &Path) -> Option<PathBuf> {
     use std::io::Read;
     std::env::split_paths(path)
-        .filter(|dir| dir != &scratch.join(provenant_os::build_slots::SHIM_DIRECTORY))
-        .map(|dir| dir.join("cargo"))
+        .filter(|dir| dir != &scratch.join(provenant_os::admission::SHIM_DIRECTORY))
+        .map(|dir| dir.join(binary))
         .find(|candidate| {
             if !candidate.is_absolute() || !candidate.is_file() {
                 return false;
@@ -524,12 +524,18 @@ fn real_cargo_on_path(path: &std::ffi::OsStr, scratch: &Path) -> Option<PathBuf>
                 .and_then(|file| file.take(8192).read_to_end(&mut prefix))
                 .is_ok()
                 && prefix.starts_with(b"#!/bin/sh\n")
-                && prefix
-                    .windows(b"PROVENANT_BUILD_WAIT_DIR=".len())
-                    .any(|part| part == b"PROVENANT_BUILD_WAIT_DIR=")
-                && prefix
-                    .windows(b" internal build-slot -- ".len())
-                    .any(|part| part == b" internal build-slot -- ");
+                && (prefix
+                    .windows(b"PROVENANT_ADMISSION_WAIT_DIR=".len())
+                    .any(|part| part == b"PROVENANT_ADMISSION_WAIT_DIR=")
+                    || prefix
+                        .windows(b"PROVENANT_BUILD_WAIT_DIR=".len())
+                        .any(|part| part == b"PROVENANT_BUILD_WAIT_DIR="))
+                && (prefix
+                    .windows(b" admit build -- ".len())
+                    .any(|part| part == b" admit build -- ")
+                    || prefix
+                        .windows(b" internal build-slot -- ".len())
+                        .any(|part| part == b" internal build-slot -- "));
             !shim
         })
 }
@@ -541,7 +547,7 @@ fn real_cargo_on_path(path: &std::ffi::OsStr, scratch: &Path) -> Option<PathBuf>
 )]
 pub(super) fn configure_build_slots(
     spec: &mut provenant_providers::LaunchSpec,
-    settings: &provenant_config::LaneBuildSettings,
+    _settings: &provenant_config::LaneBuildSettings,
     project: &Path,
     home: &Path,
     scratch: &Path,
@@ -567,7 +573,7 @@ pub(super) fn configure_build_slots(
         .env
         .iter()
         .find(|(name, _)| name == "PATH")
-        .and_then(|(_, path)| real_cargo_on_path(path, scratch))
+        .and_then(|(_, path)| real_binary_on_path("cargo", path, scratch))
     {
         cargo
     } else if default_cargo.is_file() {
@@ -576,14 +582,42 @@ pub(super) fn configure_build_slots(
         eprintln!("provenant: cargo was not found; build-slot shim unavailable for this lane");
         return Ok(Vec::new());
     };
+    let nextest = spec
+        .env
+        .iter()
+        .find(|(name, _)| name == "PATH")
+        .and_then(|(_, path)| real_binary_on_path("nextest", path, scratch))
+        .or_else(|| {
+            let candidate = home.join(".cargo/bin/nextest");
+            if candidate.is_file() {
+                Some(candidate)
+            } else {
+                None
+            }
+        });
+    let cargo_nextest = spec
+        .env
+        .iter()
+        .find(|(name, _)| name == "PATH")
+        .and_then(|(_, path)| real_binary_on_path("cargo-nextest", path, scratch))
+        .or_else(|| {
+            let candidate = home.join(".cargo/bin/cargo-nextest");
+            if candidate.is_file() {
+                Some(candidate)
+            } else {
+                None
+            }
+        });
     let spec = std::cell::RefCell::new(spec);
     provenant_config::dispatch_port_backend(
         &port.backend,
         || {
-            let total =
-                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
-            let slots = settings.build_limit(total);
-            if let Err(error) = provenant_os::build_slots::BuildSlots::provision(state, slots) {
+            let class_config =
+                provenant_config::ResolvedAdmissionClass::resolve("build", state, Some(project));
+            let slots = class_config.slots;
+            if let Err(error) =
+                provenant_os::admission::AdmissionSlots::provision(state, "build", slots)
+            {
                 eprintln!(
                     "provenant: build slots unavailable for this lane, building without them: {error}"
                 );
@@ -606,13 +640,16 @@ pub(super) fn configure_build_slots(
                 provenant: runtime,
                 state,
                 slots,
+                class_config: Some(class_config),
                 disk_gate,
                 cargo: &cargo,
+                nextest: nextest.as_deref(),
+                cargo_nextest: cargo_nextest.as_deref(),
                 local_cargo: local_cargo(knobs),
             };
             match spec.borrow_mut().configure_build_slots(scratch, &gate) {
                 Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
-                    let directory = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+                    let directory = state.join("admission").join("build");
                     Ok(std::iter::once(PathGrant {
                         path: directory.clone(),
                         scope: PathScope::Exact,
@@ -640,8 +677,11 @@ pub(super) fn configure_build_slots(
                 provenant: runtime,
                 state,
                 slots: 1,
+                class_config: None,
                 disk_gate: None,
                 cargo: &cargo,
+                nextest: nextest.as_deref(),
+                cargo_nextest: cargo_nextest.as_deref(),
                 local_cargo: local_cargo(knobs),
             };
             match spec.borrow_mut().configure_build_slots(scratch, &gate) {
@@ -666,8 +706,11 @@ pub(super) fn configure_build_slots(
                 provenant: runtime,
                 state,
                 slots: 1,
+                class_config: None,
                 disk_gate: None,
                 cargo: &cargo,
+                nextest: nextest.as_deref(),
+                cargo_nextest: cargo_nextest.as_deref(),
                 local_cargo: local_cargo(knobs),
             };
             spec.borrow_mut()
@@ -828,13 +871,13 @@ mod refusal_tests {
         for dir in [&outer, &inner, &real] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let shim = "#!/bin/sh\nPROVENANT_BUILD_WAIT_DIR='/tmp'\nexec '/provenant' internal build-slot -- '/cargo' \"$@\"\n";
+        let shim = "#!/bin/sh\nPROVENANT_ADMISSION_WAIT_DIR='/tmp'\nexec '/provenant' admit build -- '/cargo' \"$@\"\n";
         std::fs::write(outer.join("cargo"), shim).unwrap();
         std::fs::write(inner.join("cargo"), shim).unwrap();
         std::fs::write(real.join("cargo"), "real cargo").unwrap();
         let path = std::env::join_paths([&inner, &outer, &real]).unwrap();
         assert_eq!(
-            real_cargo_on_path(&path, &root.path().join("inner")),
+            real_binary_on_path("cargo", &path, &root.path().join("inner")),
             Some(real.join("cargo"))
         );
     }

@@ -79,6 +79,16 @@ pub const LOCAL_CARGO: &str = "PROVENANT_LOCAL_CARGO";
 pub const BUILD_ADMISSION_BACKEND: &str = "PROVENANT_BUILD_ADMISSION_BACKEND";
 pub const BUILD_ADMISSION_SOURCE: &str = "PROVENANT_BUILD_ADMISSION_SOURCE";
 pub const BUILD_DISK_LIMITS: &str = "PROVENANT_BUILD_DISK_LIMITS";
+pub const ADMISSION_CLASS: &str = "PROVENANT_ADMISSION_CLASS";
+pub const ADMISSION_SLOT: &str = "PROVENANT_ADMISSION_SLOT";
+pub const ADMISSION_SLOT_STATE: &str = "PROVENANT_ADMISSION_SLOT_STATE";
+pub const ADMISSION_SLOTS: &str = "PROVENANT_ADMISSION_SLOTS";
+pub const ADMISSION_WAIT_DIR: &str = "PROVENANT_ADMISSION_WAIT_DIR";
+pub const ADMISSION_BACKEND: &str = "PROVENANT_ADMISSION_BACKEND";
+pub const ADMISSION_SOURCE: &str = "PROVENANT_ADMISSION_SOURCE";
+pub const ADMISSION_DISK_LIMITS: &str = "PROVENANT_ADMISSION_DISK_LIMITS";
+pub const ADMISSION_MEMORY_LIMIT: &str = "PROVENANT_ADMISSION_MEMORY_LIMIT";
+pub const ADMISSION_TRIM_ACTION: &str = "PROVENANT_ADMISSION_TRIM_ACTION";
 pub const PORT_OPERATION: &str = "PROVENANT_PORT_OPERATION";
 pub const PORT_SOURCE: &str = "PROVENANT_PORT_SOURCE";
 pub const PORT_PHASE: &str = "PROVENANT_PORT_PHASE";
@@ -404,6 +414,76 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Lane,
         Internal,
         "Encoded build disk limits.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_CLASS,
+        Lane,
+        Internal,
+        "The named admission class.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_SLOT,
+        Lane,
+        Internal,
+        "Marks a process that holds an admission class slot.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_SLOT_STATE,
+        Lane,
+        Internal,
+        "The host admission slot state directory.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_SLOTS,
+        Lane,
+        Internal,
+        "The admission class slot limit.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_WAIT_DIR,
+        Lane,
+        Internal,
+        "The directory for the admission wait signal.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_BACKEND,
+        Lane,
+        Internal,
+        "Encoded admission backend.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_SOURCE,
+        Lane,
+        Internal,
+        "Source of the selected admission backend.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_DISK_LIMITS,
+        Lane,
+        Internal,
+        "Encoded admission disk limits.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_MEMORY_LIMIT,
+        Lane,
+        Internal,
+        "Admission memory per slot limit.",
+        BUILD_SHIM,
+    ),
+    var(
+        ADMISSION_TRIM_ACTION,
+        Lane,
+        Internal,
+        "Admission trim action command.",
         BUILD_SHIM,
     ),
 ];

@@ -5,6 +5,11 @@
 //! library errors retain their typed cause; CLI classifies inspected defects.
 #![forbid(unsafe_code)]
 
+pub mod admission;
+pub use admission::{
+    AdmissionClassConfig, AdmissionSource, DEFAULT_CLASS, DEFAULT_WAIT_SECONDS,
+    ResolvedAdmissionClass,
+};
 mod account_sync;
 mod domains;
 mod edit;

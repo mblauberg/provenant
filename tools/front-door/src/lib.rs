@@ -4,7 +4,7 @@ mod graph_support;
 // `main.rs` parses and calls `dispatch`; the worktree driver includes this
 // file and dispatches with its fixture seams. Plain comments only: `include!`
 // refuses inner attributes.
-mod build_slot;
+mod admit;
 mod chair;
 mod check_providers;
 mod checks;
@@ -687,6 +687,11 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 let (resolved, revision) = config::show(&roots, sections)?;
                 let mut value = serde_json::to_value(&resolved)?;
                 value["revision"] = revision.into();
+                value["admission"] =
+                    serde_json::to_value(config::ResolvedAdmissionClass::resolve_all(
+                        roots.state.as_path(),
+                        Some(&context.project),
+                    ))?;
                 let policy = resolved.domains.policy.resolve_with_knobs(
                     &provenant_os::git::repository_path(
                         &context.project,
@@ -1190,11 +1195,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             supervise(&descriptors, globals, process)
         }
         // Handled in `dispatch` before roots and telemetry; it never gets here.
-        Command::Internal(provenant_cli::Internal::BuildSlot { .. }) => fail(
+        Command::Admit { .. } => fail(
             &inv.leaf,
             Outcome::Error,
             "INTERNAL",
-            "build-slot is dispatched before the command table",
+            "admit is dispatched before the command table",
             globals,
         ),
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
@@ -1767,18 +1772,43 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         ParseOutcome::Version { globals } => ("version", globals),
     };
     let verb = verb.to_owned();
-    // The lane's cargo shim runs on every build: it needs no roots, telemetry
-    // or result envelope, and ends with cargo's exit code.
+    // A command admitted under an admission class runs directly under that slot:
+    // it needs no roots, telemetry or result envelope, and ends with the command's exit code.
     if let ParseOutcome::Invocation(inv) = &parsed
-        && let Command::Internal(provenant_cli::Internal::BuildSlot { command }) = &inv.command
+        && let Command::Admit { class, command } = &inv.command
     {
-        let env: Vec<_> = std::env::vars_os().collect();
-        return u8::try_from(build_slot::run(build_slot::Gate {
-            settings: build_slot::Settings::from_env(&env),
-            local: build_slot::Local::from_env(&env),
-            command,
-        }))
-        .unwrap_or(1);
+        let mut env: Vec<_> = std::env::vars_os().collect();
+        if !env.iter().any(|(key, _)| {
+            key == provenant_core::consumer_env::BUILD_SLOT_STATE
+                || key == provenant_core::consumer_env::ADMISSION_SLOT_STATE
+        }) {
+            let resolved = roots::resolve(globals, Workspace::Checkout, Product::Optional)
+                .or_else(|_| roots::resolve(globals, Workspace::Directory, Product::Optional));
+            if let Ok(resolved) = resolved {
+                let state = resolved.roots.state.as_path();
+                let config = provenant_config::ResolvedAdmissionClass::resolve(
+                    class,
+                    state,
+                    Some(&resolved.project),
+                );
+                if let Err(error) =
+                    provenant_os::admission::AdmissionSlots::provision(state, class, config.slots)
+                {
+                    let _ = writeln!(
+                        io::stderr().lock(),
+                        "provenant: admission slots unavailable; command may proceed without them: {error}"
+                    );
+                }
+                env.push((
+                    provenant_core::consumer_env::ADMISSION_SLOT_STATE.into(),
+                    state.as_os_str().to_owned(),
+                ));
+                if let Ok(json) = serde_json::to_string(&config) {
+                    env.push(("PROVENANT_ADMISSION_CONFIG".into(), json.into()));
+                }
+            }
+        }
+        return u8::try_from(admit::run(class, command, &env)).unwrap_or(1);
     }
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build nextest binaries under a build slot, then run them without one."""
+"""Build nextest binaries and run them under the host build admission slot."""
 import os
 import subprocess
 import sys

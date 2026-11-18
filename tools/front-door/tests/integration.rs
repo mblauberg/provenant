@@ -3,8 +3,8 @@ mod support;
 mod terminal_run;
 
 mod accounts;
+mod admission;
 mod build_inventory;
-mod build_slot;
 mod catalogue_read_only;
 mod chair;
 mod checks;

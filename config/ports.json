@@ -71,9 +71,9 @@
     "integrations": [
       {
         "paths": [
-          "tools/front-door/src/build_slot.rs",
-          "tools/front-door/tests/build_slot.rs",
-          "tools/front-door/crates/os/src/build_slots.rs"
+          "tools/front-door/src/admit.rs",
+          "tools/front-door/tests/admission.rs",
+          "tools/front-door/crates/os/src/admission.rs"
         ],
         "package": "provenant",
         "binary": "integration"

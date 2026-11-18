@@ -172,12 +172,12 @@ replayable authority.
 Lane Cargo shims, including native launches, use `PortTable.build_admission`, independently of attempt
 admission: builtin uses host slots and the effective disk policy, command runs
 the repository wrapper around Cargo, and none omits admission. The host freezes
-the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
-`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain
+the backend/source in `PROVENANT_ADMISSION_BACKEND` and
+`PROVENANT_ADMISSION_SOURCE`. Native launches retain their host toolchain
 behind the shim. Local-Cargo policy still applies to every shim
 backend. Wrapper execution streams Cargo output without a host-state receipt.
 - Why: build coordination varies by repository without changing attempt custody.
-- Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
+- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`
 
 ### Bounded execution
 
@@ -324,7 +324,7 @@ Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered
 account and its required credentials. Credential values stay in the live launch,
 never in prompts or receipts. Native launches skip skill copies, tool dependency
-discovery, credential symlink inventory and the build-slot shim. Every lane still
+discovery, credential symlink inventory and the build admission shims. Every lane still
 binds the host Cargo home and private target/build directories before seed
 validation.
 

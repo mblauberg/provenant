@@ -685,7 +685,7 @@
       "values": ["all", "check", "none"],
       "default": "all",
       "status": "wired",
-      "reader": "tools/front-door/src/build_slot.rs",
+      "reader": "tools/front-door/src/admit.rs",
       "effect": "Advisory cargo scope for lanes: all permits every command without a warning; check warns for compiling commands other than cargo check; none warns for every compiling command. Commands continue after a warning. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs].",
       "trade_off": "A narrower setting warns about extra resource use; the host build slot controls cooperative cargo concurrency."
     },
