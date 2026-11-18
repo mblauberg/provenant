@@ -11,6 +11,27 @@ use std::{
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
 #[test]
+// Spec: docs/specs/cli.md#results
+fn scanner_refusal_names_rule_without_echoing_brief() -> Result {
+    let rig = GraphProject::new()?;
+    prepare_state(&rig)?;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (output, value) = rig.run(&["run", "task", "--brief", secret, "--explain"])?;
+    let wire = value.to_string();
+    assert!(!wire.contains(secret), "credential reached output");
+    if output.status.success() {
+        assert_eq!(
+            value["data"]["document"]["nodes"][0]["prompt"],
+            "[REDACTED]"
+        );
+    } else {
+        assert!(wire.contains("brief"), "missing field in refusal");
+        assert!(wire.contains("credential token"), "missing rule in refusal");
+    }
+    Ok(())
+}
+
+#[test]
 fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     use std::io::Write;
     let rig = GraphProject::new()?;
@@ -607,13 +628,13 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     std::fs::create_dir_all(&user)?;
     std::fs::create_dir_all(&repo)?;
     std::fs::write(user.join("task.toml"), "brief='user'\ntier='junior'\n")?;
-    let (_, value) = rig.run(&["templates", "task"])?;
+    let (_, value) = rig.run(&["templates", "show", "task"])?;
     assert_eq!(value["data"]["templates"][0]["template"]["brief"], "user");
     std::fs::write(
         repo.join("task.toml"),
         "brief='repository'\ntier='senior'\n",
     )?;
-    let (_, value) = rig.run(&["templates", "task"])?;
+    let (_, value) = rig.run(&["templates", "show", "task"])?;
     assert_eq!(
         value["data"]["templates"][0]["template"]["brief"],
         "repository"
@@ -625,7 +646,7 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     )?;
     let output = rig
         .command()
-        .args(["templates", "task", "--file"])
+        .args(["templates", "show", "task", "--file"])
         .arg(inline)
         .output()?;
     let value: Value = serde_json::from_slice(&output.stdout)?;
@@ -677,7 +698,7 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
         expected.iter().map(String::as_str).collect()
     );
 
-    let (output, shown) = rig.run(&["templates", "task"])?;
+    let (output, shown) = rig.run(&["templates", "show", "task"])?;
     assert!(output.status.success(), "{shown}");
     assert_eq!(
         &shown["data"]["templates"][0],
@@ -981,7 +1002,7 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
         repo.join("broken.toml"),
         "brief='leaf'\nnodes=[{id='child',use='task'}]\n",
     )?;
-    for args in [vec!["templates"], vec!["templates", "broken"]] {
+    for args in [vec!["templates"], vec!["templates", "show", "broken"]] {
         let (output, _) = rig.run(&args)?;
         assert!(!output.status.success());
     }
@@ -1505,6 +1526,31 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
     }
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-ambiguous",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (output, value) =
+        rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("settled"), "{message}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|next| next.contains("retry steer-ambiguous/accept --brief-file")),
+        "{value}"
+    );
     Ok(())
 }
 
@@ -1762,7 +1808,18 @@ fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() 
             id.clone()
         };
         let brief = "line one\nline two: corrected scope\n";
-        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
+        let brief_path = rig.project.join("amended-brief.txt");
+        std::fs::write(&brief_path, brief)?;
+        let (output, retried) = if qualified {
+            rig.run(&[
+                "retry",
+                &target,
+                "--brief-file",
+                brief_path.to_str().ok_or("brief path")?,
+            ])?
+        } else {
+            rig.run(&["retry", &target, "--brief", brief])?
+        };
         assert!(output.status.success(), "{target}: {retried}");
         let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
         assert_eq!(prompt, brief, "{target}");
