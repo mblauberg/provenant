@@ -6890,6 +6890,7 @@ mod tests {
             MismatchedSession,
             LiveThenTerminalMismatch,
             LiveThenTerminalIncomplete,
+            LiveThenTerminalIncompleteAllowed,
             LiveThenTerminalSteeredEof,
             LiveThenTerminalExplicitCancelEof,
             LiveThenTerminalEofIncomplete,
@@ -6904,6 +6905,7 @@ mod tests {
             Case::MismatchedSession,
             Case::LiveThenTerminalMismatch,
             Case::LiveThenTerminalIncomplete,
+            Case::LiveThenTerminalIncompleteAllowed,
             Case::LiveThenTerminalSteeredEof,
             Case::LiveThenTerminalExplicitCancelEof,
             Case::LiveThenTerminalEofIncomplete,
@@ -7204,6 +7206,12 @@ mod tests {
                             Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
                         )
                     }
+                    Case::LiveThenTerminalIncompleteAllowed => {
+                        exit.provider_identity_evidence_incomplete = true;
+                        publication.outcome = Outcome::Succeeded;
+                        publication.session = Some("fixture-session".into());
+                        (provenant_records::run::SteeringState::Resumed, None)
+                    }
                     Case::LiveThenTerminalSteeredEof | Case::LiveThenTerminalExplicitCancelEof => {
                         exit.stop_reason =
                             Some(if matches!(case, Case::LiveThenTerminalSteeredEof) {
@@ -7304,16 +7312,56 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
+    fn clean_exit_with_incomplete_identity_evidence_settles_the_result() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let attempt = store.attempt_dir(id, false)?;
+        crate::artifacts::seal(&attempt, "stdout.log", b"valid result", CAPTURE_LIMIT)?;
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        exit.provider_identity_evidence_incomplete = true;
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let fake = crate::dispatch_tests::Fake::with_observed(
+            Some(crate::tests::route()),
+            Some(Outcome::Succeeded),
+        );
+        let finished = store.finish(id, &attempt, &exit, &fake, &call)?;
+        assert!(matches!(
+            finished.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
     fn sealed_live_identity_conflict_fences_a_queued_successor() -> TestResult {
-        for (conflict, incomplete, outcome, cause) in [
-            (
+        {
+            let (conflict, incomplete, outcome, cause) = (
                 true,
                 false,
                 Outcome::Failed,
                 Some(TerminalCause::IdentityMismatch),
-            ),
-            (false, true, Outcome::Unsettled, None),
-        ] {
+            );
             let temp = tempfile::tempdir()?;
             let clock = crate::tests::clock();
             let cancel = provenant_core::CancelToken::new();
@@ -7431,9 +7479,9 @@ mod tests {
                 Some(true),
                 false,
                 true,
-                Outcome::Unsettled,
-                None,
-                false,
+                Outcome::Cancelled,
+                Some(TerminalCause::Steered),
+                true,
             ),
             (
                 Some(StopReason::Steered),
