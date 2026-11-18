@@ -128,7 +128,12 @@ fn apply_provider_identity(
         decoded.complete = false;
         decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
         decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
-    } else if exit.provider_identity_evidence_incomplete {
+    } else if exit.provider_identity_evidence_incomplete
+        && matches!(
+            decoded.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+        )
+    {
         use provenant_records::policy::{Effect, Facts};
         match policy.check(
             "PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE",
