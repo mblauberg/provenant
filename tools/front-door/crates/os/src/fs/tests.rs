@@ -274,6 +274,34 @@ fn directory_stream_resumes_from_an_opaque_cookie() {
     assert_eq!(resumed.next().unwrap().unwrap(), expected[1]);
 }
 
+#[test]
+fn directory_positions_resume_across_blocks_without_repeating_or_missing_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    for index in 0..513 {
+        dir.create_new(OsStr::new(&format!("entry-{index:04}")))
+            .unwrap();
+    }
+    let mut expected = names(&dir);
+    expected.sort();
+    let mut observed = Vec::new();
+    let mut stream = dir.entries().unwrap();
+    loop {
+        for _ in 0..31 {
+            let Some(name) = stream.next() else {
+                observed.sort();
+                assert_eq!(observed, expected);
+                return;
+            };
+            observed.push(name.unwrap());
+        }
+        let position = stream.position().unwrap();
+        drop(stream);
+        stream = dir.entries().unwrap();
+        stream.seek(position).unwrap();
+    }
+}
+
 fn payload_root(temp: &Path, mode: u32) -> (Directory, Metadata) {
     let parent = Directory::open_anchor(temp).unwrap();
     parent.mkdir(OsStr::new("payload"), 0o700).unwrap();
