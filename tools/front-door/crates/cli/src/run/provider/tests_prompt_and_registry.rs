@@ -374,6 +374,68 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
 #[test]
 fn registry_spec_drives_local_provider_preparation_and_quota()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    let catalogue = provenant_routing::Catalogue::bundled()?;
+    let config = provenant_routing::RoutingConfig::default();
+    let model = provenant_routing::ModelId::parse("cursor/composer-2.5")?;
+    let now = provenant_core::WallTime::from_unix_seconds(100)?;
+    let assess = |account| {
+        provenant_routing::monthly_allowance_assessment(
+            &catalogue,
+            &config,
+            now,
+            &model,
+            Some(account),
+            None,
+        )
+        .expect("Cursor declares a monthly allowance")
+    };
+    assert!(!assess("local").constrained);
+    assert!(assess("registered").constrained);
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "local".into(),
+    };
+    let snapshot = provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 90,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: None,
+        windows: vec![provenant_quota::QuotaWindow {
+            extra: Default::default(),
+            pool: "billing_cycle".into(),
+            window_seconds: Some(30 * 86400),
+            resets_unix_seconds: Some(30 * 86400),
+            used_basis_points: 9000,
+        }],
+    };
+    let mut allowance = provenant_quota::AllowanceLedger::default();
+    allowance.observe(&snapshot);
+    let observation = provenant_routing::QuotaObservation {
+        model: model.clone(),
+        snapshot,
+        allowance,
+        expires_unix_seconds: 200,
+    };
+    assert!(
+        provenant_routing::monthly_allowance_assessment(
+            &catalogue,
+            &config,
+            now,
+            &model,
+            Some("local"),
+            Some(&observation),
+        )
+        .expect("monthly assessment")
+        .constrained
+    );
     registry_provider_resolves_prepares_and_reports_quota("cursor", "local")
 }
 

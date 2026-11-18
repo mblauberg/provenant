@@ -172,10 +172,11 @@ intervening launches, then smooth 75% previous/25% new. Unchanged reports retain
 debt; launches at or after observation remain pending. Rollover retains learned
 cost. Failed launches conservatively retain reservations.
 
-`monthly_window` generalises cycle detection; adapter declarations require
-missing evidence. Missing, stale or incomplete cycles constrain eligibility;
-model-pool scope applies. `reserve_allowance_launch` atomically rechecks and
-records against the account cache. `pacing.monthly` and account profiles override
+`monthly_window` generalises cycle detection. Adapter declarations identify
+expected cycles. Missing, stale or incomplete cycles constrain registered-account
+eligibility; for an unregistered local login they are advisory because the login
+is not pinned. A valid observed cycle constrains both. Model-pool scope applies.
+`reserve_allowance_launch` atomically rechecks and records against the account cache. `pacing.monthly` and account profiles override
 settings; `spend`, `max` or monthly `enabled=false` bypass this preference.
 `pacing_preview` reports settings, source, estimate and budget.
 

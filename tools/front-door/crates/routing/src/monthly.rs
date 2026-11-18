@@ -92,10 +92,20 @@ pub fn monthly_allowance_assessment(
         });
     }
     let now = now.unix_seconds();
+    let unregistered_local = account.is_some_and(|key| {
+        provenant_records::AdapterSpec::get(model.adapter())
+            .is_some_and(|spec| spec.local_login && spec.local_account.1 == key)
+    });
     let unknown = || {
+        let constrained = !unregistered_local;
+        let outcome = if constrained {
+            "constrained"
+        } else {
+            "advisory for unregistered local login"
+        };
         Some(MonthlyAllowanceAssessment {
-            constrained: true,
-            detail: format!("{prefix}; monthly window missing, stale or incomplete; constrained"),
+            constrained,
+            detail: format!("{prefix}; monthly window missing, stale or incomplete; {outcome}"),
         })
     };
     let Some(q) = observation.filter(|q| {
