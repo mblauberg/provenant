@@ -14,7 +14,7 @@ pub struct Redactor {
 impl Redactor {
     pub fn text(&self, value: &str) -> String {
         // Apply the capture redactor to every value, including executable paths.
-        let mut out = match provenant_confinement::redact::known_shapes(value.as_bytes()) {
+        let mut out = match provenant_redact::known_shapes(value.as_bytes()) {
             Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| "[REDACTED]".into()),
             Err(_) => "[REDACTED]".into(),
         };

@@ -1,5 +1,5 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
-mod support;
+use crate::support;
 use provenant_fabric_runtime::hosts::{
     CONSOLE_DETAIL_PROTOCOL, CONSOLE_INBOX_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL,
 };

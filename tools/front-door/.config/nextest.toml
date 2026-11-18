@@ -68,7 +68,7 @@ not (
         test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
         test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
     )) |
-    (package(=provenant) & binary(=fabric_lane) & test(=lane_run_submits_child_through_parent_relay)) |
+    (package(=provenant) & binary(=integration) & test(=fabric_lane::lane_run_submits_child_through_parent_relay)) |
     (package(=provenant) & binary(=worktrees) & (
         test(=lane_prepare_isolates_nested_claude_state) |
         test(=lane_builds_and_tests_swift_in_a_registered_worktree)
@@ -171,7 +171,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # The oversized peer-frame refusal also reads its boundary-sized frame before
 # contact and exceeds 30 seconds on this host even when run on its own.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_and_compiles_with_its_declared_parameters)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
+filter = 'package(=provenant) & ((binary(=integration) & test(=graph_cli::every_bundled_template_is_listed_and_compiles_with_its_declared_parameters)) | (binary(=integration) & test(=fabric_transport::peer_dispatch_refuses_an_oversized_frame_before_contact)))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # Three isolated credential layouts each run real writer preparation. Retain
@@ -207,13 +207,13 @@ slow-timeout = { period = "10s", terminate-after = 6 }
 # These Git-history release fixtures crossed 20s while running together.
 # Reserve the full pool while retaining the normal CI deadline.
 [[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=checks) & (test(=release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=release_ranges_check_commit_identity_across_a_shallow_boundary))'
+filter = 'package(=provenant) & binary(=integration) & (test(=checks::release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=checks::release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=checks::release_ranges_check_commit_identity_across_a_shallow_boundary))'
 threads-required = "num-test-threads"
 
 # This bounded-evidence fixture launches six release checks and exceeded 30s
 # on macOS. Its measured aggregate work gets four 30s intervals; no other
 # fixture or product/runtime deadline changes.
 [[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=checks) & test(=release_checks_legal_private_symlink_and_bounded_evidence)'
+filter = 'package(=provenant) & binary(=integration) & test(=checks::release_checks_legal_private_symlink_and_bounded_evidence)'
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 4 }

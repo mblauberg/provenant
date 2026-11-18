@@ -765,7 +765,7 @@ fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     if joined.is_empty() {
         return None;
     }
-    let redacted = provenant_confinement::redact::known_shapes(joined.as_bytes())
+    let redacted = provenant_redact::known_shapes(joined.as_bytes())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
@@ -779,7 +779,7 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
-    let redacted = provenant_confinement::redact::known_shapes(line.as_bytes())
+    let redacted = provenant_redact::known_shapes(line.as_bytes())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(crate::bounded_text(&redacted, 160))

@@ -880,8 +880,8 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             });
         let disk = disk_guard::LaneDisk::default();
         let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
-            provenant_confinement::redact::Redactor::new([]),
-            provenant_confinement::redact::Redactor::new([]),
+            provenant_redact::Redactor::new([]),
+            provenant_redact::Redactor::new([]),
         ) else {
             return fail(
                 "internal supervise",

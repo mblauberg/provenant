@@ -3,7 +3,7 @@
 
 //! Claude Code hooks that report and keep session state, and that route
 //! worktree creation and removal through the worktree owner.
-mod support;
+use crate::support;
 use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
 use provenant_os::clock::SystemClock;
 use provenant_workflow::session::{HostSessionId, SessionStore};

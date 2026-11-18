@@ -31,21 +31,21 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "release_checks_legal_private_symlink_and_bounded_evidence"
+name = "checks::release_checks_legal_private_symlink_and_bounded_evidence"
 issue = "#3304"
 owner = "chair"
 expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "release_reads_packed_objects_native_alternates_and_linked_worktrees"
+name = "checks::release_reads_packed_objects_native_alternates_and_linked_worktrees"
 issue = "#3304"
 owner = "chair"
 expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "malformed_operations_and_waits_fail_before_state_creation"
+name = "fabric::malformed_operations_and_waits_fail_before_state_creation"
 issue = "#3304"
 owner = "chair"
 expires = 2026-12-14
@@ -115,7 +115,7 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "session_save_warns_once_only_when_disk_is_low"
+name = "workflow::session_save_warns_once_only_when_disk_is_low"
 issue = "#3305"
 owner = "chair"
 expires = 2026-12-14

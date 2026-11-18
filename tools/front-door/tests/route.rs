@@ -1,5 +1,5 @@
 //! Real command tree, isolated state and trap providers: previews perform no effects.
-mod support;
+use crate::support;
 use serde_json::Value;
 use std::{fs, os::unix::fs::PermissionsExt};
 use support::{Result, TestRig, call as json_call, code};

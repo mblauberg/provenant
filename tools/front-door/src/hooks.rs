@@ -1474,11 +1474,11 @@ fn run_local_gate_with(
             Err(error) => (Some(format!("execution failed: {error}")), Vec::new()),
         };
         if let Some(failure) = failure {
-            let safe = provenant_confinement::redact::known_shapes(&output)
+            let safe = provenant_redact::known_shapes(&output)
                 .unwrap_or_else(|_| b"[output withheld: redaction failed]".to_vec());
             let message = format!(
                 "local gate command {:?}: {failure}\n{}",
-                provenant_confinement::redact::bounded_line(command, 200),
+                provenant_redact::bounded_line(command, 200),
                 String::from_utf8_lossy(&safe)
             );
             if settings.mode == LocalGateMode::Enforce {

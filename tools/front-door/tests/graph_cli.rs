@@ -2,7 +2,7 @@
     clippy::disallowed_methods,
     reason = "integration tests exercise the CLI process"
 )]
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},

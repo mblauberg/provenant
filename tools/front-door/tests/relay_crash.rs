@@ -1,5 +1,5 @@
 //! Killed relay hosts recover children whose provider acceptance was journalled.
-mod support;
+use crate::support;
 use provenant_core::{AttemptId, CancelToken, Clock, RootInputs, WaitBudget};
 use provenant_fabric_runtime::graph::{self, AttemptOwner, FileJournal, GraphExecution};
 use provenant_os::clock::SystemClock;
