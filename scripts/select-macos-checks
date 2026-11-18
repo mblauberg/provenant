@@ -33,20 +33,31 @@ if ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1; then
   exit 0
 fi
 
-changed=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
+if ! changed=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA"); then
+  run_conservatively 'Changed paths unavailable'
+  exit 0
+fi
 printf 'Changed paths since merge base:\n%s\n' "$changed"
 # Non-code assets still pass harness, writing and documentation checks.
 # Executable or structured skill assets and the native inventory retain Rust
 # and native coverage. Treat renames as deletion plus addition.
 non_code='^(skills/.*\.md|roles/.*\.md|docs/.*\.(md|png|jpg|jpeg|svg|gif|webp|pdf)|[^/]+\.md|\.(editorconfig|gitattributes|gitignore)|LICENSE|NOTICE)$'
 # A Markdown name proves nothing about an executable or a symlink.
-not_plain=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA" | awk '($1 != ":100644" && $1 != ":000000") || ($2 != "100644" && $2 != "000000")')
+if ! raw=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA"); then
+  run_conservatively 'Changed modes unavailable'
+  exit 0
+fi
+not_plain=$(printf '%s\n' "$raw" | awk '($1 != ":100644" && $1 != ":000000") || ($2 != "100644" && $2 != "000000")')
 if [ -n "$changed" ] && [ -z "$not_plain" ] && ! printf '%s\n' "$changed" | grep -Evq "$non_code"; then
   set_output false false
   exit 0
 fi
-if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$|config/native-test-inventory\.json$|scripts/(check-native-inventory|run-native-test-group|test-check-native-inventory)$)'; then
-  set_output true
-else
+# Only these Linux test-selection scripts are known not to affect native work.
+# Both sides must be regular files, including executable scripts.
+not_regular=$(printf '%s\n' "$raw" | awk '($1 != ":100644" && $1 != ":100755" && $1 != ":000000") || ($2 != "100644" && $2 != "100755" && $2 != "000000")')
+linux_only='^(scripts/(select-affected-crate-tests|test-select-affected-crate-tests))$'
+if [ -n "$changed" ] && [ -z "$not_regular" ] && ! printf '%s\n' "$changed" | grep -Evq "$linux_only"; then
   set_output false
+else
+  set_output true
 fi

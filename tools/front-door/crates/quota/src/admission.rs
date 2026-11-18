@@ -23,17 +23,35 @@ impl Refusal {
         self.pool.as_deref() == Some(ACCOUNT_ROUTE)
     }
     /// When the refusal stops holding: its reset, or one hour after it was
-    /// observed when the provider named no reset.
+    /// observed when the provider named no reset. Agy reset estimates are
+    /// revalidated after five minutes, even when they claim a multi-day wait.
     pub fn expires_unix_seconds(&self) -> Result<i64, QuotaError> {
-        match self.resets_unix_seconds {
-            Some(resets) => Ok(resets),
-            None => self
-                .observed_unix_seconds
-                .checked_add(3600)
-                .ok_or(QuotaError::TimeRange),
-        }
+        refusal_expiry(
+            &self.account.adapter,
+            self.observed_unix_seconds,
+            self.resets_unix_seconds,
+        )
     }
 }
+/// Shared by account records and already-published readiness observations.
+pub(crate) fn refusal_expiry(
+    adapter: &str,
+    observed: i64,
+    reset: Option<i64>,
+) -> Result<i64, QuotaError> {
+    let revalidation = provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.refusal_revalidation_seconds);
+    if revalidation.is_none()
+        && let Some(reset) = reset
+    {
+        return Ok(reset);
+    }
+    let bounded = observed
+        .checked_add(revalidation.unwrap_or(3600))
+        .ok_or(QuotaError::TimeRange)?;
+    Ok(reset.map_or(bounded, |reset| reset.min(bounded)))
+}
+
 /// Short-lived provider capacity evidence, separate from quota admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityCooldown {
@@ -1054,6 +1072,76 @@ mod admission_tests {
         }
         assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
     }
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn agy_refusal_revalidates_instead_of_holding_a_multi_day_reset() {
+        let mut account = record(QuotaStatus::Available).account;
+        account.adapter = "agy".into();
+        let other = AccountScope {
+            account_key: "other".into(),
+            ..account.clone()
+        };
+        let intent = record_refusal(
+            None,
+            &account,
+            "agy/gemini-3.8-flash",
+            None,
+            1000,
+            Some(1000 + 7 * 86400),
+        )
+        .expect("refusal");
+        let record = intent.replacement.expect("account record");
+        let refusal = &record.refusals[0];
+        for (now, holds) in [(1000, true), (1299, true), (1300, false)] {
+            let admission = Admission {
+                policy: crate::source::test_policy(),
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(&record),
+                pools: &[],
+            };
+            assert_eq!(
+                admission
+                    .refusal_holds("agy", Some(&record), refusal)
+                    .unwrap(),
+                holds
+            );
+            assert_eq!(
+                admission
+                    .account_block("agy", &other.account_key, "gemini-3.8-flash")
+                    .unwrap(),
+                None
+            );
+            // Published observations from older versions carry the long expiry;
+            // reading them must apply the same freshness boundary immediately.
+            let scope = crate::ReadinessScope {
+                extra: Default::default(),
+                host: "host".into(),
+                adapter: "agy".into(),
+                account_key: account.account_key.clone(),
+                route: "agy/gemini-3.8-flash".into(),
+            };
+            let file = crate::ReadinessFile {
+                records: vec![crate::RouteReadiness {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    scope: scope.clone(),
+                    state: crate::ReadinessState::Unavailable,
+                    reason: Some(crate::ReadinessReason::ProviderRefusal),
+                    observed_unix_seconds: 1000,
+                    expires_unix_seconds: 1000 + 7 * 86400,
+                    reset_unix_seconds: Some(1000 + 7 * 86400),
+                    evidence_ref: Some("provider-refusal".into()),
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                file.get(&scope, now).state == crate::ReadinessState::Unavailable,
+                holds
+            );
+        }
+    }
+
     #[test]
     fn account_usage_limit_holds_every_model_until_its_reset() {
         let account = AccountScope {

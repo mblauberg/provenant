@@ -36,6 +36,14 @@ evidence stays unknown and protects its cache. A `reclaim` hint never becomes
 deletion authority: GC revalidates its own conditions.
 - Why: a report row must never become deletion authority.
 
+Attempt scratch becomes collectable from owner evidence of finished work, not
+from attempt release. A busy or unreleased attempt remains protected. After
+merge, background cleanup is scoped to that branch's worktree and attempts;
+automatic full sweeps run only below `gc.free_floor`, under a shared single-flight lock.
+Full sweeps preserve warm shared caches and the newest Cargo seed generation.
+- Why: space recovery must not interrupt resumable work or evict useful shared
+  build state.
+
 Collection belongs to [worktrees](supervisor.md#worktrees) and
 [state retention](state.md#retention-keeps-evidence).
 

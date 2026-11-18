@@ -128,7 +128,9 @@ fn directory_inventory_findings(
                 account
                     .paths
                     .iter()
-                    .map(|path| resolve_directory(path))
+                    .flat_map(|path| {
+                        provenant_providers::identity::account_state_paths(&account.adapter, path)
+                    })
                     .collect::<Vec<_>>(),
             )
         })
@@ -155,7 +157,7 @@ fn directory_inventory_findings(
             }) {
                 findings.push(DirectoryFinding {
                     accounts: vec![(*id).clone(), (*other_id).clone()],
-                    message: format!("accounts {id} and {other_id}: registered directories overlap; a login at HOME is the adapter's local account and needs no registration"),
+                    message: format!("accounts {id} and {other_id}: resolved state or credential stores overlap; choose separate account stores"),
                 });
             }
         }

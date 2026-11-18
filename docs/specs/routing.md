@@ -142,7 +142,11 @@ spend the single lineage allowance in [retry owner](retry-owner.md).
 Unknown or stale quota never causes a refusal, and missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
-limit holds the whole account until its reset. One function,
+limit holds the whole account until its reset. Agy's recorded refusals expire
+within five minutes even when the provider reports a later reset. This bound
+also applies when reading previously published readiness, so a stale multi-day
+estimate cannot prevent a new attempt or probe. Fresh provider evidence may
+renew the refusal. One function,
 `Admission::account_block`, decides account blocks for both resolution and
 the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
@@ -190,19 +194,25 @@ provider, is refused; a same-key account from another provider is never
 substituted. An absent applied account key remains absent. Credential roots
 must not be HOME or an ancestor of HOME.
 Additional directories within one account entry are aliases and may overlap.
-Distinct isolated registered-account directories must not overlap;
-`accounts register` refuses these and `check config` reports them. An adapter
+`identity::account_state_paths` resolves each adapter's state and credential
+stores before registration, registry selection and confinement compare them.
+HOME-rooted adapters own their declared client state below HOME (agy uses
+`.gemini`) and their declared credential files; their entire HOME is not a
+credential store. Nested HOME roots are allowed, while overlapping resolved
+stores, including symlink aliases, are refused by `accounts register` and
+reported by `check config`. An adapter
 that declares no registered accounts but uses a local login can have multiple
 quota/menu entries whose directory paths overlap; those entries all describe
 the same local login, not separate credential trees. This allowance is limited
 to that adapter and does not include isolated registered accounts. A login at
-HOME is the adapter's local account and needs no registration. Agy's local
-login remains selectable as `account=local` beside isolated registered accounts,
-but is an in-memory identity
-rather than a registered credential root; automatic routing continues to choose
-among registered accounts. A node-wide account pin does not switch accounts;
-each fallback candidate may declare its own account when the node is unpinned.
-Credential custody
+HOME needs no registration. Agy's local login remains selectable as
+`account=local` beside isolated registered accounts and participates in pools
+with its own quota and readiness. It is an in-memory identity rather than a
+registered credential root. Registering HOME explicitly uses its detected
+identity and suppresses the synthetic local entry to avoid routing the same
+login twice. Native launches and account probes set HOME to the selected
+account directory; sandboxed launches retain a private HOME with only the
+selected account's keychain. A node-wide account pin does not switch accounts; each fallback candidate may declare its own account when the node is unpinned. Credential custody
 is owned by [supervision](supervisor.md#native-environment-and-sandbox-tool-stores).
 A registered long-lived lane token is not rotated by the host.
 
