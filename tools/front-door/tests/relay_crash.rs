@@ -176,7 +176,12 @@ fn start(rig: &TestRig, attempt: AttemptId, recover: bool) -> Result<Host> {
     }
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["--exact", "relay_host_process", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "relay_crash::relay_host_process",
+            "--ignored",
+            "--nocapture",
+        ])
         .envs(rig.env.iter().cloned())
         .env("RELAY_CRASH_ROOT", &rig.root)
         .env("RELAY_CRASH_ATTEMPT", attempt.to_string());
