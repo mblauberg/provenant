@@ -10,7 +10,6 @@
   `domains.wait.max_timeout_seconds`, with the source shown; the fixed 24-hour
   `pr watch` budget is deliberately dropped rather than copied into another
   hard-coded path. (#3528)
-- Head pinning and end-of-wait head revalidation (#3373), the merge-conflict
-  diagnosis of missing checks (#3492) and the wait final-line format (#3437)
-  are deliberately not moved into `wait --pr`; they belong to their own lanes
-  in this batch. (#3528)
+- The merge-conflict diagnosis of missing checks (#3492) and the wait
+  final-line format (#3437) are deliberately not moved into `wait --pr`; they
+  belong to their own lanes in this batch. (#3528)

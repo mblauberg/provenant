@@ -5,11 +5,13 @@
 #![allow(clippy::disallowed_methods)]
 use provenant_cli::{Globals, wait::LocalCadence};
 use provenant_core::CancelToken;
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::Outcome;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    path::PathBuf,
+    ffi::OsString,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -21,6 +23,9 @@ enum Source {
     Pr {
         number: u64,
         repository: Result<String, String>,
+        /// The head this wait is pinned to. Until GitHub reports it, no
+        /// verdict is taken from the pull request's current head.
+        watch_head: Option<String>,
     },
 }
 impl Source {
@@ -139,6 +144,72 @@ impl Reading {
     }
 }
 
+/// A PR reading is only a verdict about the head being watched. While GitHub
+/// reports a different head, keep the reading pending whatever its checks say.
+fn gate_line(
+    mut line: crate::pr::status::Line,
+    watch_head: Option<&str>,
+) -> crate::pr::status::Line {
+    if let Some(head) = watch_head
+        && line.awaiting.is_none()
+        && line.head != head
+    {
+        line.await_head(head);
+    }
+    line
+}
+
+/// The head a PR reading is watching, always shown in its status line.
+fn watched_head(line: &crate::pr::status::Line) -> &str {
+    line.awaiting.as_deref().unwrap_or(&line.head)
+}
+
+/// The tip of a branch known locally, checked in the local repository only.
+/// Both the checked-out branch and a remote-tracking branch count; a missing
+/// repository or an unsafe branch name simply means no local tip is known.
+fn local_branch_tip(cwd: &Path, branch: &str) -> Option<String> {
+    let binary = provenant_os::git::git_executable()?;
+    let refs = [
+        provenant_confinement::repo::GitRefName::branch(branch).ok()?,
+        provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
+            .ok()?,
+    ];
+    let environment: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(key, _)| {
+            !key.to_str()
+                .is_some_and(|key| crate::fabric::GIT_REDIRECTS.contains(&key))
+        })
+        .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
+        .collect();
+    let executor = SystemExecutor::new(1).ok()?;
+    for reference in refs {
+        let argv: Vec<OsString> = [
+            binary.clone().into_os_string(),
+            OsString::from("rev-parse"),
+            OsString::from("--verify"),
+            OsString::from("--quiet"),
+            OsString::from(reference.as_str()),
+        ]
+        .into();
+        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+        options.env = Some(&environment);
+        options.stdin = Some(b"");
+        options.stdout = StreamPolicy::Capture { limit: 128 };
+        options.stderr = StreamPolicy::Capture { limit: 128 };
+        let Ok(out) = executor.execute(options) else {
+            continue;
+        };
+        if out.termination != Termination::Exit(0) {
+            continue;
+        }
+        let tip = String::from_utf8_lossy(&out.stdout.bytes).trim().to_owned();
+        if provenant_core::GitOid::parse(&tip).is_ok() {
+            return Some(tip);
+        }
+    }
+    None
+}
+
 /// A graph target settles by its own row: the graph, else its node, else its
 /// newest attempt. A complete graph or a settled attempt succeeds only with a
 /// succeeded outcome; a paused graph needs input.
@@ -218,7 +289,11 @@ fn read(
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
-        Source::Pr { number, repository } => match repository {
+        Source::Pr {
+            number,
+            repository,
+            watch_head,
+        } => match repository {
             Ok(repository) => match crate::pr::status::wait_line_observed(
                 edge.cwd,
                 edge.roots.state.as_path(),
@@ -227,15 +302,23 @@ fn read(
                 &forge_request(deadline, cancel, pr_read_timeout),
                 crate::pr::observer::POLL,
             ) {
-                Ok(line) => Reading {
-                    settle: match line.verdict() {
-                        Some(true) => Settle::Succeeded,
-                        Some(false) => Settle::Unsuccessful,
-                        None => Settle::Pending,
-                    },
-                    line: format!("{label} {}{}", line.class(), line.cause_suffix()),
-                    data: json!(line),
-                },
+                Ok(line) => {
+                    let line = gate_line(line, watch_head.as_deref());
+                    Reading {
+                        settle: match line.verdict() {
+                            Some(true) => Settle::Succeeded,
+                            Some(false) => Settle::Unsuccessful,
+                            None => Settle::Pending,
+                        },
+                        line: format!(
+                            "{label} {}{} head={}",
+                            line.class(),
+                            line.cause_suffix(),
+                            watched_head(&line)
+                        ),
+                        data: json!(line),
+                    }
+                }
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             },
             Err(error) => Reading::unavailable(&label, error),
@@ -243,18 +326,26 @@ fn read(
     }
 }
 
-fn reading_pr_event(number: u64, detail: Value) -> Reading {
+fn reading_pr_event(number: u64, watch_head: Option<&str>, detail: Value) -> Reading {
     let label = format!("#{number}");
     match serde_json::from_value::<crate::pr::status::Line>(detail["status"].clone()) {
-        Ok(line) => Reading {
-            settle: match line.verdict() {
-                Some(true) => Settle::Succeeded,
-                Some(false) => Settle::Unsuccessful,
-                None => Settle::Pending,
-            },
-            line: format!("{label} {}{}", line.class(), line.cause_suffix()),
-            data: json!(line),
-        },
+        Ok(line) => {
+            let line = gate_line(line, watch_head);
+            Reading {
+                settle: match line.verdict() {
+                    Some(true) => Settle::Succeeded,
+                    Some(false) => Settle::Unsuccessful,
+                    None => Settle::Pending,
+                },
+                line: format!(
+                    "{label} {}{} head={}",
+                    line.class(),
+                    line.cause_suffix(),
+                    watched_head(&line)
+                ),
+                data: json!(line),
+            }
+        }
         Err(error) => Reading::unavailable(&label, &format!("invalid PR journal status: {error}")),
     }
 }
@@ -1130,15 +1221,35 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         );
     }
     if !prs.is_empty() {
-        let repository = crate::pr::status::wait_repository(
-            edge.roots.state.as_path(),
-            edge.cwd,
-            &forge_request(deadline, &stop.cancel, pr_read_timeout),
-        )
-        .map_err(|error| error.to_string());
-        sources.extend(prs.into_iter().map(|number| Source::Pr {
-            number,
-            repository: repository.clone(),
+        let request = forge_request(deadline, &stop.cancel, pr_read_timeout);
+        let repository =
+            crate::pr::status::wait_repository(edge.roots.state.as_path(), edge.cwd, &request)
+                .map_err(|error| error.to_string());
+        sources.extend(prs.into_iter().map(|number| {
+            let watch_head = command.head.clone().or_else(|| {
+                let repository = repository.as_ref().ok()?;
+                let reported = crate::pr::status::wait_head(
+                    edge.roots.state.as_path(),
+                    edge.cwd,
+                    repository,
+                    number,
+                    &request,
+                )
+                .ok()?;
+                let local = local_branch_tip(edge.cwd, &reported.branch)?;
+                (local != reported.sha).then(|| {
+                    crate::event_delivery::warn(&format!(
+                        "#{number}: local tip {local} differs from GitHub head {}; waiting for the local tip",
+                        reported.sha
+                    ));
+                    local
+                })
+            });
+            Source::Pr {
+                number,
+                repository: repository.clone(),
+                watch_head,
+            }
         }));
     }
     let mut latest: Vec<Option<Reading>> = sources
@@ -1449,6 +1560,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             let interval = Duration::from_secs(60);
             scope.spawn(move || {
                 let mut session = None;
+                let watch_head = match source {
+                    Source::Pr { watch_head, .. } => watch_head.as_deref(),
+                    _ => None,
+                };
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
                 let setup =
@@ -1460,6 +1575,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         if let Source::Pr {
                             number,
                             repository: Ok(repository),
+                            ..
                         } = source
                         {
                             journal.register_pr(repository, *number, None)?;
@@ -1507,6 +1623,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             Source::Pr {
                                 number,
                                 repository: Ok(repository),
+                                ..
                             },
                         ) => match journal.next_pr(
                             repository,
@@ -1519,7 +1636,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             Ok(Some(detail)) => {
                                 last_reconcile = Instant::now();
                                 if detail["status"].is_object() {
-                                    reading_pr_event(*number, detail)
+                                    reading_pr_event(*number, watch_head, detail)
                                 } else {
                                     // Webhook records carry identifiers only;
                                     // fetch the authoritative PR status now.
@@ -1928,6 +2045,7 @@ mod tests {
         let pull = Source::Pr {
             number: 7,
             repository: Ok("owner/repo".into()),
+            watch_head: None,
         };
         for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
             let mut sources = vec![Source::Graph("fix".parse().expect("target"))];
@@ -2266,10 +2384,27 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_wait_ignores_the_verdict_of_another_head() {
+        let line: crate::pr::status::Line = serde_json::from_value(json!({
+            "number": 7, "state": "OPEN", "head": "stale", "draft": false,
+            "merge": "clean", "review": "approved", "error": null,
+            "checks_passed": 1, "checks_total": 1,
+            "checks_failed": 0, "checks_pending": 0
+        }))
+        .expect("fixture line");
+        assert_eq!(line.verdict(), Some(true));
+        let pinned = gate_line(line, Some("new"));
+        assert_eq!(pinned.verdict(), None);
+        assert_eq!(watched_head(&pinned), "new");
+        assert_eq!(pinned.head, "stale");
+    }
+
+    #[test]
     fn pr_timeout_reports_the_last_known_check_summary_and_next_step() {
         let sources = vec![Source::Pr {
             number: 7,
             repository: Ok("owner/repo".into()),
+            watch_head: None,
         }];
         let pending = Reading {
             settle: Settle::Pending,
