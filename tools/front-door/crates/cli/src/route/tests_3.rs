@@ -218,8 +218,10 @@
         let unresolved = super::resolve_dispatch(
             &request, &roots, None, ("fixture", 0), &[], &access,
             "fixture", None, &[],
-        );
-        assert!(unresolved.is_err(), "dispatch needs an account even without a probe record");
+        )?;
+        assert!(matches!(unresolved.readiness, RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::UnknownAvailability, ..
+        }));
         let first = resolve(&[])?;
         let first_id =
             provenant_routing::ModelId::parse(&format!("{}/{}", first.adapter, first.model))?;
@@ -301,12 +303,15 @@
             fallback.readiness,
             provenant_records::RouteReadiness::Ready { .. }
         ));
-        // Missing identity cannot be selected just to preserve a family preference.
+        // An unobserved unused family reaches preparation, not a ready launch.
         let missing = super::resolve_dispatch(
             &request, &roots, None, ("fixture", 0), &availability[..1],
             &access, "fixture", Some((&["openai".into()], false, &[])), &[],
         )?;
-        assert_eq!(missing.adapter, "codex");
+        assert_eq!(missing.adapter, "claude");
+        assert!(matches!(missing.readiness, RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::UnknownAvailability, ..
+        }));
         let mut stale = availability.clone();
         stale[1].observed_unix_seconds = now - 10;
         stale[1].expires_unix_seconds = now - 1;
