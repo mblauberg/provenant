@@ -1889,7 +1889,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         let selection_epoch = if let Some(lease) = lease.as_ref() {
             lease.epoch()
         } else {
-            SystemClock.wall_now()?.as_micros() as u64
+            SystemClock
+                .wall_now()
+                .map_err(|_| Error::Budget)?
+                .as_micros() as u64
         };
         let selection_epoch = format!("{selection_epoch:016x}");
         let mut selection = {
@@ -3210,7 +3213,10 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let epoch_number = if let Some(lease) = self.lease.as_ref() {
             lease.epoch()
         } else {
-            let timestamp = SystemClock.wall_now()?.as_micros() as u64;
+            let timestamp = SystemClock
+                .wall_now()
+                .map_err(|_| Error::Budget)?
+                .as_micros() as u64;
             timestamp ^ u64::from(std::process::id()).rotate_left(32)
         };
         let epoch = format!("{epoch_number:016x}");
