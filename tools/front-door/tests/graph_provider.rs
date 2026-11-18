@@ -2111,6 +2111,7 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
                 .spawn()?,
         );
     }
+    let mut attempts = Vec::new();
     for child in children {
         let output = child.wait_with_output()?;
         let text = format!(
@@ -2124,8 +2125,30 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
         let graph = result["data"]["checkpoint"]["graph_id"]
             .as_str()
             .ok_or_else(|| format!("launch named no graph: {result}"))?;
-        let settled = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
-        assert_eq!(code(&settled), 0, "{graph}: {settled:?}");
+        let node = result["data"]["checkpoint"]["nodes"][0]["id"]
+            .as_str()
+            .ok_or_else(|| format!("launch named no node: {result}"))?;
+        attempts.push((graph.to_owned(), node.to_owned()));
+    }
+
+    // `wait` observes attempt settlement but does not run graph advancement.
+    // Once each provider attempt is terminal, one explicit host tick drives
+    // the normal graph settlement owner for every concurrently launched run.
+    for (graph, node) in &attempts {
+        let target = format!("{graph}/{node}#1");
+        let waited = rig.command(&["wait", &target, "--timeout", "30s", "--json"])?;
+        assert_eq!(code(&waited), 0, "{target}: {waited:?}");
+    }
+    let tick = rig.command(&["tick", "--json"])?;
+    assert_eq!(code(&tick), 0, "graph settlement tick: {tick:?}");
+
+    for (graph, _) in &attempts {
+        let checkpoint = rig.checkpoint(graph)?;
+        let node = checkpoint["nodes"]
+            .as_array()
+            .and_then(|nodes| nodes.first())
+            .ok_or_else(|| format!("{graph}: graph node missing after tick: {checkpoint}"))?;
+        assert_eq!(node["state"], "succeeded", "{graph}: {checkpoint}");
     }
     Ok(())
 }

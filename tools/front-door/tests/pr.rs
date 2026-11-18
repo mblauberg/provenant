@@ -328,31 +328,7 @@ fn land_refuses_a_draft_pull_request_before_gate_step() -> Result {
 
 fn land_plain_singleton_uses_batch_driver() -> Result {
     let rig = self::rig()?;
-    let git = provenant_os::git::git_executable().ok_or("Git executable")?;
-    let remote = rig.root.join("unused-remote.git");
-    fixture_git(
-        &rig,
-        &[
-            "init",
-            "-q",
-            "--bare",
-            "--initial-branch=main",
-            remote.to_str().ok_or("remote path")?,
-        ],
-    )?;
-    assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote.to_str().ok_or("remote path")?
-            ],
-            None
-        )?),
-        0
-    );
+    live_pr_origin(&rig)?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version = 1\n[domains.pr.land]\napproval_tier = 'carry'\nbatch_wait_seconds = 0\n",
