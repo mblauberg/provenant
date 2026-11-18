@@ -197,7 +197,9 @@ credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
-files. Roots carry declarations; launch preparation classifies built-in,
+files. For HOME-rooted accounts, the stores are the adapter's client state
+below HOME and its declared credential files; registration does not make
+the entire account HOME a credential store. Roots carry declarations; launch preparation classifies built-in,
 provider, host-variable and account declarations once, using the actual launch
 source and cwd, scratch, and the derived writer cache, without unioning an
 earlier project classification. Scratch and the writer cache are lane roots

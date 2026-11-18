@@ -1024,9 +1024,12 @@ pub struct Gc {
     /// Also delete merged worktrees and ignored declared output (otherwise previewed)
     #[arg(long)]
     pub apply: bool,
-    /// Minimum idle age for caches and ignored output (e.g. 6h, 2d, or 0s); merged trees are immediate
-    #[arg(long, default_value = "7d", value_name = "DURATION", value_parser = idle_age_seconds)]
-    pub idle: u64,
+    /// Collect scratch owned by work that has finished after this branch landed
+    #[arg(long, hide = true, requires = "apply", conflicts_with = "dry_run")]
+    pub finished_branch: Option<String>,
+    /// Unowned idle lifetime (default: gc.idle, shipped default 6h)
+    #[arg(long, catalog_gc_idle())]
+    pub idle: Option<u64>,
 }
 #[derive(Debug, Args)]
 pub struct Remove {
@@ -1239,9 +1242,6 @@ fn span_seconds(value: &str) -> Option<u64> {
         n.saturating_mul(10).saturating_add(u64::from(digit - b'0'))
     });
     Some(seconds.saturating_mul(multiplier))
-}
-fn idle_age_seconds(value: &str) -> Result<u64, &'static str> {
-    span_seconds(value).ok_or("duration must be a span such as 6h or 2d")
 }
 pub(crate) fn positive_span_seconds(value: &str) -> Result<u64, &'static str> {
     span_seconds(value)

@@ -18,10 +18,9 @@ to design, review and tests, weighing alternatives and recording the reason.
 
 ## The brief
 
-The writer sees only the brief: the issue, the criteria, the files and owners
-already found, the checks to run, and an instruction to stop and report rather
-than widen scope. Name the method: `test-design` for behaviour, `diagnose` for
-an unknown cause, the refactor rules below for restructuring.
+Give the writer the outcome, criteria, known owners and checks. Name the method:
+`test-design` for behaviour, `diagnose` for an unknown cause, or the refactor
+rules below for restructuring.
 
 ## Writer rules
 
@@ -29,7 +28,7 @@ an unknown cause, the refactor rules below for restructuring.
   whether it caught a defect or pins implementation detail: fix the code for a
   defect; rewrite the test as an invariant or delete it if it pins
   implementation. Keep regression tests minimal and prune redundant tests.
-  Report every changed or removed test with its reason.
+  Report material test changes with their reason.
 - Update the owned docs in the same pull request; a settled decision moves to
   its durable home (`engineering-docs`).
 - Move every caller and delete the old shape without compatibility code. Follow
@@ -45,11 +44,8 @@ an unknown cause, the refactor rules below for restructuring.
 Pick the oracle before changing structure: the compiler for type-driven moves,
 a reviewed codemod for uniform changes across many sites, a differential run or
 characterisation tests. Record the baseline so another agent can repeat it.
-Land a shared seam first, then the large change under the same oracle with
-disjoint write scopes. Delete the old path in the same change; no shims, legacy
-readers or fallbacks. Move every caller and delete the old shape. Stop on an
-unexplained oracle failure or a
-discovered behaviour change. Report the ownership and dependency delta.
+Use the same oracle across the change. Investigate unexplained failures or
+behaviour changes, and report the ownership and dependency delta.
 
 ## Judging review findings
 

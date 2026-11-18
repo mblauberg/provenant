@@ -4,8 +4,8 @@ import json
 import os
 import sys
 
-MACOS = frozenset({"rust-macos-archive", "rust-macos-tests", "rust-macos-inventory", "rust-macos-release"})
-RUST = frozenset({"generated-reference", "rust-test-archive", "rust", "rust-dependencies", "rust-macos-lint"})
+MACOS = frozenset({"rust-macos-archive", "rust-macos-tests", "rust-macos-inventory", "rust-macos-release", "rust-macos-lint"})
+RUST = frozenset({"generated-reference", "rust-test-archive", "rust", "rust-dependencies", "quarantine-filter", "quarantine-validation"})
 REQUIRED = MACOS | RUST | {"macos-scope", "rust-lint"}
 
 

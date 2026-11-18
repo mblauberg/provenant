@@ -90,31 +90,51 @@ fn invalid_json_is_an_envelope() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+// Spec: docs/specs/cli.md#parsing
 #[test]
-fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Result {
+fn catalogue_commands_resolve_to_scoped_help_in_process() -> Result {
+    use provenant_cli::{ParseOutcome, parse};
+    use std::ffi::OsString;
+
+    for args in [&["help", "--json"][..], &["help", "--all", "--json"][..]] {
+        let ParseOutcome::Help { catalog, .. } = parse(args.iter().map(OsString::from)) else {
+            panic!("expected catalogue help for {args:?}");
+        };
+        assert!(!catalog.commands.is_empty(), "empty catalogue for {args:?}");
+        for command in catalog.commands {
+            let name = command.command;
+            let argv = name
+                .split_whitespace()
+                .skip(1)
+                .chain(std::iter::once("--help"))
+                .map(OsString::from);
+            let ParseOutcome::Help { catalog, .. } = parse(argv) else {
+                panic!("expected help for {name}");
+            };
+            assert!(
+                catalog.commands.iter().any(|entry| entry.command == name),
+                "scoped help omits metadata for {name}"
+            );
+        }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#parsing
+#[test]
+fn help_and_version_need_no_roots_or_state() -> Result {
     let mut rig = TestRig::new()?.without_state()?;
     rig.env.retain(|(key, _)| {
         key != "HOME" && key != "PROVENANT_ROOT" && key != "PROVENANT_STATE_DIR"
     });
-    for args in [&["help", "--json"][..], &["help", "--all", "--json"][..]] {
+    for args in [
+        &["help", "--json"][..],
+        &["help", "--all", "--json"][..],
+        &["status", "--help"][..],
+        &["config", "check", "--help"][..],
+    ] {
         let help = rig.command(args)?;
-        assert_eq!(code(&help), 0);
-        let catalog: serde_json::Value = serde_json::from_slice(&help.stdout.bytes)?;
-        for command in catalog["data"]["commands"]
-            .as_array()
-            .ok_or("missing catalogue")?
-        {
-            let name = command["command"].as_str().ok_or("missing command")?;
-            let mut argv: Vec<_> = name.split_whitespace().skip(1).collect();
-            argv.push("--help");
-            let out = rig.command(&argv)?;
-            assert_eq!(
-                code(&out),
-                0,
-                "{name}: {}",
-                String::from_utf8_lossy(&out.stdout.bytes)
-            );
-        }
+        assert_eq!(code(&help), 0, "{args:?}: {help:?}");
     }
     let version = rig.command(&["--json", "--version"])?;
     assert_eq!(code(&version), 0);

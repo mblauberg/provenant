@@ -459,6 +459,7 @@ mod tests {
             "live"
         );
         std::fs::remove_dir(&owner)?;
+        policy.protected_owners.clear();
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
             "orphaned"
