@@ -1839,6 +1839,7 @@ fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
 fn unreadable_process_without_candidate_paths_is_scoped_independently_of_uid()
 -> Result<(), Box<dyn Error>> {
@@ -2005,6 +2006,7 @@ fn cwd_query_errors_never_consult_the_daemon_policy() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
 fn unreadable_cwd_without_candidate_paths_does_not_block_removal() -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
@@ -2134,6 +2136,7 @@ fn unreadable_cwd_without_candidate_paths_does_not_block_removal() -> Result<(),
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
 fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<(), Box<dyn Error>>
 {
@@ -2449,6 +2452,7 @@ mod writer_cohort {
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
     #[test]
     fn denied_descriptor_observation_remains_unknown_until_occupancy_is_complete()
     -> Result<(), Box<dyn Error>> {

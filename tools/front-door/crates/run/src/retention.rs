@@ -2234,7 +2234,8 @@ mod tests {
 
         let root = Directory::open_anchor(context.state_root.as_path())?;
         let idle = 7 * 86_400;
-        let retained_by_writer_owner = |_, _| ScratchOwner::Owned;
+        let retained_by_writer_owner =
+            |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Owned;
         let policy = ScratchPolicy {
             idle_seconds: idle,
             owner: Some(&retained_by_writer_owner),
