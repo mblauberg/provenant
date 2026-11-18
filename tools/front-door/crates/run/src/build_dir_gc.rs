@@ -33,6 +33,10 @@ use std::{
 const CARGO_LOCK: &str = ".cargo-lock";
 const LOCKS: [&str; 3] = [CARGO_LOCK, ".cargo-build-lock", ".cargo-artifact-lock"];
 const TARGETS: [&str; 2] = ["target", "target-lint"];
+const GC_TOMBSTONES: [(&str, &str); 2] = [
+    (".provenant-gc-target", "target"),
+    (".provenant-gc-target-lint", "target-lint"),
+];
 const MAX_DEPTH: usize = 64;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_CACHE_ROOT_ENTRIES: usize = 20_000;
@@ -40,7 +44,7 @@ const PREVIEW_ENTRIES: usize = 4096;
 const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
 const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
-const SURVEY_SNAPSHOT_VERSION: u8 = 2;
+const SURVEY_SNAPSHOT_VERSION: u8 = 3;
 const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
 const TARGET_LAST_USED: &str = ".provenant-last-used";
 /// How far ahead of now a modification time may be and still count as a
@@ -110,6 +114,7 @@ struct SurveySnapshot {
     completed: Vec<Candidate>,
     root_cursor: Option<RootCursor>,
     measuring: Option<MeasureProgress>,
+    rechecking: Option<MeasureProgress>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -159,9 +164,7 @@ impl MeasureBudget {
     }
 
     fn consume(&mut self) -> bool {
-        if self.preview
-            && (self.remaining == 0 || self.started.elapsed() >= PREVIEW_BUDGET)
-        {
+        if self.preview && (self.remaining == 0 || self.started.elapsed() >= PREVIEW_BUDGET) {
             self.limited = true;
             return false;
         }
@@ -170,9 +173,7 @@ impl MeasureBudget {
     }
 
     fn preview_limited(&mut self) -> bool {
-        if self.preview
-            && (self.remaining == 0 || self.started.elapsed() >= PREVIEW_BUDGET)
-        {
+        if self.preview && (self.remaining == 0 || self.started.elapsed() >= PREVIEW_BUDGET) {
             self.limited = true;
         }
         self.limited
@@ -309,9 +310,9 @@ pub fn target_protection_for_launch(
                 let held = !terminal || !released;
                 if held {
                     protection.worktrees.insert(writer.worktree);
-                    protection.shared_projects.insert(
-                        crate::target_seed::project_key(binding.common_dir()),
-                    );
+                    protection
+                        .shared_projects
+                        .insert(crate::target_seed::project_key(binding.common_dir()));
                 }
             }
             match page.next {
@@ -339,6 +340,7 @@ enum Outcome {
     Removed,
     Busy,
     Recent,
+    Interrupted(Option<MeasureProgress>),
 }
 
 /// What a walk of the lane caches found, before anything is removed.
@@ -594,6 +596,7 @@ pub fn collect_with_progress(
             &mut free,
             protection,
             should_stop,
+            Some(&mut snapshot),
         );
         if report.interrupted_at.is_some() {
             save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
@@ -633,6 +636,7 @@ pub fn collect_with_progress(
                 &mut free,
                 &current_protection,
                 should_stop,
+                Some(&mut snapshot),
             );
             if report.interrupted_at.is_some() {
                 save_survey_snapshot(host, &mut snapshot, epoch, &mut report);
@@ -660,11 +664,11 @@ fn snapshot_epoch(name: &str) -> Option<&str> {
     valid_epoch(epoch).then_some(epoch)
 }
 
-fn snapshot_directory(
-    host: &Path,
-    create: bool,
-) -> Result<Directory, Box<dyn std::error::Error>> {
-    Ok(provenant_config::private_directory(&host.join("tick"), create)?)
+fn snapshot_directory(host: &Path, create: bool) -> Result<Directory, Box<dyn std::error::Error>> {
+    Ok(provenant_config::private_directory(
+        &host.join("tick"),
+        create,
+    )?)
 }
 
 fn load_survey_snapshot(
@@ -683,7 +687,9 @@ fn load_survey_snapshot(
     let directory = match snapshot_directory(host, false) {
         Ok(directory) => directory,
         Err(error) => {
-            report.warnings.push(format!("GC survey sidecar unavailable: {error}"));
+            report
+                .warnings
+                .push(format!("GC survey sidecar unavailable: {error}"));
             return SurveySnapshot {
                 version: SURVEY_SNAPSHOT_VERSION,
                 epoch: epoch.into(),
@@ -705,7 +711,9 @@ fn load_survey_snapshot(
             snapshot
         }
         Ok(_) => {
-            report.warnings.push("GC survey sidecar identity changed; restarting census".into());
+            report
+                .warnings
+                .push("GC survey sidecar identity changed; restarting census".into());
             SurveySnapshot {
                 version: SURVEY_SNAPSHOT_VERSION,
                 epoch: epoch.into(),
@@ -713,7 +721,9 @@ fn load_survey_snapshot(
             }
         }
         Err(error) => {
-            report.warnings.push(format!("GC survey sidecar ignored: {error}"));
+            report
+                .warnings
+                .push(format!("GC survey sidecar ignored: {error}"));
             SurveySnapshot {
                 version: SURVEY_SNAPSHOT_VERSION,
                 epoch: epoch.into(),
@@ -745,14 +755,18 @@ fn save_survey_snapshot(
             return;
         }
         Err(error) => {
-            report.errors.push(format!("GC survey sidecar encode: {error}"));
+            report
+                .errors
+                .push(format!("GC survey sidecar encode: {error}"));
             return;
         }
     };
     let directory = match snapshot_directory(host, true) {
         Ok(directory) => directory,
         Err(error) => {
-            report.warnings.push(format!("GC survey sidecar unavailable: {error}"));
+            report
+                .warnings
+                .push(format!("GC survey sidecar unavailable: {error}"));
             return;
         }
     };
@@ -765,7 +779,9 @@ fn save_survey_snapshot(
         )
         .and_then(|publication| publication.require_durable());
     if let Err(error) = write {
-        report.warnings.push(format!("GC survey checkpoint failed: {error}"));
+        report
+            .warnings
+            .push(format!("GC survey checkpoint failed: {error}"));
         return;
     }
     report.cursor_detail = Some(name.clone());
@@ -829,7 +845,9 @@ fn prune_survey_snapshots(
     let entries = match directory.entries() {
         Ok(entries) => entries,
         Err(error) => {
-            report.warnings.push(format!("GC survey sidecar scan: {error}"));
+            report
+                .warnings
+                .push(format!("GC survey sidecar scan: {error}"));
             return;
         }
     };
@@ -844,11 +862,15 @@ fn prune_survey_snapshots(
         let name = match entry {
             Ok(name) => name,
             Err(error) => {
-                report.warnings.push(format!("GC survey sidecar entry: {error}"));
+                report
+                    .warnings
+                    .push(format!("GC survey sidecar entry: {error}"));
                 continue;
             }
         };
-        let Some(name_text) = name.to_str() else { continue };
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
         if snapshot_epoch(name_text).is_none() || keep.contains(name_text) {
             continue;
         }
@@ -857,13 +879,17 @@ fn prune_survey_snapshots(
                 if metadata.kind == FileKind::Regular && metadata.uid == effective_uid() =>
             {
                 if let Err(error) = directory.unlink(&name) {
-                    report.warnings.push(format!("GC survey sidecar cleanup: {error}"));
+                    report
+                        .warnings
+                        .push(format!("GC survey sidecar cleanup: {error}"));
                 }
             }
             Ok(_) => report
                 .warnings
                 .push(format!("GC survey sidecar retained: {}", name_text)),
-            Err(error) => report.warnings.push(format!("GC survey sidecar stat: {error}")),
+            Err(error) => report
+                .warnings
+                .push(format!("GC survey sidecar stat: {error}")),
         }
     }
 }
@@ -903,11 +929,7 @@ pub fn sweep(
 
 /// Measure every managed target directory and sample free space. No lock is needed:
 /// removal probes each candidate again.
-fn survey(
-    home: &Path,
-    free_space: &mut dyn FnMut() -> io::Result<u64>,
-    preview: bool,
-) -> Survey {
+fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>, preview: bool) -> Survey {
     let mut report = Report::default();
     let lane_root = match Directory::open_anchor(&cache_root(home)) {
         Ok(root) => Some(root),
@@ -986,11 +1008,14 @@ fn survey_with_progress(
         || snapshot.shared_root != shared_identity
     {
         if !snapshot.completed.is_empty() || snapshot.measuring.is_some() {
-            report.warnings.push("GC survey roots changed; restarting census".into());
+            report
+                .warnings
+                .push("GC survey roots changed; restarting census".into());
         }
         snapshot.completed.clear();
         snapshot.root_cursor = None;
         snapshot.measuring = None;
+        snapshot.rechecking = None;
     }
     snapshot.version = SURVEY_SNAPSHOT_VERSION;
     snapshot.lane_root = lane_identity;
@@ -1002,7 +1027,11 @@ fn survey_with_progress(
     let mut interrupted = None;
     for (root, cache_path, kind) in [
         (lane_root.as_ref(), cache_root(home), CacheKind::Lane),
-        (shared_root.as_ref(), shared_cache_root(home), CacheKind::Shared),
+        (
+            shared_root.as_ref(),
+            shared_cache_root(home),
+            CacheKind::Shared,
+        ),
     ] {
         let Some(root) = root else { continue };
         if !discover_with_progress(
@@ -1019,9 +1048,7 @@ fn survey_with_progress(
         }
     }
     drop(stop);
-    let complete = interrupted.is_none()
-        && !measurement_budget.limited
-        && report.errors.is_empty();
+    let complete = interrupted.is_none() && !measurement_budget.limited && report.errors.is_empty();
     report.measurement_skipped = !complete;
     if let Some(path) = interrupted {
         report.interrupted_at = Some(path);
@@ -1037,6 +1064,13 @@ fn survey_with_progress(
     });
     candidates.sort_by(|a, b| (a.newest, &a.display).cmp(&(b.newest, &b.display)));
     if complete {
+        if snapshot.rechecking.as_ref().is_some_and(|state| {
+            !candidates
+                .iter()
+                .any(|candidate| state_matches(state, candidate))
+        }) {
+            snapshot.rechecking = None;
+        }
         snapshot.completed = candidates.clone();
         snapshot.measuring = None;
     }
@@ -1088,13 +1122,17 @@ fn discover_with_progress(
     interrupted: &mut Option<PathBuf>,
 ) -> bool {
     let saved_cursor = snapshot.root_cursor;
-    if saved_cursor.is_some_and(|cursor| cursor.kind == CacheKind::Shared && kind == CacheKind::Lane) {
+    if saved_cursor
+        .is_some_and(|cursor| cursor.kind == CacheKind::Shared && kind == CacheKind::Lane)
+    {
         return true;
     }
     let mut entries = match root.entries() {
         Ok(entries) => entries,
         Err(error) => {
-            report.errors.push(format!("{}: {error}", cache_root.display()));
+            report
+                .errors
+                .push(format!("{}: {error}", cache_root.display()));
             return true;
         }
     };
@@ -1103,7 +1141,9 @@ fn discover_with_progress(
         _ => (0, 0),
     };
     if let Err(error) = entries.seek(start_offset) {
-        report.errors.push(format!("{}: {error}", cache_root.display()));
+        report
+            .errors
+            .push(format!("{}: {error}", cache_root.display()));
         snapshot.completed.clear();
         snapshot.root_cursor = Some(RootCursor {
             kind,
@@ -1117,7 +1157,9 @@ fn discover_with_progress(
         let entry_offset = match entries.position() {
             Ok(offset) => offset,
             Err(error) => {
-                report.errors.push(format!("{}: {error}", cache_root.display()));
+                report
+                    .errors
+                    .push(format!("{}: {error}", cache_root.display()));
                 return false;
             }
         };
@@ -1145,7 +1187,9 @@ fn discover_with_progress(
         let name = match entry {
             Ok(name) => name,
             Err(error) => {
-                report.errors.push(format!("{}: {error}", cache_root.display()));
+                report
+                    .errors
+                    .push(format!("{}: {error}", cache_root.display()));
                 continue;
             }
         };
@@ -1159,9 +1203,10 @@ fn discover_with_progress(
             *interrupted = Some(
                 name.to_str()
                     .filter(|name| is_cache_digest(name))
-                    .map_or_else(|| cache_root.to_owned(), |digest| {
-                        cache_root.join(digest).join("target")
-                    }),
+                    .map_or_else(
+                        || cache_root.to_owned(),
+                        |digest| cache_root.join(digest).join("target"),
+                    ),
             );
             return false;
         }
@@ -1182,7 +1227,14 @@ fn discover_with_progress(
         let Ok(cache) = PayloadTree::claim(root, &name, &metadata) else {
             continue;
         };
-        for target_name in TARGETS {
+        for (target_name, logical_name) in TARGETS
+            .into_iter()
+            .map(|name| (name, name))
+            .chain(GC_TOMBSTONES)
+        {
+            candidates.retain(|saved| {
+                saved.kind != kind || saved.cache != digest || saved.target != target_name
+            });
             if should_stop() {
                 snapshot.completed = candidates.clone();
                 snapshot.root_cursor = Some(RootCursor {
@@ -1190,7 +1242,7 @@ fn discover_with_progress(
                     offset: entry_offset,
                     scanned: seen.saturating_sub(1),
                 });
-                *interrupted = Some(cache_root.join(digest).join(target_name));
+                *interrupted = Some(cache_root.join(digest).join(logical_name));
                 return false;
             }
             let target = OsStr::new(target_name);
@@ -1201,7 +1253,7 @@ fn discover_with_progress(
                 Err(error) => {
                     report.errors.push(format!(
                         "{}: {error}",
-                        cache_root.join(digest).join(target_name).display()
+                        cache_root.join(digest).join(logical_name).display()
                     ));
                     continue;
                 }
@@ -1210,15 +1262,21 @@ fn discover_with_progress(
                 kind,
                 cache: digest.to_owned(),
                 target: target_name.to_owned(),
-                display: cache_root.join(digest).join(target_name),
+                display: cache_root.join(digest).join(logical_name),
                 bytes: 0,
-                newest: target_metadata.modified_ns,
+                newest: if target_name == logical_name {
+                    target_metadata.modified_ns
+                } else {
+                    i128::MIN
+                },
                 target_modified_ns: target_metadata.modified_ns,
                 identity: (target_metadata.device, target_metadata.inode),
             };
-            if let Some(completed) = snapshot.completed.iter().find(|saved| {
-                same_candidate(saved, &candidate)
-            }) {
+            if let Some(completed) = snapshot
+                .completed
+                .iter()
+                .find(|saved| same_candidate(saved, &candidate))
+            {
                 if !candidates
                     .iter()
                     .any(|item| same_candidate(item, completed))
@@ -1265,7 +1323,9 @@ fn discover_with_progress(
                     return false;
                 }
                 Err(error) => {
-                    report.errors.push(format!("{}: {error}", candidate.display.display()));
+                    report
+                        .errors
+                        .push(format!("{}: {error}", candidate.display.display()));
                     snapshot.measuring = None;
                     snapshot.completed = candidates.clone();
                     snapshot.root_cursor = Some(RootCursor {
@@ -1281,7 +1341,9 @@ fn discover_with_progress(
         let offset = match entries.position() {
             Ok(offset) => offset,
             Err(error) => {
-                report.errors.push(format!("{}: {error}", cache_root.display()));
+                report
+                    .errors
+                    .push(format!("{}: {error}", cache_root.display()));
                 return false;
             }
         };
@@ -1360,12 +1422,12 @@ fn measure_resumable(
             .child(OsStr::new(&candidate.target))
             .map_err(io::Error::other)?;
         for part in &frame_path {
-            directory = directory.child(&decode_component(part)?).map_err(io::Error::other)?;
+            directory = directory
+                .child(&decode_component(part)?)
+                .map_err(io::Error::other)?;
         }
         let metadata = directory.metadata().map_err(io::Error::other)?;
-        if (metadata.device, metadata.inode, metadata.modified_ns)
-            != frame_identity
-        {
+        if (metadata.device, metadata.inode, metadata.modified_ns) != frame_identity {
             return Ok(MeasureOutcome::Changed);
         }
         let mut entries = directory.directory().entries().map_err(io::Error::other)?;
@@ -1452,6 +1514,7 @@ fn prune(
         free_space,
         protection,
         &mut should_stop,
+        None,
     )
 }
 
@@ -1463,6 +1526,7 @@ fn prune_with_progress(
     free_space: &mut dyn FnMut() -> io::Result<u64>,
     protection: &TargetProtection,
     should_stop: &mut dyn FnMut() -> bool,
+    mut snapshot: Option<&mut SurveySnapshot>,
 ) -> Report {
     let Survey {
         mut report,
@@ -1483,7 +1547,8 @@ fn prune_with_progress(
             report.interrupted_at = Some(candidate.display);
             break;
         }
-        if within_grace(candidate.newest, now_ns, grace) {
+        let tombstone = is_gc_tombstone(&candidate.target);
+        if !tombstone && within_grace(candidate.newest, now_ns, grace) {
             report.recent.push(candidate.display);
             continue;
         }
@@ -1492,8 +1557,30 @@ fn prune_with_progress(
             CacheKind::Shared => shared_root.as_ref(),
         };
         let Some(root) = root else { continue };
-        match remove(root, &candidate, dry_run, now_ns, grace, protection) {
+        let resumed = snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.rechecking.as_ref())
+            .filter(|state| state_matches(state, &candidate))
+            .cloned();
+        match remove(
+            root,
+            &candidate,
+            dry_run,
+            now_ns,
+            grace,
+            protection,
+            should_stop,
+            resumed,
+        ) {
             Ok(Outcome::Removed) => {
+                if let Some(snapshot) = snapshot.as_deref_mut()
+                    && snapshot
+                        .rechecking
+                        .as_ref()
+                        .is_some_and(|state| state_matches(state, &candidate))
+                {
+                    snapshot.rechecking = None;
+                }
                 total = total.saturating_sub(candidate.bytes);
                 report.bytes = report.bytes.saturating_add(candidate.bytes);
                 report.removed.push(candidate.display);
@@ -1503,9 +1590,45 @@ fn prune_with_progress(
                     free_space().unwrap_or(free.saturating_add(candidate.bytes))
                 };
             }
-            Ok(Outcome::Busy) => report.busy.push(candidate.display),
-            Ok(Outcome::Recent) => report.recent.push(candidate.display),
+            Ok(Outcome::Busy) => {
+                if let Some(snapshot) = snapshot.as_deref_mut()
+                    && snapshot
+                        .rechecking
+                        .as_ref()
+                        .is_some_and(|state| state_matches(state, &candidate))
+                {
+                    snapshot.rechecking = None;
+                }
+                report.busy.push(candidate.display)
+            }
+            Ok(Outcome::Recent) => {
+                if let Some(snapshot) = snapshot.as_deref_mut()
+                    && snapshot
+                        .rechecking
+                        .as_ref()
+                        .is_some_and(|state| state_matches(state, &candidate))
+                {
+                    snapshot.rechecking = None;
+                }
+                report.recent.push(candidate.display)
+            }
+            Ok(Outcome::Interrupted(rechecking)) => {
+                if let Some(snapshot) = snapshot.as_deref_mut() {
+                    snapshot.rechecking = rechecking;
+                }
+                report.measurement_skipped = true;
+                report.interrupted_at = Some(candidate.display);
+                break;
+            }
             Err(error) => {
+                if let Some(snapshot) = snapshot.as_deref_mut()
+                    && snapshot
+                        .rechecking
+                        .as_ref()
+                        .is_some_and(|state| state_matches(state, &candidate))
+                {
+                    snapshot.rechecking = None;
+                }
                 report.busy.push(candidate.display.clone());
                 report
                     .errors
@@ -1574,8 +1697,12 @@ fn discover(
         let Ok(cache) = PayloadTree::claim(root, &name, &metadata) else {
             continue;
         };
-        for target in TARGETS {
-            let target = OsStr::new(target);
+        for (target_name, logical_name) in TARGETS
+            .into_iter()
+            .map(|name| (name, name))
+            .chain(GC_TOMBSTONES)
+        {
+            let target = OsStr::new(target_name);
             let metadata = match cache.metadata_at(target) {
                 Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
                 Ok(_) => continue,
@@ -1588,15 +1715,19 @@ fn discover(
             let Ok(target_tree) = cache.child(target) else {
                 continue;
             };
-            let display = cache_root.join(digest).join(target);
+            let display = cache_root.join(digest).join(logical_name);
             match measure(&target_tree, 0, budget) {
                 Ok((bytes, newest)) => candidates.push(Candidate {
                     kind,
                     cache: digest.to_owned(),
-                    target: target.to_string_lossy().into_owned(),
+                    target: target_name.to_owned(),
                     display,
                     bytes,
-                    newest,
+                    newest: if target_name == logical_name {
+                        newest
+                    } else {
+                        i128::MIN
+                    },
                     target_modified_ns: metadata.modified_ns,
                     identity: (metadata.device, metadata.inode),
                 }),
@@ -1619,8 +1750,8 @@ fn directory_names(
         MAX_ENTRIES
     };
     let mut names = Vec::new();
-    for entry in provenant_os::fs::entry_names(directory.directory(), limit)
-        .map_err(io::Error::other)?
+    for entry in
+        provenant_os::fs::entry_names(directory.directory(), limit).map_err(io::Error::other)?
     {
         if !budget.consume() {
             break;
@@ -1668,6 +1799,8 @@ fn remove(
     now_ns: i128,
     grace: i128,
     protection: &TargetProtection,
+    should_stop: &mut dyn FnMut() -> bool,
+    resumed: Option<MeasureProgress>,
 ) -> io::Result<Outcome> {
     let metadata: Metadata = root
         .metadata_at(OsStr::new(&candidate.cache), false)
@@ -1681,7 +1814,11 @@ fn remove(
         None
     };
     if (candidate.kind == CacheKind::Lane && owner.is_none())
-        || protection.protects(candidate.kind, OsStr::new(&candidate.cache), owner.as_deref())
+        || protection.protects(
+            candidate.kind,
+            OsStr::new(&candidate.cache),
+            owner.as_deref(),
+        )
     {
         return Ok(Outcome::Busy);
     }
@@ -1699,37 +1836,108 @@ fn remove(
     if dry_run {
         return Ok(Outcome::Removed);
     }
-    let (_, newest) = measure(&target, 0, &mut MeasureBudget::new(false))?;
+    if is_gc_tombstone(&candidate.target) {
+        let mut remaining = MAX_ENTRIES;
+        if !remove_contents_until(&target, 0, &mut remaining, should_stop)? {
+            return Ok(Outcome::Interrupted(None));
+        }
+        drop(target);
+        cache.rmdir(name).map_err(io::Error::other)?;
+        return Ok(Outcome::Removed);
+    }
+
+    let newest = match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)?
+    {
+        MeasureOutcome::Complete { newest, .. } => newest,
+        MeasureOutcome::Interrupted(state) => return Ok(Outcome::Interrupted(Some(state))),
+        MeasureOutcome::Changed => return Ok(Outcome::Recent),
+    };
     if newest != candidate.newest || within_grace(newest, now_ns, grace) {
         return Ok(Outcome::Recent);
     }
-    remove_contents(&target, 0)?;
+    if should_stop() {
+        return Ok(Outcome::Interrupted(None));
+    }
     drop(target);
-    cache.rmdir(name).map_err(io::Error::other)?;
+    let tombstone = gc_tombstone_for(&candidate.target)
+        .ok_or_else(|| io::Error::other("unknown Cargo target name"))?;
+    match cache.metadata_at(OsStr::new(tombstone)) {
+        Ok(_) => return Ok(Outcome::Busy),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(io::Error::other(error)),
+    }
+    cache
+        .directory()
+        .rename_noreplace(name, cache.directory(), OsStr::new(tombstone))
+        .map_err(io::Error::other)?;
+    let tombstone = cache
+        .child(OsStr::new(tombstone))
+        .map_err(io::Error::other)?;
+    let mut remaining = MAX_ENTRIES;
+    if !remove_contents_until(&tombstone, 0, &mut remaining, should_stop)? {
+        return Ok(Outcome::Interrupted(None));
+    }
+    drop(tombstone);
+    let tombstone_name = gc_tombstone_for(&candidate.target)
+        .ok_or_else(|| io::Error::other("unknown Cargo target name"))?;
+    cache
+        .rmdir(OsStr::new(tombstone_name))
+        .map_err(io::Error::other)?;
     Ok(Outcome::Removed)
 }
 
+fn gc_tombstone_for(target: &str) -> Option<&'static str> {
+    GC_TOMBSTONES
+        .iter()
+        .find(|(_, logical)| *logical == target)
+        .map(|(tombstone, _)| *tombstone)
+}
+
+fn is_gc_tombstone(target: &str) -> bool {
+    GC_TOMBSTONES
+        .iter()
+        .any(|(tombstone, _)| *tombstone == target)
+}
+
 /// Remove a target tree while its Cargo profile locks are held. Links are
-/// unlinked, never followed.
-fn remove_contents(directory: &PayloadTree, depth: usize) -> io::Result<()> {
+/// unlinked, never followed. A rename keeps interrupted deletion out of Cargo's
+/// target path; the next sweep continues from the surviving tombstone.
+fn remove_contents_until(
+    directory: &PayloadTree,
+    depth: usize,
+    remaining: &mut usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> io::Result<bool> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory nesting too deep"));
     }
+    if should_stop() {
+        return Ok(false);
+    }
     directory.make_writable().map_err(io::Error::other)?;
-    for name in provenant_os::fs::entry_names(directory.directory(), MAX_ENTRIES)
-        .map_err(io::Error::other)?
-    {
+    let mut entries = directory.directory().entries().map_err(io::Error::other)?;
+    while let Some(entry) = entries.next() {
+        if should_stop() {
+            return Ok(false);
+        }
+        if *remaining == 0 {
+            return Err(io::Error::other("target entry limit exceeded"));
+        }
+        *remaining -= 1;
+        let name = entry.map_err(io::Error::other)?;
         let metadata = directory.metadata_at(&name).map_err(io::Error::other)?;
         if metadata.kind == FileKind::Directory {
             let child = directory.child(&name).map_err(io::Error::other)?;
-            remove_contents(&child, depth + 1)?;
+            if !remove_contents_until(&child, depth + 1, remaining, should_stop)? {
+                return Ok(false);
+            }
             drop(child);
             directory.rmdir(&name).map_err(io::Error::other)?;
         } else {
             directory.unlink(&name).map_err(io::Error::other)?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1910,7 +2118,11 @@ mod tests {
         let large = target.join("many");
         fs::create_dir(&large).unwrap();
         for index in 0..128 {
-            fs::write(large.join(format!("file-{index:03}")), vec![index as u8; 1024]).unwrap();
+            fs::write(
+                large.join(format!("file-{index:03}")),
+                vec![index as u8; 1024],
+            )
+            .unwrap();
         }
         let budget = provenant_config::CargoCacheBudget {
             bytes: u64::MAX,
@@ -1938,7 +2150,10 @@ mod tests {
         .unwrap();
         assert!(partial.measurement_skipped);
         assert_eq!(partial.interrupted_at.as_deref(), Some(target.as_path()));
-        let detail = partial.cursor_detail.clone().expect("published continuation");
+        let detail = partial
+            .cursor_detail
+            .clone()
+            .expect("published continuation");
         assert!(target.exists());
         assert!(state.path().join("tick").join(detail).is_file());
 
@@ -2006,6 +2221,148 @@ mod tests {
             assert!(detail.is_some(), "interrupted census must publish progress");
         }
         panic!("flat cache-root census failed to reach later cache keys");
+    }
+
+    #[test]
+    fn an_interrupted_target_prune_resumes_from_its_hidden_tombstone() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = fixture.profile('a', "debug", 8192, 100);
+        for index in 0..64 {
+            fs::write(
+                target.join(format!("artifact-{index:03}")),
+                vec![index as u8; 4096],
+            )
+            .unwrap();
+        }
+        let state_root = state.path();
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut began_deletion = false;
+        let mut stop_at_tombstone = || {
+            if !target.exists() && !began_deletion {
+                began_deletion = true;
+                true
+            } else {
+                false
+            }
+        };
+        let mut refresh = TargetProtection::default;
+        let partial = collect_with_progress(
+            state_root,
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000001",
+            &mut stop_at_tombstone,
+            &mut refresh,
+        )
+        .unwrap();
+        assert!(partial.measurement_skipped);
+        assert_eq!(partial.interrupted_at.as_deref(), Some(target.as_path()));
+        let cache = target.parent().unwrap();
+        assert!(!target.exists());
+        assert!(cache.join(GC_TOMBSTONES[0].0).is_dir());
+
+        let mut continue_delete = || false;
+        let mut refresh = TargetProtection::default;
+        let resumed = collect_with_progress(
+            state_root,
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            partial.cursor_detail.as_deref(),
+            "0000000000000002",
+            &mut continue_delete,
+            &mut refresh,
+        )
+        .unwrap();
+        assert!(!resumed.measurement_skipped);
+        assert!(resumed.removed.iter().any(|path| path == &target));
+        assert!(!cache.join(GC_TOMBSTONES[0].0).exists());
+    }
+
+    #[test]
+    fn an_interrupted_lock_held_recheck_resumes_before_renaming() {
+        let fixture = Fixture::new();
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = fixture.profile('a', "debug", 8192, 100);
+        for index in 0..64 {
+            fs::write(
+                target.join(format!("artifact-{index:03}")),
+                vec![index as u8; 4096],
+            )
+            .unwrap();
+        }
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut locked_steps = 0;
+        let mut stop_during_recheck = || {
+            let directory = Directory::open_anchor(&target).unwrap();
+            match directory
+                .try_flock_foreign(OsStr::new(CARGO_LOCK), LockMode::Exclusive)
+                .unwrap()
+            {
+                ForeignLock::Held => {
+                    locked_steps += 1;
+                    locked_steps > 8
+                }
+                ForeignLock::Acquired(guard) => {
+                    drop(guard);
+                    false
+                }
+                ForeignLock::Absent => false,
+            }
+        };
+        let mut refresh = TargetProtection::default;
+        let partial = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            "0000000000000001",
+            &mut stop_during_recheck,
+            &mut refresh,
+        )
+        .unwrap();
+        assert!(partial.measurement_skipped);
+        assert!(target.is_dir());
+        assert!(!target.parent().unwrap().join(GC_TOMBSTONES[0].0).exists());
+
+        let mut continue_recheck = || false;
+        let mut refresh = TargetProtection::default;
+        let resumed = collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            partial.cursor_detail.as_deref(),
+            "0000000000000002",
+            &mut continue_recheck,
+            &mut refresh,
+        )
+        .unwrap();
+        assert!(!resumed.measurement_skipped);
+        assert!(resumed.removed.iter().any(|path| path == &target));
+        assert!(!target.exists());
     }
 
     #[test]
