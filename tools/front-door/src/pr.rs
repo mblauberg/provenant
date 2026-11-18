@@ -152,7 +152,9 @@ pub(crate) fn forge_execute(
         std::sync::Arc::new(provenant_records::policy::Policy::default()),
     )?;
     provenant_confinement::publication::install_forge(
-        &mut forge, project.to_owned(), provenant_confinement::publication::Projector::ambient(),
+        &mut forge,
+        project.to_owned(),
+        provenant_confinement::publication::Projector::ambient(),
     );
     provenant_config::Forge::bind(&mut forge, request);
     let arguments: Vec<_> = argv[1..].iter().map(OsString::from).collect();
@@ -164,18 +166,29 @@ pub(crate) fn forge_execute(
             },
             request.remaining(),
             |projected_args, projected_input, _, budget| {
-                let projected: Vec<_> = projected_args.iter().map(|arg| arg.to_str()
-                    .ok_or_else(|| std::io::Error::other("forge argument is not UTF-8")))
-                    .collect::<std::io::Result<_>>()?;
-                raw_execute_cancellable(project, &projected, budget, watch, projected_input, Some(request.cancel()))
-                    .map_err(|error| {
-                        let kind = if error.is::<TimedOut>() {
-                            std::io::ErrorKind::TimedOut
-                        } else {
-                            std::io::ErrorKind::Other
-                        };
-                        std::io::Error::new(kind, error.to_string())
+                let projected: Vec<_> = projected_args
+                    .iter()
+                    .map(|arg| {
+                        arg.to_str()
+                            .ok_or_else(|| std::io::Error::other("forge argument is not UTF-8"))
                     })
+                    .collect::<std::io::Result<_>>()?;
+                raw_execute_cancellable(
+                    project,
+                    &projected,
+                    budget,
+                    watch,
+                    projected_input,
+                    Some(request.cancel()),
+                )
+                .map_err(|error| {
+                    let kind = if error.is::<TimedOut>() {
+                        std::io::ErrorKind::TimedOut
+                    } else {
+                        std::io::ErrorKind::Other
+                    };
+                    std::io::Error::new(kind, error.to_string())
+                })
             },
         )
         .map_err(|error| -> Box<dyn std::error::Error> {

@@ -2686,6 +2686,7 @@ mod result_tests {
                 route_index: 0,
                 attempt: 1,
             }),
+            launch_actor: attempt_ref.map(|_| factory.context.identity.inbox.actor.to_string()),
             inline_findings: None,
             finding_prefix: None,
         };
@@ -2967,6 +2968,7 @@ mod result_tests {
                 label: "ci".into(),
                 attempt_ref: None,
                 attempt_key: None,
+                launch_actor: None,
                 inline_findings: Some(vec![finding]),
                 finding_prefix: None,
             }],

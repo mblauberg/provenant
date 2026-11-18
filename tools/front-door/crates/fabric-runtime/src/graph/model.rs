@@ -2424,6 +2424,8 @@ pub struct InputRequest {
     pub attempt_ref: Option<String>,
     /// Origin identity of the attempt that produced this input.
     pub attempt_key: Option<AttemptKey>,
+    /// Launch actor bound to the selected upstream attempt.
+    pub launch_actor: Option<String>,
     /// Findings from a non-attempt member, such as a CI gate with no result file.
     pub inline_findings: Option<Vec<Finding>>,
     /// Composite qualification to apply to IDs in the source result.

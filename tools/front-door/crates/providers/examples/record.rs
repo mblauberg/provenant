@@ -1258,8 +1258,12 @@ fn main() -> Result<()> {
         redactor.value(&mut entry)?;
         // Bind the final export bytes, after all content transformations.
         entry["sha256"] = json!(provenant_core::hex(&Sha256::digest(redacted.as_bytes())));
-        entry["raw_binding"] = json!(provenant_confinement::publication::PayloadBinding::of(&run.outcome.stdout.bytes));
-        entry["publication_binding"] = json!(provenant_confinement::publication::PayloadBinding::of(redacted.as_bytes()));
+        entry["raw_binding"] = json!(provenant_confinement::publication::PayloadBinding::of(
+            &run.outcome.stdout.bytes
+        ));
+        entry["publication_binding"] = json!(
+            provenant_confinement::publication::PayloadBinding::of(redacted.as_bytes())
+        );
         println!("{}", serde_json::to_string_pretty(&entry)?);
         if args.write {
             let fixtures =

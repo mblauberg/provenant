@@ -217,6 +217,314 @@ fn validate_graph_steer(
     Err(FacadeError::StateCorrupt)
 }
 
+fn validate_graph_output(
+    factory: &Factory,
+    owner: &BinaryRunOwner<'_>,
+    request: &PeerRequest,
+    audience: &provenant_fabric_runtime::hosts::OutputAudience,
+    input: &OutputInput,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let provenant_fabric_runtime::hosts::OutputAudience::GraphExecution {
+        launch_actor: actor,
+        launch_operation: operation,
+        origin_work_key: origin,
+    } = audience
+    else {
+        return Err(FacadeError::ConfinementRefused { resource: None });
+    };
+    if request.agent != format!("graph-{actor}")
+        || request.actor().ok() != Some(factory.context.identity.inbox.actor)
+    {
+        return Err(FacadeError::ConfinementRefused { resource: None });
+    }
+    let requested = match input {
+        OutputInput::Read {
+            target,
+            part: OutputPart::Result,
+            ..
+        } => target,
+        _ => return Err(FacadeError::ConfinementRefused { resource: None }),
+    };
+    let receipt = peer_retained_receipt(factory, operation, *actor)?.ok_or_else(|| {
+        FacadeError::LaunchUnknown {
+            operation_id: operation.clone(),
+        }
+    })?;
+    let graph = peer_graph_name(*actor, operation)?;
+    let local = factory.context.identity.host;
+    if receipt.operation_id != *operation
+        || receipt.targets.len() != 1
+        || receipt.targets.first() != Some(requested)
+        || requested.host != Some(local)
+        || !receipt
+            .peer_graph
+            .as_ref()
+            .is_some_and(|g| g.host == local && g.graph_id == graph)
+    {
+        return Err(FacadeError::ConfinementRefused { resource: None });
+    }
+    let record = owner.snapshot(requested.clone(), budget, cancel)?;
+    let fields = peer_graph_fields(factory, requested.attempt)?;
+    if record.attempt_id != requested.attempt
+        || record.verified_owner != Some(factory.context.identity.inbox.actor)
+        || record.project_id != factory.context.identity.project
+        || record.key.project() != factory.context.identity.project
+        || record.key.graph() != graph
+        || record.key.node() != origin.node()
+        || !peer_origin_matches(&fields, origin)
+        || !fields
+            .peer_graph
+            .as_ref()
+            .is_some_and(|g| g.host == local && g.graph_id == graph)
+    {
+        return Err(FacadeError::ConfinementRefused { resource: None });
+    }
+    Ok(())
+}
+
+fn attach_output_graph_fields(
+    factory: &Factory,
+    data: &mut OutputResult,
+) -> Result<(), FacadeError> {
+    let (OutputResult::Chunk { peer, target, .. } | OutputResult::Artifact { peer, target, .. }) =
+        data;
+    let mut fields = peer_graph_fields(factory, target.attempt)?;
+    fields.peer_subtree = None;
+    peer.merge(fields);
+    Ok(())
+}
+
+// Project the complete verified payload before slicing it into peer pages.
+fn project_peer_output(
+    owner: &mut BinaryRunOwner<'_>,
+    input: &OutputInput,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<OutputResult, FacadeError> {
+    let projector = provenant_confinement::publication::Projector::ambient()
+        .map_err(|_| FacadeError::io("peer publication projection failed"))?;
+    project_peer_output_with(input, &projector, |read| {
+        let mut data = owner.output_for_peer(read, budget, cancel)?;
+        attach_output_graph_fields(owner.factory, &mut data)?;
+        Ok(data)
+    })
+}
+
+fn project_peer_output_with(
+    input: &OutputInput,
+    projector: &provenant_confinement::publication::Projector,
+    mut read_page: impl FnMut(OutputInput) -> Result<OutputResult, FacadeError>,
+) -> Result<OutputResult, FacadeError> {
+    use provenant_confinement::publication::Destination;
+    const CAP: u64 = 16 * 1024 * 1024;
+    let failure = || FacadeError::io("peer publication projection failed");
+    let (requested_offset, requested_max, events) = match input {
+        OutputInput::Read {
+            offset,
+            max_bytes,
+            part,
+            ..
+        } => (*offset, *max_bytes, *part == OutputPart::Events),
+        OutputInput::Fetch { max_bytes, .. } => (0, *max_bytes, false),
+    };
+    let mut read = input.clone();
+    if let OutputInput::Read {
+        offset, max_bytes, ..
+    } = &mut read
+    {
+        if events && *offset != 0 {
+            return Err(failure());
+        }
+        *offset = 0;
+        *max_bytes = provenant_records::run::OUTPUT_LIMIT;
+    }
+    let mut first = None;
+    let mut raw = Vec::new();
+    let mut cursor = 0;
+    let mut binding = None;
+    loop {
+        let page = read_page(read.clone())?;
+        let (bytes, done, next) = match &page {
+            OutputResult::Chunk {
+                bytes,
+                eof,
+                offset,
+                next_offset,
+                digest,
+                length,
+                ..
+            } => {
+                if *offset != cursor
+                    || length.is_some_and(|len| len > CAP)
+                    || (!events && binding.is_some_and(|d| d != *digest))
+                {
+                    return Err(failure());
+                }
+                binding = Some(*digest);
+                (bytes, *eof, *next_offset)
+            }
+            OutputResult::Artifact { bytes, length, .. } => {
+                if length.is_some_and(|len| len > CAP) {
+                    return Err(failure());
+                }
+                (bytes, true, 0)
+            }
+        };
+        let OutputBytes::Utf8(text) = bytes else {
+            return Err(failure());
+        };
+        raw.extend_from_slice(text.as_bytes());
+        if raw.len() as u64 > CAP {
+            return Err(failure());
+        }
+        if first.is_none() {
+            first = Some(page);
+        }
+        if done {
+            break;
+        }
+        if events || next <= cursor {
+            return Err(failure());
+        }
+        cursor = next;
+        if let OutputInput::Read { offset, .. } = &mut read {
+            *offset = cursor;
+        } else {
+            return Err(failure());
+        }
+    }
+    let mut value = first.ok_or_else(failure)?;
+    let text = String::from_utf8(raw).map_err(|_| failure())?;
+    match &mut value {
+        OutputResult::Chunk { bytes, .. } | OutputResult::Artifact { bytes, .. } => {
+            *bytes = OutputBytes::Utf8(text)
+        }
+    }
+    let encoded = serde_json::to_vec(&value).map_err(|_| failure())?;
+    let projection = projector
+        .json(Destination::PeerPublication, &encoded)
+        .map_err(|_| failure())?;
+    let mut output: OutputResult =
+        serde_json::from_slice(projection.bytes()).map_err(|_| failure())?;
+    match &mut output {
+        OutputResult::Chunk {
+            bytes,
+            length,
+            offset,
+            next_offset,
+            eof,
+            digest,
+            ..
+        } => {
+            let OutputBytes::Utf8(text) = bytes else {
+                return Err(failure());
+            };
+            let all = text.as_bytes();
+            *digest = provenant_core::Digest::from_bytes(
+                *provenant_records::CanonicalV1::file_digest(all).bytes(),
+            );
+            if !events {
+                let start = usize::try_from(requested_offset)
+                    .map_err(|_| failure())?
+                    .min(all.len());
+                let end = start
+                    .saturating_add(usize::try_from(requested_max).map_err(|_| failure())?)
+                    .min(all.len());
+                *length = Some(all.len() as u64);
+                *offset = start as u64;
+                *next_offset = end as u64;
+                *eof = end == all.len();
+                *bytes = OutputBytes::from_bytes(all[start..end].to_vec());
+            } else if all.len() as u64 > requested_max {
+                return Err(failure());
+            }
+        }
+        OutputResult::Artifact {
+            bytes,
+            length,
+            digest,
+            artifact,
+            ..
+        } => {
+            let OutputBytes::Utf8(text) = bytes else {
+                return Err(failure());
+            };
+            if text.len() as u64 > requested_max {
+                return Err(FacadeError::OutputTooLarge);
+            }
+            let file_digest = provenant_records::CanonicalV1::file_digest(text.as_bytes());
+            *length = Some(text.len() as u64);
+            *digest = provenant_core::Digest::from_bytes(*file_digest.bytes());
+            artifact.digest = Some(file_digest);
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod output_projection_tests {
+    use super::*;
+
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn projects_before_paging_and_binds_published_bytes() {
+        let secret = "a-long-private-value";
+        let raw = format!("{}{}tail", "x".repeat(65530), secret);
+        let projector =
+            provenant_confinement::publication::Projector::new([secret.as_bytes().to_vec()])
+                .unwrap();
+        let target: AttemptTarget = serde_json::from_value(
+            serde_json::json!({"attempt":"11111111111111111111111111111111"}),
+        )
+        .unwrap();
+        let input = OutputInput::Read {
+            extra: Default::default(),
+            target: target.clone(),
+            part: OutputPart::Result,
+            offset: 65520,
+            max_bytes: 100,
+        };
+        let actual_digest = provenant_core::Digest::from_bytes(
+            *provenant_records::CanonicalV1::file_digest(raw.as_bytes()).bytes(),
+        );
+        let projected = project_peer_output_with(&input, &projector, |request| {
+            let OutputInput::Read { offset, .. } = request else { unreachable!() };
+            let start = offset as usize;
+            let end = (start + 65536).min(raw.len());
+            serde_json::from_value(serde_json::json!({
+                "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
+                "offset":start, "next_offset":end, "eof":end == raw.len(), "digest":actual_digest,
+                "bytes":{"encoding":"utf8","data":&raw[start..end]}, "length":raw.len()
+            })).map_err(|_| FacadeError::StateCorrupt)
+        }).unwrap();
+        let OutputResult::Chunk {
+            bytes: OutputBytes::Utf8(page),
+            length,
+            digest,
+            offset,
+            next_offset,
+            ..
+        } = projected
+        else {
+            panic!("projected chunk")
+        };
+        let expected = format!("{}[REDACTED]tail", "x".repeat(65530));
+        assert_eq!(page, expected[65520..]);
+        assert!(!page.contains(secret));
+        assert_eq!(length, Some(expected.len() as u64));
+        assert_eq!(offset, 65520);
+        assert_eq!(next_offset, expected.len() as u64);
+        assert_eq!(
+            digest,
+            provenant_core::Digest::from_bytes(
+                *provenant_records::CanonicalV1::file_digest(expected.as_bytes()).bytes()
+            )
+        );
+    }
+}
+
 const MAX_GRAPH_STEER_SUPERSEDED: usize = 32;
 
 fn peer_inbox_execute(
@@ -745,21 +1053,36 @@ pub fn peer(
                     extra: Default::default(),
                 },
             ),
-            PeerAction::Output { audience, input, .. } => peer_result(
+            PeerAction::Output {
+                audience, input, ..
+            } => peer_result(
                 (|| {
-                    if !matches!(audience, provenant_fabric_runtime::hosts::OutputAudience::PeerPublication) {
-                        return Err(FacadeError::ConfinementRefused { resource: None });
+                    if matches!(
+                        audience,
+                        provenant_fabric_runtime::hosts::OutputAudience::GraphExecution { .. }
+                    ) {
+                        validate_graph_output(
+                            &peer_factory,
+                            &owner,
+                            &request,
+                            audience,
+                            input,
+                            budget,
+                            &cancel,
+                        )?;
                     }
-                    owner
-                    .output_for_peer(input.clone(), budget, &cancel)
-                    .and_then(|mut data| {
-                        let (OutputResult::Chunk { peer, target, .. }
-                        | OutputResult::Artifact { peer, target, .. }) = &mut data;
-                        let mut fields = peer_graph_fields(&peer_factory, target.attempt)?;
-                        fields.peer_subtree = None;
-                        peer.merge(fields);
-                        Ok(data)
-                    })
+                    match audience {
+                        provenant_fabric_runtime::hosts::OutputAudience::GraphExecution {
+                            ..
+                        } => {
+                            let mut data = owner.output_for_peer(input.clone(), budget, &cancel)?;
+                            attach_output_graph_fields(&peer_factory, &mut data)?;
+                            Ok(data)
+                        }
+                        provenant_fabric_runtime::hosts::OutputAudience::PeerPublication => {
+                            project_peer_output(&mut owner, input, budget, &cancel)
+                        }
+                    }
                 })(),
                 |data| PeerResult::Output {
                     data: Box::new(data),

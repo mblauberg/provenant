@@ -1066,7 +1066,6 @@ mod tests {
                 }
             }
         }
-
     }
 
     /// The package exception never absorbs another declaration, whichever

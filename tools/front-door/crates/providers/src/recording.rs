@@ -14,26 +14,45 @@ pub struct Redactor {
     projector: provenant_confinement::publication::Projector,
 }
 impl Redactor {
-    pub fn new(literals: Vec<(String, String)>, token: Option<&crate::claude::OauthToken>) -> Result<Self> {
-        let mut secrets: Vec<_> = std::env::vars_os().filter(|(key, value)| {
-            key.to_str().is_some_and(provenant_confinement::publication::secret_field) && !value.is_empty()
-        }).map(|(_, value)| {
-            value.as_encoded_bytes().to_vec()
-        }).collect();
-        if let Some(token) = token { secrets.push(token.access.as_bytes().to_vec()); }
-        Ok(Self { literals, projector: provenant_confinement::publication::Projector::new(secrets)? })
+    pub fn new(
+        literals: Vec<(String, String)>,
+        token: Option<&crate::claude::OauthToken>,
+    ) -> Result<Self> {
+        let mut secrets: Vec<_> = std::env::vars_os()
+            .filter(|(key, value)| {
+                key.to_str()
+                    .is_some_and(provenant_confinement::publication::secret_field)
+                    && !value.is_empty()
+            })
+            .map(|(_, value)| value.as_encoded_bytes().to_vec())
+            .collect();
+        if let Some(token) = token {
+            secrets.push(token.access.as_bytes().to_vec());
+        }
+        Ok(Self {
+            literals,
+            projector: provenant_confinement::publication::Projector::new(secrets)?,
+        })
     }
 
     pub fn text(&self, value: &str) -> Result<String> {
-        let projection = self.projector.project(provenant_confinement::publication::Destination::FixtureExport, value.as_bytes())?;
+        let projection = self.projector.project(
+            provenant_confinement::publication::Destination::FixtureExport,
+            value.as_bytes(),
+        )?;
         let mut out = String::from_utf8(projection.into_bytes())?;
-        for (from, to) in &self.literals { out = out.replace(from, to); }
+        for (from, to) in &self.literals {
+            out = out.replace(from, to);
+        }
         Ok(out)
     }
 
     pub fn value(&self, value: &mut Value) -> Result<()> {
         let bytes = serde_json::to_vec(value)?;
-        let projection = self.projector.json(provenant_confinement::publication::Destination::FixtureExport, &bytes)?;
+        let projection = self.projector.json(
+            provenant_confinement::publication::Destination::FixtureExport,
+            &bytes,
+        )?;
         let mut projected: Value = serde_json::from_slice(projection.bytes())?;
         self.pseudonyms(&mut projected)?;
         *value = projected;
@@ -43,15 +62,25 @@ impl Redactor {
     fn pseudonyms(&self, value: &mut Value) -> Result<()> {
         match value {
             Value::String(text) => {
-                for (from, to) in &self.literals { *text = text.replace(from, to); }
+                for (from, to) in &self.literals {
+                    *text = text.replace(from, to);
+                }
             }
-            Value::Array(items) => for item in items { self.pseudonyms(item)?; },
+            Value::Array(items) => {
+                for item in items {
+                    self.pseudonyms(item)?;
+                }
+            }
             Value::Object(map) => {
                 let entries = std::mem::take(map);
                 for (mut key, mut item) in entries {
-                    for (from, to) in &self.literals { key = key.replace(from, to); }
+                    for (from, to) in &self.literals {
+                        key = key.replace(from, to);
+                    }
                     self.pseudonyms(&mut item)?;
-                    if map.insert(key, item).is_some() { return Err("fixture projection collided object keys".into()); }
+                    if map.insert(key, item).is_some() {
+                        return Err("fixture projection collided object keys".into());
+                    }
                 }
             }
             _ => {}
@@ -60,13 +89,20 @@ impl Redactor {
     }
 
     pub fn stream(&self, bytes: &[u8]) -> Result<String> {
-        let values: Vec<Value> = std::str::from_utf8(bytes)?.lines().filter(|line| !line.is_empty())
-            .map(serde_json::from_str).collect::<std::result::Result<_,_>>()?;
+        let values: Vec<Value> = std::str::from_utf8(bytes)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()?;
         let mut values = Value::Array(values);
         self.value(&mut values)?;
         let mut out = String::new();
-        for value in values.as_array().ok_or("fixture projection is not an array")? {
-            out.push_str(&serde_json::to_string(value)?); out.push('\n');
+        for value in values
+            .as_array()
+            .ok_or("fixture projection is not an array")?
+        {
+            out.push_str(&serde_json::to_string(value)?);
+            out.push('\n');
         }
         Ok(out)
     }
@@ -148,7 +184,10 @@ mod tests {
     fn recording_redacts_known_tokens_in_argv_zero() {
         let redactor = Redactor {
             literals: vec![],
-            projector: provenant_confinement::publication::Projector::new([b"ghp_abcdefghijklmnopqrst".to_vec()]).unwrap(),
+            projector: provenant_confinement::publication::Projector::new([
+                b"ghp_abcdefghijklmnopqrst".to_vec(),
+            ])
+            .unwrap(),
         };
         let argv = ["/tools/ghp_abcdefghijklmnopqrst", "--help"];
         let recorded: Vec<_> = argv.iter().map(|arg| redactor.text(arg).unwrap()).collect();

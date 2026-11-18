@@ -32,7 +32,7 @@ pub enum PortError {
     EvidenceVisible { cause: String },
     #[error("port execution returned {0:?}")]
     Disposition(PortCommandDisposition),
-    #[error("publication projection unavailable or failed") ]
+    #[error("publication projection unavailable or failed")]
     Projection,
     #[error("invalid forge response: {0}")]
     Response(&'static str),
@@ -338,13 +338,19 @@ impl ForgeOperation {
                 if arguments.first().is_some_and(|arg| arg == "api") {
                     return input.is_some() || api_publishes(&arguments[1..]);
                 }
-                input.is_some() || !matches!(
-                    (arguments.first().and_then(|a| a.to_str()), arguments.get(1).and_then(|a| a.to_str())),
-                    (Some("pr"), Some("view" | "list" | "checks" | "diff" | "status"))
-                    | (Some("issue"), Some("view" | "list" | "status"))
-                    | (Some("repo"), Some("view"))
-                    | (Some("run"), Some("view" | "list" | "watch"))
-                )
+                input.is_some()
+                    || !matches!(
+                        (
+                            arguments.first().and_then(|a| a.to_str()),
+                            arguments.get(1).and_then(|a| a.to_str())
+                        ),
+                        (
+                            Some("pr"),
+                            Some("view" | "list" | "checks" | "diff" | "status")
+                        ) | (Some("issue"), Some("view" | "list" | "status"))
+                            | (Some("repo"), Some("view"))
+                            | (Some("run"), Some("view" | "list" | "watch"))
+                    )
             }
             _ => false,
         }
@@ -354,14 +360,20 @@ impl ForgeOperation {
 fn api_publishes(arguments: &[OsString]) -> bool {
     arguments.iter().any(|arg| {
         let arg = arg.to_string_lossy();
-        matches!(arg.as_ref(), "-f" | "-F" | "--field" | "--raw-field" | "--input")
-            || arg.starts_with("--field=") || arg.starts_with("--raw-field=")
-            || arg.starts_with("--input=") || arg.starts_with("-f") || arg.starts_with("-F")
+        matches!(
+            arg.as_ref(),
+            "-f" | "-F" | "--field" | "--raw-field" | "--input"
+        ) || arg.starts_with("--field=")
+            || arg.starts_with("--raw-field=")
+            || arg.starts_with("--input=")
+            || arg.starts_with("-f")
+            || arg.starts_with("-F")
     }) || arguments.windows(2).any(|pair| {
         (pair[0] == "-X" || pair[0] == "--method") && pair[1] != "GET" && pair[1] != "HEAD"
     }) || arguments.iter().any(|arg| {
         let arg = arg.to_string_lossy();
-        arg.strip_prefix("--method=").or_else(|| arg.strip_prefix("-X"))
+        arg.strip_prefix("--method=")
+            .or_else(|| arg.strip_prefix("-X"))
             .is_some_and(|method| !method.is_empty() && method != "GET" && method != "HEAD")
     })
 }
@@ -465,23 +477,30 @@ impl ForgePort {
         self.projector = Some(Box::new(projector));
     }
 
-    fn invocation(&self, operation: ForgeOperation) -> Result<(ForgeOperation, Invocation), PortError> {
-        let raw = provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
+    fn invocation(
+        &self,
+        operation: ForgeOperation,
+    ) -> Result<(ForgeOperation, Invocation), PortError> {
+        let raw =
+            provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
         let operation = if operation.requires_projection() {
             self.projector.as_ref().ok_or(PortError::Projection)?(operation)?
         } else {
             operation
         };
-        let projected = provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
+        let projected =
+            provenant_records::CanonicalV1::bytes(&operation).map_err(|_| PortError::Projection)?;
         let mut invocation = Invocation::for_operation(&operation, self.adapter.owner);
         // Receipts bind both the source operation and the exact projected payload,
         // including title, stdin and command arguments, never just a branch name.
-        invocation.key = format!("{}:{}:{}", invocation.key,
+        invocation.key = format!(
+            "{}:{}:{}",
+            invocation.key,
             provenant_records::CanonicalV1::file_digest(raw.as_bytes()),
-            provenant_records::CanonicalV1::file_digest(projected.as_bytes()));
+            provenant_records::CanonicalV1::file_digest(projected.as_bytes())
+        );
         Ok((operation, invocation))
     }
-
 
     pub fn execute_with(
         &mut self,
@@ -1267,13 +1286,26 @@ esac
     #[test]
     fn failed_publication_projection_never_invokes_forge_backend() {
         let dir = tempfile::tempdir().unwrap();
-        let mut forge = ForgePort::new(port(PortBackend::Builtin), "tracker", dir.path(), dir.path(),
-            std::sync::Arc::new(provenant_records::policy::Policy::default())).unwrap();
+        let mut forge = ForgePort::new(
+            port(PortBackend::Builtin),
+            "tracker",
+            dir.path(),
+            dir.path(),
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        )
+        .unwrap();
         forge.set_publication_projector(|_| Err(PortError::Projection));
-        let result = forge.execute_with(ForgeOperation::Open {
-            base: "main".into(), head: "branch".into(), title: "title".into(),
-            body: b"raw secret".to_vec(), draft: false,
-        }, Duration::from_secs(2), |_, _, _, _| panic!("failed projection reached publisher"));
+        let result = forge.execute_with(
+            ForgeOperation::Open {
+                base: "main".into(),
+                head: "branch".into(),
+                title: "title".into(),
+                body: b"raw secret".to_vec(),
+                draft: false,
+            },
+            Duration::from_secs(2),
+            |_, _, _, _| panic!("failed projection reached publisher"),
+        );
         assert!(matches!(result, Err(PortError::Projection)));
     }
 

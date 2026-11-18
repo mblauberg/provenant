@@ -1070,7 +1070,9 @@ impl Repo for GitRepo<'_> {
         )
         .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
         provenant_confinement::publication::install_forge(
-            &mut forge, self.project.clone(), provenant_confinement::publication::Projector::ambient(),
+            &mut forge,
+            self.project.clone(),
+            provenant_confinement::publication::Projector::ambient(),
         );
         let execution = forge
             .execute_with(

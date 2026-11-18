@@ -752,7 +752,12 @@ fn credential_declarations(
         };
         if spec.credential_profile_sibling {
             declarations.push(CredentialDeclaration {
-                root: CredentialRoot { path: path.with_extension("json"), source: format!("{source} credential file"), kind: CredentialKind::Store, scope: CredentialScope::Exact },
+                root: CredentialRoot {
+                    path: path.with_extension("json"),
+                    source: format!("{source} credential file"),
+                    kind: CredentialKind::Store,
+                    scope: CredentialScope::Exact,
+                },
                 inventory: CredentialInventory::Adapter(spec.name.to_owned()),
             });
         }
@@ -765,7 +770,6 @@ fn credential_declarations(
             },
             inventory: CredentialInventory::Adapter(spec.name.to_owned()),
         });
-
     }
 
     declarations.extend(

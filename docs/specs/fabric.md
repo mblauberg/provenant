@@ -413,10 +413,11 @@ the affected publication and never substitutes raw bytes.
 `PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
 not authorisation: the receiver must bind the authenticated actor, retained
 launch receipt, origin work key and requested attempt before allowing raw graph
-transport. Until that validation is wired, graph claims are refused. External
-peer output requires publication projection. The graph scanner migration is
-tracked separately; the checkpoint rules below describe the existing behaviour
-until that slice lands.
+transport. The sender derives the claim from the retained upstream attempt and
+the receiver checks its actor namespace, launch receipt, origin and target.
+External peer output projects the complete verified text and envelope before
+paging, with published lengths and digests. Binary output, over-bound projections
+and event pages that cannot be fully projected are withheld on projection failure.
 
 ### Checkpoint before launch
 

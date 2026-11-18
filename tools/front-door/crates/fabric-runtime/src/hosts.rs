@@ -1245,10 +1245,17 @@ mod tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn output_audience_requires_graph_evidence_and_new_protocol() {
-        let action = declared_feature_actions().into_iter().find(|(name, _, _)| *name == "output").unwrap().2;
+        let action = declared_feature_actions()
+            .into_iter()
+            .find(|(name, _, _)| *name == "output")
+            .unwrap()
+            .2;
         let mut wire = serde_json::to_value(&action).unwrap();
         assert_eq!(action_fence(&action), OUTPUT_AUDIENCE_PROTOCOL);
-        assert_eq!(feature_protocol_for_wire_name("output"), OUTPUT_AUDIENCE_PROTOCOL);
+        assert_eq!(
+            feature_protocol_for_wire_name("output"),
+            OUTPUT_AUDIENCE_PROTOCOL
+        );
         assert!(serde_json::from_value::<PeerAction>(wire.clone()).is_ok());
         wire.as_object_mut().unwrap().remove("audience");
         assert!(serde_json::from_value::<PeerAction>(wire.clone()).is_err());

@@ -111,6 +111,7 @@ fn read_remote(
     owner: &mut BinaryRunOwner<'_>,
     target: AttemptTarget,
     origin: &provenant_records::WorkKey,
+    audience: provenant_fabric_runtime::hosts::OutputAudience,
     budget: WaitBudget,
     cancel: &CancelToken,
     max: usize,
@@ -119,19 +120,28 @@ fn read_remote(
     let mut offset = 0;
     let mut expected_digest = None;
     loop {
-        let result = owner.output(
-            OutputInput::Read {
+        let input = OutputInput::Read {
+            extra: Default::default(),
+            target: target.clone(),
+            part: OutputPart::Result,
+            offset,
+            max_bytes: (max - bytes.len()).min(provenant_records::run::OUTPUT_LIMIT as usize)
+                as u64,
+        };
+        let result = owner.peer(
+            target.host.ok_or(FacadeError::StateCorrupt)?,
+            provenant_fabric_runtime::hosts::PeerAction::Output {
                 extra: Default::default(),
-                target: target.clone(),
-                part: OutputPart::Result,
-                offset,
-                max_bytes: (max - bytes.len()).min(provenant_records::run::OUTPUT_LIMIT as usize)
-                    as u64,
+                audience: audience.clone(),
+                input,
             },
             budget,
             cancel,
         )?;
-        let result = super::peer::checked_output_origin(result, origin)?;
+        let provenant_fabric_runtime::hosts::PeerResult::Output { data, .. } = result else {
+            return Err(FacadeError::StateCorrupt);
+        };
+        let result = super::peer::checked_output_origin(*data, origin)?;
         let OutputResult::Chunk {
             length,
             target: returned_target,
@@ -275,6 +285,19 @@ pub(super) fn materialise(
                             .ok_or(FacadeError::StateCorrupt)?
                             .work_key(factory.context.identity.project)
                             .map_err(|_| FacadeError::StateCorrupt)?;
+                        let actor = request
+                            .launch_actor
+                            .as_ref()
+                            .ok_or(FacadeError::StateCorrupt)?
+                            .parse()
+                            .map_err(|_| FacadeError::StateCorrupt)?;
+                        let operation = super::graph_execution::graph_operation(
+                            "graph-attempt-operation",
+                            request
+                                .attempt_key
+                                .as_ref()
+                                .ok_or(FacadeError::StateCorrupt)?,
+                        )?;
                         read_remote(
                             &mut owner,
                             AttemptTarget {
@@ -283,6 +306,11 @@ pub(super) fn materialise(
                                 attempt,
                             },
                             &origin,
+                            provenant_fabric_runtime::hosts::OutputAudience::GraphExecution {
+                                launch_actor: actor,
+                                launch_operation: operation,
+                                origin_work_key: origin.clone(),
+                            },
                             budget,
                             cancel,
                             remaining,

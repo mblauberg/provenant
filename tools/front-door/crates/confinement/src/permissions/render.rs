@@ -241,7 +241,6 @@ fn compile_sbpl_inner(
     .max()
     .unwrap_or(0);
     let mandatory = mandatory_for_plan(plan, anchors.home, None)?;
-    let credentials = mandatory.credential_roots();
     if let Some(warning) = check_capacity_policy(
         policy,
         "GRANT_COUNT",
@@ -289,19 +288,18 @@ fn compile_sbpl_inner(
     validate_profile_spec_with_home(&profile.spec, anchors.home, &credentials, usize::MAX)?;
     for grant in &plan.read_roots {
         validate_read_exec_grant(grant, &credentials)
-
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     // Every lexical credential check runs before any filesystem anchor check,
     // so a refused root names the declared store rather than a missing anchor.
     for grant in plan.protected_roots.iter().chain(&plan.write_roots) {
-        validate_noncredential_grant(grant, credentials)
+        validate_noncredential_grant(grant, &credentials)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     let worktree_grants = match &plan.mode {
         AccessMode::ReadOnly => None,
         AccessMode::WorktreeWrite(authority) => {
-            Some(verify_worktree_authority(authority, anchors, credentials)?)
+            Some(verify_worktree_authority(authority, anchors, &credentials)?)
         }
     };
     if let Some(read_only) = &plan.read_only {
@@ -310,7 +308,7 @@ fn compile_sbpl_inner(
         }
         read_only.revalidate().map_err(compile_authority_error)?;
         for grant in &read_only.writes {
-            validate_noncredential_grant(grant, credentials)
+            validate_noncredential_grant(grant, &credentials)
                 .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
             if plan
                 .protected_roots
@@ -388,7 +386,7 @@ fn compile_sbpl_inner(
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath(plan.scratch.path.clone()));
     }
-    validate_noncredential_grant(&plan.scratch, credentials)
+    validate_noncredential_grant(&plan.scratch, &credentials)
         .map_err(|error| error.with_credential_path(&plan.scratch.path, Some(anchors.home)))?;
     anchors
         .verify_grant_held(&plan.scratch)
@@ -433,7 +431,7 @@ fn compile_sbpl_inner(
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
-        validate_noncredential_grant(state, credentials)
+        validate_noncredential_grant(state, &credentials)
             .map_err(|error| error.with_credential_path(&state.path, Some(anchors.home)))?;
         if state.overlaps(&plan.scratch) {
             return Err(PermissionError::ProtectedOverlap);
@@ -493,7 +491,7 @@ fn compile_sbpl_inner(
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors, credentials)?;
+        verify_worktree_authority(authority, anchors, &credentials)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
@@ -1426,7 +1424,6 @@ fn push_boundaries(
         push_denial(source, "file-map-executable", root, &exec)?;
         push_rule(source, "deny", "file-link", &root.path, root.scope)?;
         if !confinement.credentials_permitted()
-
             || credential_writes.is_empty()
             || root.path == home.join(".claude.json")
         {
