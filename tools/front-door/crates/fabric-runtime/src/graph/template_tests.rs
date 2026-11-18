@@ -59,7 +59,6 @@ fn compiled_batch(raw: Value) -> GraphDocument {
     let context = super::patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &super::patch::scan_for_secrets,
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
