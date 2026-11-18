@@ -424,10 +424,11 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
     if !available()? {
         return Ok(());
     }
+    // The successful lane also crosses the capture limit, retaining the tail;
+    // a separate successful launch would repeat the same settlement invariant.
     let rig = rig(json!({
-        "pass":{"argv":["/bin/sh","-c","printf 'hello\\n'; printf 'diagnostic\\n' >&2; test ! -w .git/config; ! touch forbidden;"]},
+        "pass":{"argv":["/bin/sh","-c","printf 'hello\\n'; printf 'diagnostic\\n' >&2; test ! -w .git/config; ! touch forbidden || exit 1; /usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "fail":{"argv":["/bin/sh","-c","printf 'failed\\n'; exit 7"]},
-        "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
     // This test exercises denied checkout writes as well as command settlement.
@@ -436,7 +437,6 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),
         ("fail", "failed", "FAIL"),
-        ("tail", "succeeded", "PASS"),
         ("missing", "rejected", ""),
     ] {
         // A batch whose every lane is refused exits non-zero, with its receipt.
@@ -457,7 +457,7 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         if !verdict.is_empty() {
             let result = fs::read_to_string(attempt_dir(&rig, id)?.join("result.md"))?;
             assert!(result.contains(&format!("VERDICT: {verdict}")), "{result}");
-            if name == "tail" {
+            if name == "pass" {
                 assert!(result.contains("last-output"), "{result}");
                 assert!(result.contains("retained tail"), "{result}");
             }

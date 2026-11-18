@@ -1499,61 +1499,107 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
             "PATH".into(),
             format!("{}:/usr/bin:/bin", bin.display()).into(),
         ));
-        for (operation, text, expected) in [
-            ("opencode-success", "reply OK", "succeeded"),
-            ("opencode-zen", "reply OK", "succeeded"),
+        let cases = [
+            (
+                "opencode-success",
+                "reply OK",
+                "succeeded",
+                "opencode/opencode-go/glm-5.3-flash",
+                "go",
+            ),
+            (
+                "opencode-zen",
+                "reply OK",
+                "succeeded",
+                "opencode/opencode/glm-5.3-flash-free",
+                "zen",
+            ),
             (
                 "opencode-unavailable",
                 "model unavailable",
                 "model_unavailable",
+                "opencode/opencode/uncatalogued-fixture-model",
+                "zen",
             ),
-            ("opencode-limit", "free limit", "quota_limited"),
-        ] {
-            let (model, provider) = if expected == "model_unavailable" {
-                ("opencode/opencode/uncatalogued-fixture-model", "opencode")
-            } else if operation == "opencode-zen" {
-                ("opencode/opencode/glm-5.3-flash-free", "opencode")
-            } else {
-                ("opencode/opencode-go/glm-5.3-flash", "opencode-go")
-            };
-            let lane = run_graph_provider(
-                &rig,
-                operation,
-                json!({
-                    "id":"provider", "prompt":text, "access":"read_only", "route":{"adapter":"opencode", "model":model}
-                }),
+            (
+                "opencode-limit",
+                "free limit",
+                "quota_limited",
+                "opencode/opencode-go/glm-5.3-flash",
+                "go",
+            ),
+        ];
+        // Finish both successful routes before cooling the Go pool. Each pair
+        // uses independent accounts and shares one real graph submission/wait.
+        for (index, batch) in cases.chunks(2).enumerate() {
+            let document = rig.root.join(format!("opencode-batch-{index}.json"));
+            let nodes: Vec<_> = batch
+                .iter()
+                .map(|(id, prompt, _, model, _)| {
+                    json!({
+                        "id":id, "prompt":prompt, "access":"read_only",
+                        "route":{"adapter":"opencode", "model":model}
+                    })
+                })
+                .collect();
+            fs::write(
+                &document,
+                serde_json::to_vec(&json!({
+                    "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+                    "graph_id":format!("opencode-batch-{index}"), "nodes":nodes
+                }))?,
             )?;
-            assert_eq!(lane["state"], expected, "{lane}");
-            let account = if provider == "opencode-go" {
-                "go"
-            } else {
-                "zen"
-            };
-            assert_eq!(lane["account"], account, "{lane}");
-            // Unlisted models must reach the provider exactly as requested.
-            assert_eq!(lane["applied_route"]["model"], model, "{lane}");
-            assert_eq!(lane["applied_route"]["account_label"], account, "{lane}");
-            assert_eq!(lane["applied_route"]["account_key"], account, "{lane}");
-            if expected == "succeeded" {
-                assert_eq!(lane["transcript"]["session"], "ses_x");
-                assert_eq!(lane["observed_route"]["model"], model);
-                assert_eq!(lane["observed_route"]["source"], "opencode_session");
-            } else if expected == "quota_limited" {
-                assert!(
-                    lane["reason"]
-                        .as_str()
-                        .is_some_and(|reason| reason.starts_with("provider quota exhausted; ")),
-                    "{lane}"
-                );
-            } else {
-                // The provider's own message is not projected; the typed
-                // outcome and its fixed sentence are.
-                assert_eq!(lane["state"], "model_unavailable", "{lane}");
-                assert_eq!(
-                    lane["reason"],
-                    "the model is unavailable; check the selected model or wait for capacity"
-                );
-                assert!(!lane["reason"].to_string().contains("misspelt"), "{lane}");
+            let settled =
+                rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], "5s")?;
+            assert!(
+                [0, 1, 5, 124].contains(&settled.exit()),
+                "{:?}",
+                settled.wait
+            );
+            assert!(
+                settled.launch_value["error"].is_null(),
+                "{}",
+                settled.launch_value
+            );
+            if batch.iter().any(|case| case.2 == "model_unavailable") {
+                let stderr = String::from_utf8_lossy(&settled.launch.stderr.bytes);
+                assert!(stderr.contains("not in the catalogue"), "{stderr}");
+            }
+            for &(operation, _, expected, model, account) in batch {
+                let node = settled.checkpoint["nodes"]
+                    .as_array()
+                    .ok_or("nodes")?
+                    .iter()
+                    .find(|node| node["id"] == operation)
+                    .ok_or("provider node")?;
+                let lane = provider_lane(&rig, node)?;
+                assert_eq!(lane["state"], expected, "{lane}");
+                assert_eq!(lane["account"], account, "{lane}");
+                // Unlisted models must reach the provider exactly as requested.
+                assert_eq!(lane["applied_route"]["model"], model, "{lane}");
+                assert_eq!(lane["applied_route"]["account_label"], account, "{lane}");
+                assert_eq!(lane["applied_route"]["account_key"], account, "{lane}");
+                if expected == "succeeded" {
+                    assert_eq!(lane["transcript"]["session"], "ses_x");
+                    assert_eq!(lane["observed_route"]["model"], model);
+                    assert_eq!(lane["observed_route"]["source"], "opencode_session");
+                } else if expected == "quota_limited" {
+                    assert!(
+                        lane["reason"]
+                            .as_str()
+                            .is_some_and(|reason| reason.starts_with("provider quota exhausted; ")),
+                        "{lane}"
+                    );
+                } else {
+                    // The provider's own message is not projected; the typed
+                    // outcome and its fixed sentence are.
+                    assert_eq!(lane["state"], "model_unavailable", "{lane}");
+                    assert_eq!(
+                        lane["reason"],
+                        "the model is unavailable; check the selected model or wait for capacity"
+                    );
+                    assert!(!lane["reason"].to_string().contains("misspelt"), "{lane}");
+                }
             }
         }
         rig.assert_v1_root_untouched()?;
@@ -2085,63 +2131,64 @@ fn writer_registry_fixture() -> Result<TestRig> {
 
 /// Admission starts or durably schedules a retry under repository contention.
 fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result {
-    for _round in 0..2 {
-        let rig = writer_registry_fixture()?;
-        let _cleanup = rig.process_cleanup();
-        let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
-        let barrier = std::sync::Barrier::new(12);
-        std::thread::scope(|scope| -> Result {
-            let mut launches = Vec::new();
-            for index in 0..12 {
-                let barrier = &barrier;
-                let rig = &rig;
-                launches.push(scope.spawn(move || {
-                    barrier.wait();
-                    std::process::Command::new(binary)
-                        .current_dir(&rig.project)
-                        .env_clear()
-                        .envs(rig.env.iter().cloned())
-                        .arg("--state-dir")
-                        .arg(&rig.state)
-                        .args([
-                            "run",
-                            "task",
-                            "fixture writer",
-                            "--route",
-                            "junior",
-                            "--mode",
-                            "worktree-write",
-                            "--branch",
-                            &format!("parallel-{index}"),
-                            "--base",
-                            "HEAD",
-                            "--json",
-                        ])
-                        .output()
-                }));
-            }
-            for launch in launches {
-                let output = launch.join().map_err(|_| "launch thread panicked")??;
-                let response: Value = serde_json::from_slice(&output.stdout)?;
-                let node = &response["data"]["checkpoint"]["nodes"][0];
-                let accepted = node["attempts"][0]["attempt_ref"].is_string();
-                let retry = node["state"] == "running"
-                    && node["launch_retry"]["wake_at"].as_str().is_some()
-                    && response["status"] == "waiting"
-                    && response["data"]["waits"].as_array().is_some_and(|waits| {
-                        waits.iter().any(|wait| {
-                            wait["node"] == node["id"] && wait["wait"] == "launch_retry"
-                        })
-                    });
-                assert!(
-                    accepted || retry,
-                    "{response}; {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            Ok(())
-        })?;
-    }
+    // Two simultaneous callers exercise admission under contention. Repeating
+    // twelve launches in two rounds only stressed the host; the held-lock test
+    // below deterministically pins the durable retry branch.
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| -> Result {
+        let mut launches = Vec::new();
+        for index in 0..2 {
+            let barrier = &barrier;
+            let rig = &rig;
+            launches.push(scope.spawn(move || {
+                barrier.wait();
+                std::process::Command::new(binary)
+                    .current_dir(&rig.project)
+                    .env_clear()
+                    .envs(rig.env.iter().cloned())
+                    .arg("--state-dir")
+                    .arg(&rig.state)
+                    .args([
+                        "run",
+                        "task",
+                        "fixture writer",
+                        "--route",
+                        "junior",
+                        "--mode",
+                        "worktree-write",
+                        "--branch",
+                        &format!("parallel-{index}"),
+                        "--base",
+                        "HEAD",
+                        "--json",
+                    ])
+                    .output()
+            }));
+        }
+        for launch in launches {
+            let output = launch.join().map_err(|_| "launch thread panicked")??;
+            let response: Value = serde_json::from_slice(&output.stdout)?;
+            let node = &response["data"]["checkpoint"]["nodes"][0];
+            let accepted = node["attempts"][0]["attempt_ref"].is_string();
+            let retry = node["state"] == "running"
+                && node["launch_retry"]["wake_at"].as_str().is_some()
+                && response["status"] == "waiting"
+                && response["data"]["waits"].as_array().is_some_and(|waits| {
+                    waits
+                        .iter()
+                        .any(|wait| wait["node"] == node["id"] && wait["wait"] == "launch_retry")
+                });
+            assert!(
+                accepted || retry,
+                "{response}; {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -4649,15 +4696,31 @@ fn run_graph_provider_with_wait(
         settled.wait
     );
     assert!(response["error"].is_null(), "{response}");
-    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
+    let lane = provider_lane(rig, &settled.checkpoint["nodes"][0])?;
+    if graph_id == "fixture-claude" && !lane["started_at"].is_null() {
+        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|line| line.starts_with("lane policy: "))
+                .count(),
+            1,
+            "host graph child launch must report once, including candidate fallback: {stderr}"
+        );
+    }
+    Ok(lane)
+}
+// Project each node from its durable attempt, including a refused successor's
+// previous provider attempt. Multi-node fixtures share the CLI launch and wait.
+fn provider_lane(rig: &TestRig, node: &Value) -> Result<Value> {
     // The lane is the attempt that ran the provider: a retry refused before
     // launch (a cooled free pool, say) points back at it.
-    let latest = &response["data"]["checkpoint"]["nodes"][0]["attempts"][0];
+    let latest = &node["attempts"][0];
     let reference = match (&latest["launched"], &latest["key"]["previous_attempt_ref"]) {
         (Value::Bool(false), Value::String(previous)) => Some(previous.as_str()),
         _ => latest["attempt_ref"].as_str(),
     }
-    .ok_or_else(|| format!("attempt reference missing: {response}"))?;
+    .ok_or_else(|| format!("attempt reference missing: {node}"))?;
     let (_, attempt) = reference.split_once('/').ok_or("attempt reference")?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -4685,17 +4748,6 @@ fn run_graph_provider_with_wait(
         None,
         false,
     ))?;
-    if graph_id == "fixture-claude" && !lane["started_at"].is_null() {
-        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
-        assert_eq!(
-            stderr
-                .lines()
-                .filter(|line| line.starts_with("lane policy: "))
-                .count(),
-            1,
-            "host graph child launch must report once, including candidate fallback: {stderr}"
-        );
-    }
     Ok(lane)
 }
 
