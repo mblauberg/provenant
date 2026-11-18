@@ -1620,6 +1620,7 @@ node_prompt_bytes = 262144
             run_code: "DISK_FLOOR".into(),
             next: "run provenant gc --apply".into(),
             detail: None,
+            resource: None,
         };
         assert_eq!(run_kind.code(), "DISK_FLOOR");
         assert_eq!(

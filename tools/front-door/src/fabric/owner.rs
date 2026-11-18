@@ -4555,10 +4555,10 @@ mod journal_error_tests {
                 replay,
             )
             .unwrap_err();
-        assert!(matches!(
-            &service_refusal,
-            FacadeError::ConfinementRefused { .. }
-        ));
+        assert!(
+            matches!(&service_refusal, FacadeError::RunKind { .. }),
+            "{service_refusal:?}"
+        );
         let operation = graph_operation("graph-attempt-operation", &service_key)?;
         let saved = store
             .operation(&operation, &call)?

@@ -5302,10 +5302,12 @@ mod tests {
             },
             &mut records,
         )?;
+        // Every reported window shows headroom, so the model-scoped refusal
+        // without a pool clears too (docs/specs/routing.md, #3450).
         assert_eq!(state_of(&pool), ReadinessState::Unknown);
         assert_eq!(
             state_of(&scope("claude", "key", "claude/two")),
-            ReadinessState::Unavailable
+            ReadinessState::Unknown
         );
         // Forgetting the account removes its readiness file.
         let drop = UpdateIntent {

@@ -635,6 +635,16 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         resource: Some(*fact),
                     };
                 }
+                if let FacadeError::RunKind { run_code, next, .. } =
+                    facade_error_for_kind(fail.kind)
+                {
+                    return FacadeError::RunKind {
+                        run_code,
+                        next,
+                        detail: None,
+                        resource: Some(Box::new(*fact)),
+                    };
+                }
             }
             None => {}
         }
@@ -674,10 +684,16 @@ fn with_run_detail(
         return error;
     };
     match error {
-        FacadeError::RunKind { run_code, next, .. } => FacadeError::RunKind {
+        FacadeError::RunKind {
+            run_code,
+            next,
+            resource,
+            ..
+        } => FacadeError::RunKind {
             run_code,
             next,
             detail: Some(detail),
+            resource,
         },
         other => other,
     }
@@ -790,6 +806,7 @@ fn run_kind_facade(kind: provenant_run::ErrorKind) -> FacadeError {
         run_code: kind.code().into(),
         next: run_kind_next(kind).into(),
         detail: None,
+        resource: None,
     }
 }
 /// Translate a typed run category at the command edge. `ErrorKind` is the one

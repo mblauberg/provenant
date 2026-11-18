@@ -623,6 +623,11 @@ pub enum FacadeError {
         /// Sanitised local diagnostic detail; never published to a peer.
         #[serde(skip)]
         detail: Option<String>,
+        /// The typed resource fact behind an admission refusal (disk floor,
+        /// memory pressure, lane cap). Closed and safe for the peer wire, so
+        /// the setting and its source survive both adapters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
     },
     #[error("writer lock or writer is busy{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy {
@@ -1148,7 +1153,8 @@ impl FacadeError {
                 }
                 projected = projected.next("reconcile the holding attempt before retrying writer binding");
             }
-            Self::RunKind { next, detail, .. } => {
+            Self::RunKind { resource: Some(fact), .. } => projected = fact.project(projected),
+            Self::RunKind { next, detail, resource: None, .. } => {
                 if let Some(detail) = detail {
                     projected = projected.detail(detail.clone());
                 }
