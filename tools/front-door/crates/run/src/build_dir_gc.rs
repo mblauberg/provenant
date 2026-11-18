@@ -2504,7 +2504,7 @@ fn remove_contents_until(
         return Ok(false);
     }
     directory.make_writable().map_err(io::Error::other)?;
-    let mut entries = directory.directory().entries().map_err(io::Error::other)?;
+    let entries = directory.directory().entries().map_err(io::Error::other)?;
     for entry in entries {
         if should_stop() {
             return Ok(false);
