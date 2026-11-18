@@ -210,13 +210,25 @@ requests an interrupt through the attempt's existing custody owner only after
 that readiness record is durable. If readiness is not yet available, the text
 stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
-the next user turn. It preserves writer custody. When the provider session is
-unavailable, steer.fallback defaults to fresh_with_handoff: settlement warns
-with the configuration source, then starts a fresh session using the original
-accepted brief, the previous bounded handoff and all queued steer text. Set
-domains.fabric.steer.fallback to "refuse" to retain the accepted steer without
-a successor. A route, account, session or process identity mismatch remains
-fatal and never takes the fresh fallback.
+the next user turn. It preserves writer custody. Before it interrupts the live
+attempt, the owner prints one line naming the configured steer.fallback and the
+layer that set it, so the action is stated before it happens. When the provider
+session is unavailable, steer.fallback defaults to fresh_with_handoff: the fresh
+session continues with the original accepted brief, the previous bounded handoff
+and all queued steer text. Set domains.fabric.steer.fallback to "refuse" to
+retain the accepted steer without a successor. A route, account, session or
+process identity mismatch remains fatal and never takes the fresh fallback.
+Providers that can resume (claude, codex, cursor, agy, opencode) keep their
+session across the restart; command and host-native routes cannot resume and
+start fresh. Injecting a turn into an already-running provider process without
+a restart is not implemented: it needs a persistent, authenticated bidirectional
+channel per adapter, which none of the adapters expose. The resume-capable
+providers are the ones that could support it; until then the session-preserving
+restart is the delivery path. Steered lanes that settle close together claim a
+restart slot from
+a host-state gate spaced by domains.fabric.steer.restart_spacing_ms (default
+2000 ms; 0 disables), which bounds concurrent restarts instead of racing the
+launch lock; an applied wait names its configuration source.
 
 When placement or the accepted run owner is temporarily unavailable, the graph
 journal persists a bounded steer intent for the exact work key before replying

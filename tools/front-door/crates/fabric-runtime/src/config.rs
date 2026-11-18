@@ -62,10 +62,23 @@ pub enum SteerFallback {
     Refuse,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SteerConfig {
     pub fallback: SteerFallback,
+    /// Minimum spacing between steer restart launches, in milliseconds. Steered
+    /// lanes that settle close together queue behind this gate instead of
+    /// racing the launch lock. Zero disables the stagger.
+    pub restart_spacing_ms: u64,
+}
+
+impl Default for SteerConfig {
+    fn default() -> Self {
+        Self {
+            fallback: SteerFallback::FreshWithHandoff,
+            restart_spacing_ms: 2_000,
+        }
+    }
 }
 
 /// Whether a preset run puts a principal planner in front of its graph.
@@ -944,6 +957,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
+    FieldMetadata::int("steer.restart_spacing_ms", 0, 600_000),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
@@ -1283,6 +1297,20 @@ mod tests {
         encoded["steer"]["fallback"] = "refuse".into();
         let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.steer.fallback, SteerFallback::Refuse);
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_restart_spacing_defaults_and_can_be_overridden() {
+        let config = config();
+        assert_eq!(config.steer.restart_spacing_ms, 2_000);
+        let mut encoded = serde_json::to_value(config).unwrap();
+        encoded["steer"]["restart_spacing_ms"] = 7_500.into();
+        let decoded: FabricConfig = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.steer.restart_spacing_ms, 7_500);
+        encoded["steer"]["restart_spacing_ms"] = 0.into();
+        let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.steer.restart_spacing_ms, 0);
     }
 
     #[test]
