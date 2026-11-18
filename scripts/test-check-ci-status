@@ -26,6 +26,7 @@ for name in module.REQUIRED:
 for name in module.MACOS:
     needs[name] = {"result": "skipped"}
 assert not module.failures(needs, "false")
+assert module.failures(needs, "true")
 for name in module.RUST:
     needs[name] = {"result": "skipped"}
 assert not module.failures(needs, "false", "false")

@@ -73,8 +73,8 @@ and on PRs labelled `mutants`.
 
 Quarantine a flaky test in `tools/front-door/.config/quarantine.toml` only while
 it has an open issue, an owner and an expiry within 30 days. CI validates entries
-against `cargo nextest list`, excludes them from blocking partitions and reports
-their result in an advisory step. Remove the entry in the PR that fixes the test.
+against the union of selected platform `cargo nextest list` inventories, excludes them from blocking partitions and reports
+their result in an advisory step. A Linux-only run cannot resolve a macOS-only entry and fails the inventory gate; run the full pipeline for that case. Remove the entry in the PR that fixes the test.
 
 ## Tool downloads
 

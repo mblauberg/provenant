@@ -10,6 +10,7 @@ The outward contract is declared in `crates/cli/src/external_contract.rs`, cover
 The [consumer contract](consumer-contract.md) gives each command, output and variable its tier: the few stable ones hold across 2.x, and the rest evolve with release notes; direct internal-state readers are unsupported.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
+Repository CI's `select-macos-checks` selects native work for unknown paths and Git failures; only explicitly classified Linux-only paths skip macOS while retaining Rust. `flaky-quarantine` validates filter entries before tests run, and `check-ci-status` requires a separate inventory validation: both platform lists when macOS is selected, Linux otherwise. An identity absent from the available lists blocks CI. Native evidence remains required whenever macOS is selected.
 
 ## Targets
 
