@@ -132,12 +132,20 @@ pub struct RouteList {
     pub pools: std::collections::BTreeMap<String, Vec<RoutePoolMemberView>>,
     pub pacing: std::collections::BTreeMap<String, PacingPolicy>,
     pub account_pacing: Vec<AccountPacingView>,
+    pub monthly: crate::SourcedMonthlySettings,
+    pub monthly_allowances: Vec<MonthlyAccountView>,
     pub configured_accounts: BTreeMap<String, PacingProfile>,
     pub configured_free: BTreeMap<String, PacingProfile>,
     pub active_overrides: Vec<PacingOverride>,
     pub model_exclusions: Vec<ModelExclusion>,
     /// Rows that were repaired or ignored while reading the configuration.
     pub exclusion_notes: Vec<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct MonthlyAccountView {
+    pub model: ModelId,
+    pub account: Option<String>,
+    pub assessment: crate::MonthlyAllowanceAssessment,
 }
 #[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
@@ -239,7 +247,59 @@ pub fn list(
         }
         pools.clear();
     }
+    let monthly_allowances = context
+        .catalogue
+        .models
+        .iter()
+        .filter(|m| matches(m.model.adapter()))
+        .flat_map(|m| {
+            let accounts: BTreeSet<_> = context
+                .availability
+                .iter()
+                .filter(|a| a.adapter == m.model.adapter())
+                .filter_map(|a| a.account_key.clone())
+                .chain(
+                    context
+                        .quota
+                        .iter()
+                        .filter(|q| q.model == m.model)
+                        .map(|q| q.snapshot.account.account_key.clone()),
+                )
+                .chain(context.config.pacing.accounts.keys().filter_map(|key| {
+                    let (adapter, account) = key.split_once('/')?;
+                    (adapter == m.model.adapter()).then(|| account.to_owned())
+                }))
+                .chain(
+                    provenant_records::AdapterSpec::get(m.model.adapter())
+                        .filter(|s| s.local_login)
+                        .map(|s| s.local_account.1.to_owned()),
+                )
+                .collect();
+            accounts
+                .into_iter()
+                .filter_map(|account| {
+                    crate::monthly_allowance_assessment(
+                        context.catalogue,
+                        context.config,
+                        context.now,
+                        &m.model,
+                        Some(&account),
+                        context.quota.iter().find(|q| {
+                            q.model == m.model && q.snapshot.account.account_key == account
+                        }),
+                    )
+                    .map(|assessment| MonthlyAccountView {
+                        model: m.model.clone(),
+                        account: Some(account),
+                        assessment,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
     Ok(RouteList {
+        monthly: crate::global_monthly_settings(context.config),
+        monthly_allowances,
         valid_pairs,
         catalogue_revision: context.catalogue.revision.clone(),
         models: context

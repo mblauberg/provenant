@@ -22,7 +22,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     };
     assert!(!assess(Some(&q)).constrained); // 9% plus the default 1% launch fits 10% burst.
     let mut debt = q.clone();
-    debt.allowance.record_launch("first", 85)?;
+    debt.allowance.record_launch("first", 85, 100)?;
     assert!(assess(Some(&debt)).constrained);
     debt.snapshot.observed_unix_seconds = 90; // A fresh but unchanged provider report.
     debt.allowance.observe(&debt.snapshot);
@@ -87,7 +87,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     );
     // Another provider's declared monthly window uses the same rule.
     let mut other = monthly_quota("claude/claude-haiku-5-5", "a", 900);
-    other.allowance.record_launch("first", 85)?;
+    other.allowance.record_launch("first", 85, 100)?;
     assert!(
         monthly_allowance_assessment(
             &catalogue,
@@ -214,5 +214,99 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
             serde_json::from_value(serde_json::json!({"pacing":{"monthly":bad}}))?;
         assert!(!cfg.validate().is_empty());
     }
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#monthly-allowance-ledger
+#[test]
+fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let model = ModelId::parse("cursor/composer-2.5")?;
+    let at = provenant_core::WallTime::from_unix_seconds(100)?;
+    let assess = |at, q: Option<&QuotaObservation>| {
+        monthly_allowance_assessment(&catalogue, &config, at, &model, Some("local"), q).unwrap()
+    };
+    assert!(
+        assess(at, None)
+            .detail
+            .contains("estimated cycle: calendar month UTC")
+    );
+    let record = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "Local".into(),
+    });
+    let mut q = QuotaObservation::from_record(model.clone(), &record, 0);
+    for n in 0..10 {
+        q.allowance.record_launch(&format!("local-{n}"), 90, 100)?;
+    }
+    assert!(assess(at, Some(&q)).constrained);
+    assert!(assess(at, Some(&q)).detail.contains("estimated_bp=1000"));
+    // A stale snapshot provides a cycle estimate without clearing local debt.
+    q.snapshot = monthly_quota(model.as_str(), "local", 0).snapshot;
+    let stale = assess(at, Some(&q));
+    assert!(stale.constrained);
+    assert!(
+        stale
+            .detail
+            .contains("estimated cycle: previous snapshot reset and duration")
+    );
+    q.allowance.observe(&q.snapshot);
+    assert!(
+        assess(at, Some(&q))
+            .detail
+            .contains("estimated cycle: ledger reset and duration")
+    );
+    // The cycle rolls by any number of durations, not just one. Old launches expire;
+    // current-cycle launches remain chargeable without a new provider report.
+    let rolled_at = provenant_core::WallTime::from_unix_seconds(90 * 86400 + 100)?;
+    assert!(!assess(rolled_at, Some(&q)).constrained);
+    for n in 0..10 {
+        q.allowance
+            .record_launch(&format!("rolled-{n}"), rolled_at.unix_seconds() - 1, 100)?;
+    }
+    assert!(assess(rolled_at, Some(&q)).constrained);
+    // A provider clock error does not erase valid local launch debt.
+    q.snapshot.observed_unix_seconds = rolled_at.unix_seconds() + 1;
+    assert!(assess(rolled_at, Some(&q)).constrained);
+    // Scope mismatches cannot borrow another account's cycle or launches.
+    q.snapshot.account.account_key = "other".into();
+    let mismatched = assess(at, Some(&q));
+    assert!(!mismatched.constrained);
+    assert!(
+        mismatched
+            .detail
+            .contains("estimated cycle: calendar month UTC")
+    );
+    // A high configured floor belongs to its booked cycle, even if no report
+    // ever confirmed that debt. A lower override applies to the next cycle.
+    let mut high = monthly_quota(model.as_str(), "local", 0);
+    high.allowance.record_launch("old-high-floor", 90, 250)?;
+    let next_cycle = provenant_core::WallTime::from_unix_seconds(30 * 86400 + 100)?;
+    let lower: RoutingConfig = serde_json::from_value(
+        serde_json::json!({"pacing":{"accounts":{"cursor/local":{"monthly":{"initial_launch_cost_basis_points":50}}}}}),
+    )?;
+    let lower_assessment = |q: &QuotaObservation| {
+        monthly_allowance_assessment(
+            &catalogue,
+            &lower,
+            next_cycle,
+            &model,
+            Some("local"),
+            Some(q),
+        )
+        .unwrap()
+    };
+    assert_eq!(lower_assessment(&high).windows[0].estimated_basis_points, 0);
+    assert_eq!(lower_assessment(&high).windows[0].cost_basis_points, 50);
+    high.allowance
+        .record_launch("new-low-floor", 30 * 86400 + 90, 50)?;
+    assert_eq!(
+        lower_assessment(&high).windows[0].estimated_basis_points,
+        50
+    );
     Ok(())
 }

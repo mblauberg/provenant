@@ -295,6 +295,26 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
     }
     text
 }
+pub(super) fn monthly_list_lines(list: &provenant_routing::RouteList) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "monthly enabled={} burst_percent={} initial_launch_cost_basis_points={} source={} knob={}",
+        list.monthly.values.enabled,
+        list.monthly.values.burst_percent,
+        list.monthly.values.initial_launch_cost_basis_points,
+        list.monthly.source,
+        list.monthly.knob
+    ));
+    lines.extend(list.monthly_allowances.iter().map(|row| {
+        format!(
+            "monthly {} account={} {}",
+            row.model.as_str(),
+            row.account.as_deref().unwrap_or("unknown"),
+            row.assessment.detail
+        )
+    }));
+    lines
+}
 pub fn run(
     command: Route,
     globals: &Globals,
@@ -399,6 +419,7 @@ pub fn run(
                         unobserved_model(&r.model, list)
                     )
                 }));
+                lines.extend(monthly_list_lines(list));
                 lines.extend(list.account_pacing.iter().map(|entry| {
                     format!(
                         "account {}/{} pacing={:?} source={} profile={:?} expires={:?}",

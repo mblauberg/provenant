@@ -4,11 +4,47 @@ use crate::{
     RoutingConfig,
 };
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct MonthlyAllowanceAssessment {
+    pub active: bool,
     pub constrained: bool,
+    pub settings: SourcedMonthlySettings,
+    pub windows: Vec<MonthlyBudget>,
     pub initial_launch_cost_basis_points: u64,
     pub detail: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct MonthlyBudget {
+    pub pool: Option<String>,
+    pub cycle_start_unix_seconds: i64,
+    pub estimated_basis_points: u64,
+    pub next_launch_basis_points: u64,
+    pub budget_basis_points: u64,
+    pub elapsed_basis_points: u64,
+    pub cost_basis_points: u64,
+    pub estimated_cycle_source: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SourcedMonthlySettings {
+    #[serde(flatten)]
+    pub values: MonthlyPacingSettings,
+    pub source: String,
+    pub knob: String,
+}
+
+pub fn global_monthly_settings(config: &RoutingConfig) -> SourcedMonthlySettings {
+    SourcedMonthlySettings {
+        values: config.pacing.monthly.unwrap_or_default(),
+        source: if config.pacing.monthly.is_some() {
+            "configuration"
+        } else {
+            "bundled default"
+        }
+        .into(),
+        knob: "domains.routing.pacing.monthly".into(),
+    }
 }
 
 pub fn monthly_allowance_assessment(
@@ -86,8 +122,16 @@ pub fn monthly_allowance_assessment(
         "monthly policy={policy:?} policy_source={policy_source} enabled={} burst_percent={} initial_launch_cost_basis_points={} source={source} knob={key}",
         settings.enabled, settings.burst_percent, settings.initial_launch_cost_basis_points
     );
+    let sourced = || SourcedMonthlySettings {
+        values: settings,
+        source: source.into(),
+        knob: key.clone(),
+    };
     if policy != PacingPolicy::Pace || !settings.enabled || !monthly_selected {
         return Some(MonthlyAllowanceAssessment {
+            active: false,
+            windows: Vec::new(),
+            settings: sourced(),
             constrained: false,
             initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
             detail: format!("{prefix}; monthly cap bypassed"),
@@ -98,17 +142,71 @@ pub fn monthly_allowance_assessment(
         provenant_records::AdapterSpec::get(model.adapter())
             .is_some_and(|spec| spec.local_login && spec.local_account.1 == key)
     });
+    let scoped = observation.filter(|q| {
+        q.model == *model
+            && q.snapshot.account.adapter == model.adapter()
+            && Some(q.snapshot.account.account_key.as_str()) == account
+    });
     let unknown = || {
-        let constrained = !unregistered_local;
-        let outcome = if constrained {
-            "constrained"
-        } else {
-            "advisory for unregistered local login"
-        };
+        if unregistered_local {
+            let (reset, duration, cycle_source) = estimated_cycle(scoped, now, &serves_pool)?;
+            let start = reset.checked_sub(duration)?;
+            let elapsed =
+                ((u128::from(now.saturating_sub(start) as u64) * 10_000) / duration as u128) as u64;
+            let budget = elapsed
+                .saturating_add(u64::from(settings.burst_percent) * 100)
+                .min(10_000);
+            let ledger = scoped.map(|q| &q.allowance);
+            let cost = ledger
+                .and_then(|l| {
+                    l.windows
+                        .iter()
+                        .filter(|(pool, _)| serves_pool(pool))
+                        .filter_map(|(_, w)| w.cost_basis_points)
+                        .max()
+                })
+                .unwrap_or(settings.initial_launch_cost_basis_points);
+            let launches = ledger.map_or(0, |l| l.launches_in_cycle(start, now));
+            let estimated = ledger.map_or(0, |l| {
+                let pending = l.estimated_in_cycle(start, now, cost);
+                l.windows
+                    .iter()
+                    .filter(|(pool, w)| serves_pool(pool) && w.reset == reset)
+                    .map(|(_, w)| l.estimated(w))
+                    .max()
+                    .unwrap_or(pending)
+                    .max(pending)
+            });
+            let next = estimated.saturating_add(cost);
+            let constrained = next > budget;
+            return Some(MonthlyAllowanceAssessment {
+                active: true,
+                windows: vec![MonthlyBudget {
+                    pool: None,
+                    cycle_start_unix_seconds: start,
+                    estimated_basis_points: estimated,
+                    next_launch_basis_points: next,
+                    budget_basis_points: budget,
+                    elapsed_basis_points: elapsed,
+                    cost_basis_points: cost,
+                    estimated_cycle_source: Some(cycle_source.into()),
+                }],
+                settings: sourced(),
+                constrained,
+                initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
+                detail: format!(
+                    "{prefix}; estimated cycle: {cycle_source}; reset={reset} duration={duration} estimated_bp={estimated} next_launch_bp={next} budget_bp={budget} elapsed_bp={elapsed} cost_bp={cost} ledger_launches={launches}{}",
+                    if constrained { "; constrained" } else { "" }
+                ),
+            });
+        }
         Some(MonthlyAllowanceAssessment {
-            constrained,
+            active: true,
+            windows: Vec::new(),
+            settings: sourced(),
+            constrained: true,
             initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
-            detail: format!("{prefix}; monthly window missing, stale or incomplete; {outcome}"),
+            detail: format!("{prefix}; monthly window missing, stale or incomplete; constrained"),
         })
     };
     let Some(q) = observation.filter(|q| {
@@ -143,6 +241,7 @@ pub fn monthly_allowance_assessment(
     }
     let mut constrained = false;
     let mut details = Vec::new();
+    let mut budgets = Vec::new();
     for w in windows {
         let (Some(reset), Some(duration)) = (w.resets_unix_seconds, w.window_seconds) else {
             return unknown();
@@ -173,17 +272,26 @@ pub fn monthly_allowance_assessment(
             .and_then(|l| l.cost_basis_points)
             .unwrap_or(settings.initial_launch_cost_basis_points);
         let estimated = ledger.map_or(w.used_basis_points, |l| {
-            l.estimated(
-                q.allowance.launches,
-                settings.initial_launch_cost_basis_points,
-            )
-            .max(w.used_basis_points)
+            q.allowance.estimated(l).max(w.used_basis_points)
         });
         let next = estimated.saturating_add(cost);
         constrained |= next > budget;
+        budgets.push(MonthlyBudget {
+            pool: Some(w.pool.clone()),
+            cycle_start_unix_seconds: start,
+            estimated_basis_points: estimated,
+            next_launch_basis_points: next,
+            budget_basis_points: budget,
+            elapsed_basis_points: elapsed,
+            cost_basis_points: cost,
+            estimated_cycle_source: None,
+        });
         details.push(format!("window={} estimated_bp={estimated} next_launch_bp={next} budget_bp={budget} elapsed_bp={elapsed} cost_bp={cost} ledger_launches={}", w.pool, q.allowance.launches));
     }
     Some(MonthlyAllowanceAssessment {
+        active: true,
+        windows: budgets,
+        settings: sourced(),
         constrained,
         initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
         detail: format!(
@@ -192,4 +300,65 @@ pub fn monthly_allowance_assessment(
             if constrained { "; constrained" } else { "" }
         ),
     })
+}
+
+/// Carry a known cycle forward; UTC calendar months supply the last-resort estimate.
+fn estimated_cycle(
+    q: Option<&QuotaObservation>,
+    now: i64,
+    serves_pool: &impl Fn(&str) -> bool,
+) -> Option<(i64, i64, &'static str)> {
+    let roll = |reset: i64, duration: u64| {
+        let duration = i64::try_from(duration).ok().filter(|d| *d > 0)?;
+        let reset = if now >= reset {
+            reset.checked_add(
+                now.checked_sub(reset)?
+                    .checked_div(duration)?
+                    .checked_add(1)?
+                    .checked_mul(duration)?,
+            )?
+        } else {
+            reset
+        };
+        (reset.checked_sub(duration)? <= now).then_some((reset, duration))
+    };
+    if let Some(q) = q {
+        if let Some((reset, duration)) = q
+            .allowance
+            .windows
+            .iter()
+            .filter(|(pool, w)| serves_pool(pool) && w.observed <= now)
+            .filter_map(|(_, w)| roll(w.reset, w.duration))
+            .max_by_key(|(reset, _)| *reset)
+        {
+            return Some((reset, duration, "ledger reset and duration"));
+        }
+        if let Some((reset, duration)) = q
+            .snapshot
+            .windows
+            .iter()
+            .filter(|w| {
+                q.snapshot.observed_unix_seconds <= now
+                    && provenant_quota::monthly_window(w)
+                    && serves_pool(&w.pool)
+            })
+            .filter_map(|w| roll(w.resets_unix_seconds?, w.window_seconds?))
+            .max_by_key(|(reset, _)| *reset)
+        {
+            return Some((reset, duration, "previous snapshot reset and duration"));
+        }
+    }
+    let date = jiff::Timestamp::from_second(now)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let start = jiff::civil::Date::new(date.year(), date.month(), 1)
+        .ok()?
+        .at(0, 0, 0, 0)
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .ok()?
+        .timestamp()
+        .as_second();
+    let duration = i64::from(date.days_in_month()) * 86400;
+    Some((start.checked_add(duration)?, duration, "calendar month UTC"))
 }

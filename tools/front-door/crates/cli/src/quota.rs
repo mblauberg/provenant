@@ -1,4 +1,6 @@
 //! Quota arguments, composition through OS crate's safe filesystem, and render.
+#[path = "quota_deferred.rs"]
+mod deferred;
 #[path = "quota_notice.rs"]
 mod notice;
 use crate::metadata::CatalogueArg;
@@ -260,6 +262,7 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
             }
         }
     }
+    deferred::overlay(dir, &mut records)?;
     records.sort_by(|a, b| {
         (&a.account.adapter, &a.account.account_key)
             .cmp(&(&b.account.adapter, &b.account.account_key))
@@ -297,11 +300,7 @@ pub(crate) fn read_cache_at(state: &Path) -> Result<Vec<AccountRecord>, EdgeErro
     read_records(&directory)
 }
 
-/// Persist only typed quota scope from a provider event; its message stays in
-/// the redacted attempt reason and is never copied into quota state. Without a
-/// pool the refusal holds only the route's model.
-/// Check and reserve a launch in the same account-cache publication. A busy
-/// cache skips this candidate rather than admitting an unrecorded launch.
+/// Recheck monthly spend; lock contention is advisory, with durable deferred debt.
 pub(crate) fn reserve_allowance_launch(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
@@ -310,43 +309,10 @@ pub(crate) fn reserve_allowance_launch(
     catalogue: &provenant_routing::Catalogue,
     policies: &[QuotaPolicy],
     now: provenant_core::WallTime,
-) -> Result<(), EdgeError> {
+) -> Result<Option<String>, EdgeError> {
     let Some(key) = &route.account_key else {
-        return Ok(());
+        return Ok(None);
     };
-    let scope = AccountScope {
-        extra: Default::default(),
-        adapter: route.adapter.clone(),
-        account_key: key.clone(),
-        label: key.clone(),
-    };
-    scope.validate()?;
-    let root = private(roots.state.as_path())?;
-    let directory = child(&root, OsStr::new("quota"))?;
-    let Some(_lock) = try_quota_lock(&directory)? else {
-        return Err(EdgeError::Display(
-            "monthly allowance ledger busy; retry candidate".into(),
-        ));
-    };
-    let mut records = read_records(&directory)?;
-    let current = records
-        .iter()
-        .find(|r| r.account.adapter == scope.adapter && r.account.account_key == scope.account_key)
-        .cloned();
-    let mut next = current
-        .clone()
-        .unwrap_or_else(|| AccountRecord::empty(scope.clone()));
-    if next
-        .allowance
-        .recent_launches
-        .iter()
-        .any(|launch| launch.id == launch_id)
-    {
-        return Ok(());
-    }
-    if let Some(snapshot) = &next.snapshot {
-        next.allowance.observe(snapshot);
-    }
     let model = provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
         .map_err(|e| EdgeError::Display(e.to_string()))?;
     let ttl = schedule::interval(
@@ -357,35 +323,103 @@ pub(crate) fn reserve_allowance_launch(
     )
     .and_then(|ttl| i64::try_from(ttl).ok())
     .unwrap_or(0);
-    let observation = next
-        .snapshot
-        .as_ref()
-        .map(|snapshot| provenant_routing::QuotaObservation {
-            model: model.clone(),
-            snapshot: snapshot.clone(),
-            allowance: next.allowance.clone(),
-            expires_unix_seconds: snapshot.observed_unix_seconds.saturating_add(ttl),
-        });
-    if let Some(assessment) = provenant_routing::monthly_allowance_assessment(
-        catalogue,
-        config,
-        now,
-        &model,
-        Some(key),
-        observation.as_ref(),
-    ) {
-        if assessment.constrained {
-            return Err(EdgeError::Display(assessment.detail));
-        }
-        next.allowance.reservation_cost_basis_points = Some(
-            next.allowance
-                .reservation_cost_basis_points
-                .unwrap_or(0)
-                .max(assessment.initial_launch_cost_basis_points),
-        );
+    let assess = |record: Option<&AccountRecord>| {
+        let observation =
+            record.map(|r| provenant_routing::QuotaObservation::from_record(model.clone(), r, ttl));
+        provenant_routing::monthly_allowance_assessment(
+            catalogue,
+            config,
+            now,
+            &model,
+            Some(key),
+            observation.as_ref(),
+        )
+    };
+    if assess(None).is_some_and(|a| !a.active) {
+        return Ok(None);
     }
-    next.allowance
-        .record_launch(launch_id, now.unix_seconds())?;
+    let records = read_cache(roots)?;
+    let current = records
+        .iter()
+        .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
+    let Some(assessment) = assess(current).filter(|a| a.active) else {
+        return Ok(None);
+    };
+    if current.is_some_and(|r| r.allowance.contains_launch(launch_id)) {
+        return Ok(None);
+    }
+    if assessment.constrained {
+        return Err(EdgeError::Display(assessment.detail));
+    }
+    let scope = AccountScope {
+        extra: Default::default(),
+        adapter: route.adapter.clone(),
+        account_key: key.clone(),
+        label: key.clone(),
+    };
+    scope.validate()?;
+    let root = private(roots.state.as_path())?;
+    let directory = child(&root, OsStr::new("quota"))?;
+    let clock = SystemClock::new();
+    let lock = directory.lock(
+        OsStr::new("quota.lock"),
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(50_000),
+        ),
+        &provenant_core::CancelToken::new(),
+        &clock,
+    );
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(FsError::LockTimeout { .. }) => {
+            deferred::record(
+                &directory,
+                &scope,
+                launch_id,
+                now.unix_seconds(),
+                assessment
+                    .windows
+                    .iter()
+                    .map(|w| w.cost_basis_points)
+                    .max()
+                    .unwrap_or(assessment.initial_launch_cost_basis_points),
+            )?;
+            return Ok(Some("monthly allowance ledger busy; admitted with deferred reservation for next publication".into()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|r| r.account.adapter == scope.adapter && r.account.account_key == scope.account_key)
+        .cloned();
+    let mut next = current
+        .clone()
+        .unwrap_or_else(|| AccountRecord::empty(scope.clone()));
+    if next.allowance.contains_launch(launch_id) {
+        return Ok(None);
+    }
+    if let Some(snapshot) = &next.snapshot {
+        next.allowance.observe(snapshot);
+    }
+    let Some(assessment) = assess(Some(&next)).filter(|a| a.active) else {
+        return Ok(None);
+    };
+    if assessment.constrained {
+        return Err(EdgeError::Display(assessment.detail));
+    }
+    next.allowance.record_launch(
+        launch_id,
+        now.unix_seconds(),
+        assessment
+            .windows
+            .iter()
+            .map(|w| w.cost_basis_points)
+            .max()
+            .unwrap_or(assessment.initial_launch_cost_basis_points),
+    )?;
     next.revision = next
         .revision
         .checked_add(1)
@@ -402,7 +436,8 @@ pub(crate) fn reserve_allowance_launch(
             login_probe_expiry: None,
         },
         &mut records,
-    )
+    )?;
+    Ok(None)
 }
 
 pub(crate) fn persist_provider_refusal(
@@ -950,6 +985,7 @@ fn write_intent(
                 0o600,
                 PublishMode::Replace,
             )?)?;
+            deferred::retire(dir, record)?;
             if let Some(p) = pos {
                 records[p] = record.clone();
             } else {
@@ -2754,24 +2790,130 @@ mod tests {
                 "pacing":{"accounts":{"cursor/other":{"monthly":{"enabled":false}}}}
             }))?;
         reserve(&route, "attempt-d", &relaxed)?;
-        let records = read_cache(&roots)?;
+        // Bypassed accounts never wait on a quota publication or book monthly debt.
         assert!(
-            records
+            !read_cache(&roots)?
                 .iter()
-                .any(|r| r.account.account_key == "other" && r.allowance.launches == 1)
+                .any(|r| r.account.account_key == "other")
         );
         let held = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
-        assert!(reserve(&route, "attempt-e", &relaxed).is_err());
+        assert!(reserve(&route, "attempt-e", &relaxed)?.is_none());
+        route.adapter = "codex".into();
+        route.model = "gpt-6-luna".into();
+        assert!(reserve(&route, "non-monthly", &config)?.is_none());
+        route.adapter = "cursor".into();
+        route.model = "composer-2.5".into();
+        route.account_key = Some("local".into());
+        let warning = reserve(&route, "contended", &config)?.expect("contention is advisory");
+        assert!(warning.contains("deferred reservation"));
+        let local = read_cache(&roots)?
+            .into_iter()
+            .find(|r| r.account.account_key == "local")
+            .unwrap();
+        assert_eq!(local.allowance.launches, 1);
+        // The route composition must retain reservations before any provider snapshot.
+        let observations =
+            crate::route::quota_observations(&catalogue, &[], &[local], &policies, &[])?;
+        assert!(observations.iter().any(|q| q.allowance.launches == 1));
         drop(held);
+        reserve(&route, "after-contention", &config)?;
+        reserve(&route, "contended", &config)?; // Replaying the deferred ID cannot spend twice.
+        let local = read_cache(&roots)?
+            .into_iter()
+            .find(|r| r.account.account_key == "local")
+            .unwrap();
+        assert_eq!(local.allowance.launches, 2);
+        // Publication absorbed the receipt, so subsequent reads cannot duplicate it.
         assert_eq!(
             read_cache(&roots)?
-                .iter()
-                .find(|r| r.account.account_key == "other")
+                .into_iter()
+                .find(|r| r.account.account_key == "local")
                 .unwrap()
                 .allowance
                 .launches,
-            1
+            2
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#monthly-allowance-ledger
+    #[test]
+    fn deferred_allowance_receipts_survive_journal_eviction_and_publication_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = private(temp.path())?;
+        let directory = child(&root, OsStr::new("quota"))?;
+        let scope = AccountScope {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            account_key: "local".into(),
+            label: "Local".into(),
+        };
+        deferred::record(&directory, &scope, "receipt-0", 100, 1)?;
+        let pending = temp.path().join("quota/.allowance-pending/local");
+        // Fixture writes seed a backlog beyond the bounded replay journal without
+        // paying for thousands of per-file production durability barriers.
+        for n in 1..4100 {
+            let item = serde_json::json!({"account": scope, "launch": {"id":format!("receipt-{n}"), "unix_seconds":100+n,"cost_basis_points":1}});
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(pending.join(format!("cursor-receipt-{n}.json")))?
+                .write_all(&serde_json::to_vec(&item)?)?;
+        }
+        let mut records = read_records(&directory)?;
+        assert_eq!(records[0].allowance.launches, 4100);
+        assert_eq!(records[0].allowance.receipt_launch_ids.len(), 4100);
+        assert!(records[0].allowance.recent_launches.len() < 4100);
+        // Simulate a crash after durable account replacement, before retiring receipts.
+        let mut committed = records[0].clone();
+        committed.revision = 1;
+        assert!(
+            !committed
+                .allowance
+                .recent_launches
+                .iter()
+                .any(|l| l.id == "receipt-0")
+        );
+        committed.allowance.record_launch("receipt-0", 5000, 1)?;
+        assert_eq!(committed.allowance.launches, 4100); // Acked replays bypass the rolling horizon.
+        committed.validate()?;
+        let account = child(&directory, OsStr::new("local"))?;
+        durable(account.atomic_write_with_permissions(
+            OsStr::new("cursor.json"),
+            ".quota",
+            &serde_json::to_vec(&committed)?,
+            0o600,
+            PublishMode::Replace,
+        )?)?;
+        for _ in 0..2 {
+            assert_eq!(read_records(&directory)?[0].allowance.launches, 4100);
+        }
+        records = read_records(&directory)?;
+        let expected = records[0].clone();
+        let mut next = expected.clone();
+        next.revision += 1;
+        write_intent(
+            &directory,
+            temp.path(),
+            &UpdateIntent {
+                account: scope,
+                expected: Some(expected),
+                replacement: Some(next),
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut records,
+        )?;
+        assert_eq!(std::fs::read_dir(pending)?.count(), 0);
+        for _ in 0..2 {
+            let current = read_records(&directory)?;
+            assert_eq!(current[0].allowance.launches, 4100);
+            assert!(current[0].allowance.receipt_launch_ids.is_empty());
+        }
         Ok(())
     }
 

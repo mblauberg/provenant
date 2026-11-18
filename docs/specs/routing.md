@@ -163,25 +163,24 @@ providers at the same tier before stopping at the chair.
 
 ## Monthly allowance ledger
 
-`AllowanceLedger` persists timestamped, deduplicated launch reservations per
-account. `monthly_allowance_assessment` makes `pace` monthly eligibility:
-estimated spend including the next launch must fit elapsed cycle fraction plus
-burst, capped at 100%. Defaults are 10 percentage points burst and 100 basis
-points per uncalibrated launch. Positive usage deltas confirm only reservations covered at the current cost
-estimate. Ambiguous partial reports cannot lower that estimate; a single-launch
-sample may raise it. Unchanged or decreasing reports retain debt; launches at or after observation remain pending. Rollover retains learned
-cost. Failed launches conservatively retain reservations.
+`monthly_allowance_assessment` caps next-launch spend at elapsed cycle fraction
+plus burst, respecting model-pool scope. Missing registered cycles constrain
+eligibility; local logins roll remembered cycles forward or estimate UTC months,
+exposing the source without granting readiness.
 
-`monthly_window` generalises cycle detection. Adapter declarations identify
-expected cycles. Missing, stale or incomplete cycles constrain registered-account
-eligibility; for an unregistered local login they are advisory because the login
-is not pinned. A valid observed cycle constrains both. Model-pool scope applies.
-`reserve_allowance_launch` atomically rechecks and records against the account cache. `pacing.monthly` and account profiles override
-settings; `spend`, `max` or monthly `enabled=false` bypass this preference.
-`pacing_preview` reports settings, source, estimate and budget.
+`AllowanceLedger` retains booked costs across policy and cycle-estimate changes.
+First samples baseline debt; later deltas confirm only covered, pre-observation
+reservations. Flat/decreasing reports and incomplete journal coverage retain
+debt. Rollover preserves learned cost.
 
-[Operating details](../runbooks/routing-and-templates.md#pacing) cover journal
-bounds, calibration and overrides.
+`reserve_allowance_launch` bypasses inapplicable policies. Contention admits with
+warnings and durable receipts after bounded retries. Receipt acknowledgements
+precede retirement, surviving crashes beyond journal retention.
+
+Canonical local logins accept account overrides. `route list` exposes sourced
+settings, knobs, estimates and budgets; `pacing_preview` shares its assessment.
+[Operating details](../runbooks/routing-and-templates.md#pacing) cover overrides
+and retention.
 
 ## Revisioned, bounded refresh
 

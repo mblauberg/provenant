@@ -22,7 +22,7 @@ use provenant_routing::{
 pub use resolution::fixture_resolve_dispatch;
 use resolution::*;
 pub(crate) use resolution::{
-    DispatchError, check_dispatch_candidate, recorded_model_readiness,
+    DispatchError, check_dispatch_candidate, quota_observations, recorded_model_readiness,
     resolve_dispatch_rejecting_family, selection_evidence,
 };
 pub use resolution::{depletion_facts, resolve_review_family};

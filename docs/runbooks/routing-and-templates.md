@@ -25,8 +25,11 @@ and clear the override when it is no longer needed.
 
 Monthly allowance accounts default to a 10 percentage point burst above elapsed
 cycle time. The local launch ledger keeps estimates current while provider
-billing lags; a missing or stale cycle is constrained. Inspect estimates and
-sources with `provenant route list`.
+billing lags. A missing or stale registered-account cycle is constrained. Local
+logins estimate the cycle from a remembered reset and duration rolled forward,
+or the calendar month in UTC. Their local launches still consume the estimated
+budget. Inspect settings, estimates, budgets, sources and knobs with
+`provenant route list` (or `--json`).
 
 Override the global defaults, or a single account, in the selected config:
 
@@ -47,14 +50,20 @@ windows. These preferences do not bypass exhausted allowance or authentication.
 The account quota cache also persists the launch journal. Preparation reserves a
 launch before returning its specification, under the quota publication lock.
 The most recent 4096 attempt IDs deduplicate replayed preparation. A busy cache
-skips the candidate for retry. Launches made with pacing bypassed are still
-recorded, and failed launches retain their reservation conservatively.
+retries briefly, then admits with a warning and a separate reservation receipt.
+Cache reads include that receipt; the next account publication absorbs it.
+Bypassed accounts avoid the lock and do not book monthly debt. Failed launches
+retain their reservation conservatively.
 
 Between reports, estimated spend is the last reported percentage plus launches
 since the anchor times estimated cost. Positive provider-reported usage changes
 confirm only the launches covered at the current cost estimate. A single-launch
 sample can increase that estimate; ambiguous partial samples cannot lower it.
-Before calibration, the configured initial launch cost applies. Flat or decreasing readings in the
+Before calibration, the configured initial launch cost is booked with each
+reservation. Later overrides affect new launches; pending launches retain their
+booked costs even when a calendar estimate becomes a provider billing cycle.
+The first provider sample establishes a baseline without confirming earlier
+local launches. Flat or decreasing readings in the
 same cycle retain pending launch estimates. A new cycle resets spend but retains
 learned cost. Timestamps keep launches at or after a slow probe's observation
 pending even when they were recorded before it completed; insufficient retained
@@ -64,7 +73,8 @@ Monthly windows are recognised by billing-cycle/monthly/thirty-day pool names
 or 28–31 day durations. An adapter's monthly-allowance declaration, account
 monthly profile or remembered monthly ledger also requires evidence when a
 snapshot omits its cycle. Missing, stale, future-dated, reset or incomplete
-cycles are constrained. Other windows retain their existing treatment, and
+registered-account cycles are constrained; local login estimates name their
+cycle source and pace the recorded launches. Other windows retain their existing treatment, and
 monthly windows respect model-pool scope. Profiles can select other windows
 with `windows`. The estimate averages launches across one account's models and
 pools; it cannot measure individual launch costs or external usage before the

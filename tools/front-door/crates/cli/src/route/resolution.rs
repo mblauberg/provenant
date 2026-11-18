@@ -236,7 +236,7 @@ pub(super) fn snapshot_governs(adapter: &str, plan: Option<&str>, model: &ModelI
     provenant_records::AdapterSpec::get(adapter)
         .is_none_or(|spec| spec.account_serves_model(plan, model.model()))
 }
-pub(super) fn quota_observations(
+pub(crate) fn quota_observations(
     catalogue: &Catalogue,
     availability: &[AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
@@ -246,9 +246,7 @@ pub(super) fn quota_observations(
     let mut observations = Vec::new();
     for record in records {
         let adapter = record.account.adapter.as_str();
-        let Some(snapshot) = record.snapshot.as_ref() else {
-            continue;
-        };
+        let snapshot = record.snapshot.as_ref();
         let Some(ttl) = provenant_quota::schedule::interval(
             policies,
             adapter,
@@ -257,10 +255,6 @@ pub(super) fn quota_observations(
         ) else {
             continue;
         };
-        let expires_unix_seconds = snapshot
-            .observed_unix_seconds
-            .checked_add(i64::try_from(ttl).map_err(|_| provenant_quota::QuotaError::TimeRange)?)
-            .ok_or(provenant_quota::QuotaError::TimeRange)?;
         let mut models: BTreeSet<ModelId> = catalogue
             .models()
             .iter()
@@ -291,7 +285,9 @@ pub(super) fn quota_observations(
         models.retain(|model| {
             snapshot_governs(
                 adapter,
-                snapshot.details.as_ref().and_then(|d| d.plan.as_deref()),
+                snapshot
+                    .and_then(|s| s.details.as_ref())
+                    .and_then(|d| d.plan.as_deref()),
                 model,
             )
         });
@@ -299,12 +295,11 @@ pub(super) fn quota_observations(
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
         for model in models {
-            observations.push(QuotaObservation {
-                allowance: record.allowance.clone(),
+            observations.push(QuotaObservation::from_record(
                 model,
-                snapshot: snapshot.clone(),
-                expires_unix_seconds,
-            });
+                record,
+                i64::try_from(ttl).map_err(|_| provenant_quota::QuotaError::TimeRange)?,
+            ));
         }
     }
     Ok(observations)
@@ -314,6 +309,14 @@ pub(super) fn resolve_account_reference(
     field: &str,
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<String, EdgeError> {
+    // The canonical local login is an account too, even without a registered
+    // credential tree. Require adapter/key to avoid introducing ambiguous aliases.
+    if let Some((adapter, key)) = name.split_once('/')
+        && provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|s| s.local_login && s.local_account.1 == key)
+    {
+        return Ok(name.to_owned());
+    }
     let valid = settings
         .entries
         .iter()
