@@ -284,13 +284,12 @@ impl Admission<'_> {
         route: &ResolvedRoute,
         policy: &provenant_records::policy::Policy,
     ) -> Result<(), QuotaError> {
-        let ready = match route.readiness {
+        let ready = matches!(route.readiness,
             RouteReadiness::Ready {
                 expires_unix_seconds,
                 ..
-            } if expires_unix_seconds > self.now_unix_seconds => true,
-            _ => false,
-        };
+            } if expires_unix_seconds > self.now_unix_seconds
+        );
         if !ready {
             policy.warn_or(
                 "QUOTA_READINESS_STALE",
