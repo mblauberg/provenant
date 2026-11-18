@@ -2758,7 +2758,7 @@ mod result_tests {
                 provenant_config::PortTable::builtin().worktree_layout
             }
             fn actor(&self) -> String {
-                "fixture".into()
+                self.factory.context.identity.inbox.actor.to_string()
             }
             fn materialise_inputs(
                 &mut self,

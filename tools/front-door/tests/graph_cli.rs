@@ -550,10 +550,13 @@ fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
             !value.to_string().contains("credential token"),
             "{source}: {value}"
         );
-        if source == "route" {
+        if matches!(source, "route" | "graph_id") {
+            // A ghp_ value is not a valid graph handle (underscores are
+            // forbidden), and the fixture alias has no registered route.
+            // These schema checks remain mandatory, independently of shape.
             assert!(
                 !output.status.success(),
-                "unknown route must still fail: {value}"
+                "schema validation must still fail: {source}: {value}"
             );
         } else {
             assert!(output.status.success(), "{source}: {value}");
