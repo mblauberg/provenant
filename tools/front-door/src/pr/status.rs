@@ -8,6 +8,12 @@ use std::path::Path;
 
 pub(crate) mod batch;
 mod ci;
+
+/// Why a PR whose CI never reported checks stayed pending. Shared by the
+/// graph gate's CI summary and by `wait --pr` at a timeout.
+pub(crate) const NO_CHECKS_NEXT: &str =
+    "check the workflow triggers or push an empty commit to start CI";
+
 #[derive(Deserialize)]
 struct View {
     state: String,
@@ -117,7 +123,13 @@ impl Line {
                 .then_some(true),
         }
     }
-    fn text(&self) -> String {
+    /// True when no check has been observed for this pull request's head.
+    pub(crate) fn checks_unreported(&self) -> bool {
+        self.checks_total.is_none()
+    }
+    /// The readable check summary: head, check counts, failing names, merge
+    /// and review. `wait --pr` uses this when a PR wait ends without a verdict.
+    pub(crate) fn text(&self) -> String {
         if let Some(error) = &self.error {
             return format!("#{} unavailable: {error}", self.number);
         }
@@ -529,9 +541,9 @@ fn summarise_ci(
     };
     let selection = required.map_or_else(String::new, |(_, names)| format!(" names={names:?}"));
     let next = if state == CiState::NotScheduled {
-        " next: check the workflow triggers or push an empty commit to start CI"
+        format!(" next: {NO_CHECKS_NEXT}")
     } else {
-        ""
+        String::new()
     };
     CiObservation {
         extra: Default::default(),

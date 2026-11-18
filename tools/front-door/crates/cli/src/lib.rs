@@ -2110,6 +2110,17 @@ mod tests {
         }
     }
     #[test]
+    fn pr_watch_is_no_longer_a_subcommand() {
+        assert!(
+            matches!(
+                parsed(&["pr", "watch", "1668"]),
+                ParseOutcome::Invalid { .. }
+            ),
+            "`pr watch` parses as a command"
+        );
+    }
+
+    #[test]
     fn ci_observation_commands_accept_batch_and_json_forms() {
         assert!(matches!(
             valid(&["pr", "status", "12", "34", "--json"]).command,
@@ -2154,7 +2165,6 @@ mod tests {
             (vec!["steer"], "target", "provenant steer"),
             (vec!["edit"], "name", "provenant edit"),
             (vec!["route", "resolve"], "route", "provenant route resolve"),
-            (vec!["pr", "watch"], "number", "provenant pr watch"),
             (vec!["config"], "subcommand", "provenant config show"),
             (vec!["accounts"], "subcommand", "provenant accounts list"),
             (vec!["disk"], "subcommand", "provenant disk report"),
