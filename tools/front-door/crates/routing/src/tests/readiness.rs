@@ -159,18 +159,20 @@ fn all_excluded_preferred_provider_routes_fall_back_with_a_recorded_reason()
     )?;
 
     assert_eq!(route.adapter, "claude");
-    assert_eq!(route.model, "test");
+    let claude = &catalogue.pools["trial"][0].model;
+    let codex = &catalogue.pools["trial"][1].model;
+    assert_eq!(route.model, claude.model());
     let receipt = route.pool_selection.ok_or("pool selection receipt")?;
     let skipped = receipt
         .candidates
         .iter()
-        .find(|candidate| candidate.model == "codex/test")
+        .find(|candidate| candidate.model == codex.as_str())
         .ok_or("excluded preferred-provider candidate")?;
     assert_eq!(
         skipped.exclusion.as_deref(),
         Some("excluded by graph: provider codex")
     );
-    assert_eq!(receipt.pick, "claude/test");
+    assert_eq!(receipt.pick, claude.as_str());
     Ok(())
 }
 
