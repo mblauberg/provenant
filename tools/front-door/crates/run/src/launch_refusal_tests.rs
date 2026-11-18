@@ -1,5 +1,5 @@
-//! Launch refusals survive settlement with a specific cause; a refusal's own
-//! message reaches the reason only redacted and bounded.
+//! Launch refusals survive settlement with a specific cause. Host-authored
+//! explanations and fixed notes reach the reason; a provider's own message does not.
 use super::tests::{call, clock, context, input};
 use super::*;
 use provenant_core::CancelToken;
@@ -147,8 +147,10 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         } else if typed {
             assert!(reason.contains("unsupported_effort"), "{reason}");
         } else {
-            // With no fixed note, the refusal's own message is sealed.
-            assert!(reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
+            // Without a host-authored explanation or fixed note, only the safe cause remains.
+            assert!(reason.starts_with(cause.detail()), "{reason}");
+            assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
+            assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
         }
         // Whatever the reason carries, a secret-shaped value never reaches it.
         assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
