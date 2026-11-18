@@ -81,25 +81,6 @@ pub(crate) fn collect(
         };
     report.observation = observation(&inventory);
     report.errors.extend(inventory.issues.iter().cloned());
-    let mut collection_lock = if !dry_run && !inventory.entries.is_empty() {
-        match provenant_config::try_lock_port_command_receipts(roots.state.as_path()) {
-            Ok(lock) => Some(lock),
-            Err(provenant_config::PortEvidenceError::Busy) => {
-                report.busy = true;
-                return report;
-            }
-            Err(error) => {
-                report.errors.push(issue(
-                    roots.state.as_path(),
-                    "lock port receipt collection",
-                    error,
-                ));
-                return report;
-            }
-        }
-    } else {
-        None
-    };
     if inventory.interrupted_at.is_some() && !control.should_continue() {
         if let Some(candidate) = inventory.interrupted_at.clone() {
             interrupt(
@@ -196,9 +177,6 @@ pub(crate) fn collect(
     }
 
     if !dry_run && !eligible.is_empty() {
-        let Some(lock) = collection_lock.as_ref() else {
-            return report;
-        };
         for index in eligible {
             let entry = &inventory.entries[index];
             if !control.should_continue() {
@@ -210,7 +188,30 @@ pub(crate) fn collect(
                 );
                 return report;
             }
+            let lock = match provenant_config::try_lock_port_command_receipts(roots.state.as_path())
+            {
+                Ok(lock) => lock,
+                Err(provenant_config::PortEvidenceError::Busy) => {
+                    report.busy = true;
+                    interrupt(
+                        &mut report,
+                        phase,
+                        entry.path.clone(),
+                        entry.cursor.as_deref(),
+                    );
+                    return report;
+                }
+                Err(error) => {
+                    report.errors.push(issue(
+                        roots.state.as_path(),
+                        "lock port receipt collection",
+                        error,
+                    ));
+                    return report;
+                }
+            };
             remove_receipt(roots.state.as_path(), &lock, entry, &mut report);
+            drop(lock);
         }
     }
 
@@ -258,23 +259,6 @@ pub(crate) fn collect(
         };
         report.observation = ByteObservation::Partial { bytes };
     }
-    if collection_lock.is_none() && !dry_run && !release_inventory.entries.is_empty() {
-        match provenant_config::try_lock_port_command_receipts(roots.state.as_path()) {
-            Ok(lock) => collection_lock = Some(lock),
-            Err(provenant_config::PortEvidenceError::Busy) => {
-                report.busy = true;
-                return report;
-            }
-            Err(error) => {
-                report.errors.push(issue(
-                    roots.state.as_path(),
-                    "lock port receipt collection",
-                    error,
-                ));
-                return report;
-            }
-        }
-    }
     let mut release_proofs = HashMap::<AttemptScope, Result<Option<AdmissionProof>, String>>::new();
     let mut release_eligible = Vec::new();
     for (index, entry) in release_inventory.entries.iter().enumerate() {
@@ -313,9 +297,6 @@ pub(crate) fn collect(
         }
     }
     if !dry_run && !release_eligible.is_empty() {
-        let Some(lock) = collection_lock.as_ref() else {
-            return report;
-        };
         for index in release_eligible {
             let entry = &release_inventory.entries[index];
             if !control.should_continue() {
@@ -327,7 +308,30 @@ pub(crate) fn collect(
                 );
                 return report;
             }
+            let lock = match provenant_config::try_lock_port_command_receipts(roots.state.as_path())
+            {
+                Ok(lock) => lock,
+                Err(provenant_config::PortEvidenceError::Busy) => {
+                    report.busy = true;
+                    interrupt(
+                        &mut report,
+                        RetentionPhase::Release,
+                        entry.path.clone(),
+                        entry.cursor.as_deref(),
+                    );
+                    return report;
+                }
+                Err(error) => {
+                    report.errors.push(issue(
+                        roots.state.as_path(),
+                        "lock port receipt collection",
+                        error,
+                    ));
+                    return report;
+                }
+            };
             remove_receipt(roots.state.as_path(), &lock, entry, &mut report);
+            drop(lock);
         }
     }
     if let Some(candidate) = release_inventory.interrupted_at {

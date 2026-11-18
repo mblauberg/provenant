@@ -280,8 +280,9 @@ pub fn port_command_receipts(
         );
         return Ok(inventory);
     }
-    let cursor = ReceiptCursor::parse(control.detail);
-    let visited = cursor.as_ref().map_or(0, |cursor| cursor.visited);
+    let mut root_stamp = DirectoryStamp::read(&receipt_root)?;
+    let parsed_cursor = ReceiptCursor::parse(control.detail);
+    let cursor = parsed_cursor.filter(|cursor| cursor.root_stamp == root_stamp);
     let owner_start = match cursor.as_ref().map(|cursor| cursor.phase.as_str()) {
         Some("root") => PortTable::PORT_NAMES.len(),
         Some("files") => cursor
@@ -291,7 +292,7 @@ pub fn port_command_receipts(
             .unwrap_or(0),
         _ => 0,
     };
-    let mut visited = visited;
+    let mut visited = 0usize;
     for owner in PortTable::PORT_NAMES.iter().skip(owner_start) {
         let owner_path = state.join(RECEIPTS_DIR).join(owner);
         let owner_dir = match receipt_root.open_verified_directory(OsStr::new(owner)) {
@@ -310,15 +311,20 @@ pub fn port_command_receipts(
             );
             continue;
         }
-        let owner_cursor = cursor
-            .as_ref()
-            .filter(|cursor| cursor.phase == "files" && cursor.owner.as_deref() == Some(owner));
+        let owner_stamp = DirectoryStamp::read(&owner_dir)?;
+        let owner_cursor = cursor.as_ref().filter(|cursor| {
+            cursor.phase == "files"
+                && cursor.owner.as_deref() == Some(owner)
+                && cursor.owner_stamp == Some(owner_stamp)
+        });
         scan_receipt_owner(
+            &receipt_root,
             &owner_dir,
             owner,
             &owner_path,
+            root_stamp,
+            owner_stamp,
             owner_cursor,
-            control.start_at,
             control,
             &mut inventory,
             &mut visited,
@@ -328,14 +334,17 @@ pub fn port_command_receipts(
         }
     }
     {
+        let root_issue_count = inventory.issues.len();
+        root_stamp = DirectoryStamp::read(&receipt_root)?;
         let root_cursor = cursor.as_ref().filter(|cursor| cursor.phase == "root");
         let mut entries = receipt_root.entries().map_err(PortEvidenceError::Read)?;
-        if let Some(cursor) = root_cursor {
-            let _ = entries.seek(cursor.cookie);
+        if let Some(cursor) = root_cursor.filter(|cursor| cursor.root_stamp == root_stamp)
+            && entries.seek(cursor.cookie).is_err()
+        {
+            entries = receipt_root.entries().map_err(PortEvidenceError::Read)?;
         }
-        let mut resume_target = root_cursor.and(control.start_at);
         loop {
-            let before = entries.position().ok();
+            let before = entries.position().map_err(PortEvidenceError::Read)?;
             let Some(item) = entries.next() else { break };
             let item = match item {
                 Ok(item) => item,
@@ -345,24 +354,10 @@ pub fn port_command_receipts(
                 }
             };
             let path = receipt_root.anchored_path().join(&item);
-            if let Some(candidate) = resume_target {
-                if candidate != path {
-                    if !control.should_continue() {
-                        inventory.complete = false;
-                        inventory.interrupted_at = Some(path);
-                        inventory.continuation =
-                            Some(ReceiptCursor::root(before.unwrap_or_default(), visited).encode());
-                        return Ok(inventory);
-                    }
-                    continue;
-                }
-                resume_target = None;
-            }
             if !control.should_continue() {
                 inventory.complete = false;
                 inventory.interrupted_at = Some(path);
-                inventory.continuation =
-                    Some(ReceiptCursor::root(before.unwrap_or_default(), visited).encode());
+                inventory.continuation = Some(ReceiptCursor::root(before, root_stamp).encode());
                 return Ok(inventory);
             }
             if item.as_os_str() == OsStr::new(RECEIPT_LOCK)
@@ -372,8 +367,34 @@ pub fn port_command_receipts(
             }
             inventory.issue(path, "inspect owner", "unknown port receipt owner");
         }
+        let current_stamp = DirectoryStamp::read(&receipt_root)?;
+        if current_stamp != root_stamp {
+            inventory.issues.truncate(root_issue_count);
+            inventory.complete = false;
+            inventory.interrupted_at = Some(receipt_root.anchored_path());
+            inventory.continuation =
+                Some(ReceiptCursor::root(DirectoryPosition::default(), current_stamp).encode());
+        }
     }
     Ok(inventory)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectoryStamp {
+    device: u64,
+    inode: u64,
+    modified_ns: i128,
+}
+
+impl DirectoryStamp {
+    fn read(directory: &Directory) -> Result<Self, PortEvidenceError> {
+        let metadata = directory.metadata().map_err(PortEvidenceError::Read)?;
+        Ok(Self {
+            device: metadata.device,
+            inode: metadata.inode,
+            modified_ns: metadata.modified_ns,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -381,42 +402,55 @@ struct ReceiptCursor {
     phase: String,
     owner: Option<String>,
     cookie: DirectoryPosition,
-    visited: usize,
+    root_stamp: DirectoryStamp,
+    owner_stamp: Option<DirectoryStamp>,
 }
 
 impl ReceiptCursor {
-    fn files(owner: &str, cookie: DirectoryPosition, visited: usize) -> Self {
+    fn files(
+        owner: &str,
+        cookie: DirectoryPosition,
+        root_stamp: DirectoryStamp,
+        owner_stamp: DirectoryStamp,
+    ) -> Self {
         Self {
             phase: "files".into(),
             owner: Some(owner.into()),
             cookie,
-            visited,
+            root_stamp,
+            owner_stamp: Some(owner_stamp),
         }
     }
 
-    fn root(cookie: DirectoryPosition, visited: usize) -> Self {
+    fn root(cookie: DirectoryPosition, root_stamp: DirectoryStamp) -> Self {
         Self {
             phase: "root".into(),
             owner: None,
             cookie,
-            visited,
+            root_stamp,
+            owner_stamp: None,
         }
     }
 
     fn encode(&self) -> String {
         format!(
-            "port-receipts-v1|{}|{}|{}|{}|{}",
+            "port-receipts-v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.phase,
             self.owner.as_deref().unwrap_or("-"),
             self.cookie.block,
             self.cookie.offset,
-            self.visited
+            self.root_stamp.device,
+            self.root_stamp.inode,
+            self.root_stamp.modified_ns,
+            self.owner_stamp.map_or(0, |stamp| stamp.device),
+            self.owner_stamp.map_or(0, |stamp| stamp.inode),
+            self.owner_stamp.map_or(0, |stamp| stamp.modified_ns),
         )
     }
 
     fn parse(value: Option<&str>) -> Option<Self> {
         let mut fields = value?.split('|');
-        if fields.next()? != "port-receipts-v1" {
+        if fields.next()? != "port-receipts-v2" {
             return None;
         }
         let phase = fields.next()?.to_owned();
@@ -430,7 +464,19 @@ impl ReceiptCursor {
         let block = fields.next()?.parse().ok()?;
         let offset = fields.next()?.parse().ok()?;
         let cookie = DirectoryPosition { block, offset };
-        let visited = fields.next()?.parse().ok()?;
+        let root_stamp = DirectoryStamp {
+            device: fields.next()?.parse().ok()?,
+            inode: fields.next()?.parse().ok()?,
+            modified_ns: fields.next()?.parse().ok()?,
+        };
+        let owner_device = fields.next()?.parse().ok()?;
+        let owner_inode = fields.next()?.parse().ok()?;
+        let owner_mtime = fields.next()?.parse().ok()?;
+        let owner_stamp = (phase == "files").then_some(DirectoryStamp {
+            device: owner_device,
+            inode: owner_inode,
+            modified_ns: owner_mtime,
+        });
         if fields.next().is_some() {
             return None;
         }
@@ -438,28 +484,35 @@ impl ReceiptCursor {
             phase,
             owner,
             cookie,
-            visited,
+            root_stamp,
+            owner_stamp,
         })
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_receipt_owner(
+    receipt_root: &Directory,
     owner_dir: &Directory,
     owner: &str,
     owner_path: &Path,
+    root_stamp: DirectoryStamp,
+    owner_stamp: DirectoryStamp,
     cursor: Option<&ReceiptCursor>,
-    start_at: Option<&Path>,
     control: &SweepControl<'_>,
     inventory: &mut PortCommandReceiptInventory,
     visited: &mut usize,
 ) -> Result<(), PortEvidenceError> {
+    let entry_count = inventory.entries.len();
+    let initial_bytes = inventory.bytes;
     let mut entries = owner_dir.entries().map_err(PortEvidenceError::Read)?;
-    if let Some(cursor) = cursor {
-        let _ = entries.seek(cursor.cookie);
+    if let Some(cursor) = cursor
+        && entries.seek(cursor.cookie).is_err()
+    {
+        entries = owner_dir.entries().map_err(PortEvidenceError::Read)?;
     }
-    let mut resume_target = cursor.and(start_at);
     loop {
-        let before = entries.position().ok();
+        let before = entries.position().map_err(PortEvidenceError::Read)?;
         let file_entry = match entries.next() {
             Some(Ok(entry)) => entry,
             Some(Err(error)) => {
@@ -469,39 +522,24 @@ fn scan_receipt_owner(
             None => break,
         };
         let path = owner_path.join(&file_entry);
-        if let Some(candidate) = resume_target {
-            if candidate != path {
-                if !control.should_continue() {
-                    inventory.complete = false;
-                    inventory.interrupted_at = Some(path);
-                    inventory.continuation = Some(
-                        ReceiptCursor::files(owner, before.unwrap_or_default(), *visited).encode(),
-                    );
-                    return Ok(());
-                }
-                continue;
-            }
-            resume_target = None;
-        }
         if !control.should_continue() {
             inventory.complete = false;
             inventory.interrupted_at = Some(path);
             inventory.continuation =
-                Some(ReceiptCursor::files(owner, before.unwrap_or_default(), *visited).encode());
+                Some(ReceiptCursor::files(owner, before, root_stamp, owner_stamp).encode());
             return Ok(());
         }
         if file_entry.as_os_str() == OsStr::new(RECEIPT_LOCK) {
             continue;
         }
-        *visited += 1;
-        if *visited > MAX_RECEIPTS {
-            inventory.issue(
-                owner_path.to_path_buf(),
-                "enumerate receipts",
-                format!("receipt count exceeds {MAX_RECEIPTS}"),
-            );
+        if *visited >= MAX_RECEIPTS {
+            inventory.complete = false;
+            inventory.interrupted_at = Some(path);
+            inventory.continuation =
+                Some(ReceiptCursor::files(owner, before, root_stamp, owner_stamp).encode());
             return Ok(());
         }
+        *visited += 1;
         let file_name = match file_entry.to_str() {
             Some(name) if name.starts_with(RECEIPT_PREFIX) && name.ends_with(".json") => name,
             _ => {
@@ -556,18 +594,25 @@ fn scan_receipt_owner(
             continue;
         }
         let mut entry = PortCommandReceiptEntry::new(receipt, metadata.size, path);
-        entry.cursor = Some(
-            ReceiptCursor::files(owner, before.unwrap_or_default(), visited.saturating_sub(1))
-                .encode(),
-        );
+        entry.cursor = Some(ReceiptCursor::files(owner, before, root_stamp, owner_stamp).encode());
         inventory.entries.push(entry);
     }
-    if resume_target.is_some() {
-        // If the cursor's item disappeared, restart once from the directory
-        // head. Previously removed entries are absent and therefore cheap to skip.
-        scan_receipt_owner(
-            owner_dir, owner, owner_path, None, None, control, inventory, visited,
-        )?;
+    let current_root_stamp = DirectoryStamp::read(receipt_root)?;
+    let current_owner_stamp = DirectoryStamp::read(owner_dir)?;
+    if current_root_stamp != root_stamp || current_owner_stamp != owner_stamp {
+        inventory.entries.truncate(entry_count);
+        inventory.bytes = initial_bytes;
+        inventory.complete = false;
+        inventory.interrupted_at = Some(owner_path.to_path_buf());
+        inventory.continuation = Some(
+            ReceiptCursor::files(
+                owner,
+                DirectoryPosition::default(),
+                current_root_stamp,
+                current_owner_stamp,
+            )
+            .encode(),
+        );
     }
     Ok(())
 }
@@ -1079,5 +1124,62 @@ mod tests {
         assert_eq!(resumed.entries.len(), 1);
         assert!(resumed.complete);
         assert_ne!(first.entries[0].path, resumed.entries[0].path);
+    }
+
+    #[test]
+    fn receipt_inventory_restarts_when_owner_changes_between_pages() {
+        use std::cell::Cell;
+
+        let state = tempfile::tempdir().unwrap();
+        for key in ["issue:1", "issue:2"] {
+            record_port_command(
+                state.path(),
+                "tracker",
+                PortSource::Project,
+                "issue",
+                key,
+                &execution(b"evidence", false),
+                age(),
+            )
+            .unwrap();
+        }
+        let checks = Cell::new(0usize);
+        let keep_going = || {
+            let count = checks.get() + 1;
+            checks.set(count);
+            count <= 1
+        };
+        let first = port_command_receipts(
+            state.path(),
+            &provenant_core::SweepControl {
+                keep_going: Some(&keep_going),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidate = first.interrupted_at.unwrap();
+        let detail = first.continuation.unwrap();
+        record_port_command(
+            state.path(),
+            "tracker",
+            PortSource::Project,
+            "issue",
+            "issue:3",
+            &execution(b"evidence", false),
+            age(),
+        )
+        .unwrap();
+
+        let resumed = port_command_receipts(
+            state.path(),
+            &provenant_core::SweepControl {
+                start_at: Some(&candidate),
+                detail: Some(&detail),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(resumed.complete);
+        assert_eq!(resumed.entries.len(), 3);
     }
 }
