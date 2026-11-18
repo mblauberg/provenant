@@ -652,6 +652,59 @@ fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dy
             Err(RoutingError::NoEligiblePoolMember { cause: Some(reason), .. }) if reason == expected
         ));
     }
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    // An expired sign-out and a configured exclusion still form a typed exhausted pool.
+    let mixed = config.clone();
+    let excluded = [rule(ExclusionSelector::Provider("claude".into()))];
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "claude".into(),
+            ..availability()
+        },
+    ];
+    let mut file = provenant_quota::ReadinessFile::default();
+    let mut account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        account_key: records[0].account_key.clone().ok_or("fixture account")?,
+        label: "work".into(),
+    });
+    file.sync_probe_result(
+        &account,
+        provenant_quota::LOCAL_HOST,
+        10,
+        30,
+        Some(ReadinessReason::SignedOut),
+    )?;
+    let readiness = |scope: &provenant_quota::ReadinessScope, now| file.get(scope, now);
+    let mut ctx = context(&catalogue, &mixed, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.readiness = Some(&readiness);
+    assert!(matches!(
+        resolve_for_account_with_seed_excluding(&query, &ctx, None, "mixed", 0, &[], &excluded),
+        Err(RoutingError::NoEligiblePoolMember {
+            preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+            ..
+        })
+    ));
+    account.auth_state = Some(provenant_quota::AuthState {
+        signed_in: Some(true),
+        observed_unix_seconds: Some(80),
+        ..Default::default()
+    });
+    file.sync_probe_result(&account, provenant_quota::LOCAL_HOST, 80, 30, None)?;
+    let readiness = |scope: &provenant_quota::ReadinessScope, now| file.get(scope, now);
+    let mut ctx = context(&catalogue, &mixed, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.readiness = Some(&readiness);
+    assert_eq!(
+        resolve_for_account_with_seed_excluding(&query, &ctx, None, "mixed", 0, &[], &excluded)?
+            .adapter,
+        "codex"
+    );
     // Different login failures still have the same preparation fallback class.
     let records = [
         availability(),

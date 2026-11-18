@@ -75,6 +75,7 @@ fn select_account<'a>(
         message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
         cause: provenant_records::run::TerminalCause::UnregisteredAccount,
         note: None,
+                    fallback_outcome: None,
     })?;
     if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
         return Err(PrepareError::Other(
@@ -99,6 +100,7 @@ fn select_retained_account<'a>(
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
             cause: provenant_records::run::TerminalCause::UnregisteredAccount,
             note: None,
+                    fallback_outcome: None,
         })
 }
 
@@ -271,6 +273,48 @@ pub(super) fn provider_preparation_fallback(
         | ProviderError::CredentialNotFound
         | ProviderError::CredentialExpired => provenant_routing::FallbackOutcome::AuthRequired,
         _ => provenant_routing::FallbackOutcome::Other,
+    }
+}
+
+fn publish_preparation_login_failure(
+    state: &Path,
+    entry: &provenant_providers::accounts::Registration,
+    reason: provenant_quota::ReadinessReason,
+    now: i64,
+) {
+    let account = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: entry.adapter.clone(),
+        account_key: entry.key.clone(),
+        label: entry.label.clone(),
+    };
+    if let Err(error) =
+        crate::quota::persist_preparation_login_failure(state, &account, reason, now)
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: could not publish preparation login failure: {error}"
+        );
+    }
+}
+
+fn publish_provider_login_failure(
+    state: &Path,
+    entry: Option<&provenant_providers::accounts::Registration>,
+    error: &provenant_providers::ProviderError,
+    now: i64,
+) {
+    use provenant_providers::ProviderError;
+    let reason = match error {
+        ProviderError::LoginRequired | ProviderError::CredentialNotFound => {
+            provenant_quota::ReadinessReason::SignedOut
+        }
+        ProviderError::CredentialExpired => provenant_quota::ReadinessReason::LoginExpired,
+        _ => return,
+    };
+    if let Some(entry) = entry {
+        publish_preparation_login_failure(state, entry, reason, now);
     }
 }
 
@@ -680,6 +724,7 @@ pub(super) enum PrepareError {
         cause: provenant_records::run::TerminalCause,
         /// Fixed-form text naming a configured value, never captured output.
         note: Option<String>,
+        fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
@@ -815,6 +860,7 @@ impl PrepareError {
                 message,
                 cause,
                 note,
+                fallback_outcome,
             } => Box::new(run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
@@ -823,7 +869,7 @@ impl PrepareError {
                 terminal_note: note,
                 message,
                 skipped_routes: Vec::new(),
-                fallback_outcome: match cause {
+                fallback_outcome: fallback_outcome.or(match cause {
                     provenant_records::run::TerminalCause::AccountLoginRequired => {
                         Some(provenant_records::run::PreparationFailure::AuthRequired)
                     }
@@ -833,7 +879,7 @@ impl PrepareError {
                         Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
                     }
                     _ => None,
-                },
+                }),
             }),
             Self::SourceView(error) => {
                 let detail = error.to_string();
@@ -1258,6 +1304,16 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
 fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError {
     use crate::route::{DispatchError, EdgeError};
     use provenant_records::run::TerminalCause;
+    let fallback_outcome = match &error {
+        DispatchError::Edge(edge) => match edge.as_ref() {
+            EdgeError::Routing(provenant_routing::RoutingError::NoEligiblePoolMember {
+                preparation_failure,
+                ..
+            }) => Some(*preparation_failure),
+            _ => None,
+        },
+        _ => None,
+    };
     let message = error.to_string();
     let (cause, code) = match &error {
         DispatchError::Edge(error) => match error.as_ref() {
@@ -1304,6 +1360,11 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
         message,
         cause,
         note: Some(format!("route resolver classification: {code}")),
+        fallback_outcome: if cause == TerminalCause::AccountLoginRequired {
+            Some(provenant_records::run::PreparationFailure::AuthRequired)
+        } else {
+            fallback_outcome
+        },
     }
 }
 
@@ -1680,6 +1741,7 @@ fn prepare_inner(
                         .into(),
                     cause: provenant_records::run::TerminalCause::HostNativeUnconfigured,
                     note: None,
+                    fallback_outcome: None,
                 })?;
         let provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent {
             model,
@@ -2950,35 +3012,6 @@ pub(super) fn prepare_candidates(
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
-                    // Staleness removes an old auth failure from admission,
-                    // but the executable-only OpenCode probe still cannot
-                    // establish login health. Keep that distinction visible
-                    // as a launch warning instead of silently losing the
-                    // reason when `read_readiness` projects it to `Stale`.
-                    let persisted_auth_failure = crate::quota::recorded_readiness_file(
-                        roots.state.as_path(),
-                        &entry.adapter,
-                        &entry.key,
-                    )
-                    .ok()
-                    .flatten()
-                    .is_some_and(|file| {
-                        file.records.iter().any(|record| {
-                            record.scope.host == provenant_quota::LOCAL_HOST
-                                && record.scope.route == provenant_quota::ACCOUNT_ROUTE
-                                && recorded.reason == Some(provenant_quota::ReadinessReason::Stale)
-                                && recorded.observed_scope.as_ref() == Some(&record.scope)
-                                && recorded.observed_unix_seconds
-                                    == Some(record.observed_unix_seconds)
-                                && matches!(
-                                    record.reason,
-                                    Some(
-                                        provenant_quota::ReadinessReason::SignedOut
-                                            | provenant_quota::ReadinessReason::LoginExpired
-                                    )
-                                )
-                        })
-                    });
                     let mismatch = recorded.reason
                         == Some(provenant_quota::ReadinessReason::AccountMismatch)
                         || diagnostic_records.iter().any(|r| {
@@ -3005,14 +3038,16 @@ pub(super) fn prepare_candidates(
                                 provenant_quota::ReadinessReason::SignedOut
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
-                        )
-                        || persisted_auth_failure;
+                        );
                     // A version-only probe cannot clear an authentication refusal.
                     if auth_failure
                         && login_check_can_clear(&entry.adapter, mismatch)
                         && strategy != provenant_records::LoginReprobe::ExecutableOnly
                     {
                         let executable = Path::new(&record.executable);
+                        // Date recovery before I/O: late publication of an older
+                        // probe must not clear a concurrently recorded failure.
+                        let login_observed_at = clock.unix_seconds();
                         let healthy = match strategy {
                             provenant_records::LoginReprobe::Codex => {
                                 codex_login_is_healthy(entry, executable, &probe)
@@ -3038,6 +3073,28 @@ pub(super) fn prepare_candidates(
                             | provenant_records::LoginReprobe::ExecutableOnly => false,
                         };
                         if healthy {
+                            let recovered = run::RouteRecord {
+                                provider: Some(entry.adapter.clone()),
+                                account_key: Some(entry.key.clone()),
+                                account_label: Some(entry.label.clone()),
+                                ..Default::default()
+                            };
+                            if let Err(error) = crate::quota::persist_login_probe_success(
+                                roots.state.as_path(),
+                                &recovered,
+                                login_observed_at,
+                            ) {
+                                let _ = writeln!(
+                                    std::io::stderr().lock(),
+                                    "warning: could not publish login recovery: {error}"
+                                );
+                            }
+                            let interval = record
+                                .expires_unix_seconds
+                                .saturating_sub(record.observed_unix_seconds);
+                            record.observed_unix_seconds = login_observed_at;
+                            record.expires_unix_seconds =
+                                login_observed_at.saturating_add(interval);
                             record.fixture_ref =
                                 format!("installed/{}/login-status", entry.adapter);
                         }
@@ -3046,6 +3103,12 @@ pub(super) fn prepare_candidates(
                 availability.push(record)
             }
             Err(AccountObservationError::AuthRequired(detail)) => {
+                publish_preparation_login_failure(
+                    roots.state.as_path(),
+                    entry,
+                    provenant_quota::ReadinessReason::SignedOut,
+                    clock.unix_seconds(),
+                );
                 auth_failures.insert((entry.adapter.clone(), entry.key.clone()), detail.clone());
                 observation_failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
             }
@@ -3949,6 +4012,12 @@ pub(super) fn prepare_candidates(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
+                    publish_provider_login_failure(
+                        roots.state.as_path(),
+                        entry,
+                        &error,
+                        clock.unix_seconds(),
+                    );
                     previous_outcome = provider_preparation_fallback(&error);
                     reasons.push(credential_failure_skip(
                         &label,
@@ -4054,6 +4123,12 @@ pub(super) fn prepare_candidates(
         let mut spec = match prepare(&provider_route) {
             Ok(spec) => spec,
             Err(error) => {
+                publish_provider_login_failure(
+                    roots.state.as_path(),
+                    entry,
+                    &error,
+                    clock.unix_seconds(),
+                );
                 previous_outcome = provider_preparation_fallback(&error);
                 let class = error.boundary_class();
                 if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -4086,6 +4161,12 @@ pub(super) fn prepare_candidates(
             spec = match prepare(&without_skills) {
                 Ok(spec) => spec,
                 Err(error) => {
+                    publish_provider_login_failure(
+                        roots.state.as_path(),
+                        entry,
+                        &error,
+                        clock.unix_seconds(),
+                    );
                     previous_outcome = provider_preparation_fallback(&error);
                     let class = error.boundary_class();
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -4646,6 +4727,7 @@ pub(super) fn prepare_candidates(
                     message: "provider prepared a resumed invocation without its retained session binding".into(),
                     cause: provenant_records::run::TerminalCause::HandoffRefused,
                     note: None,
+                    fallback_outcome: None,
                 });
             }
             (false, _) => None,
@@ -5388,6 +5470,8 @@ mod refusal_cause_tests {
                 provenant_routing::RoutingError::NoEligiblePoolMember {
                     exclusions: vec!["PROVIDER_SECRET_SENTINEL".into()],
                     cause: Some(reason),
+                    preparation_failure:
+                        provenant_records::run::PreparationFailure::AdapterUnavailable,
                 },
             ));
             assert_eq!(
@@ -5397,6 +5481,19 @@ mod refusal_cause_tests {
                 Some(expected)
             );
         }
+        let aggregate = crate::route::DispatchError::from(crate::route::EdgeError::Routing(
+            provenant_routing::RoutingError::NoEligiblePoolMember {
+                exclusions: vec!["signed out".into(), "disabled".into()],
+                cause: None,
+                preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+            },
+        ));
+        assert_eq!(
+            route_resolution_refusal(aggregate)
+                .into_refusal()
+                .fallback_outcome,
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+        );
         assert!(
             !refusal
                 .terminal_note

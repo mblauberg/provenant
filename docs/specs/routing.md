@@ -153,7 +153,16 @@ publication leaves readiness unknown and never erases held refusals.
 A pool cannot draw an unresolved account or a current login-required account,
 even when every other member is unavailable. Dispatch requires a resolved account;
 preview can explain an unprobed model without selecting a launch account.
-An executable-only probe cannot clear recorded sign-out or login-expiry evidence.
+Account-wide sign-out and login-expiry failures remain unavailable after their
+observation interval, including across quota publication and independent dispatches.
+Only a strictly newer successful login observation or explicit sign-in clears them;
+a later timeout, failed command or executable-only probe cannot establish recovery.
+Preparation publishes its first typed login failure through the quota/readiness
+owner, using the same account-scoped store as quota probes. A successful login
+reprobe publishes recovery through that owner too.
+A pool exhausted by pre-launch candidate exclusions carries a typed aggregate
+preparation disposition even when the exclusion reasons differ, so a signed-out
+member beside a disabled or excluded member can advance to a declared fallback.
 A fresh probe failure (`command_failure` or `probe_timeout`) ranks its account
 below ready or untested accounts during its validity window; if only failed-probe
 accounts remain, launch proceeds with a warning unless the `PROBE_FAILURE`
@@ -166,6 +175,7 @@ providers at the same tier before stopping at the chair.
 - Why: one probe outage or model limit must not take a provider offline, and
   no stale evidence may admit a launch.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
+  `AccountRecord::successful_login_observed_at` in `crates/quota/src/state.rs`,
   `crates/routing/src/resolve.rs`
 
 ## Revisioned, bounded refresh

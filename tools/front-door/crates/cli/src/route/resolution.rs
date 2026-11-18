@@ -920,6 +920,8 @@ pub(super) fn resolve_dispatch_excluding_family(
                 let gate = if resolved.account_key.is_none() {
                     Err(EdgeError::Routing(RoutingError::NoEligiblePoolMember {
                         cause: Some(provenant_records::RouteExclusionReason::UnknownAccount),
+                        preparation_failure:
+                            provenant_records::run::PreparationFailure::AdapterUnavailable,
                         exclusions: vec![format!(
                             "{}: {}",
                             model.as_str(),

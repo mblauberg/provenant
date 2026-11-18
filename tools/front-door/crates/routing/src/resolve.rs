@@ -1319,7 +1319,12 @@ fn readiness_reason(
             );
             if read.observed_scope.is_some()
                 && read.observed_unix_seconds.is_some_and(|at| at <= now)
-                && read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+                && (read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+                    || (read.state == provenant_quota::ReadinessState::Unavailable
+                        && read
+                            .observed_scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.route == provenant_quota::ACCOUNT_ROUTE)))
             {
                 match read.reason {
                     Some(provenant_quota::ReadinessReason::SignedOut) => {
@@ -2311,6 +2316,8 @@ fn resolve_inner(
             if let Some(detail) = excluded_members.family_reason(model) {
                 return Err(RoutingError::NoEligiblePoolMember {
                     cause: None,
+                    preparation_failure:
+                        provenant_records::run::PreparationFailure::AdapterUnavailable,
                     exclusions: vec![format!("{}: {detail}", model.as_str())],
                 });
             }
@@ -2400,6 +2407,8 @@ fn resolve_inner(
                 {
                     return Err(RoutingError::NoEligiblePoolMember {
                         cause: None,
+                        preparation_failure:
+                            provenant_records::run::PreparationFailure::AdapterUnavailable,
                         exclusions: vec![format!(
                             "{}: outside provider model scope",
                             named.model.as_str()
@@ -2422,6 +2431,8 @@ fn resolve_inner(
                 if let Some(detail) = single.reason(&named.model, context) {
                     return Err(RoutingError::NoEligiblePoolMember {
                         cause: None,
+                        preparation_failure:
+                            provenant_records::run::PreparationFailure::AdapterUnavailable,
                         exclusions: vec![format!("{}: {detail}", named.model.as_str())],
                     });
                 }
@@ -2443,6 +2454,7 @@ fn resolve_inner(
     {
         return Err(RoutingError::NoEligiblePoolMember {
             cause: None,
+            preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
             exclusions: vec![format!(
                 "required family {family} count 1; {}/{}: {:?}",
                 primary.adapter, primary.model, primary.readiness
@@ -3058,6 +3070,7 @@ fn draw_pool(
             .or(classified.first_other_unavailable)
     };
     let index = selected_index.ok_or_else(|| RoutingError::NoEligiblePoolMember {
+        preparation_failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
         cause: classified.candidates.first().and_then(|first| {
             let RouteReadiness::Unavailable { reason, .. } = first.readiness.as_ref()? else {
                 return None;

@@ -26,6 +26,12 @@ A local handoff failure records its preparation cause after withdrawing the
 unlaunched lease. An attempt proven never to have launched needs no provider
 custody lock; an existing lease or writer reservation must still be released.
 Boundary refusals and uncertain withdrawals do not authorise another launch.
+- If a terminal row is visible before local custody release, a route fallback
+  re-reads the same attempt's evidence after a short persisted wake. The wake is
+  bound to that attempt and expires after one second; replay cannot renew it.
+  Missing or unreadable evidence is retried only when the route, typed cause,
+  and retry limits would allow fallback once evidence is available. At expiry,
+  missing proof refuses the route.
 - Why: polling or process restart must not create more time or writer authority.
 
 ## Recovery preserves work and budget

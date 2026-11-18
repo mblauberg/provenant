@@ -72,6 +72,16 @@ declare_readiness_enum! {
     }
 }
 
+impl ReadinessReason {
+    /// Authentication refusals survive time alone; other availability expires.
+    pub fn is_authentication_failure(self) -> bool {
+        matches!(
+            self,
+            Self::SignedOut | Self::LoginExpired | Self::AccountMismatch
+        )
+    }
+}
+
 /// An observation is valid only for its exact scope and before its expiry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteReadiness {
@@ -85,6 +95,17 @@ pub struct RouteReadiness {
     pub expires_unix_seconds: i64,
     pub reset_unix_seconds: Option<i64>,
     pub evidence_ref: Option<String>,
+}
+
+impl RouteReadiness {
+    /// Authentication failures require recovery evidence, not just elapsed time.
+    pub fn authentication_failure(&self) -> bool {
+        self.scope.route == ACCOUNT_ROUTE
+            && self.state == ReadinessState::Unavailable
+            && self
+                .reason
+                .is_some_and(ReadinessReason::is_authentication_failure)
+    }
 }
 
 /// Host identity under which this machine publishes its own observations.
@@ -304,7 +325,7 @@ impl ReadinessFile {
             } else {
                 r.expires_unix_seconds
             };
-            if now >= expires {
+            if now >= expires && !r.authentication_failure() {
                 return ReadinessRead {
                     observed_scope: Some(r.scope.clone()),
                     observed_unix_seconds: Some(r.observed_unix_seconds),
@@ -374,7 +395,7 @@ impl ReadinessFile {
         let previous = self.records.clone();
         let now = admission.now_unix_seconds;
         self.records.retain(|r| {
-            r.expires_unix_seconds > now
+            (r.expires_unix_seconds > now || r.authentication_failure())
                 && !(r.scope.host == host
                     && r.state == ReadinessState::Unavailable
                     && r.reason == Some(ReadinessReason::ProviderRefusal))
@@ -473,8 +494,21 @@ impl ReadinessFile {
             .iter()
             .find(|record| record.scope.same_scope(&account_scope))
             .cloned();
+        // A failed executable/transport probe cannot undo a known login failure.
+        // Nor can an older or simultaneous successful observation establish recovery.
+        if previous.as_ref().is_some_and(|record| {
+            let newer_login = account
+                .successful_login_observed_at()
+                .is_some_and(|at| at > record.observed_unix_seconds && at <= now);
+            record.authentication_failure()
+                && (now <= record.observed_unix_seconds
+                    || (!reason.is_some_and(ReadinessReason::is_authentication_failure)
+                        && !newer_login))
+        }) {
+            return Ok(());
+        }
         self.records.retain(|record| {
-            record.expires_unix_seconds > now
+            (record.expires_unix_seconds > now || record.authentication_failure())
                 && !(record.scope.host == host
                     && record.scope.adapter == account.account.adapter
                     && record.scope.account_key == account.account.account_key
@@ -632,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn login_failure_expires_at_the_probe_interval() {
+    fn login_failure_survives_expiry_until_a_newer_successful_probe() {
         let account_scope = crate::AccountScope {
             extra: Default::default(),
             adapter: "claude".into(),
@@ -668,10 +702,54 @@ mod tests {
         };
         assert_eq!(
             file.get(&account_scope, 160).reason,
-            Some(ReadinessReason::Stale)
+            Some(ReadinessReason::LoginExpired)
+        );
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            500,
+            60,
+            Some(ReadinessReason::ProbeTimeout),
+        )
+        .unwrap();
+        file.sync_refusals(&account, LOCAL_HOST, &at(&account, 500))
+            .unwrap();
+        assert_eq!(
+            file.get(&scope, 500).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        file.sync_probe_result(&account, LOCAL_HOST, 99, 60, None)
+            .unwrap();
+        file.sync_probe_result(&account, LOCAL_HOST, 100, 60, None)
+            .unwrap();
+        assert_eq!(
+            file.get(&scope, 500).reason,
+            Some(ReadinessReason::LoginExpired)
         );
         // #3342: a successful probe with no figures reads as probed, not as
         // "not probed", so the hint to run `quota tick` is not repeated.
+        file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
+            .unwrap();
+        assert_eq!(
+            file.get(&scope, 501).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        account.auth_state = Some(crate::AuthState {
+            signed_in: Some(true),
+            observed_unix_seconds: Some(100),
+            ..Default::default()
+        });
+        file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
+            .unwrap();
+        assert_eq!(
+            file.get(&scope, 501).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        account.auth_state = Some(crate::AuthState {
+            signed_in: Some(true),
+            observed_unix_seconds: Some(501),
+            ..Default::default()
+        });
         file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
             .unwrap();
         assert_eq!(

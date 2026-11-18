@@ -464,7 +464,8 @@ fn alias_skips_known_spent_members_and_refuses_all_with_resets()
     };
     let rejected = [ModelId::parse("codex/gpt-6.1-sol")?];
     let Err(RoutingError::NoEligiblePoolMember {
-        exclusions: overlap, ..
+        exclusions: overlap,
+        ..
     }) = resolve_for_account_with_seed_excluding(&alias, &ctx, None, "overlap", 0, &rejected, &[])
     else {
         panic!("all exhausted members must refuse")

@@ -383,6 +383,65 @@ pub(crate) fn persist_provider_refusal_once(
     write_intent(&directory, state_root, &intent, &mut records)
 }
 
+/// Publish a pre-launch authentication failure through the quota/readiness owner.
+/// Transport errors and boundary refusals are not authentication observations.
+pub(crate) fn persist_preparation_login_failure(
+    state: &Path,
+    account: &AccountScope,
+    reason: ReadinessReason,
+    now: i64,
+) -> Result<(), EdgeError> {
+    let failure = match reason {
+        ReadinessReason::SignedOut => ProbeFailure::Auth,
+        ReadinessReason::LoginExpired => ProbeFailure::LoginExpired,
+        _ => return Err(QuotaError::Invalid("preparation login failure").into()),
+    };
+    account.validate()?;
+    let root = private(state)?;
+    let directory = child(&root, OsStr::new("quota"))?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Err(QuotaError::Conflict.into());
+    };
+    let mut records = read_records(&directory)?;
+    let current = records
+        .iter()
+        .find(|r| {
+            r.account.adapter == account.adapter && r.account.account_key == account.account_key
+        })
+        .cloned();
+    if current
+        .as_ref()
+        .is_some_and(|r| r.successful_login_observed_at().is_some_and(|at| at > now))
+    {
+        return Ok(());
+    }
+    let mut next = current
+        .clone()
+        .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    // Identity mismatch remains owned by an account-identifying login probe.
+    let reason = if next.last_error == Some(ProbeFailure::AccountMismatch) {
+        ReadinessReason::AccountMismatch
+    } else {
+        next.last_error = Some(failure);
+        reason
+    };
+    next.auth_verified_unix_seconds = None;
+    next.auth_state = None;
+    next.last_attempt_unix_seconds = Some(now);
+    next.revision = next
+        .revision
+        .checked_add(1)
+        .ok_or(QuotaError::NumberOutOfRange)?;
+    let intent = UpdateIntent {
+        account: next.account.clone(),
+        expected: current,
+        replacement: Some(next),
+        readiness_probe_result: Some(Some(reason)),
+        login_probe_expiry: None,
+    };
+    write_intent_at(&directory, state, &intent, &mut records, now)
+}
+
 pub(crate) fn persist_capacity_cooldown(
     state_root: &Path,
     route: &provenant_records::run::RouteRecord,
@@ -447,19 +506,45 @@ pub(crate) fn persist_provider_success(
     route: &provenant_records::run::RouteRecord,
     now: i64,
 ) -> Result<(), EdgeError> {
+    persist_success(state_root, route, now, false)
+}
+
+/// Only a current successful login observation may clear retained authentication readiness.
+pub(crate) fn persist_login_probe_success(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    now: i64,
+) -> Result<(), EdgeError> {
+    persist_success(state_root, route, now, true)
+}
+
+fn persist_success(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    now: i64,
+    login_probe: bool,
+) -> Result<(), EdgeError> {
     let (Some(adapter), Some(key)) = (route.provider.as_deref(), route.account_key.as_deref())
     else {
         return Ok(());
     };
-    let root = match Directory::open_anchor(state_root) {
-        Ok(root) => root,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let root = if login_probe {
+        private(state_root)?
+    } else {
+        match Directory::open_anchor(state_root) {
+            Ok(root) => root,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
     };
-    let directory = match root.open_verified_directory(OsStr::new("quota")) {
-        Ok(dir) => dir,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let directory = if login_probe {
+        child(&root, OsStr::new("quota"))?
+    } else {
+        match root.open_verified_directory(OsStr::new("quota")) {
+            Ok(dir) => dir,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
     };
     check_private(&root)?;
     let Some(_lock) = try_quota_lock(&directory)? else {
@@ -470,6 +555,29 @@ pub(crate) fn persist_provider_success(
         .iter()
         .find(|r| r.account.adapter == adapter && r.account.account_key == key)
         .cloned();
+    // Reservation time is not failure evidence. Compare recovery against
+    // the readiness owner's actual account-wide authentication observation.
+    let newer_failure = if login_probe {
+        recorded_readiness_file(state_root, adapter, key)?.is_some_and(|file| {
+            file.records.iter().any(|record| {
+                record.scope.host == LOCAL_HOST
+                    && record.authentication_failure()
+                    && record.observed_unix_seconds >= now
+            })
+        })
+    } else {
+        false
+    };
+    if newer_failure
+        || (login_probe
+            && current.as_ref().is_some_and(|record| {
+                record
+                    .successful_login_observed_at()
+                    .is_some_and(|at| at > now)
+            }))
+    {
+        return Ok(());
+    }
     let mut next = match &current {
         Some(record) => record.clone(),
         None => {
@@ -488,18 +596,44 @@ pub(crate) fn persist_provider_success(
     };
     // A lane launched before a mismatch is not evidence of the current
     // signed-in identity, and must not supersede the verifying probe.
-    if next.last_error == Some(ProbeFailure::AccountMismatch) {
+    if next.last_error == Some(ProbeFailure::AccountMismatch)
+        && !(login_probe
+            && provenant_records::AdapterSpec::get(adapter)
+                .is_some_and(|spec| spec.login_check_names_account))
+    {
         return Ok(());
     }
-    next.auth_verified_unix_seconds = Some(now);
+    next.auth_verified_unix_seconds = Some(
+        next.auth_verified_unix_seconds
+            .map_or(now, |at| at.max(now)),
+    );
+    if login_probe {
+        next.auth_state = Some(AuthState {
+            extra: next
+                .auth_state
+                .as_ref()
+                .map_or_else(Default::default, |auth| auth.extra.clone()),
+            signed_in: Some(true),
+            observed_unix_seconds: Some(now),
+            ..Default::default()
+        });
+    }
     next.auth_retry_pending = false;
-    // A probe started before this lane may not overwrite newer evidence.
-    next.claim = None;
+    // Supersede older probes, while preserving a probe reserved after this
+    // login observation. A reservation is not a later authentication failure.
+    let newer_probe = login_probe
+        && next.claim.is_some()
+        && next.last_attempt_unix_seconds.is_some_and(|at| at > now);
+    if !newer_probe {
+        next.claim = None;
+    }
     if next.last_error.is_some_and(ProbeFailure::needs_login) {
         next.last_error = None;
         next.failures = 0;
         next.backoff_until_unix_seconds = None;
-        next.last_attempt_unix_seconds = None;
+        if !newer_probe {
+            next.last_attempt_unix_seconds = None;
+        }
     }
     if next
         .snapshot
@@ -516,10 +650,14 @@ pub(crate) fn persist_provider_success(
         account: next.account.clone(),
         expected: current,
         replacement: Some(next),
-        readiness_probe_result: None,
+        readiness_probe_result: login_probe.then_some(None),
         login_probe_expiry: None,
     };
-    write_intent(&directory, state_root, &intent, &mut records)?;
+    if login_probe {
+        write_intent_at(&directory, state_root, &intent, &mut records, now)?;
+    } else {
+        write_intent(&directory, state_root, &intent, &mut records)?;
+    }
 
     // Publish the changed row so an already-open menu receives the event.
     let mut bytes = Vec::new();
@@ -695,13 +833,13 @@ pub(crate) fn read_readiness_after_probe(
     let read = recorded_readiness_file(state, &scope.adapter, &scope.account_key);
     match read {
         Ok(Some(mut file)) => {
-            if let Some(reprobe) = reprobe {
+            if let Some(reprobe) = reprobe.filter(|evidence| evidence.observed_at() <= now) {
                 let observed_at = reprobe.observed_at();
                 file.records.retain(|record| {
                     !(record.scope.host == scope.host
                         && record.scope.adapter == scope.adapter
                         && record.scope.account_key == scope.account_key
-                        && record.observed_unix_seconds <= observed_at
+                        && record.observed_unix_seconds < observed_at
                         && (matches!(
                             record.reason,
                             Some(ReadinessReason::SignedOut | ReadinessReason::LoginExpired)
@@ -824,6 +962,22 @@ fn write_intent(
     intent: &UpdateIntent,
     records: &mut Vec<AccountRecord>,
 ) -> Result<(), EdgeError> {
+    write_intent_at(
+        dir,
+        state,
+        intent,
+        records,
+        SystemClock::new().unix_seconds(),
+    )
+}
+
+fn write_intent_at(
+    dir: &Directory,
+    state: &Path,
+    intent: &UpdateIntent,
+    records: &mut Vec<AccountRecord>,
+    now: i64,
+) -> Result<(), EdgeError> {
     let pos = records.iter().position(|r| {
         r.account.adapter == intent.account.adapter
             && r.account.account_key == intent.account.account_key
@@ -863,7 +1017,7 @@ fn write_intent(
         }
     }
     // The account commit remains authoritative if derived publication fails.
-    if let Err(error) = sync_readiness(state, intent, SystemClock::new().unix_seconds()) {
+    if let Err(error) = sync_readiness(state, intent, now) {
         use std::io::Write;
         let _ = writeln!(
             io::stderr().lock(),
@@ -1728,6 +1882,9 @@ pub(crate) fn execute(
             }
             None => Err(ProbeFailure::Disabled),
         };
+        let login_verified = auth_state
+            .as_ref()
+            .is_some_and(|auth| auth.signed_in == Some(true));
         let readiness_reason = match outcome.as_ref() {
             // Auth status was verified; deferral must not publish an
             // unavailable account and prevent launch from doing the refresh.
@@ -1749,9 +1906,7 @@ pub(crate) fn execute(
             match schedule::complete(reserved, &token, finished, outcome, None) {
                 Ok(mut complete) => {
                     if let Some(replacement) = complete.replacement.as_mut() {
-                        if auth_state
-                            .as_ref()
-                            .is_some_and(|auth| auth.signed_in == Some(true))
+                        if login_verified
                             && !replacement
                                 .last_error
                                 .is_some_and(ProbeFailure::needs_login)
@@ -1760,7 +1915,14 @@ pub(crate) fn execute(
                         }
                         // An unobserved login cannot inherit an older signed-in
                         // assertion after a failed or missing probe.
-                        replacement.auth_state = auth_state;
+                        replacement.auth_state = if replacement
+                            .last_error
+                            .is_some_and(ProbeFailure::needs_login)
+                        {
+                            None
+                        } else {
+                            auth_state
+                        };
                     }
                     // A later failure cannot disprove a previously verified
                     // mismatch: publish the same sticky reason as the account
@@ -3656,6 +3818,144 @@ mod tests {
                 .unwrap()
                 .status,
             QuotaStatus::AuthRequired
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn preparation_login_failure_is_account_wide_and_survives_independent_dispatch_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        persist_preparation_login_failure(temp.path(), &account, ReadinessReason::SignedOut, 100)?;
+        let scope = ReadinessScope {
+            extra: Default::default(),
+            host: LOCAL_HOST.into(),
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            route: "opencode/another-model".into(),
+        };
+        for now in [101, 1000] {
+            assert_eq!(
+                read_readiness(temp.path(), &scope, now).reason,
+                Some(ReadinessReason::SignedOut)
+            );
+            assert_eq!(
+                read_readiness_after_probe(temp.path(), &scope, now, None).state,
+                ReadinessState::Unavailable
+            );
+        }
+        for at in [100, 1001] {
+            assert_eq!(
+                read_readiness_after_probe(
+                    temp.path(),
+                    &scope,
+                    1000,
+                    Some(LoginEvidence::Unverified(at))
+                )
+                .reason,
+                Some(ReadinessReason::SignedOut)
+            );
+        }
+        assert_eq!(
+            read_readiness_after_probe(
+                temp.path(),
+                &scope,
+                1000,
+                Some(LoginEvidence::Unverified(999))
+            )
+            .reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        let route = provenant_records::run::RouteRecord {
+            provider: Some(account.adapter.clone()),
+            account_key: Some(account.account_key.clone()),
+            account_label: Some(account.label.clone()),
+            ..Default::default()
+        };
+        persist_provider_success(temp.path(), &route, 1001)?;
+        assert_eq!(
+            read_readiness(temp.path(), &scope, 1001).reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        persist_login_probe_success(temp.path(), &route, 1001)?;
+        assert_eq!(
+            read_readiness(temp.path(), &scope, 1001).reason,
+            Some(ReadinessReason::ProbedNoFigures)
+        );
+        // Publishing a failure during quota I/O keeps the in-flight probe claim.
+        let directory = Directory::open_anchor(&temp.path().join("quota"))?;
+        let mut records = read_records(&directory)?;
+        let current = records[0].clone();
+        let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
+        let intent = schedule::reserve(
+            &policies,
+            Some(&current),
+            &account,
+            1002,
+            "live-probe",
+            schedule::Trigger::Manual,
+            schedule::Power::Ac,
+        )?;
+        write_intent_at(&directory, temp.path(), &intent, &mut records, 1002)?;
+        persist_preparation_login_failure(
+            temp.path(),
+            &account,
+            ReadinessReason::LoginExpired,
+            1003,
+        )?;
+        let records = read_records(&directory)?;
+        assert_eq!(
+            records[0].claim.as_ref().map(|claim| claim.token.as_str()),
+            Some("live-probe")
+        );
+        assert_eq!(
+            read_readiness(temp.path(), &scope, 1003).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        // A healthy probe started before the new failure cannot clear it,
+        // even when its result is published after the failure.
+        persist_login_probe_success(temp.path(), &route, 1002)?;
+        let records = read_records(&directory)?;
+        assert_eq!(records[0].last_error, Some(ProbeFailure::LoginExpired));
+        assert_eq!(
+            records[0].claim.as_ref().map(|claim| claim.token.as_str()),
+            Some("live-probe")
+        );
+        assert_eq!(
+            read_readiness(temp.path(), &scope, 1004).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        // A newer reservation retaining an old auth error is not a newer
+        // failure. Valid recovery clears readiness and preserves that probe.
+        let current = records[0].clone();
+        let intent = schedule::reserve(
+            &policies,
+            Some(&current),
+            &account,
+            2000,
+            "newer-probe",
+            schedule::Trigger::Manual,
+            schedule::Power::Ac,
+        )?;
+        let mut records = records;
+        write_intent_at(&directory, temp.path(), &intent, &mut records, 2000)?;
+        persist_login_probe_success(temp.path(), &route, 1999)?;
+        let records = read_records(&directory)?;
+        assert_eq!(records[0].last_error, None);
+        assert_eq!(
+            records[0].claim.as_ref().map(|claim| claim.token.as_str()),
+            Some("newer-probe")
+        );
+        assert_eq!(
+            read_readiness(temp.path(), &scope, 2001).reason,
+            Some(ReadinessReason::ProbedNoFigures)
         );
         Ok(())
     }

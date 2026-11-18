@@ -270,35 +270,38 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
 }
 
 #[test]
-fn read_only_sign_in_failure_falls_back_to_next_route() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "signed-out", "nodes": [{
-            "id": "review", "prompt": "review", "access": "read_only", "routes": [
-                {"adapter": "cursor", "model": "cursor/example"},
-                {"adapter": "codex", "model": "codex/example"}
-            ]
-        }]
-    }))
-    .expect("graph fixture");
-    let mut owner = FakeOwner {
-        observations: VecDeque::from([
-            preparation_refusal("host/a", AttemptOutcome::AuthRequired),
-            terminal(AttemptOutcome::Succeeded),
-        ]),
-        ..FakeOwner::default()
-    };
-    let run =
-        advance(&document, &mut owner, &mut MemoryJournal::default()).expect("fallback advances");
-    assert_eq!(run.status, GraphStatus::Complete);
-    assert_eq!(owner.calls.len(), 2);
-    assert_eq!(
-        run.checkpoint.nodes[0].attempts[0].outcome,
-        Some(AttemptOutcome::AuthRequired)
-    );
-    assert_eq!(
-        run.checkpoint.nodes[0].attempts[1].outcome,
-        Some(AttemptOutcome::Succeeded)
-    );
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+fn typed_preparation_failures_fall_back_to_the_next_route() {
+    for (suffix, failure) in [
+        ("auth", AttemptOutcome::AuthRequired),
+        ("adapter", AttemptOutcome::AdapterUnavailable),
+    ] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": format!("signed-out-{suffix}"), "nodes": [{
+                "id": "review", "prompt": "review", "access": "read_only", "routes": [
+                    {"adapter": "cursor", "model": "cursor/example"},
+                    {"adapter": "codex", "model": "codex/example"}
+                ]
+            }]
+        }))
+        .expect("graph fixture");
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                preparation_refusal("host/a", failure),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..FakeOwner::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default())
+            .expect("typed preparation fallback advances");
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(owner.calls.len(), 2);
+        assert_eq!(run.checkpoint.nodes[0].attempts[0].outcome, Some(failure));
+        assert_eq!(
+            run.checkpoint.nodes[0].attempts[1].outcome,
+            Some(AttemptOutcome::Succeeded)
+        );
+    }
 }
 
 #[test]
@@ -825,10 +828,12 @@ fn reader_auth_restart_uses_the_declared_successor_account() {
 }
 
 #[test]
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
 fn fallback_reports_unreadable_evidence() {
     let mut task = node("node", route("first"));
     task.route = None;
     task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
     let mut owner = FakeOwner {
         fail_fallback_evidence: true,
         observations: VecDeque::from([AttemptObservation::Terminal {
@@ -845,12 +850,23 @@ fn fallback_reports_unreadable_evidence() {
         }]),
         ..FakeOwner::default()
     };
-    let run = advance(
-        &graph(vec![task]),
+    owner.now = Some(at(0));
+    let mut journal = MemoryJournal::default();
+    let waiting = advance(
+        &document,
         &mut owner,
-        &mut MemoryJournal::default(),
+        &mut journal,
     )
     .unwrap();
+    let retry = waiting.checkpoint.nodes[0]
+        .fallback_evidence_retry
+        .as_ref()
+        .expect("unreadable custody starts a bounded re-observation");
+    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(retry.key, waiting.checkpoint.nodes[0].attempts[0].key);
+    let deadline = retry.deadline;
+    owner.now = Some(deadline);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(
         run.checkpoint.nodes[0].advance_error_code.as_deref(),
@@ -859,10 +875,12 @@ fn fallback_reports_unreadable_evidence() {
 }
 
 #[test]
-fn live_fallback_without_release_proof_stops() {
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+fn missing_fallback_evidence_waits_briefly_then_refuses() {
     let mut task = node("node", route("first"));
     task.route = None;
     task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([preparation_refusal(
             "host/attempt",
@@ -870,14 +888,19 @@ fn live_fallback_without_release_proof_stops() {
         )]),
         omit_fallback_evidence: true,
         fallback_cause: Some(provenant_records::RouteExclusionReason::StaleAvailability),
+        now: Some(at(0)),
         ..Default::default()
     };
-    let result = advance(
-        &graph(vec![task]),
-        &mut owner,
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
+    let mut journal = MemoryJournal::default();
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+    let retry = waiting.checkpoint.nodes[0]
+        .fallback_evidence_retry
+        .as_ref()
+        .expect("missing custody evidence starts a bounded re-observation");
+    let deadline = retry.deadline;
+    owner.now = Some(deadline);
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(owner.calls.len(), 1);
     let reason = result.checkpoint.nodes[0].advance_error.as_deref().unwrap();
@@ -888,50 +911,46 @@ fn live_fallback_without_release_proof_stops() {
 }
 
 #[test]
-fn resumed_fallback_requires_current_local_custody_evidence() {
-    let mut task = node("node", route("first"));
-    task.route = None;
-    task.routes = Some(vec![route("first"), route("second")]);
-    let document = graph(vec![task]);
-    let first = AttemptObservation::Terminal {
-        attempt_ref: Some("host/attempt".into()),
-        outcome: AttemptOutcome::AuthRequired,
-        launched: false,
-        result: None,
-        result_warning: None,
-        result_path: None,
-        branch: None,
-        commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
-        stop: None,
-    };
-    let mut owner = FakeOwner {
-        observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let result = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(result.checkpoint.nodes[0].attempts.len(), 2);
-    let mut checkpoint = result.checkpoint;
-    let progress = &mut checkpoint.nodes[0];
-    progress.attempts.pop();
-    progress.state = NodeState::Running;
-    progress.outputs = None;
-    let mut restarted = FakeOwner::default();
-    let mut journal = MemoryJournal(Some(checkpoint));
-    let stopped = advance(&document, &mut restarted, &mut journal).unwrap();
-    assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(
-        stopped.checkpoint.nodes[0].advance_error_code.as_deref(),
-        Some("fallback_evidence_unavailable")
-    );
-    assert!(restarted.calls.is_empty());
-    let reason = stopped.checkpoint.nodes[0]
-        .advance_error
-        .as_deref()
-        .unwrap();
-    assert!(reason.contains("authentication"));
-    assert!(reason.contains("custody"));
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+fn fallback_evidence_reobservation_is_bounded_across_live_and_resumed_attempts() {
+    for restart in [false, true] {
+        for appears in [false, true] {
+            let mut task = node("node", route("first"));
+            task.route = None;
+            task.routes = Some(vec![route("first"), route("second")]);
+            let document = graph(vec![task]);
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([preparation_refusal("host/attempt", AttemptOutcome::AuthRequired)]),
+                omit_fallback_evidence: true,
+                now: Some(at(0)),
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+            let retry = waiting.checkpoint.nodes[0].fallback_evidence_retry.as_ref().unwrap().clone();
+            if restart {
+                owner = FakeOwner { omit_fallback_evidence: true, ..Default::default() };
+            }
+            // A re-read within the window cannot renew the original deadline.
+            owner.now = Some(retry.wake_at);
+            let still_waiting = advance(&document, &mut owner, &mut journal).unwrap();
+            let reread = still_waiting.checkpoint.nodes[0].fallback_evidence_retry.as_ref().unwrap();
+            assert_eq!(reread.deadline, retry.deadline);
+            assert_eq!(reread.key, retry.key);
+            assert_eq!(reread.attempt_ref, retry.attempt_ref);
+            owner.now = Some(if appears { reread.wake_at } else { retry.deadline });
+            if appears {
+                owner.omit_fallback_evidence = false;
+                owner.fallback_evidence.insert(retry.attempt_ref.clone(), provenant_records::run::PreparationFailure::AuthRequired);
+                owner.observations.push_back(terminal(AttemptOutcome::Succeeded));
+            }
+            let settled = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(settled.checkpoint.nodes[0].state, if appears { NodeState::Succeeded } else { NodeState::Failed });
+            assert_eq!(settled.checkpoint.nodes[0].attempts.len(), if appears { 2 } else { 1 });
+            assert_eq!(settled.checkpoint.nodes[0].attempts[0].key, retry.key);
+            assert!(settled.checkpoint.nodes[0].fallback_evidence_retry.is_none());
+        }
+    }
 }
 
 #[test]

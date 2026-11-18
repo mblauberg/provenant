@@ -7,6 +7,8 @@ use std::error::Error;
 pub(crate) enum NextAttempt {
     /// Persisted retry wake has not elapsed yet.
     WaitRetryWake,
+    /// Persist a later read of the same attempt's local custody evidence.
+    WaitFallbackEvidence(FallbackEvidenceRetry),
     /// Launch retry deadline passed without launch acceptance.
     LaunchRetryExhausted { reason: String },
     /// Node should fail with an optional error code and reason.
@@ -21,6 +23,103 @@ pub(crate) enum NextAttempt {
     },
     /// No further attempt for this node.
     None,
+}
+
+const FALLBACK_EVIDENCE_WINDOW_MICROS: u64 = 1_000_000;
+const FALLBACK_EVIDENCE_RETRY_MICROS: u64 = 100_000;
+
+pub(super) fn initial_fallback_evidence_retry(
+    key: &AttemptKey,
+    attempt_ref: &str,
+    now: provenant_core::WallTime,
+) -> Option<FallbackEvidenceRetry> {
+    let deadline = now
+        .checked_add(provenant_core::DurationMicros::from_micros(
+            FALLBACK_EVIDENCE_WINDOW_MICROS,
+        ))
+        .ok()?;
+    let wake_at = now
+        .checked_add(provenant_core::DurationMicros::from_micros(
+            FALLBACK_EVIDENCE_RETRY_MICROS,
+        ))
+        .ok()?;
+    Some(FallbackEvidenceRetry {
+        extra: Default::default(),
+        key: key.clone(),
+        attempt_ref: attempt_ref.to_owned(),
+        deadline,
+        wake_at: wake_at.min(deadline),
+    })
+}
+
+fn next_fallback_evidence_retry(
+    retry: &FallbackEvidenceRetry,
+    now: provenant_core::WallTime,
+) -> Option<FallbackEvidenceRetry> {
+    if now >= retry.deadline {
+        return None;
+    }
+    let wake_at = now
+        .checked_add(provenant_core::DurationMicros::from_micros(
+            FALLBACK_EVIDENCE_RETRY_MICROS,
+        ))
+        .ok()?
+        .min(retry.deadline);
+    Some(FallbackEvidenceRetry {
+        wake_at,
+        ..retry.clone()
+    })
+}
+
+pub(super) fn custody_release_pending(
+    node: &PlannedNode,
+    route_index: usize,
+    outcome: AttemptOutcome,
+    launched: bool,
+    mut facts: FallbackEvidence<'_>,
+) -> bool {
+    if launched || route_index + 1 >= node.routes.len() || facts.review_limit_reached {
+        return false;
+    }
+    let candidate = match facts.preparation {
+        Some(evidence)
+            if evidence.handoff == provenant_routing::FallbackHandoff::Local
+                && !evidence.custody_released
+                && expected_preparation_failure(outcome) == Some(evidence.failure) =>
+        {
+            Some(evidence)
+        }
+        Some(_) => return false,
+        None => expected_preparation_failure(outcome).map(|failure| PreparationFallbackEvidence {
+            failure,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+        }),
+    };
+    let Some(mut evidence) = candidate else {
+        return false;
+    };
+    evidence.custody_released = true;
+    facts.preparation = Some(evidence);
+    facts.unreadable = false;
+    matches!(
+        next_step::settlement_fallback_decision(node, route_index, outcome, launched, facts),
+        SettlementFallback::Continue
+    )
+}
+
+fn expected_preparation_failure(
+    outcome: AttemptOutcome,
+) -> Option<provenant_records::run::PreparationFailure> {
+    use provenant_records::run::PreparationFailure;
+    match outcome {
+        AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
+        AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
+        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+            Some(PreparationFailure::AdapterUnavailable)
+        }
+        _ => None,
+    }
 }
 
 /// Contention waits for this lane's launch deadline, independently of the
@@ -467,6 +566,50 @@ pub(super) fn next_attempt_transition(
     launch_clock: Option<provenant_core::WallTime>,
     facts: &NextAttemptFacts,
 ) -> NextAttemptDecision {
+    if let Some(retry) = &progress.fallback_evidence_retry {
+        let same_attempt = progress.attempts.last().is_some_and(|attempt| {
+            attempt.key == retry.key && attempt.attempt_ref.as_deref() == Some(&retry.attempt_ref)
+        });
+        if !same_attempt {
+            return NextAttemptDecision::Ready(NextAttempt::Fail {
+                code: Some("fallback_evidence_unavailable"),
+                message: Some(
+                    "Cannot verify local preparation and released custody for route fallback."
+                        .into(),
+                ),
+            });
+        }
+        let Some(now) = launch_clock else {
+            return NextAttemptDecision::Ready(NextAttempt::Fail {
+                code: Some("fallback_evidence_unavailable"),
+                message: Some(
+                    "Cannot verify local preparation and released custody for route fallback."
+                        .into(),
+                ),
+            });
+        };
+        if retry.wake_at > retry.deadline
+            || retry
+                .deadline
+                .as_micros()
+                .saturating_sub(retry.wake_at.as_micros())
+                > FALLBACK_EVIDENCE_WINDOW_MICROS as i64
+            || retry.deadline.as_micros().saturating_sub(now.as_micros())
+                > FALLBACK_EVIDENCE_WINDOW_MICROS as i64
+        {
+            return NextAttemptDecision::Ready(NextAttempt::Fail {
+                code: Some("fallback_evidence_unavailable"),
+                message: Some(
+                    "Cannot verify local preparation and released custody for route fallback."
+                        .into(),
+                ),
+            });
+        }
+        if now < retry.wake_at {
+            return NextAttemptDecision::Ready(NextAttempt::WaitRetryWake);
+        }
+    }
+
     // 1. A persisted launch wait defers this node until its own wake.
     if progress
         .launch_retry
@@ -646,6 +789,45 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                         })
                     })
                     .flatten();
+                let review_limit_reached = review_preparation_substitution(node, last)
+                    && progress
+                        .attempts
+                        .iter()
+                        .filter(|attempt| attempt.review_substitution)
+                        .count()
+                        >= limits.review_substitutions;
+                if denied
+                    && launch_clock.is_some()
+                    && custody_release_pending(
+                        node,
+                        usize::from(last.key.route_index),
+                        last.outcome.unwrap_or(AttemptOutcome::Unclassified),
+                        last.launched,
+                        FallbackEvidence {
+                            preparation: evidence,
+                            unreadable,
+                            review_limit_reached,
+                            cause: cause.as_ref(),
+                            skipped_accounts: &[],
+                        },
+                    )
+                {
+                    let Some(now) = launch_clock else {
+                        unreachable!("clock checked above")
+                    };
+                    let retry = progress
+                        .fallback_evidence_retry
+                        .as_ref()
+                        .map(|retry| next_fallback_evidence_retry(retry, now))
+                        .unwrap_or_else(|| {
+                            last.attempt_ref.as_deref().and_then(|reference| {
+                                initial_fallback_evidence_retry(&last.key, reference, now)
+                            })
+                        });
+                    if let Some(retry) = retry {
+                        return Ok(NextAttempt::WaitFallbackEvidence(retry));
+                    }
+                }
                 facts.fallback = Some(PreparationObservation {
                     evidence,
                     unreadable,

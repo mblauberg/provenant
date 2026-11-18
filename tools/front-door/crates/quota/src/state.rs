@@ -236,6 +236,17 @@ pub struct AccountRecord {
     pub capacity_cooldowns: Vec<crate::CapacityCooldown>,
 }
 impl AccountRecord {
+    /// A successful login check, distinct from a successful provider task.
+    pub fn successful_login_observed_at(&self) -> Option<i64> {
+        if self.last_error.is_some_and(ProbeFailure::needs_login) {
+            return None;
+        }
+        self.auth_state
+            .as_ref()
+            .filter(|auth| auth.signed_in == Some(true))
+            .and_then(|auth| auth.observed_unix_seconds)
+    }
+
     pub fn empty(account: AccountScope) -> Self {
         Self {
             extra: Default::default(),
