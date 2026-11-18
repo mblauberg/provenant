@@ -511,8 +511,10 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
 }
 #[derive(Deserialize, Serialize)]
 struct LogInput {
+    #[serde(default = "default_log_kind")]
     kind: String,
     markdown: String,
+    #[serde(default = "default_log_channel")]
     channel: String,
     #[serde(default)]
     request_ids: Vec<String>,
@@ -526,12 +528,39 @@ struct LogInput {
     correction_of: Option<u64>,
 }
 
+fn default_log_kind() -> String {
+    "markdown".into()
+}
+
+fn default_log_channel() -> String {
+    "chat".into()
+}
+
 fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
     Ok(serde_json::from_slice(&log_bytes(path)?)?)
 }
 
 fn log_request(path: &str) -> Result<(LogInput, Vec<provenant_records::InputWarning>), Error> {
-    Ok(provenant_records::decode_input(path, &log_bytes(path)?)?)
+    let bytes = log_bytes(path)?;
+    if let Ok(Value::Object(ref map)) = serde_json::from_slice::<Value>(&bytes)
+        && map.contains_key("markdown")
+    {
+        return Ok(provenant_records::decode_input(path, &bytes)?);
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|e| format!("input is not valid UTF-8: {e}"))?;
+    Ok((
+        LogInput {
+            kind: "markdown".into(),
+            markdown: text.to_string(),
+            channel: "chat".into(),
+            request_ids: Vec::new(),
+            attempt_ids: Vec::new(),
+            issue_ids: Vec::new(),
+            pr_ids: Vec::new(),
+            correction_of: None,
+        },
+        Vec::new(),
+    ))
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -749,6 +778,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
 #[error("a lane cannot append a chair log")]
 struct LaneAppend;
 
+#[allow(clippy::print_stderr)]
 fn log_run(command: ChairLog, globals: &Globals) -> u8 {
     use provenant_workflow::log::{Append, LogStore, Retention};
     let read_only = matches!(command, ChairLog::List { .. });
@@ -791,7 +821,21 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 if context.in_lane {
                     return Err(LaneAppend.into());
                 }
-                let (input, warnings) = log_request(&file)?;
+                let session_str = match session {
+                    Some(s) => s,
+                    None => {
+                        let host_session = context.host_chair_session().ok_or(
+                            "chair log append: no session specified and no host chair session found; provide --session",
+                        )?;
+                        eprintln!(
+                            "provenant: selected chair session {} from {}",
+                            host_session.session, host_session.source
+                        );
+                        host_session.session
+                    }
+                };
+                let file_path = file.as_deref().unwrap_or("-");
+                let (input, warnings) = log_request(file_path)?;
                 let config = provenant_cli::config_reads::read_for(&context.roots, "chair")?;
                 let settings = config.retention;
                 let retention = Retention {
@@ -803,7 +847,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 let entry = LogStore::new(
                     context.roots.state,
                     context.identity.project,
-                    HostSessionId::parse(&session)?,
+                    HostSessionId::parse(&session_str)?,
                 )
                 .append(
                     Append {
@@ -834,24 +878,25 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 after,
                 limit,
             } => {
-                let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(
-                    git,
-                    resolved.roots.state.as_path(),
+                let context = provenant_cli::fabric::Context::open_read_only(
+                    resolved.roots.clone(),
+                    &resolved.home,
+                    &resolved.project,
                 )?;
-                let executor = SystemExecutor::new(1)?;
-                let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
-                let location = runtime
-                    .project_location(
-                        &executor,
-                        &resolved.project,
-                        budget,
-                        &provenant_core::CancelToken::new(),
-                    )?
-                    .location;
-                let project = provenant_config::lookup_project(&resolved.roots, &location)?
-                    .ok_or("project not registered")?
-                    .project_id();
+                let (session_str, session_source) = match session {
+                    Some(s) => (s, "argument --session".to_string()),
+                    None => {
+                        let host_session = context.host_chair_session().ok_or(
+                            "chair log list: no session specified and no host chair session found; provide --session",
+                        )?;
+                        eprintln!(
+                            "provenant: selected chair session {} from {}",
+                            host_session.session, host_session.source
+                        );
+                        (host_session.session, host_session.source)
+                    }
+                };
+                let project = context.identity.project;
                 let settings =
                     provenant_cli::config_reads::read_for(&resolved.roots, "chair")?.retention;
                 let retention = Retention {
@@ -863,10 +908,13 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 let page = LogStore::new(
                     resolved.roots.state,
                     project,
-                    HostSessionId::parse(&session)?,
+                    HostSessionId::parse(&session_str)?,
                 )
                 .page(after, limit as usize, retention, clock.unix_seconds())?;
-                Ok(serde_json::to_value(page)?)
+                let mut data = serde_json::to_value(page)?;
+                data["session"] = json!(session_str);
+                data["session_source"] = json!(session_source);
+                Ok(data)
             }
         }
     })();
@@ -1260,6 +1308,122 @@ mod tests {
         let path = PathBuf::from(OsString::from_vec(vec![b'/', 0xff]));
         assert!(terminal_path(&path).is_err());
     }
+    #[test]
+    fn chair_log_request_table_test_markdown_and_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "# Title\n- item 1\n- item 2",
+                "markdown",
+                "# Title\n- item 1\n- item 2",
+                "chat",
+            ),
+            (
+                "Just simple markdown line",
+                "markdown",
+                "Just simple markdown line",
+                "chat",
+            ),
+            (
+                r#"{"kind":"update","markdown":"hello world","channel":"cli"}"#,
+                "update",
+                "hello world",
+                "cli",
+            ),
+            (
+                r#"{"markdown":"only markdown field"}"#,
+                "markdown",
+                "only markdown field",
+                "chat",
+            ),
+            (
+                r#"{"other":"no markdown field"}"#,
+                "markdown",
+                r#"{"other":"no markdown field"}"#,
+                "chat",
+            ),
+        ];
+
+        for (content, expected_kind, expected_md, expected_channel) in cases {
+            let path = dir.path().join("input.txt");
+            std::fs::write(&path, content).unwrap();
+            let (input, warnings) = super::log_request(path.to_str().unwrap()).unwrap();
+            assert_eq!(input.kind, expected_kind, "content: {content}");
+            assert_eq!(input.markdown, expected_md, "content: {content}");
+            assert_eq!(input.channel, expected_channel, "content: {content}");
+            assert!(warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn chair_log_append_and_list_roundtrip_markdown_and_json() {
+        use provenant_core::{OperationId, ProjectId, RootInputs, StateRoot};
+        use provenant_workflow::log::{Append, LogStore, Retention};
+        use provenant_workflow::session::HostSessionId;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let mut inputs = RootInputs::new(tmp.path().join("home"), tmp.path().join("checkout"));
+        inputs.state_dir = Some(state);
+        let root = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver).unwrap();
+        let project = ProjectId::from_bytes([1; 16]);
+        let session = HostSessionId::parse("test-sess").unwrap();
+        let store = LogStore::new(root, project, session);
+        let retention = Retention {
+            max_age_seconds: 86400,
+            replay_horizon_seconds: 3600,
+            max_entries: 100,
+            max_bytes: 1024 * 1024,
+        };
+        let cases = [
+            (
+                "raw markdown append",
+                "markdown",
+                "raw markdown append",
+                "chat",
+            ),
+            (
+                r#"{"kind":"progress","markdown":"json progress update","channel":"custom"}"#,
+                "progress",
+                "json progress update",
+                "custom",
+            ),
+        ];
+        for (i, (raw, exp_kind, exp_md, exp_channel)) in cases.iter().enumerate() {
+            let file = tmp.path().join(format!("entry-{i}.txt"));
+            std::fs::write(&file, raw).unwrap();
+            let (input, _) = super::log_request(file.to_str().unwrap()).unwrap();
+            assert_eq!(input.kind, *exp_kind);
+            assert_eq!(input.markdown, *exp_md);
+            assert_eq!(input.channel, *exp_channel);
+            store
+                .append(
+                    Append {
+                        operation_id: OperationId::parse(&format!("op-{i}")).unwrap(),
+                        issued_at: i as i64 + 1,
+                        host: "localhost".into(),
+                        kind: input.kind,
+                        markdown: input.markdown,
+                        request_ids: input.request_ids,
+                        attempt_ids: input.attempt_ids,
+                        issue_ids: input.issue_ids,
+                        pr_ids: input.pr_ids,
+                        channel: input.channel,
+                        correction_of: input.correction_of,
+                    },
+                    retention,
+                    i as i64 + 1,
+                )
+                .unwrap();
+        }
+        let page = store.page(None, 50, retention, 100).unwrap();
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].update.markdown, "raw markdown append");
+        assert_eq!(page.entries[0].update.kind, "markdown");
+        assert_eq!(page.entries[1].update.markdown, "json progress update");
+        assert_eq!(page.entries[1].update.kind, "progress");
+    }
+
     #[test]
     fn chair_hook_reserves_time_before_snapshot_and_launch() {
         use super::*;

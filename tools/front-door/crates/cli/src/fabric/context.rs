@@ -224,6 +224,40 @@ pub fn current_chair(context: &Context) -> Result<provenant_records::custody::Ch
     })
 }
 
+/// A host chair session with its source explanation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostChairSession {
+    pub session: String,
+    pub source: String,
+}
+
+impl Context {
+    /// The host chair session when known, and the source it came from.
+    pub fn host_chair_session(&self) -> Option<HostChairSession> {
+        if let Some(session) = current_session() {
+            return Some(HostChairSession {
+                session,
+                source: format!(
+                    "environment variable {}",
+                    provenant_core::consumer_env::SESSION_ID
+                ),
+            });
+        }
+        let actor = self.identity.inbox.actor;
+        if let Some(session) = provenant_workflow::session::chair_session_for(
+            &self.roots.state,
+            self.identity.project,
+            actor,
+        ) {
+            return Some(HostChairSession {
+                session: session.as_str().to_owned(),
+                source: format!("saved chair session for actor {actor}"),
+            });
+        }
+        None
+    }
+}
+
 /// Record a lifecycle acquisition without turning advisory custody into admission.
 pub fn acquire_custody(
     context: &Context,
@@ -1589,5 +1623,15 @@ node_prompt_bytes = 262144
             super::facade_outcome(&failure.error).1.code(),
             "PEER_VERSION"
         );
+    }
+
+    #[test]
+    fn host_chair_session_discovery() {
+        let hs = super::HostChairSession {
+            session: "chair-123".into(),
+            source: "saved chair session for actor test".into(),
+        };
+        assert_eq!(hs.session, "chair-123");
+        assert!(hs.source.contains("saved chair session"));
     }
 }
