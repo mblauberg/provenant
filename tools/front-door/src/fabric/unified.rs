@@ -3013,7 +3013,13 @@ pub(crate) fn read_lane_graph(
             &holder.roots.checkout,
             launch.configuration_root.clone(),
         )?;
-        let graph_directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
+        let graph_directory = if input["op"] == "prepare_child" {
+            // The admitted parent launch owns this path. A lane cannot choose
+            // another repository or worktree for host-side object preparation.
+            launch.cwd.as_path()
+        } else {
+            launch.graph_directory.as_deref().unwrap_or(&launch.cwd)
+        };
         let context = Context::open_inspection(roots, &holder.roots.home, graph_directory)?;
         if context.identity.project != holder.project_id {
             return Err("host graph project mismatch".into());
@@ -3035,6 +3041,11 @@ pub(crate) fn read_lane_graph(
         }
         if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
             return Err(FacadeError::Timeout.into());
+        }
+        if input["op"] == "prepare_child" {
+            return Ok(serde_json::to_value(
+                factory.child_request(&input["input"])?,
+            )?);
         }
         if input["op"] != "output" || input["trace"] == true {
             return Ok(factory.graph_document(input.clone(), budget, cancel)?);

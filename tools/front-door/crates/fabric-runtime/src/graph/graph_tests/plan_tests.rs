@@ -74,6 +74,7 @@ fn planner_fragment_writers_use_the_declared_worktree_template() {
 }
 
 #[test]
+// Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
 fn admission_planner_fragment_capability() {
     let fragment = json!({
         "schema_version": 1,
@@ -86,20 +87,13 @@ fn admission_planner_fragment_capability() {
     let output = format!("```fragment\n{}\n```", fragment);
     let mut owner = fixture_owner(&[&output]);
     let run = advance(&planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
-    );
-    assert!(
-        run.checkpoint
-            .pause_reason()
-            .unwrap()
-            .contains("invalid fragment"),
-        "{:?}",
-        run.checkpoint.pause_reason()
-    );
-    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    let child = &run.checkpoint.expansions[0].nodes[0];
+    assert_eq!(child.family_group.as_deref(), Some("group"));
+    let mut effective = planner(4);
+    plans::append(&mut effective, &run.checkpoint.expansions[0]);
+    assert_eq!(effective.schema_version, 2);
 }
 
 #[test]

@@ -1196,6 +1196,16 @@ fn constraints(path: &str) -> Vec<String> {
 mod tests {
     use super::*;
     #[test]
+    fn run_accepts_pinned_review_pr() {
+        let invocation = valid(&["run", "review.security", "--pr", "3465"]);
+        let Command::Run(request) = invocation.command else {
+            panic!("expected run");
+        };
+        assert_eq!(request.pr, Some(3465));
+        invalid(&["run", "review", "--pr", "0"]);
+    }
+
+    #[test]
     fn run_accepts_writer_branch_base_and_named_route() {
         let invocation = valid(&[
             "run",

@@ -163,6 +163,74 @@ fn lane_child_joins_the_same_graph_with_an_idempotent_receipt() {
     );
 }
 
+// Spec: docs/specs/routing.md#pinned-review-selection
+#[test]
+fn review_child_range_survives_v1_parent_and_checkpoint_reload() {
+    let (document, mut checkpoint) = live(None);
+    let base = "1".repeat(40);
+    let head = "2".repeat(40);
+    let mut request = child("review", "pinned-review-child");
+    request.launch = Some(relay::ChildLaunch {
+        templates: Default::default(),
+        node: json!({"id":"review", "access":"read_only", "prompt":"Review",
+            "review_behaviour":"lens", "route":{"alias":"senior"},
+            "source":{"type":"commit","commit":head}, "review_base":base}),
+    });
+    let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    assert_eq!(document.schema_version, 1);
+    let mut restored: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let effective = plans::expand(
+        &document,
+        &restored.extensions,
+        &restored.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    assert_eq!(effective.schema_version, 2);
+    effective.validate(&plans::generous()).unwrap();
+    let review = effective
+        .nodes
+        .iter()
+        .find(|node| node.id == receipt.node)
+        .unwrap();
+    assert_eq!(review.review_base.as_deref(), Some(base.as_str()));
+    assert_eq!(
+        serde_json::to_value(&review.source).unwrap()["commit"],
+        head
+    );
+    let plan = validate_flat_plan(&effective, &plans::generous())
+        .unwrap()
+        .0;
+    let before_identity =
+        envelope::checkpoint_bound(&document, &restored.expansions, &restored.extensions, &plan);
+    let mut with_identity = restored.clone();
+    with_identity
+        .expansions
+        .last_mut()
+        .unwrap()
+        .patch
+        .as_mut()
+        .unwrap()
+        .child_receipt
+        .as_mut()
+        .unwrap()
+        .run_request = Some(relay::RunRequestIdentity {
+        id: "f".repeat(32),
+        digest: format!("sha256:{}", "f".repeat(64)),
+    });
+    let after_identity = envelope::checkpoint_bound(
+        &document,
+        &with_identity.expansions,
+        &with_identity.extensions,
+        &plan,
+    );
+    assert!(after_identity <= before_identity);
+    let replay = add(&document, &mut restored, "a", &request).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(restored, checkpoint);
+}
+
 #[test]
 fn rich_child_attempt_controls_define_replay_identity_and_reach_the_launch() {
     let (document, mut checkpoint) = live(None);

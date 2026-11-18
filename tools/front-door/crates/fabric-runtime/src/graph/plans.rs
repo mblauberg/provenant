@@ -783,6 +783,11 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
             }
         }
     }
+    // Extensions are compiled independently of the original document. Their
+    // supported additive fields determine the effective graph's schema too.
+    document.schema_version = document
+        .schema_version
+        .max(u64::from(minimum_schema_version(document)));
     composites::resolve_writer_targets(document);
 }
 
@@ -1404,7 +1409,7 @@ pub(super) fn flatten_fragment(
         stub.required_verdict.clone_from(&existing.required_verdict);
         local_nodes.push(stub);
     }
-    let local = GraphDocument {
+    let mut local = GraphDocument {
         review: None,
         review_subject_missing: false,
         exclude: Vec::new(),
@@ -1431,6 +1436,9 @@ pub(super) fn flatten_fragment(
         decision_session: document.decision_session.clone(),
         integration_branch: document.integration_branch.clone(),
     };
+    local.schema_version = local
+        .schema_version
+        .max(u64::from(minimum_schema_version(&local)));
     // Composites and loops expand before the patch is checked, so the host
     // limits see every member and round.
     let mut local = loops::expand(&local, &[], &generous()).map_err(|error| error.to_string())?;

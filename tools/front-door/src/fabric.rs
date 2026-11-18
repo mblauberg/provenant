@@ -7,6 +7,7 @@ mod interface;
 #[cfg(test)]
 mod lane_read_tests;
 mod refusal_detail;
+mod review_subject;
 mod unified;
 pub(crate) use unified::{
     GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,

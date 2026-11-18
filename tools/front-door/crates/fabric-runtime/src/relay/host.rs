@@ -38,7 +38,8 @@ pub fn host_budget(
 const GRAPH_LAUNCH_MAX_SECONDS: u64 = provenant_core::WaitTransport::Cli.maximum_seconds() + 1;
 
 fn request_max_seconds(request: &Request) -> u64 {
-    if request.tool == GRAPH_TOOL && request.arguments["op"] == "add" {
+    if request.tool == GRAPH_TOOL && matches!(request.arguments["op"].as_str(), Some("add" | "run"))
+    {
         GRAPH_LAUNCH_MAX_SECONDS
     } else {
         super::MAX_WAIT_SECONDS
@@ -1174,6 +1175,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         for (tool, arguments, long) in [
             (GRAPH_TOOL, serde_json::json!({"op":"add"}), true),
+            (GRAPH_TOOL, serde_json::json!({"op":"run"}), true),
             (GRAPH_TOOL, serde_json::json!({"op":"children"}), false),
             ("fabric_events", request().arguments, false),
         ] {

@@ -757,11 +757,7 @@ fn override_launch(
     Ok(())
 }
 
-fn bind_submission_subject(
-    node: &mut provenant_fabric_runtime::graph::GraphNode,
-    head: &str,
-    subject_missing: bool,
-) {
+fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode, head: &str) {
     // An explicit composite source is inherited by its members. Loops resolve
     // their own subjects as writers advance, rather than freezing every round.
     if node.source.is_some() || node.loop_body.is_some() {
@@ -769,16 +765,32 @@ fn bind_submission_subject(
     }
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
-            bind_submission_subject(child, head, subject_missing);
+            bind_submission_subject(child, head);
         }
     } else if node.review_behaviour.is_some() {
-        if subject_missing {
-            node.prompt.insert_str(0, "No review subject was supplied on the command line; no host diff range is available. Request a pinned subject and base if the brief requires a diff.\n\n");
-        }
         node.prompt.push_str("\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The review lane has read-only Git metadata and cannot fetch; read the supplied commits and context.");
         node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
             commit: head.into(),
         });
+    }
+}
+
+fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base: &str) {
+    node.review_base = Some(base.into());
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_review_base(child, base);
+        }
+    }
+}
+
+fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, warning: &str) {
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_review_warning(child, warning);
+        }
+    } else if node.review_behaviour.is_some() {
+        node.prompt.insert_str(0, &format!("{warning}\n\n"));
     }
 }
 
@@ -1080,8 +1092,36 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        let request =
-            provenant_fabric_runtime::graph::relay::RelayOp::Add(self.child_request(input)?);
+        use provenant_fabric_runtime::graph::relay::RelayOp;
+        let pinned_review = input.get("pr").is_some_and(|value| !value.is_null())
+            || input.pointer("/set/subject").is_some()
+            || input.pointer("/set/review_base").is_some();
+        let request = if pinned_review {
+            // The lane has read-only Git metadata and no fetch authority. The
+            // host owns PR lookup, ref resolution and missing-object preparation.
+            let mut input = input.clone();
+            // One unnamed invocation stays replayable if its transport reply is
+            // lost; a separate invocation still gets a distinct child.
+            if input.get("name").is_none_or(Value::is_null)
+                && input
+                    .get("idempotency_key")
+                    .or_else(|| input.pointer("/document/idempotency_key"))
+                    .is_none_or(Value::is_null)
+            {
+                input["idempotency_key"] = json!(provenant_core::hex(
+                    &provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?
+                ));
+            }
+            let identity =
+                provenant_fabric_runtime::graph::relay::RunRequestIdentity::for_input(&input)
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+            RelayOp::Run {
+                request_id: identity.id,
+                input,
+            }
+        } else {
+            RelayOp::Add(self.child_request(input)?)
+        };
         if input["explain"] == true {
             return encode(request);
         }
@@ -1264,6 +1304,29 @@ impl Factory {
             }
         };
         let library = self.template_library(Some(&inline))?;
+        let template_name = input
+            .get("template")
+            .and_then(Value::as_str)
+            .or_else(|| node["use"].as_str())
+            .unwrap_or("task");
+        let review = library
+            .resolve(template_name)
+            .map_err(|_| invalid())?
+            .accepts_review_range();
+        let review_subject = self.review_subject(input, review)?;
+        let idempotency_key = if let Some(subject) = &review_subject
+            && name.is_some()
+            && input
+                .get("idempotency_key")
+                .or_else(|| raw.and_then(|document| document.get("idempotency_key")))
+                .is_none()
+        {
+            let mut pinned = input.clone();
+            pinned["review_subject"] = json!({"base":subject.base,"head":subject.head});
+            submission_digest(&pinned, Some(&subject.head), None)?
+        } else {
+            idempotency_key
+        };
         if full_document.is_none() {
             // The CLI brief is a node prompt; template parameters retain their names.
             for (field, node_field) in [("brief", "prompt"), ("over", "over")] {
@@ -1283,6 +1346,9 @@ impl Factory {
             if let Some(overrides) = input.get("set").filter(|value| !value.is_null()) {
                 let fields = parameters.as_object_mut().ok_or_else(invalid)?;
                 for (name, value) in overrides.as_object().ok_or_else(invalid)? {
+                    if review && matches!(name.as_str(), "subject" | "review_base") {
+                        continue;
+                    }
                     fields.insert(
                         name.clone(),
                         typed_binding(&template, &template_name, name, value)?,
@@ -1309,7 +1375,10 @@ impl Factory {
             &self.context.port_table,
         )?;
         node["id"] = json!(key);
-        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), None)?;
+        let range = review_subject
+            .as_ref()
+            .map(|subject| (subject.base.as_str(), subject.head.as_str()));
+        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), range)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
@@ -1335,6 +1404,16 @@ impl Factory {
         }
         let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
         override_launch(&mut typed, input)?;
+        if let Some(subject) = &review_subject {
+            if subject.base != subject.head {
+                bind_submission_subject(&mut typed, &subject.head);
+                bind_review_base(&mut typed, &subject.base);
+            }
+            if let Some(warning) = &subject.warning {
+                warn_operator(warning);
+                bind_review_warning(&mut typed, warning);
+            }
+        }
         self.validate_host_placement(&typed)?;
         compiled = encode(typed)?;
         // The relay is bound to the parent's graph, while the selected checkout
@@ -1756,47 +1835,10 @@ impl Factory {
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = declared.accepts_review_range();
-        let setting = |name: &str| -> Result<Option<&str>, FacadeError> {
-            match input.get("set").and_then(|set| set.get(name)) {
-                None => Ok(None),
-                Some(value) => value
-                    .as_str()
-                    .filter(|value| !value.is_empty())
-                    .map(Some)
-                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(name.into()))),
-            }
-        };
-        let subject = if review_launch {
-            setting("subject")?
-        } else {
-            None
-        };
-        let review_base = if review_launch {
-            setting("review_base")?
-        } else {
-            None
-        };
-        if review_launch && subject.is_some() != review_base.is_some() {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                "review requires both subject and review_base".into(),
-            )));
-        }
+        let review_subject = self.review_subject(input, review_launch)?;
         let git = provenant_os::git::git_executable();
-        let mut resolved_head = None;
-        let mut resolved_review_base = None;
-        if let (Some(subject), Some(base)) = (subject, review_base) {
-            let git = git
-                .as_deref()
-                .ok_or(FacadeError::InvalidInput { detail: None })?;
-            let head =
-                provenant_run::resolve_git_base(git, &self.cwd, subject).map_err(run_error)?;
-            let base = provenant_run::resolve_git_base(git, &self.cwd, base).map_err(run_error)?;
-            if base == head {
-                return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
-            }
-            resolved_head = Some(head);
-            resolved_review_base = Some(base);
-        }
+        let mut resolved_head = review_subject.as_ref().map(|subject| subject.head.clone());
+        let resolved_review_base = review_subject.as_ref().map(|subject| subject.base.clone());
         let review_range = resolved_review_base
             .as_deref()
             .zip(resolved_head.as_deref());
@@ -1841,7 +1883,12 @@ impl Factory {
         };
         let mut templates = effective_templates(&library, template_name, input);
         templates["$implement_plan_default"] = json!(self.context.config.implement.plan);
-        let digest = submission_digest(input, source_commit.as_deref(), Some(&templates))?;
+        let mut identity_input = input.clone();
+        if let Some(subject) = &review_subject {
+            identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
+        }
+        let digest =
+            submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?;
         let explain = input["explain"] == true;
         let (generated_id, taken) = if explain {
             (
@@ -2025,13 +2072,18 @@ impl Factory {
             )
             .map_err(|error| submission_patch_error(error, input))?
         };
-        if review_launch {
-            if let Some(base) = resolved_review_base {
-                document.review_base = Some(base);
-                document.schema_version = document.schema_version.max(2);
-            } else {
-                document.review_subject_missing = true;
-            }
+        if review_launch
+            && let Some(base) =
+                resolved_review_base.filter(|base| Some(base) != resolved_head.as_ref())
+        {
+            document.review_base = Some(base);
+            document.schema_version = document.schema_version.max(2);
+        }
+        if review_subject
+            .as_ref()
+            .is_some_and(|subject| subject.warning.is_some() && subject.base == subject.head)
+        {
+            document.review_subject_missing = true;
         }
         document.template_layers = library.snapshot_layers();
         document.template_library = library.snapshot();
@@ -2087,7 +2139,7 @@ impl Factory {
         }
         if let Some(head) = &resolved_head {
             for node in &mut document.nodes {
-                bind_submission_subject(node, head, review_launch && subject.is_none());
+                bind_submission_subject(node, head);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2100,6 +2152,14 @@ impl Factory {
         input_warnings.extend(self.graph_input_warnings(&bound)?);
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        if let Some(warning) = review_subject
+            .as_ref()
+            .and_then(|subject| subject.warning.as_ref())
+        {
+            for node in &mut document.nodes {
+                bind_review_warning(node, warning);
+            }
+        }
         document.set_replay_digest(&digest);
         let submission_key = format!("submit:{}", document.graph_id);
         patch::submission(
@@ -2130,6 +2190,9 @@ impl Factory {
             input,
             self.context.config.implement.warn_unbounded_junior,
         ));
+        if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
+            input_warnings.push(warning);
+        }
         input_warnings.sort();
         input_warnings.dedup();
         let warnings = input_warnings;
@@ -4104,8 +4167,234 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn review_fallback_warns_range_and_keeps_empty_context_free() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::review_fallback_warns_range_and_keeps_empty_context_free",
+        )? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input =
+            json!({"op":"run","template":"review.correctness","brief":"Review","explain":true});
+        let response = factory.graph_document(input.clone(), budget, &cancel)?;
+        assert!(response["document"]["review_base"].is_null());
+        assert_eq!(response["document"]["review_subject_missing"], true);
+        let child = factory
+            .child_request(&input)?
+            .launch
+            .ok_or("missing child")?
+            .node;
+        assert!(child["review_base"].is_null());
+        assert!(child["source"].is_null());
+        assert!(
+            child["prompt"]
+                .as_str()
+                .ok_or("prompt")?
+                .contains("empty range")
+        );
+        let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "tip"])?;
+        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["update-ref", "refs/remotes/origin/main", &head])?;
+        crate::worktree_tests::git(
+            &rig,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )?;
+        let response = factory.graph_document(input.clone(), budget, &cancel)?;
+        assert_eq!(response["document"]["review_base"], base);
+        assert_eq!(response["document"]["nodes"][0]["source"]["commit"], head);
+        assert!(
+            response["warnings"]
+                .as_array()
+                .ok_or("warnings")?
+                .iter()
+                .any(|warning| {
+                    warning.as_str().is_some_and(|warning| {
+                        warning.contains(&format!("{base}...{head}"))
+                            && warning.contains("first parent")
+                    })
+                })
+        );
+        let child = factory
+            .child_request(&input)?
+            .launch
+            .ok_or("missing child")?
+            .node;
+        assert_eq!(child["review_base"], base);
+        assert_eq!(child["source"]["commit"], head);
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::review_pr_pins_merge_branch_from_any_launch_checkout",
+        )? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        git(&["checkout", "-B", "main"])?;
+        git(&["checkout", "-b", "feature"])?;
+        std::fs::write(rig.project.join("feature.txt"), "feature\n")?;
+        git(&["add", "feature.txt"])?;
+        git(&["commit", "-m", "feature"])?;
+        git(&["checkout", "main"])?;
+        std::fs::write(rig.project.join("merged.txt"), "merged main\n")?;
+        git(&["add", "merged.txt"])?;
+        git(&["commit", "-m", "main change"])?;
+        git(&["checkout", "feature"])?;
+        git(&["merge", "--no-ff", "main", "-m", "merge main"])?;
+        let head = git(&["rev-parse", "HEAD"])?;
+        git(&["checkout", "main"])?;
+        std::fs::write(rig.project.join("later.txt"), "later main\n")?;
+        git(&["add", "later.txt"])?;
+        git(&["commit", "-m", "later main"])?;
+        let base = git(&["rev-parse", "HEAD"])?;
+        let metadata = rig.root.join("pull.json");
+        std::fs::write(
+            &metadata,
+            serde_json::to_vec(
+                &json!({"baseRefOid":base,"baseRefName":"main","headRefOid":head,"url":"https://github.com/owner/repo/pull/7"}),
+            )?,
+        )?;
+        // A command forge port exercises the host lookup without network or credentials.
+        std::fs::write(
+            rig.state.join("ports.json"),
+            serde_json::to_vec(&json!({
+                "schema_version":provenant_config::PORTS_SCHEMA_VERSION,
+                "forge":{"source":"host","backend":{"kind":"command","command":{
+                    "argv":["/bin/sh","-c","test \"$2\" = pr && test \"$3\" = view && test \"$4\" = 7 && /bin/cat \"$1\"","fixture",metadata],
+                    "exit_codes":{"success":[0],"unknown":[75],"other":"refused"}
+                }}}
+            }))?,
+        )?;
+        for checkout in ["main", "feature"] {
+            git(&["checkout", checkout])?;
+            let factory = factory(&rig)?;
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+            for template in ["review.correctness", "review-panel"] {
+                let request =
+                    json!({"op":"run","template":template,"brief":"Review","pr":7,"explain":true});
+                let response = factory.graph_document(request.clone(), budget, &cancel)?;
+                assert_eq!(response["document"]["review_base"], base);
+                let frame = factory.relay_document(&request, budget, &cancel)?;
+                assert_eq!(frame["op"], "run");
+                assert_eq!(frame["input"]["pr"], 7);
+                let git_path = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+                let holder = provenant_run::HolderContext {
+                    schema_version: 1,
+                    roots: provenant_run::RootSeed {
+                        home: rig.home.clone(),
+                        checkout: rig.project.clone(),
+                        state_root: rig.state.clone(),
+                    },
+                    project_id: factory.context.identity.project,
+                    actor_id: factory.context.identity.inbox.actor,
+                    attempt_id: provenant_core::AttemptId::from_bytes(
+                        provenant_os::fs::entropy_128()?,
+                    ),
+                    host_delivery: None,
+                    sealed: None,
+                    launch: Some(provenant_run::HostLaunchContext::from_environment(
+                        &rig.state,
+                        &rig.project,
+                        git_path.clone(),
+                    )),
+                };
+                let prepared = super::super::read_lane_graph(
+                    &holder,
+                    json!({"op":"prepare_child","input":frame["input"]}),
+                    &cancel,
+                    std::time::Duration::from_secs(30),
+                    &Workers,
+                )
+                .map_err(|error| format!("host preparation: {error:?}"))?;
+                assert_eq!(prepared["launch"]["node"]["review_base"], base);
+                if checkout == "main" && template == "review.correctness" {
+                    let repeated = super::super::read_lane_graph(
+                        &holder,
+                        json!({"op":"prepare_child","input":frame["input"]}),
+                        &cancel,
+                        std::time::Duration::from_secs(30),
+                        &Workers,
+                    )
+                    .map_err(|error| format!("host replay preparation: {error:?}"))?;
+                    assert_eq!(prepared["id"], repeated["id"]);
+                    assert_eq!(prepared["idempotency_key"], repeated["idempotency_key"]);
+                    let distinct = factory.relay_document(&request, budget, &cancel)?;
+                    assert_ne!(
+                        frame["input"]["idempotency_key"],
+                        distinct["input"]["idempotency_key"]
+                    );
+                    for control in ["name", "idempotency_key"] {
+                        let mut named = request.clone();
+                        named[control] = json!("stable-review");
+                        let first = factory.relay_document(&named, budget, &cancel)?;
+                        let retry = factory.relay_document(&named, budget, &cancel)?;
+                        assert_eq!(first["request_id"], retry["request_id"]);
+                        named["wait_seconds"] = json!(5);
+                        let changed_wait = factory.relay_document(&named, budget, &cancel)?;
+                        assert_eq!(first["request_id"], changed_wait["request_id"]);
+                    }
+                }
+                let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+                let expanded = document.expanded(&factory.context.config.graph.limits)?;
+                for node in expanded
+                    .nodes
+                    .iter()
+                    .filter(|node| node.review_behaviour.is_some())
+                {
+                    assert_eq!(serde_json::to_value(&node.source)?["commit"], head);
+                }
+                let child = factory.child_request(&request)?;
+                let another = factory.child_request(&request)?;
+                assert_ne!(child.id, another.id);
+                assert_ne!(child.idempotency_key, another.idempotency_key);
+                let child_node = child.launch.ok_or("missing launch")?.node;
+                assert_eq!(child_node["review_base"], base);
+                let git_path = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+                let context =
+                    provenant_run::review_diff_context_at(&git_path, &rig.project, &base, &head)?;
+                assert_eq!(context.paths, ["feature.txt"]);
+            }
+            for invalid in [
+                json!({"template":"task","pr":7}),
+                json!({"template":"review","pr":0}),
+                json!({"template":"review","pr":7,"set":{"subject":head,"review_base":base}}),
+            ] {
+                let mut invalid = invalid;
+                invalid["op"] = json!("run");
+                invalid["explain"] = json!(true);
+                assert!(
+                    factory
+                        .graph_document(invalid.clone(), budget, &cancel)
+                        .is_err()
+                );
+                assert!(factory.child_request(&invalid).is_err());
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn review_ref_binds_tip_until_launch() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::review_ref_binds_tip_until_launch",
+        )? {
+            return Ok(());
+        }
         let rig = crate::worktree_tests::repository()?;
         let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
@@ -4117,8 +4406,24 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let result = factory.graph_document(json!({"op":"run","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
+        let input = json!({"op":"run","name":"pinned-ref","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true});
+        let result = factory.graph_document(input.clone(), budget, &cancel)?;
+        let child = factory.child_request(&input)?;
         assert_eq!(result["document"]["review_base"], tip);
+        crate::worktree_tests::git(
+            &rig,
+            &["commit", "--allow-empty", "-m", "target advanced again"],
+        )?;
+        let advanced = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let changed = factory.graph_document(input.clone(), budget, &cancel)?;
+        let changed_child = factory.child_request(&input)?;
+        assert_eq!(changed["document"]["review_base"], advanced);
+        assert_ne!(
+            result["document"]["replay_digest"],
+            changed["document"]["replay_digest"]
+        );
+        assert_ne!(child.idempotency_key, changed_child.idempotency_key);
+        assert_eq!(child.launch.ok_or("child")?.node["review_base"], tip);
         Ok(())
     }
 
@@ -4292,6 +4597,11 @@ mod tests {
 
     #[test]
     fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit",
+        )? {
+            return Ok(());
+        }
         // `Factory::template_library` honours the caller's XDG directory. Run
         // this fixture with an empty user template root so unrelated templates
         // installed on the test host cannot invalidate inline task compilation.
@@ -4415,6 +4725,19 @@ mod tests {
         );
         assert_eq!(review["document"]["review_subject_missing"], true);
         assert!(
+            review["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| {
+                    warning.as_str().is_some_and(|text| {
+                        text.contains("No review subject was supplied")
+                            && text.contains("...")
+                            && text.contains("from ")
+                    })
+                })
+        );
+        assert!(
             review["document"]["nodes"][0]["prompt"]
                 .as_str()
                 .unwrap()
@@ -4452,6 +4775,7 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/routing.md#pinned-review-selection
     fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
         struct Reviewer(usize);
@@ -4500,6 +4824,11 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(
             factory.graph_document(preview, budget, &cancel)?["document"].clone(),
         )?;
+        assert!(
+            document.nodes[0]
+                .prompt
+                .contains("No review subject was supplied")
+        );
         let mut reviewer = Reviewer(0);
         let first = {
             let mut journal = FileJournal::open(
