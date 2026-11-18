@@ -102,6 +102,10 @@ fn write_grants_list_every_write_source() {
         git_grants_digest: [7; 32],
         publishing: true,
         common_git_dir: "/fixture/git".into(),
+        git_state: PathGrant {
+            path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
+            scope: PathScope::Subtree,
+        },
         cargo_cache: PathGrant {
             path: "/fixture/cache".into(),
             scope: PathScope::Subtree,
@@ -112,6 +116,15 @@ fn write_grants_list_every_write_source() {
         "/fixture/cache",
         PathScope::Subtree,
     ));
+    expected.extend(["git-common", "git-objects"].map(|name| {
+        grant(
+            WriteSource::GitState,
+            &format!(
+                "/fixture/home/Library/Application Support/provenant/worktree-git/fixture/{name}"
+            ),
+            PathScope::Subtree,
+        )
+    }));
     assert_eq!(write_grants(&plan, &profile), expected);
 
     plan.selected_authentication = None;
@@ -153,7 +166,22 @@ fn writer_grants_do_not_include_shared_branch_paths() {
         path: "/fixture/cache".into(),
         scope: PathScope::Subtree,
     };
-    assert_ne!(grants.digest(&cache), other.digest(&cache));
+    let git_state = PathGrant {
+        path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
+        scope: PathScope::Subtree,
+    };
+    let other_git_state = PathGrant {
+        path: "/fixture/home/Library/Application Support/provenant/worktree-git/other".into(),
+        scope: PathScope::Subtree,
+    };
+    assert_ne!(
+        grants.digest(&cache, &git_state),
+        other.digest(&cache, &git_state)
+    );
+    assert_ne!(
+        grants.digest(&cache, &git_state),
+        grants.digest(&cache, &other_git_state)
+    );
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -195,6 +223,12 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
                 git_grants_digest: [7; 32],
                 publishing: true,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,
@@ -316,6 +350,12 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
                 git_grants_digest: [7; 32],
                 publishing: true,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: subtree("/fixture/cache"),
             }));
         }
@@ -385,6 +425,10 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         git_grants_digest: [0; 32],
         publishing: true,
         common_git_dir: "/fixture/git".into(),
+        git_state: PathGrant {
+            path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
+            scope: PathScope::Subtree,
+        },
         cargo_cache: PathGrant {
             path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             scope: PathScope::Subtree,
@@ -409,7 +453,8 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
 
 #[test]
 #[allow(clippy::disallowed_methods)]
-fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn std::error::Error>> {
+fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
+-> Result<(), Box<dyn std::error::Error>> {
     let fixture = crate::test_support::Fixture::new()?;
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
@@ -425,6 +470,7 @@ fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn s
                 path.to_str().ok_or("path")?,
             ])?;
             let worktree = crate::repo::verify_worktree(&fixture.repo, &path)?;
+            crate::worktrees::acquire_worktree_subject(worktree.repo())?;
             let branch = GitRefName::branch(&branch)?;
             let authority =
                 WorktreeWriteAuthority::for_worktree(&worktree, &branch, &home, &credentials)?;
@@ -469,13 +515,27 @@ fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn s
                     .join(crate::cache::CARGO_CACHE_OWNER)
                     .is_file()
             );
+            for path in [
+                authority
+                    .git_state
+                    .path
+                    .parent()
+                    .ok_or("Git state namespace")?
+                    .to_owned(),
+                authority.git_state.path.clone(),
+                authority.git_state.path.join("git-common"),
+                authority.git_state.path.join("git-objects"),
+            ] {
+                let directory = Directory::open_anchor(&path)?;
+                verify_cache_metadata(&directory.metadata()?)?;
+            }
         }
     }
     Ok(())
 }
 
 #[test]
-fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
+fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::repo::verify_worktree;
     use std::os::unix::fs::PermissionsExt;
@@ -491,7 +551,9 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
             branch,
             path.to_str().ok_or("path")?,
         ])?;
-        Ok::<_, Box<dyn std::error::Error>>(verify_worktree(&fixture.repo, path)?)
+        let worktree = verify_worktree(&fixture.repo, path)?;
+        crate::worktrees::acquire_worktree_subject(worktree.repo())?;
+        Ok::<_, Box<dyn std::error::Error>>(worktree)
     };
     let path = fixture._temp.path().join("package");
     let linked = add(&fixture, &path, "cache-test")?;
@@ -503,11 +565,20 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
         &provenant_core::CredentialRoots::for_home(&home),
     )?;
     let cache = &authority.cargo_cache.path;
+    let git_state = authority.git_state.path.clone();
     assert_eq!(
         cache.parent(),
         Some(home.join("Library/Caches/provenant-lane-cargo").as_path())
     );
     assert_eq!(cache.file_name().ok_or("cache name")?.len(), 64);
+    assert_eq!(git_state.file_name().ok_or("Git state name")?.len(), 64);
+    assert_eq!(
+        git_state.parent(),
+        Some(
+            home.join("Library/Application Support/provenant/worktree-git")
+                .as_path()
+        )
+    );
     assert_eq!(
         authority,
         WorktreeWriteAuthority::for_worktree(
@@ -517,6 +588,17 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
             &provenant_core::CredentialRoots::for_home(&home)
         )?
     );
+    let other_branch_state =
+        worktree_git_state_path(&home, &linked, &GitRefName::branch("another-branch")?)?;
+    assert_ne!(git_state, other_branch_state);
+    let mut credential_roots = provenant_core::CredentialRoots::default();
+    credential_roots.add(
+        git_state.clone(),
+        provenant_core::CredentialScope::Subtree,
+        "test secret root",
+        provenant_core::CredentialKind::Store,
+    );
+    assert!(worktree_git_state(&home, &linked, &selected_ref, &credential_roots).is_err());
 
     let other_linked = add(&other, &other._temp.path().join("package"), "cache-test")?;
     assert_ne!(
@@ -528,6 +610,17 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
             &provenant_core::CredentialRoots::for_home(&home)
         )?
         .cargo_cache
+        .path
+    );
+    assert_ne!(
+        git_state,
+        WorktreeWriteAuthority::for_worktree(
+            &other_linked,
+            &selected_ref,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
+        .git_state
         .path
     );
     let sibling_path = fixture._temp.path().join("nested/package");
@@ -542,6 +635,17 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
             &provenant_core::CredentialRoots::for_home(&home)
         )?
         .cargo_cache
+        .path
+    );
+    assert_ne!(
+        git_state,
+        WorktreeWriteAuthority::for_worktree(
+            &sibling,
+            &GitRefName::branch("sibling")?,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
+        .git_state
         .path
     );
 
@@ -616,6 +720,17 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
         .cargo_cache
         .path
     );
+    assert_ne!(
+        git_state,
+        WorktreeWriteAuthority::for_worktree(
+            &recreated,
+            &GitRefName::branch("recreated")?,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
+        .git_state
+        .path
+    );
     Ok(())
 }
 
@@ -645,6 +760,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     )?;
     assert_eq!(added.termination, Termination::Exit(0));
     let linked = verify_worktree(&fixture.repo, &worktree_path)?;
+    crate::worktrees::acquire_worktree_subject(linked.repo())?;
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
     assert_ne!(private, common);
@@ -667,9 +783,17 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
 
     prepare_writer_directories(&linked, &selected_ref, &authority, &home, &credentials)?;
     let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
+    assert_eq!(authority.git_state.scope, PathScope::Subtree);
+    assert_eq!(
+        authority.git_state.path.parent(),
+        Some(
+            home.join("Library/Application Support/provenant/worktree-git")
+                .as_path()
+        )
+    );
     assert_eq!(
         authority.git_grants_digest,
-        grants.digest(&authority.cargo_cache)
+        grants.digest(&authority.cargo_cache, &authority.git_state)
     );
     assert_eq!(grants.common_git_dir.path, common);
     assert_eq!(grants.private_git_dir.path, private);
@@ -688,6 +812,15 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         common.join("info"),
         common.join("objects"),
         authority.cargo_cache.path.clone(),
+        authority
+            .git_state
+            .path
+            .parent()
+            .ok_or("Git state namespace")?
+            .to_owned(),
+        authority.git_state.path.clone(),
+        authority.git_state.path.join("git-common"),
+        authority.git_state.path.join("git-objects"),
         private_logs.clone(),
         common_heads,
         common_logs,
@@ -765,11 +898,27 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
+    let mut tampered = authority.clone();
+    tampered.git_state.path = fixture._temp.path().join("other-git-state");
+    assert!(matches!(
+        verify_worktree_authority(
+            &tampered,
+            &anchors,
+            &provenant_core::CredentialRoots::for_home(anchors.home)
+        ),
+        Err(PermissionError::GitWriteAuthorityMissing)
+    ));
     let mut missing = serde_json::to_value(&authority)?;
     missing
         .as_object_mut()
         .ok_or("authority fields")?
         .remove("common_git_dir");
+    assert!(serde_json::from_value::<WorktreeWriteAuthority>(missing).is_err());
+    let mut missing = serde_json::to_value(&authority)?;
+    missing
+        .as_object_mut()
+        .ok_or("authority fields")?
+        .remove("git_state");
     assert!(serde_json::from_value::<WorktreeWriteAuthority>(missing).is_err());
 
     let original_head = std::fs::read(private.join("HEAD"))?;

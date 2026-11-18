@@ -838,7 +838,6 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
         "remove",
         "detached-unique",
         "final-refusal",
-        "contended-refusal",
         "cancelled-refusal",
     ] {
         let refuse = !matches!(scenario, "remove" | "detached-unique");
@@ -883,36 +882,9 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
                 .is_err()
         );
         let final_writer_held = std::cell::Cell::new(false);
-        let holder = std::cell::RefCell::new(None);
         let collection_cancel = cancel();
         let no_live = |_: &Path| {
-            if scenario == "contended-refusal"
-                && let Ok(state) = context.project_state.open_verified_directory(&state_name)
-                && matches!(
-                    state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
-                    Err(FsError::LockTimeout { .. })
-                )
-            {
-                let repository = context
-                    .repo
-                    .common_dir()
-                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                    .unwrap();
-                holder.replace(Some(repository));
-                return false;
-            }
-            if matches!(
-                context
-                    .repo
-                    .common_dir()
-                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive),
-                Err(FsError::LockTimeout { .. })
-            ) {
-                let Ok(state) = context.project_state.open_verified_directory(&state_name) else {
-                    // A concurrent test's fork can briefly inherit the
-                    // repository lock before this call establishes state.
-                    return true;
-                };
+            if let Ok(state) = context.project_state.open_verified_directory(&state_name) {
                 final_writer_held.set(matches!(
                     state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
                     Err(FsError::LockTimeout { .. })
@@ -971,11 +943,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
         } else {
             assert!(branch_exists(&fixture, "native-no-state"));
         }
-        if let Some(holder) = holder.into_inner() {
-            drop(holder);
-        } else {
-            assert!(final_writer_held.get());
-        }
+        assert!(final_writer_held.get());
         assert!(
             context
                 .project_state
@@ -1101,27 +1069,6 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Records whether the repository lock was held during each census.
-struct LockProbeWorkers<'a> {
-    common: &'a Directory,
-    repository_held: std::sync::Mutex<Vec<bool>>,
-}
-
-impl WorkerObserver for LockProbeWorkers<'_> {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-        let held = self
-            .common
-            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-            .is_err();
-        self.repository_held.lock().unwrap().push(held);
-        roots
-            .iter()
-            .cloned()
-            .map(|root| (root, Occupancy::Available))
-            .collect()
-    }
-}
-
 /// Mutable census evidence for testing a freshness boundary.
 struct FlippingWorkers {
     unknown: std::sync::atomic::AtomicBool,
@@ -1224,83 +1171,6 @@ fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>
     )?;
     assert_eq!(created.path, expected_path,);
     assert!(created.path.join(".git").exists());
-    Ok(())
-}
-
-/// Worktree creation and writer setup use one common-directory mutation owner.
-#[test]
-fn worktree_creation_excludes_writer_configuration_updates() -> Result<(), Box<dyn Error>> {
-    struct MutationProbe<'a> {
-        inner: &'a dyn Executor,
-        common: &'a Directory,
-        observed: std::sync::atomic::AtomicBool,
-    }
-    impl Executor for MutationProbe<'_> {
-        fn execute(
-            &self,
-            options: provenant_os::exec::ExecOptions<'_>,
-        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            if options.argv.iter().any(|word| word == "worktree")
-                && options.argv.iter().any(|word| word == "add")
-            {
-                assert!(
-                    matches!(
-                        self.common
-                            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive),
-                        Err(FsError::LockTimeout { .. })
-                    ),
-                    "worktree addition must exclude configuration writers"
-                );
-                self.observed
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            self.inner.execute(options)
-        }
-    }
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let mut context = test.context();
-    context.lock_budget = WaitBudget::nonblocking(context.clock.mono_now());
-    let cancel = cancel();
-    let setup = lock_repository(
-        context.repo.common_dir(),
-        LockMode::Exclusive,
-        context.lock_budget,
-        &cancel,
-        context.clock,
-    )?;
-    let request = WorktreeCreate {
-        branch: "shared-mutation-owner".into(),
-        base: Some(fixture.head()?.to_string()),
-    };
-    assert!(matches!(
-        create(&context, request.clone(), &cancel),
-        Err(WorktreeError::RegistryLockTimeout)
-    ));
-    assert!(
-        !fixture
-            .root
-            .join(".worktrees/shared-mutation-owner")
-            .exists()
-    );
-    // A completed sibling setup legitimately invalidates our old config digest.
-    fixture.run(&["config", "--local", "branch.sibling.remote", "origin"])?;
-    drop(setup);
-    let probe = MutationProbe {
-        inner: context.executor,
-        common: context.repo.common_dir(),
-        observed: std::sync::atomic::AtomicBool::new(false),
-    };
-    context.executor = &probe;
-    let created = create(&context, request, &cancel)?;
-    assert!(created.path.is_dir());
-    assert!(probe.observed.load(std::sync::atomic::Ordering::SeqCst));
-    drop(
-        context
-            .repo
-            .common_dir()
-            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)?,
-    );
     Ok(())
 }
 

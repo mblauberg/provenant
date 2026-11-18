@@ -610,6 +610,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 request_digest: prepared.request.digest()?,
                 effective_network: task.access.network(task.writer.is_some()),
                 effective_database_ipc: task.access.database_ipc,
+                writer_worktree: None,
             }),
         };
         verify_lane_profile(

@@ -2891,7 +2891,7 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
     Ok(())
 }
 
-// Medium: intentionally omit the sixth descriptor at the real first exec.
+// Medium: intentionally omit the profile descriptor at the real first exec.
 // This does not require Seatbelt; refusal happens before the native backend.
 fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");

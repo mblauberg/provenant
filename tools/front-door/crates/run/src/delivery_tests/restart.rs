@@ -941,7 +941,7 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
             .ok_or("settlement owner")?;
         driver.set_head(launch.base)?;
         drop(driver);
-        let stage = format!("refs/provenant/import/{}", launch.base);
+        let stage = crate::objects::import_pin(id, launch.base);
         fixture.git(&["update-ref", &stage, &launch.base.to_string()])?;
         tests::seal_observation(&store, &input, &exit)?;
         let mut publication = tests::publication();
@@ -955,6 +955,51 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn terminal_cleanup_removes_only_its_import_pin()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.task.writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let attempt = store.attempt_dir(input.attempt_id, false)?;
+    let scope = RunStore::scope(&store.record(input.attempt_id, &call)?);
+    let launch = crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let own = crate::objects::import_pin(input.attempt_id, launch.base);
+    let sibling = crate::objects::import_pin(
+        provenant_core::AttemptId::from_bytes([0x9a; 16]),
+        launch.base,
+    );
+    let oid = launch.base.to_string();
+    fixture.git(&["update-ref", &own, &oid])?;
+    fixture.git(&["update-ref", &sibling, &oid])?;
+
+    crate::writer::cleanup_git_pins(
+        execution.state_root.as_path(),
+        &fixture.writer,
+        &attempt,
+        scope,
+        Some(launch.base),
+        true,
+    )?;
+
+    assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &own).is_err());
+    assert_eq!(
+        crate::objects::resolve_ref(&git, launch.worktree.repo(), &sibling)?,
+        launch.base
+    );
     Ok(())
 }
 

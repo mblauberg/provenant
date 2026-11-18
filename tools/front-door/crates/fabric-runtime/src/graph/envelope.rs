@@ -261,6 +261,7 @@ fn node_bound(
         repair_growth: None,
         review_verdict_correction_refused: None,
         provisioned_source: None,
+        provisioned_owner: None,
         warnings: Vec::new(),
         removed_requirements: node.removed_requirements.clone(),
         fragment: (plans::agent(node) && !admitted).then(String::new),

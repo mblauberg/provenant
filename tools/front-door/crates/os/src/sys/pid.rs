@@ -1,5 +1,80 @@
 use crate::pid::{CwdObservation, PidError, ProcessSignal, ProcessState};
 use std::io;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+/// Kernel supplied peer PID for a connected Unix stream. The process id is
+/// only a selector; callers must resolve it to a current native identity and
+/// validate the relationship they need before granting authority.
+#[cfg(target_os = "linux")]
+pub(crate) fn unix_peer_pid(stream: &std::os::unix::net::UnixStream) -> io::Result<i64> {
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
+    // SAFETY: `credentials` and `length` are writable for the syscall, and the
+    // stream owns a valid connected Unix descriptor for this call.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length as usize != std::mem::size_of_val(&credentials) || credentials.pid <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unix peer credentials are invalid",
+        ));
+    }
+    if credentials.uid != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unix peer belongs to another user",
+        ));
+    }
+    Ok(i64::from(credentials.pid))
+}
+
+/// Darwin's LOCAL_PEERPID is supplied by the kernel at connect time. The
+/// private relay directory already enforces the effective-user boundary.
+#[cfg(target_os = "macos")]
+pub(crate) fn unix_peer_pid(stream: &std::os::unix::net::UnixStream) -> io::Result<i64> {
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // SAFETY: `pid` and `length` are writable for the syscall, and the stream
+    // owns a valid connected Unix descriptor for this call.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length as usize != std::mem::size_of_val(&pid) || pid <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unix peer process id is invalid",
+        ));
+    }
+    Ok(i64::from(pid))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn unix_peer_pid(_stream: &std::os::unix::net::UnixStream) -> io::Result<i64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "kernel Unix peer process identity is unavailable",
+    ))
+}
 
 const MAX_EINTR_RETRIES: u64 = 8;
 const OCCUPANCY_ATTEMPTS: usize = 4;
@@ -1959,6 +2034,17 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unix_peer_pid_is_supplied_by_the_kernel() -> std::io::Result<()> {
+        let (client, _server) = std::os::unix::net::UnixStream::pair()?;
+        assert_eq!(
+            crate::pid::unix_peer_pid(&client)?,
+            i64::from(std::process::id())
+        );
+        Ok(())
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct Reaped(std::process::Child);
     #[cfg(any(target_os = "linux", target_os = "macos"))]

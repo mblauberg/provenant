@@ -2204,6 +2204,7 @@ mod result_tests {
         run.checkpoint.nodes[0].writer_binding =
             Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: Some(identity.clone()),
                 worktree: path.display().to_string(),
                 head: "1".repeat(40),
@@ -2240,6 +2241,7 @@ mod result_tests {
         run.checkpoint.nodes[0].writer_binding =
             Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: None,
                 worktree: "/private/host/writer".into(),
                 head: "1".repeat(40),

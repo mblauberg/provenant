@@ -220,6 +220,7 @@ impl AttemptOwner for FakeOwner {
         self.implicit_bindings += 1;
         Ok(Some(WriterWorktreeBinding {
             extra: Default::default(),
+            shared_worktree: None,
             source_directory_identity: None,
             worktree: if std::path::Path::new(worktree).is_absolute() {
                 worktree.to_owned()
@@ -234,13 +235,19 @@ impl AttemptOwner for FakeOwner {
         path: &str,
         branch: &str,
         base: &str,
+        _owner: Option<provenant_core::Digest>,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         self.provisions
             .push((path.into(), branch.into(), base.into()));
         self.implicit_head = Some(base.into());
         self.bind_writer_worktree(path)
     }
-    fn provision_child_worktree(&mut self, path: &str, source: &str) -> Result<bool, Self::Error> {
+    fn provision_child_worktree(
+        &mut self,
+        path: &str,
+        source: &str,
+        _owner: Option<provenant_core::Digest>,
+    ) -> Result<bool, Self::Error> {
         self.provisioned.push((path.into(), source.into()));
         if std::mem::take(&mut self.provision_fail_once) {
             return Err(NoObservation);

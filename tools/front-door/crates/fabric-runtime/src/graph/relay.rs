@@ -354,6 +354,17 @@ pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &s
     checkpoint.pending_writer_provisioning.insert(
         node.to_owned(),
         PendingWriterProvisioning {
+            owner: checkpoint
+                .pending_writer_provisioning
+                .get(node)
+                .and_then(|pending| pending.owner)
+                .or_else(|| {
+                    checkpoint
+                        .nodes
+                        .iter()
+                        .filter(|row| row.id == node || row.worktree.as_deref() == Some(path))
+                        .find_map(|row| row.provisioned_owner)
+                }),
             path: path.to_owned(),
             source: source.to_owned(),
         },

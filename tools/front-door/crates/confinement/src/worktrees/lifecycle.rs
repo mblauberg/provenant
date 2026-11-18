@@ -3,9 +3,9 @@ use super::*;
 use std::path::Component;
 
 /// Advance a free, registered linked worktree to a pinned descendant commit.
-/// Writer exclusion covers verification and mutation. Local edits, divergence
-/// and ignored files that would be overwritten always refuse the handoff. A
-/// checkout already ahead of the pin is left as it is.
+/// An actual advance holds exclusive occupancy and refuses local edits,
+/// divergence and ignored files that would be overwritten. An already
+/// satisfied pin observes the checkout without excluding its shared holders.
 pub fn fast_forward(
     context: &WorktreeContext<'_>,
     path: &Path,
@@ -32,6 +32,18 @@ pub fn fast_forward(
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let entry_head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
+    // Observing an already satisfied pin has no checkout effect. Shared
+    // holders may keep editing or committing; only an actual advance needs
+    // exclusive occupancy and a clean tree.
+    if !entry.locked
+        && !entry.prunable
+        && (entry_head == head || is_ancestor(context, head, entry_head, cancel)?)
+    {
+        let tree = verify_worktree(context.repo, &path)?;
+        tree.repo().revalidate_identity()?;
+        check_writer_terminal(tree.repo())?;
+        return Ok(());
+    }
     // Inventory is advisory until this worktree's writer custody is held.
     let locked = lock_worktree_for_launch(context, entry, cancel)?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
@@ -154,16 +166,15 @@ fn list_impl(
     matches: impl Fn(&Path, Option<&str>) -> bool,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
-    let entries = {
-        let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
-        context.repo.revalidate()?;
-        match reuse_inventory
-            .then(|| context.facts.cached_inventory(context))
-            .flatten()
-        {
-            Some(entries) => entries,
-            None => context.facts.capture_inventory(context, cancel)?,
-        }
+    // Git's worktree registry and refs use their own lock files. Capture a
+    // consistent inventory without serializing unrelated repository work.
+    context.repo.revalidate()?;
+    let entries = match reuse_inventory
+        .then(|| context.facts.cached_inventory(context))
+        .flatten()
+    {
+        Some(entries) => entries,
+        None => context.facts.capture_inventory(context, cancel)?,
     };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries
@@ -420,10 +431,9 @@ fn create_with_default(
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let facts = context.facts;
-    let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
-    // Another setup may have changed configuration while this caller waited.
-    // Retain structural custody, then take the dependent snapshots under the
-    // mutation owner instead of rejecting a legitimate sibling's config write.
+    // Reopen the verified repository before using configuration snapshots.
+    // Git replaces config atomically and locks each ref/registration mutation,
+    // so independent worktree creation can proceed in parallel.
     context.repo.revalidate_identity()?;
     let repo = context.utility.open_repo(
         context.executor,
@@ -486,10 +496,9 @@ fn create_with_default(
     }
     let create_branch = existing.is_none();
     if create_branch && request.base.is_none() && default.is_none() {
-        // Network discovery does not own the repository registry. Re-enter all
+        // Network discovery does not own Git mutations. Re-enter all
         // inventory, collision and branch checks after it completes, retaining
         // only the exact commit the remote fetch proved.
-        drop(_lock);
         let default = default_creation_base(context, facts, cancel)?;
         return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
@@ -624,9 +633,9 @@ fn create_with_default(
     // Release the verified checkout descriptors before allowing a sibling
     // launcher to inspect this newly created worktree.
     drop(verified);
-    // Still under the registry lock, so no sibling create can interleave
-    // between the ref mutation and its ownership record. A failed record
-    // leaves the branch unobserved, which only ever retains it.
+    // Git locks the ref mutation itself. A sibling may create another branch
+    // here; a failed ownership record leaves this branch unobserved, which
+    // only ever retains it.
     let mut warnings = naming_warnings;
     if create_branch && request.base.is_none() {
         warnings.extend(default.map_or_else(Vec::new, |(_, warnings)| warnings));
@@ -638,8 +647,7 @@ fn create_with_default(
         ));
     }
     // The mutation and registration checks are complete. The advisory census
-    // must not keep other branches from acquiring the repository registry.
-    drop(_lock);
+    // does not hold repository-wide custody.
     warnings.extend(setup::run(context, &target, branch.as_str(), cancel));
     // Setup may leave build output or local edits; report those honestly
     // without turning an advisory setup failure into a creation refusal.
@@ -910,6 +918,21 @@ pub(super) fn execute_mutation(
     // A failed or timed-out mutation may still have changed repository state.
     let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
+    if let GitMutation::DeleteRef {
+        name,
+        expected_old_oid,
+    } = &mutation
+        && name.as_str().starts_with("refs/heads/")
+    {
+        return match delete_ref_leased(context, name, *expected_old_oid, cancel)? {
+            RefDeletion::Removed | RefDeletion::Absent => Ok(()),
+            RefDeletion::CheckedOut => Err(WorktreeError::CheckedOut),
+            RefDeletion::Changed => Err(WorktreeError::MutationFailed {
+                operation: GitMutationOperation::DeleteRef,
+                lock_failure: false,
+            }),
+        };
+    }
     let operation = match &mutation {
         GitMutation::BundleCreate { .. } => GitMutationOperation::BundleCreate,
         GitMutation::CreatePreservationRef { .. } => GitMutationOperation::PreserveRef,
@@ -951,21 +974,6 @@ pub(super) struct RemovedTree {
     pub(super) info: WorktreeInfo,
     pub(super) lane_cache: Option<PathBuf>,
     pub(super) _writer: LockGuard,
-    /// Held when removal took the repository lock itself, so the caller can
-    /// settle the branch under it.
-    pub(super) repository: Option<LockGuard>,
-}
-
-/// How `remove_tree_when_before_delete` meets the repository lock.
-#[derive(Clone, Copy)]
-pub(super) enum Repository {
-    /// The caller holds it throughout.
-    Held,
-    /// Ordinary removal refreshes the census before locking, then rechecks
-    /// ownership under the repository lock.
-    Remove,
-    /// Explicit destructive authority, requiring an archive before mutation.
-    Discard,
 }
 
 /// The registration still names this tree with its branch and head, unheld.
@@ -1052,7 +1060,7 @@ fn preserve_unsubsumed_tip(
 }
 
 /// The same fenced removal core with one durable-authority callback after the
-/// final worktree and repository checks and immediately before Git mutation.
+/// final worktree checks and immediately before Git mutation.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn remove_tree_when_before_delete(
     context: &WorktreeContext<'_>,
@@ -1061,7 +1069,7 @@ pub(super) fn remove_tree_when_before_delete(
     cancel: &CancelToken,
     eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
-    repository: Repository,
+    discard: bool,
     before_delete: impl FnOnce(
         &VerifiedWorktree,
         &Path,
@@ -1093,7 +1101,7 @@ pub(super) fn remove_tree_when_before_delete(
         cancel,
         eligible,
         output,
-        repository,
+        discard,
         None,
         before_delete,
     )
@@ -1115,7 +1123,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
     cancel: &CancelToken,
     eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
-    repository: Repository,
+    discard: bool,
     before_output: Option<BeforeOutput<'_>>,
     before_delete: impl FnOnce(
         &VerifiedWorktree,
@@ -1154,7 +1162,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
     }
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
-    if prepared && !matches!(repository, Repository::Discard) {
+    if prepared && !discard {
         let settings = output.cloned().unwrap_or_default();
         gc::prepare_removal(
             context,
@@ -1163,36 +1171,22 @@ pub(super) fn remove_tree_when_before_delete_locked(
             &settings.keep,
             cancel,
         )?;
-        if matches!(
-            repository,
-            Repository::Held | Repository::Remove | Repository::Discard
-        ) {
-            refresh_census_under_custody(context, &canonical)?;
-        }
+        refresh_census_under_custody(context, &canonical)?;
     }
     // Output preparation can take time. Recheck registration, head and lane
-    // eligibility before removing the tree while writer exclusion is held.
-    let repository_guard = match repository {
-        Repository::Held => None,
-        Repository::Remove | Repository::Discard => {
-            // Any slow census happens before the repository lock is taken.
-            if prepared {
-                eligible(true)?;
-            }
-            Some(repository_lock(context, LockMode::Exclusive, cancel)?)
-        }
-    };
+    // eligibility before removing the tree while exclusive worktree custody is held.
+    if prepared {
+        eligible(true)?;
+    }
     context.repo.revalidate()?;
     tree_unchanged(
         &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
-    // The repository lock may be ours: only the cheap fence reruns under it.
-    eligible(repository_guard.is_none())?;
-    let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
+    eligible(true)?;
+    let submodules = verify_removal_submodules(context, locked.verified.repo(), cancel)?;
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
-    let discard = matches!(repository, Repository::Discard);
     removal_verdict(&cleanliness, discard, false)?;
     // Explicit discard always has a durable archive before its retirement intent
     // and Git mutation; the archive id and exact tip become the S2 proof.
@@ -1258,7 +1252,6 @@ pub(super) fn remove_tree_when_before_delete_locked(
         info,
         lane_cache: cargo_cache,
         _writer: writer,
-        repository: repository_guard,
     })
 }
 
@@ -1565,18 +1558,15 @@ pub(super) fn settle_branch(
         revalidate_landing_evidence_with_forge(context, tip, evidence, forge, cancel)?;
     }
     let _ = context.facts.take_inventory(context);
-    let deleted = execute_git_mutation(
-        context.executor,
-        context.repo,
-        context.utility,
+    let deleted = execute_mutation(
+        context,
         GitMutation::DeleteRef {
             name: branch.clone(),
             expected_old_oid: tip,
         },
-        context.mutation_budget,
         cancel,
     );
-    if deleted.is_ok_and(|result| exit_code(&result).ok() == Some(0)) {
+    if deleted.is_ok() {
         let short = branch.short_name().to_owned();
         if discard {
             outcome.discarded.push(DiscardedRef {
@@ -1641,15 +1631,8 @@ pub(super) fn remove_merged_candidate(
                 },
             },
         );
-    // A ref-only retirement has no worktree writer lock to keep the local
-    // generation stable. Take repository custody before its durable intent and
-    // hold it through the exact-tip branch settlement below.
-    let repository = if entry.is_none() {
-        Some(repository_lock(context, LockMode::Exclusive, cancel)?)
-    } else {
-        None
-    };
-    // Held until the ref is settled, so the writer lock covers the deletion.
+    // A removed worktree remains protected by its retained writer lease while
+    // the branch is settled. Ref-only deletion uses Git's expected-tip lock.
     let mut record = None;
     let mut held = match entry {
         None => {
@@ -1689,7 +1672,7 @@ pub(super) fn remove_merged_candidate(
                 cancel,
                 &eligible,
                 Some(output),
-                Repository::Remove,
+                false,
                 |verified, path, _archive| {
                     if path != canonical {
                         return Err(WorktreeError::IdentityChanged);
@@ -1742,13 +1725,11 @@ pub(super) fn remove_merged_candidate(
                 ) {
                     Ok(finished) => record = Some(finished),
                     Err(error) => {
-                        removed.repository = None;
                         detached.push(removed);
                         return Err(error);
                     }
                 }
             } else if retirement.is_some() {
-                removed.repository = None;
                 detached.push(removed);
                 return Err(WorktreeError::RegistrationUnconfirmed);
             }
@@ -1793,9 +1774,7 @@ pub(super) fn remove_merged_candidate(
         (Some(_), None) => Some(Err(WorktreeError::RegistrationUnconfirmed)),
         (None, _) => None,
     };
-    drop(repository);
-    if let Some(mut removed) = held.take() {
-        removed.repository = None;
+    if let Some(removed) = held.take() {
         detached.push(removed);
     }
     result?;
@@ -1979,7 +1958,7 @@ pub fn remove_with_retirement(
 }
 
 /// Remove a freshly created lane only while it is still owned by this operation.
-/// The owner is checked again under repository and writer custody.
+/// The owner is checked again under writer custody.
 #[cfg(test)]
 pub fn remove_created_by_operation(
     context: &WorktreeContext<'_>,
@@ -2077,11 +2056,7 @@ fn remove_with_owner(
                         cancel,
                         &eligible,
                         Some(output),
-                        if discard {
-                            Repository::Discard
-                        } else {
-                            Repository::Remove
-                        },
+                        discard,
                         |verified, path, archive| {
                             if let Some((port, authority)) = retirement {
                                 if path != canonical {
@@ -2217,7 +2192,6 @@ fn remove_with_owner(
                         outcome.archives.push(archive);
                     }
                     outcome.removed.push(removed.info.clone());
-                    removed.repository = None;
                     detached.push(removed);
                     if let Some(error) = finish_error {
                         return Err(error);
@@ -2278,7 +2252,6 @@ fn remove_with_owner(
                 }
                 outcome.removed.push(removed.info.clone());
                 if let Some(error) = finish_error {
-                    removed.repository = None;
                     detached.push(removed);
                     return Err(error);
                 }
@@ -2327,7 +2300,6 @@ fn remove_with_owner(
                     (Some(_), _, _) => Some(Err(WorktreeError::RegistrationUnconfirmed)),
                     (None, _, _) => None,
                 };
-                removed.repository = None;
                 detached.push(removed);
                 settled?;
                 if let Some(update) = retirement_update {

@@ -289,7 +289,7 @@ impl crate::LaunchSpec {
             serde_json::to_string(&format!("!{gh} auth git-credential"))
                 .map_err(|_| ProviderError::Malformed)?,
         );
-        let include = shell_quote(&format!(
+        let include = format!(
             "include.path={}",
             text(&config).map_err(|error| {
                 self.policy.boundary_error(
@@ -300,7 +300,7 @@ impl crate::LaunchSpec {
                     error,
                 )
             })?
-        ));
+        );
         self.git_wrapper.scrub = true;
         self.git_wrapper.include = Some(include);
         self.write_git_wrapper(&scratch.join("bin"), git)?;
@@ -613,19 +613,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             .as_bytes(),
         );
     }
-    // A cleared environment loses command-scope configuration. Restore the
-    // token helper in that case, ahead of any host helper; without a token,
-    // retain the publishing helper configured by the wrapper.
-    let helper = shell_quote(&format!(
-        "credential.https://github.com.helper={TOKEN_HELPER}"
-    ));
-    bytes.extend_from_slice(
-        format!(
-            "if [ -n \"$GH_TOKEN\" ]; then set -- -c credential.helper= -c {helper} \"$@\"; fi\n"
-        )
-        .as_bytes(),
-    );
-    bytes.extend_from_slice(b"exec '");
+    bytes.extend_from_slice(b"_provenant_git_program='");
     for byte in git {
         if *byte == b'\'' {
             bytes.extend_from_slice(b"'\\''");
@@ -634,13 +622,239 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
         }
     }
     bytes.push(b'\'');
-    let include = options
-        .include
-        .as_deref()
-        .map(|value| format!(" -c {value}"))
-        .unwrap_or_default();
+    bytes.extend_from_slice(b"\n_provenant_git_include=");
+    bytes.extend_from_slice(shell_quote(options.include.as_deref().unwrap_or_default()).as_bytes());
+    bytes.extend_from_slice(b"\n");
+    let helper = shell_quote(&format!(
+        "credential.https://github.com.helper={TOKEN_HELPER}"
+    ));
+    bytes.extend_from_slice(b"_provenant_git_helper=");
+    bytes.extend_from_slice(helper.as_bytes());
+    bytes.push(b'\n');
+    bytes.extend_from_slice(
+        br#"
+_provenant_git_retry_safe() {
+    [ "$#" -gt 0 ] || return 1
+    _provenant_git_explicit_config=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -C|--git-dir|--work-tree|--git-dir=*|--work-tree=*) return 1 ;;
+            -c|--config-env)
+                _provenant_git_explicit_config=1
+                shift
+                [ "$#" -gt 0 ] || return 1 ;;
+            --config-env=*) _provenant_git_explicit_config=1; shift ;;
+            --namespace|--attr-source|--super-prefix)
+                shift
+                [ "$#" -gt 0 ] || return 1 ;;
+            --namespace=*|--attr-source=*|--super-prefix=*|--no-pager|--paginate|--no-replace-objects|--no-optional-locks|--literal-pathspecs)
+                shift ;;
+            -*) return 1 ;;
+            *) break ;;
+        esac
+    done
+    [ "$#" -gt 0 ] || return 1
+    _provenant_git_command=$1
+    shift
+    case "$_provenant_git_command" in
+        add)
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --) return 0 ;;
+                    -A|--all|-u|--update|-N|--intent-to-add|-f|--force|--renormalize|--ignore-errors|--refresh|--no-refresh|--sparse|--no-sparse)
+                        shift ;;
+                    -*) return 1 ;;
+                    *) shift ;;
+                esac
+            done
+            return 0 ;;
+        commit)
+            case "$1" in
+                -m|--message)
+                    shift
+                    [ "$#" -gt 0 ] || return 1
+                    shift ;;
+                -m?*|--message=*) shift ;;
+                *) return 1 ;;
+            esac
+            if [ "$#" -gt 0 ]; then
+                [ "$1" = "--" ] || return 1
+            fi
+            [ "$_provenant_git_explicit_config" -eq 0 ] || return 1
+            if _provenant_git_has_hooks pre-commit prepare-commit-msg commit-msg post-commit post-rewrite reference-transaction; then return 1; fi
+            return 0 ;;
+        update-ref)
+            [ "$#" -ge 2 ] || return 1
+            while [ "$#" -gt 0 ]; do
+                case "$1" in -*) return 1 ;; esac
+                shift
+            done
+            [ "$_provenant_git_explicit_config" -eq 0 ] || return 1
+            if _provenant_git_has_hooks reference-transaction; then return 1; fi
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-    bytes.extend_from_slice(format!("{include} \"$@\"\n").as_bytes());
+_provenant_git_config() {
+    if [ -n "$_provenant_git_include" ]; then
+        "$_provenant_git_program" -c "$_provenant_git_include" config "$@"
+    else
+        "$_provenant_git_program" config "$@"
+    fi
+}
+
+_provenant_git_has_hooks() {
+    _provenant_git_hooks=$(_provenant_git_config --path --get core.hooksPath 2>/dev/null)
+    if [ -n "$_provenant_git_hooks" ]; then
+        [ "$_provenant_git_hooks" = "/dev/null" ] && return 1
+        return 0
+    fi
+    _provenant_git_hooks=$("$_provenant_git_program" rev-parse --git-path hooks 2>/dev/null) || return 0
+    case "$_provenant_git_hooks" in
+        /*) ;;
+        *) _provenant_git_cwd=$(pwd -P) || return 0
+           _provenant_git_hooks=$_provenant_git_cwd/$_provenant_git_hooks ;;
+    esac
+    for _provenant_git_hook in "$@"; do
+        [ ! -x "$_provenant_git_hooks/$_provenant_git_hook" ] || return 0
+    done
+    return 1
+}
+
+_provenant_git_retryable_lock() {
+    [ -s "$_provenant_git_tmp/stderr" ] || return 1
+    _provenant_git_lock_marker="Unable to create '"
+    _provenant_git_lock_found=0
+    while IFS= read -r _provenant_git_line || [ -n "$_provenant_git_line" ]; do
+        case "$_provenant_git_command:$_provenant_git_line" in
+            add:*|commit:*)
+                case "$_provenant_git_line" in
+                    "fatal: Unable to create '"*".lock': File exists.") ;;
+                    ""|"Another git process seems to be running in this repository, e.g."|"an editor opened by 'git commit'. Please make sure all processes"|"are terminated then try again. If it still fails, a git process"|"may have crashed in this repository earlier:"|"remove the file manually to continue.") continue ;;
+                    *) return 1 ;;
+                esac ;;
+            update-ref:*)
+                case "$_provenant_git_line" in
+                    "fatal: update_ref failed for ref '"*"': cannot lock ref '"*"': Unable to create '"*".lock': File exists.") ;;
+                    ""|"Another git process seems to be running in this repository, e.g."|"an editor opened by 'git commit'. Please make sure all processes"|"are terminated then try again. If it still fails, a git process"|"may have crashed in this repository earlier:"|"remove the file manually to continue.") continue ;;
+                    *) return 1 ;;
+                esac ;;
+            *) return 1 ;;
+        esac
+        _provenant_git_lock_rest=${_provenant_git_line#*"$_provenant_git_lock_marker"}
+        _provenant_git_lock_path=${_provenant_git_lock_rest%%\'*}
+        _provenant_git_lock_suffix=${_provenant_git_lock_rest#*\'}
+        _provenant_git_lock_suffix=${_provenant_git_lock_suffix#*: }
+        [ "$_provenant_git_lock_suffix" = "File exists." ] || return 1
+        [ "$_provenant_git_lock_found" -eq 0 ] || return 1
+        _provenant_git_lock_found=1
+        case "$_provenant_git_lock_path" in *.lock) ;; *) return 1 ;; esac
+        _provenant_git_dir=$("$_provenant_git_program" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+        _provenant_git_common=$("$_provenant_git_program" rev-parse --git-common-dir 2>/dev/null) || return 1
+        case "$_provenant_git_lock_path" in
+            /*) ;;
+            *) _provenant_git_cwd=$(pwd -P) || return 1
+               _provenant_git_lock_path=$_provenant_git_cwd/$_provenant_git_lock_path ;;
+        esac
+        case "$_provenant_git_dir" in
+            /*) ;;
+            *) _provenant_git_cwd=$(pwd -P) || return 1
+               _provenant_git_dir=$_provenant_git_cwd/$_provenant_git_dir ;;
+        esac
+        case "$_provenant_git_common" in
+            /*) ;;
+            *) _provenant_git_cwd=$(pwd -P) || return 1
+               _provenant_git_common=$_provenant_git_cwd/$_provenant_git_common ;;
+        esac
+        case "$_provenant_git_command:$_provenant_git_lock_path" in
+            add:"$_provenant_git_dir"/index.lock|commit:"$_provenant_git_dir"/index.lock) ;;
+            update-ref:"$_provenant_git_dir"/refs/*.lock|update-ref:"$_provenant_git_common"/refs/*.lock) ;;
+            *) return 1 ;;
+        esac
+    done < "$_provenant_git_tmp/stderr"
+    [ "$_provenant_git_lock_found" -eq 1 ]
+}
+
+if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then
+    if [ -n "$GH_TOKEN" ]; then set -- -c credential.helper= -c "$_provenant_git_helper" "$@"; fi
+    if [ -n "$_provenant_git_include" ]; then set -- -c "$_provenant_git_include" "$@"; fi
+    exec "$_provenant_git_program" "$@"
+fi
+if ! command -v mktemp >/dev/null 2>&1 || ! command -v mkfifo >/dev/null 2>&1 || ! command -v tee >/dev/null 2>&1 || ! command -v tail >/dev/null 2>&1 || ! command -v rm >/dev/null 2>&1 || ! command -v sleep >/dev/null 2>&1; then
+    if [ -n "$GH_TOKEN" ]; then set -- -c credential.helper= -c "$_provenant_git_helper" "$@"; fi
+    if [ -n "$_provenant_git_include" ]; then set -- -c "$_provenant_git_include" "$@"; fi
+    exec "$_provenant_git_program" "$@"
+fi
+if ! _provenant_git_retry_safe "$@"; then
+    if [ -n "$GH_TOKEN" ]; then set -- -c credential.helper= -c "$_provenant_git_helper" "$@"; fi
+    if [ -n "$_provenant_git_include" ]; then set -- -c "$_provenant_git_include" "$@"; fi
+    exec "$_provenant_git_program" "$@"
+fi
+if [ -n "$GH_TOKEN" ]; then set -- -c credential.helper= -c "$_provenant_git_helper" "$@"; fi
+if [ -n "$_provenant_git_include" ]; then set -- -c "$_provenant_git_include" "$@"; fi
+_provenant_git_tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-git.XXXXXX") || exec "$_provenant_git_program" "$@"
+trap 'rm -rf "$_provenant_git_tmp"' 0
+_provenant_git_child=
+_provenant_git_signal() {
+    _provenant_git_signal_name=$1
+    _provenant_git_signal_status=$2
+    if [ -n "$_provenant_git_child" ]; then
+        kill -s "$_provenant_git_signal_name" "$_provenant_git_child" 2>/dev/null || :
+        wait "$_provenant_git_child" 2>/dev/null || :
+        _provenant_git_child=
+    fi
+    [ -z "$_provenant_git_stderr_tee_pid" ] || kill -s "$_provenant_git_signal_name" "$_provenant_git_stderr_tee_pid" 2>/dev/null || :
+    [ -z "$_provenant_git_stdout_tee_pid" ] || kill -s "$_provenant_git_signal_name" "$_provenant_git_stdout_tee_pid" 2>/dev/null || :
+    [ -z "$_provenant_git_stderr_tail_pid" ] || kill -s "$_provenant_git_signal_name" "$_provenant_git_stderr_tail_pid" 2>/dev/null || :
+    [ -z "$_provenant_git_stdout_tail_pid" ] || kill -s "$_provenant_git_signal_name" "$_provenant_git_stdout_tail_pid" 2>/dev/null || :
+    exit "$_provenant_git_signal_status"
+}
+trap '_provenant_git_signal HUP 129' HUP
+trap '_provenant_git_signal INT 130' INT
+trap '_provenant_git_signal TERM 143' TERM
+_provenant_git_attempt=0
+_provenant_git_backoff=50
+while :; do
+    _provenant_git_attempt=$((_provenant_git_attempt + 1))
+    rm -f "$_provenant_git_tmp/stderr" "$_provenant_git_tmp/stdout" "$_provenant_git_tmp/err" "$_provenant_git_tmp/out" "$_provenant_git_tmp/err-capture" "$_provenant_git_tmp/out-capture"
+    mkfifo "$_provenant_git_tmp/err" "$_provenant_git_tmp/out" "$_provenant_git_tmp/err-capture" "$_provenant_git_tmp/out-capture" || exec "$_provenant_git_program" "$@"
+    tail -c 8192 < "$_provenant_git_tmp/err-capture" > "$_provenant_git_tmp/stderr" &
+    _provenant_git_stderr_tail_pid=$!
+    tail -c 1 < "$_provenant_git_tmp/out-capture" > "$_provenant_git_tmp/stdout" &
+    _provenant_git_stdout_tail_pid=$!
+    tee /dev/fd/3 "$_provenant_git_tmp/err-capture" < "$_provenant_git_tmp/err" 3>&2 > /dev/null &
+    _provenant_git_stderr_tee_pid=$!
+    tee /dev/fd/3 "$_provenant_git_tmp/out-capture" < "$_provenant_git_tmp/out" 3>&1 > /dev/null &
+    _provenant_git_stdout_tee_pid=$!
+    "$_provenant_git_program" "$@" 2> "$_provenant_git_tmp/err" 1> "$_provenant_git_tmp/out" &
+    _provenant_git_child=$!
+    wait "$_provenant_git_child"
+    _provenant_git_status=$?
+    _provenant_git_child=
+    wait "$_provenant_git_stderr_tee_pid"
+    _provenant_git_stderr_status=$?
+    wait "$_provenant_git_stdout_tee_pid"
+    _provenant_git_stdout_status=$?
+    wait "$_provenant_git_stderr_tail_pid"
+    _provenant_git_stderr_tail_status=$?
+    wait "$_provenant_git_stdout_tail_pid"
+    _provenant_git_stdout_tail_status=$?
+    _provenant_git_stderr_tee_pid=
+    _provenant_git_stdout_tee_pid=
+    _provenant_git_stderr_tail_pid=
+    _provenant_git_stdout_tail_pid=
+    rm -f "$_provenant_git_tmp/err" "$_provenant_git_tmp/out" "$_provenant_git_tmp/err-capture" "$_provenant_git_tmp/out-capture"
+    if [ "$_provenant_git_status" -ne 128 ] || [ "$_provenant_git_stderr_status" -ne 0 ] || [ "$_provenant_git_stdout_status" -ne 0 ] || [ "$_provenant_git_stderr_tail_status" -ne 0 ] || [ "$_provenant_git_stdout_tail_status" -ne 0 ] || [ "$_provenant_git_attempt" -ge 5 ] || ! _provenant_git_retryable_lock || [ -s "$_provenant_git_tmp/stdout" ]; then
+        exit "$_provenant_git_status"
+    fi
+    _provenant_git_jitter=$((($$ + _provenant_git_attempt * 37 + _provenant_git_attempt * _provenant_git_attempt * 11) % 50))
+    _provenant_git_delay=$((_provenant_git_backoff + _provenant_git_jitter))
+    sleep "0.$(printf '%03d' "$_provenant_git_delay")" || exit "$_provenant_git_status"
+    _provenant_git_backoff=$((_provenant_git_backoff * 2))
+done
+"#,
+    );
     Ok(bytes)
 }
 
@@ -1297,7 +1511,6 @@ mod tests {
             Some(std::fs::canonicalize(developer_git).unwrap())
         );
         assert_eq!(resolve_exec_path(&dir.path().join("absent")), None);
-        assert!(text.contains(" -c 'credential.https://github.com.helper="));
         assert!(!text.contains("secret"));
         let missing = git_wrapper(Path::new("/fixture/git"), &GitWrapper::default()).unwrap();
         assert!(
@@ -1313,15 +1526,15 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let dir = tempfile::tempdir()?;
         let wrapper = dir.path().join("git");
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
         let command = || {
-            let mut command = Command::new(&wrapper);
+            let mut command = provenant_os::fixture::git_command_at(&wrapper);
             command
                 .current_dir(dir.path())
                 .env_clear()
@@ -1421,7 +1634,7 @@ mod tests {
             &config,
             format!("[credential]\n helper = !{}\n", host_helper.display()),
         )?;
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         let wrapper = dir.path().join("git");
         std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
@@ -1431,11 +1644,11 @@ mod tests {
             ("GIT_CONFIG_VALUE_0".into(), "kept".into()),
         ];
         install_token_config(&mut env)?;
-        for (executable, with_config, token) in [
-            (&git, false, false),
-            (&git, true, true),
-            (&wrapper, true, true),
-            (&wrapper, false, true),
+        for (case, executable, with_config, token) in [
+            ("native without lane token", &git, false, false),
+            ("native with lane token", &git, true, true),
+            ("wrapper with config and token", &wrapper, true, true),
+            ("wrapper with token", &wrapper, false, true),
         ] {
             let mut child = provenant_os::fixture::git_command_at(executable)
                 .args(["credential", "fill"])
@@ -1448,6 +1661,7 @@ mod tests {
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()?;
             child
                 .stdin
@@ -1455,19 +1669,29 @@ mod tests {
                 .ok_or("stdin")?
                 .write_all(b"protocol=https\nhost=github.com\n\n")?;
             let output = child.wait_with_output()?;
-            assert!(output.status.success());
-            assert!(output.stdout.split(|b| *b == b'\n').any(|line| line
-                == if token {
-                    b"username=x-access-token".as_slice()
-                } else {
-                    b"username=hostuser".as_slice()
-                }));
-            assert!(output.stdout.split(|b| *b == b'\n').any(|line| line
-                == if token {
-                    b"password=fixture-token".as_slice()
-                } else {
-                    b"password=HOST-CRED".as_slice()
-                }));
+            assert!(
+                output.status.success(),
+                "credential fill failed for {case}; stderr={:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stdout.split(|b| *b == b'\n').any(|line| line
+                    == if token {
+                        b"username=x-access-token".as_slice()
+                    } else {
+                        b"username=hostuser".as_slice()
+                    }),
+                "credential username mismatch for {case}"
+            );
+            assert!(
+                output.stdout.split(|b| *b == b'\n').any(|line| line
+                    == if token {
+                        b"password=fixture-token".as_slice()
+                    } else {
+                        b"password=HOST-CRED".as_slice()
+                    }),
+                "credential password mismatch for {case}"
+            );
         }
         Ok(())
     }
@@ -2924,15 +3148,28 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        let position = script
-            .windows(5)
-            .position(|bytes| bytes == b"exec ")
-            .ok_or("missing exec")?;
-        script.splice(position..position + 5, b"printf '%s\\000' ".iter().copied());
+        let retry_gate = b"if ! _provenant_git_retry_safe \"$@\"; then\n";
+        let gate_end = script
+            .windows(retry_gate.len())
+            .position(|window| window == retry_gate)
+            .ok_or("missing retry gate")?
+            + retry_gate.len();
+        let direct_exec = b"    exec \"$_provenant_git_program\" \"$@\"\n";
+        let exec_offset = script[gate_end..]
+            .windows(direct_exec.len())
+            .position(|window| window == direct_exec)
+            .ok_or("missing direct Git exec")?
+            + gate_end;
+        script.splice(
+            exec_offset..exec_offset + direct_exec.len(),
+            b"    printf '%s\\000' \"$_provenant_git_program\" \"$@\"\n    exit 0\n"
+                .iter()
+                .copied(),
+        );
         let wrapper = dir.path().join("git-wrapper");
         std::fs::write(&wrapper, script)?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
-        let output = provenant_os::fixture::git_command_at(wrapper)
+        let output = provenant_os::fixture::git_command_at(&wrapper)
             .env_clear()
             .args(["status", "argument with spaces"])
             .output()?;
@@ -2946,6 +3183,443 @@ mod tests {
         .flat_map(|arg| arg.iter().copied().chain(std::iter::once(0)))
         .collect::<Vec<_>>();
         assert_eq!(output.stdout, expected);
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_retries_real_index_and_ref_locks_and_keeps_pathspec_commits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::{
+            io::{BufRead, BufReader, Read},
+            os::unix::fs::PermissionsExt,
+            process::Stdio,
+        };
+
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().join("repo");
+        let home = dir.path().join("home");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&bin)?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+        let base = || {
+            let mut command = provenant_os::fixture::git_command_at(&git);
+            command
+                .current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            command
+        };
+        assert!(base().args(["init", "-q"]).status()?.success());
+        for (key, value) in [
+            ("user.name", "Fixture"),
+            ("user.email", "fixture@example.test"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            assert!(base().args(["config", key, value]).status()?.success());
+        }
+        let wrapper = bin.join("git");
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let wrapped = |args: &[&str]| {
+            let mut command = provenant_os::fixture::git_command_at(&wrapper);
+            command
+                .args(args)
+                .current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            command
+        };
+
+        std::fs::write(repo.join("one"), "first path\n")?;
+        std::fs::write(repo.join("two"), "second path\n")?;
+        assert!(
+            wrapped(&["add", "--", "one", "two"])
+                .output()?
+                .status
+                .success()
+        );
+        assert!(
+            wrapped(&["commit", "-m", "first", "--", "one"])
+                .output()?
+                .status
+                .success()
+        );
+        assert!(
+            !base()
+                .args(["cat-file", "-e", "HEAD:two"])
+                .status()?
+                .success()
+        );
+        assert!(
+            wrapped(&["commit", "-m", "second", "--", "two"])
+                .output()?
+                .status
+                .success()
+        );
+        assert!(
+            base()
+                .args(["cat-file", "-e", "HEAD:two"])
+                .status()?
+                .success()
+        );
+
+        std::fs::write(repo.join("transient"), "retry once\n")?;
+        let index_lock = repo.join(".git/index.lock");
+        std::fs::write(&index_lock, "held by another Git process")?;
+        let mut child = wrapped(&["add", "--", "transient"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stderr = child.stderr.take().ok_or("Git stderr")?;
+        let release_lock = index_lock.clone();
+        let stderr_reader = std::thread::spawn(move || -> Result<Vec<u8>, std::io::Error> {
+            let mut reader = BufReader::new(stderr);
+            let mut captured = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line)? == 0 {
+                    break;
+                }
+                if line.contains("Unable to create '") && line.contains("File exists.") {
+                    let _ = std::fs::remove_file(&release_lock);
+                }
+                captured.extend_from_slice(line.as_bytes());
+            }
+            Ok(captured)
+        });
+        let status = child.wait()?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| "stderr reader panicked")??;
+        let mut stdout = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or("Git stdout")?
+            .read_to_end(&mut stdout)?;
+        assert!(status.success(), "transient lock did not retry: {stderr:?}");
+        assert!(String::from_utf8_lossy(&stderr).contains("File exists."));
+        assert!(stdout.is_empty());
+        assert!(
+            !base()
+                .args(["diff", "--cached", "--quiet", "--", "transient"])
+                .status()?
+                .success()
+        );
+
+        std::fs::write(repo.join("stale"), "bounded retries\n")?;
+        std::fs::write(&index_lock, "stale")?;
+        let stale = wrapped(&["add", "--", "stale"]).output()?;
+        assert!(!stale.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&stale.stderr)
+                .matches("Unable to create '")
+                .count(),
+            5,
+            "stale index lock should reach the retry limit"
+        );
+        std::fs::remove_file(&index_lock)?;
+
+        let head = base().args(["rev-parse", "HEAD"]).output()?;
+        assert!(head.status.success());
+        let head = String::from_utf8(head.stdout)?.trim().to_owned();
+        let ref_lock = repo.join(".git/refs/heads/blocked.lock");
+        std::fs::write(&ref_lock, "stale")?;
+        let ref_result = wrapped(&["update-ref", "refs/heads/blocked", &head]).output()?;
+        assert!(!ref_result.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&ref_result.stderr)
+                .matches("Unable to create '")
+                .count(),
+            5,
+            "stale ref lock should reach the retry limit"
+        );
+        std::fs::remove_file(&ref_lock)?;
+        assert!(
+            !base()
+                .args(["show-ref", "--verify", "refs/heads/blocked"])
+                .status()?
+                .success()
+        );
+
+        let cas = wrapped(&[
+            "update-ref",
+            "HEAD",
+            &head,
+            "0000000000000000000000000000000000000000",
+        ])
+        .output()?;
+        assert!(!cas.status.success());
+        assert!(!String::from_utf8_lossy(&cas.stderr).contains("Unable to create '"));
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_checks_common_hooks_for_linked_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let common_git_dir = dir.path().join("repo/.git");
+        let worktree_git_dir = common_git_dir.join("worktrees/linked");
+        let hooks = common_git_dir.join("hooks");
+        std::fs::create_dir_all(&worktree_git_dir)?;
+        std::fs::create_dir_all(&hooks)?;
+        let hook = hooks.join("reference-transaction");
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
+
+        let fake_git = dir.path().join("git");
+        std::fs::write(
+            &fake_git,
+            b"#!/bin/sh\ncase \"$1\" in\n  --exec-path) exit 1 ;;\n  config) exit 1 ;;\n  rev-parse)\n    case \"$2\" in\n      --git-path) printf '%s\\n' \"$HOOKS_PATH\" ;;\n      --absolute-git-dir) printf '%s\\n' \"$WORKTREE_GIT_DIR\" ;;\n      --git-common-dir) printf '%s\\n' \"$COMMON_GIT_DIR\" ;;\n      *) exit 1 ;;\n    esac\n    exit 0 ;;\n  update-ref)\n    printf x >> \"$INVOCATION_COUNT\"\n    printf \"fatal: update_ref failed for ref 'refs/heads/contended': cannot lock ref 'refs/heads/contended': Unable to create '%s/refs/heads/contended.lock': File exists.\\n\" \"$COMMON_GIT_DIR\" >&2\n    exit 128 ;;\nesac\nexit 1\n",
+        )?;
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700))?;
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&wrapper, git_wrapper(&fake_git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let count = dir.path().join("invocation-count");
+        let output = provenant_os::fixture::git_command_at(&wrapper)
+            .args([
+                "update-ref",
+                "refs/heads/contended",
+                "0000000000000000000000000000000000000000",
+            ])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOOKS_PATH", &hooks)
+            .env("WORKTREE_GIT_DIR", &worktree_git_dir)
+            .env("COMMON_GIT_DIR", &common_git_dir)
+            .env("INVOCATION_COUNT", &count)
+            .output()?;
+        assert_eq!(output.status.code(), Some(128));
+        assert_eq!(std::fs::read(&count)?, b"x".to_vec());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches("Unable to create '")
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_cancellation_does_not_wait_for_fifo_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::{
+            io::{BufRead, BufReader},
+            os::unix::fs::PermissionsExt,
+            process::{Command, Stdio},
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+
+        let dir = tempfile::tempdir()?;
+        let fake_git = dir.path().join("git");
+        let sleeper_pid = dir.path().join("sleeper-pid");
+        std::fs::write(
+            &fake_git,
+            b"#!/bin/sh\nif [ \"$1\" = --exec-path ]; then exit 1; fi\nif [ \"$1\" = add ]; then sleep 5 & printf '%s\\n' \"$!\" > \"$SLEEPER_PID\"; printf 'started\\n'; wait \"$!\"; exit $?; fi\nexit 1\n",
+        )?;
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700))?;
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&wrapper, git_wrapper(&fake_git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let mut child = provenant_os::fixture::git_command_at(&wrapper)
+            .args(["add", "--", "file"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("SLEEPER_PID", &sleeper_pid)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdout = child.stdout.take().ok_or("wrapper stdout")?;
+        let (started_tx, started_rx) = mpsc::channel();
+        let (eof_tx, eof_rx) = mpsc::channel();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let read = reader.read_line(&mut line);
+            let _ = started_tx.send(line.clone());
+            let drained = std::io::copy(&mut reader, &mut std::io::sink());
+            let _ = eof_tx.send(());
+            read.and(drained.map(|_| ())).map(|_| line)
+        });
+        let started = started_rx.recv_timeout(Duration::from_secs(2));
+        let sleeper = std::fs::read_to_string(&sleeper_pid)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        let wrapper_pid = child.id().to_string();
+        let began = Instant::now();
+        let signal = Command::new("/bin/kill")
+            .args(["-TERM", &wrapper_pid])
+            .status();
+        let eof_before_cleanup = eof_rx.recv_timeout(Duration::from_secs(2));
+        // The child deliberately keeps the wrapper's output FIFO open. Always
+        // clean it up after observing whether the wrapper closed its own pipe.
+        if let Some(sleeper) = sleeper {
+            let _ = Command::new("/bin/kill")
+                .args(["-TERM", &sleeper.to_string()])
+                .status();
+        }
+        let status = child.wait()?;
+        let elapsed = began.elapsed();
+        let line = stdout_reader
+            .join()
+            .map_err(|_| "stdout reader panicked")??;
+        assert_eq!(started?, line);
+        assert_eq!(line, "started\n");
+        assert!(signal?.success());
+        assert!(
+            eof_before_cleanup.is_ok(),
+            "wrapper stdout remained open until test cleanup killed the FIFO descendant"
+        );
+        assert_eq!(status.code(), Some(143));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wrapper waited for a child holding a capture FIFO: {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_does_not_replay_hook_output_or_stdin_consumers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::{io::Write, os::unix::fs::PermissionsExt, process::Stdio};
+
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().join("repo");
+        let home = dir.path().join("home");
+        let bin = dir.path().join("bin");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&bin)?;
+        std::fs::create_dir_all(&hooks)?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+        let base = || {
+            let mut command = provenant_os::fixture::git_command_at(&git);
+            command
+                .current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            command
+        };
+        assert!(base().args(["init", "-q"]).status()?.success());
+        for (key, value) in [
+            ("user.name", "Fixture"),
+            ("user.email", "fixture@example.test"),
+        ] {
+            assert!(base().args(["config", key, value]).status()?.success());
+        }
+        let wrapper = bin.join("git");
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(repo.join("file"), "hook check\n")?;
+        assert!(
+            provenant_os::fixture::git_command_at(&wrapper)
+                .args(["add", "--", "file"])
+                .current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()?
+                .status
+                .success()
+        );
+
+        let hook_count = dir.path().join("hook-count");
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf x >> {}\nprintf \"fatal: Unable to create '%s/.git/index.lock': File exists.\\n\" \"$PWD\" >&2\nexit 128\n",
+                shell_quote(hook_count.to_str().ok_or("hook marker path")?)
+            ),
+        )?;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
+        assert!(
+            base()
+                .args([
+                    "config",
+                    "core.hooksPath",
+                    hooks.to_str().ok_or("hook path")?
+                ])
+                .status()?
+                .success()
+        );
+        let hook_result = provenant_os::fixture::git_command_at(&wrapper)
+            .args(["commit", "-m", "hook failure", "--", "file"])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()?;
+        assert!(!hook_result.status.success());
+        assert!(String::from_utf8_lossy(&hook_result.stderr).contains("Unable to create '"));
+        assert_eq!(std::fs::read(&hook_count)?, b"x".to_vec());
+
+        let fake_git = dir.path().join("fake-git");
+        let invocation_count = dir.path().join("invocation-count");
+        let stdin_capture = dir.path().join("stdin-capture");
+        std::fs::write(
+            &fake_git,
+            b"#!/bin/sh\nif [ \"$1\" = --exec-path ]; then exit 1; fi\nif [ \"$1\" = rev-parse ]; then printf '%s/.git\\n' \"$PWD\"; exit 0; fi\nprintf x >> \"$INVOCATION_COUNT\"\ncat > \"$STDIN_CAPTURE\"\nprintf \"fatal: update_ref failed for ref 'refs/heads/main': cannot lock ref 'refs/heads/main': Unable to create '%s/.git/refs/heads/main.lock': File exists.\\n\" \"$PWD\" >&2\nexit 128\n",
+        )?;
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700))?;
+        let stdin_wrapper = dir.path().join("stdin-git");
+        std::fs::write(
+            &stdin_wrapper,
+            git_wrapper(&fake_git, &GitWrapper::default())?,
+        )?;
+        std::fs::set_permissions(&stdin_wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let mut child = provenant_os::fixture::git_command_at(&stdin_wrapper)
+            .args(["update-ref", "--stdin", "-z"])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("INVOCATION_COUNT", &invocation_count)
+            .env("STDIN_CAPTURE", &stdin_capture)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("Git stdin")?
+            .write_all(b"start\nprepare\ncommit\n")?;
+        let stdin_result = child.wait_with_output()?;
+        assert!(!stdin_result.status.success());
+        assert_eq!(stdin_result.status.code(), Some(128));
+        assert_eq!(std::fs::read(&invocation_count)?, b"x".to_vec());
+        assert_eq!(
+            std::fs::read(&stdin_capture)?,
+            b"start\nprepare\ncommit\n".to_vec()
+        );
         Ok(())
     }
 

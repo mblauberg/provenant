@@ -411,7 +411,7 @@ fn create_refuses_aliases_of_local_and_remote_branches() -> Result<(), Box<dyn E
 
 #[test]
 fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     fixture.run(&["branch", "-M", "main"])?;
     let test_context = TestContext::new(&fixture)?;
@@ -481,7 +481,7 @@ fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), 
 #[test]
 fn named_removal_reports_unproven_landing_without_claiming_identity_changed()
 -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();

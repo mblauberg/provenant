@@ -1477,6 +1477,10 @@ pub enum AccessMode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingWriterProvisioning {
+    /// The host's graph/node owner. Present for nested provisioning; a
+    /// recovery may reuse only a checkout bearing this exact creation receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<provenant_core::Digest>,
     pub path: String,
     pub source: String,
 }
@@ -1840,6 +1844,10 @@ pub struct NodeProgress {
     pub review_verdict_correction_refused: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioned_source: Option<String>,
+    /// Nested creation authority survives clearing the pending effect fence
+    /// and follows runtime fallback/recovery through the same provisioner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioned_owner: Option<provenant_core::Digest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1942,6 +1950,10 @@ pub struct WriterWorktreeBinding {
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_directory_identity: Option<provenant_records::run::SourceIdentity>,
+    /// Host-granted sharing of the owning lane's exact checkout incarnation.
+    /// Shared writers observe its live branch; they never reset/advance it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_worktree: Option<provenant_records::custody::Subject>,
     pub worktree: String,
     pub head: String,
 }

@@ -2449,16 +2449,6 @@ fn with_context_mode_with_owner<T>(
     let name = binding.project_id().to_string();
     let project_state = if read_only {
         let project_state = worktrees_state.open_verified_directory(OsStr::new(&name))?;
-        // Repositories predating this lock have no file until their first
-        // mutation. Preview must accept that state without allocating a lock.
-        match repo
-            .common_dir()
-            .metadata_at(OsStr::new(worktrees::REPOSITORY_LOCK), false)
-        {
-            Ok(_) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
         project_state
     } else {
         child(&worktrees_state, &name)?
@@ -3002,14 +2992,13 @@ mod gc_preview_tests {
         Ok(())
     }
     #[test]
-    fn read_only_context_accepts_absent_repository_lock_without_creating_it()
+    fn read_only_context_accepts_repository_without_mutating_it()
     -> Result<(), Box<dyn std::error::Error>> {
         let rig = crate::worktree_tests::repository()?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         let facts = worktrees::RepoFacts::default();
         let workers = worktrees::SystemWorkerObserver;
-        // Establish the pre-existing project binding and state directories,
-        // as they would exist before upgrading to repository locking.
+        // Establish the project binding and state directories before preview.
         with_context_using_facts(
             &roots,
             &rig.home,
@@ -3019,8 +3008,13 @@ mod gc_preview_tests {
             &facts,
             |_, _| Ok(()),
         )?;
-        let lock = rig.project.join(".git").join(worktrees::REPOSITORY_LOCK);
-        assert!(!lock.exists());
+        let control_files =
+            || -> std::io::Result<std::collections::BTreeSet<std::ffi::OsString>> {
+                std::fs::read_dir(rig.project.join(".git"))?
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect()
+            };
+        let before = control_files()?;
         let observed = with_context_mode(
             &roots,
             &rig.home,
@@ -3032,7 +3026,11 @@ mod gc_preview_tests {
             |_, _| Ok(true),
         )?;
         assert!(observed);
-        assert!(!lock.exists());
+        assert_eq!(
+            control_files()?,
+            before,
+            "read-only setup must not create Git control files"
+        );
         Ok(())
     }
 

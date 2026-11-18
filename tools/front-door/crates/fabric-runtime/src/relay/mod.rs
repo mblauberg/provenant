@@ -6,7 +6,10 @@ mod host;
 mod lane_tests;
 
 pub use call::{FacadeError, InvalidInput, ServiceError, ToolCall};
-pub use host::{GRAPH_TOOL, GraphHandler, HostRelay, WORKERS, graph, host_budget};
+pub use host::{
+    GRAPH_TOOL, GraphHandler, HostRelay, PeerGraphHandler, WORKERS, graph, graph_authenticated,
+    host_budget,
+};
 
 /// The longest a relayed observation may wait, in seconds.
 pub(crate) const MAX_WAIT_SECONDS: u64 = provenant_core::WaitTransport::Relay.maximum_seconds();

@@ -47,6 +47,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     )?;
     assert_eq!(added.termination, Termination::Exit(0));
     let linked = verify_worktree(&fixture.repo, &worktree_path)?;
+    crate::worktrees::acquire_worktree_subject(linked.repo())?;
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
     let authority =
@@ -256,7 +257,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             path: provider_state.clone(),
             scope: PathScope::Subtree,
         }),
-        mode: AccessMode::WorktreeWrite(Box::new(authority)),
+        mode: AccessMode::WorktreeWrite(Box::new(authority.clone())),
         scratch: PathGrant {
             path: scratch.clone(),
             scope: PathScope::Subtree,
@@ -292,6 +293,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         linked.path().to_owned(),
         private.clone(),
         common.clone(),
+        authority.git_state.path.clone(),
+        authority.git_state.path.join("git-common"),
+        authority.git_state.path.join("git-objects"),
         common.join("info"),
         common.join("objects"),
         private_logs,

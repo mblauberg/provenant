@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -26,10 +27,11 @@ const MAX_GIT_LOG: u64 = 1000;
 const MAX_LANE_CONFIG_FILES: usize = 32;
 /// The longest bounded Git stderr excerpt, in characters.
 const MAX_FETCH_STDERR: usize = 1024;
-/// The most attempts for one lane upstream key write. Worktrees share the
-/// repository's `.git/config`, so concurrent writers contend for its lock.
-const CONFIG_LOCK_RETRIES: usize = 5;
-const CONFIG_LOCK_BACKOFF_START: Duration = Duration::from_millis(50);
+/// Bound retries for Git's own lock files. Each attempt shares one operation
+/// deadline, so a contending process never turns a short mutation into a queue.
+const GIT_LOCK_MAX_ATTEMPTS: usize = 5;
+const GIT_LOCK_BACKOFF_START: Duration = Duration::from_millis(50);
+static GIT_LOCK_JITTER: AtomicU64 = AtomicU64::new(0);
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 const GIT_COMMON: &[&str] = &[
@@ -95,6 +97,8 @@ pub enum UtilityError {
         "setting branch configuration timed out after {attempts} attempts waiting out lock contention"
     )]
     ConfigLockTimedOut { attempts: usize },
+    #[error("Git lock contention timed out after {attempts} attempts")]
+    GitLockTimedOut { attempts: usize },
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error(transparent)]
@@ -1048,6 +1052,30 @@ impl ExecutablePin {
             Err(ExecError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
                 self.revalidate()?;
                 Ok(executor.execute(options())?)
+            }
+            result => Ok(result?),
+        }
+    }
+
+    fn execute_prepared_ref_transaction<'a>(
+        &self,
+        executor: &dyn Executor,
+        options: impl Fn() -> ExecOptions<'a>,
+        commands_through_prepare: &[u8],
+        commit_after_prepare: &mut dyn FnMut() -> bool,
+    ) -> Result<ExecOutcome, UtilityError> {
+        match executor.execute_prepared_ref_transaction(
+            options(),
+            commands_through_prepare,
+            commit_after_prepare,
+        ) {
+            Err(ExecError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                self.revalidate()?;
+                Ok(executor.execute_prepared_ref_transaction(
+                    options(),
+                    commands_through_prepare,
+                    commit_after_prepare,
+                )?)
             }
             result => Ok(result?),
         }
@@ -2065,42 +2093,224 @@ pub(crate) fn execute_git_mutation(
     if runtime.home.identity.is_none() {
         return Err(UtilityError::InvalidHome);
     }
-    execute_git(
-        executor,
-        repo,
-        runtime,
+    retry_git_lock_contention(
         budget,
         cancel,
-        false,
-        |attribute_source| {
-            let (mut args, stdin) = mutation_args(mutation)?;
-            args.insert(0, format!("--attr-source={attribute_source}").into());
-            Ok((args, stdin))
+        || true,
+        |attempt_budget| {
+            execute_git(
+                executor,
+                repo,
+                runtime,
+                attempt_budget,
+                cancel,
+                false,
+                |attribute_source| {
+                    let (mut args, stdin) = mutation_args(mutation.clone())?;
+                    args.insert(0, format!("--attr-source={attribute_source}").into());
+                    Ok((args, stdin))
+                },
+            )
         },
     )
 }
 
-/// Real time sets one upstream-key write's deadline: every retry share is
+/// Run host-controlled Git with the same bounded lock retry as typed mutations.
+/// The callback receives its share of one deadline. Callers retain their own
+/// capture checks and must disable hooks and interactive input before replay.
+pub fn execute_with_git_lock_retry(
+    timeout: Duration,
+    cancel: &CancelToken,
+    mut execute: impl FnMut(Duration) -> Result<ExecOutcome, UtilityError>,
+) -> Result<ExecOutcome, UtilityError> {
+    retry_git_lock_contention(
+        UtilityBudget::bounded(timeout)?,
+        cancel,
+        || true,
+        |budget| execute(budget.timeout),
+    )
+}
+
+/// Retry only Git's explicit lock-file collision diagnostic. Git remains the
+/// atomicity owner; these attempts only give a sibling operation a short
+/// chance to finish publishing its lock before the caller's budget expires.
+fn retry_git_lock_contention(
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    mut retry_allowed: impl FnMut() -> bool,
+    mut execute: impl FnMut(UtilityBudget) -> Result<ExecOutcome, UtilityError>,
+) -> Result<ExecOutcome, UtilityError> {
+    let Some(deadline) = git_lock_deadline(budget.timeout) else {
+        return Err(UtilityError::InvalidBudget);
+    };
+    let mut backoff = GIT_LOCK_BACKOFF_START;
+    let mut attempt = 0;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        attempt += 1;
+        let remaining = git_lock_remaining(deadline);
+        let Some(attempt_budget) = budget.attempt_share(remaining) else {
+            return Err(UtilityError::GitLockTimedOut {
+                attempts: attempt - 1,
+            });
+        };
+        let outcome = match execute(attempt_budget) {
+            Err(UtilityError::TimedOut) if attempt > 1 => {
+                return Err(UtilityError::GitLockTimedOut { attempts: attempt });
+            }
+            result => result?,
+        };
+        if !git_lock_retry_capture_complete(&outcome)
+            || !matches!(outcome.termination, Termination::Exit(status) if status != 0)
+            || !git_lock_contention(&outcome.stderr.bytes)
+            || attempt == GIT_LOCK_MAX_ATTEMPTS
+            || !retry_allowed()
+        {
+            return Ok(outcome);
+        }
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        let sample = GIT_LOCK_JITTER.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed)
+            ^ u64::from(std::process::id());
+        let delay = git_lock_retry_delay(backoff, sample);
+        if git_lock_remaining(deadline) <= delay {
+            return Err(UtilityError::GitLockTimedOut { attempts: attempt });
+        }
+        Pause::wait(
+            &ThreadPause,
+            DurationMicros::from_micros(delay.as_micros() as u64),
+            cancel,
+        );
+        backoff = backoff.saturating_mul(2);
+    }
+}
+
+fn git_lock_retry_capture_complete(outcome: &ExecOutcome) -> bool {
+    !outcome.cancelled
+        && !outcome.timed_out
+        && !outcome.drain_truncated
+        && !outcome.overflow_stopped
+        && [&outcome.stdout, &outcome.stderr].iter().all(|stream| {
+            !stream.truncated
+                && !stream.read_failed
+                && !stream.sink_failed
+                && stream.sink_lost_bytes == 0
+                && stream.oversized_frames == 0
+                && stream.decoder_lost_frames == 0
+                && !stream.filter_failed
+        })
+}
+
+/// Git has a few stable forms for lock collisions. The config diagnostic omits
+/// the `.lock` suffix in the path, but names the config lock explicitly. Other
+/// mutation diagnostics must identify a `.lock` path and `File exists`; a CAS
+/// mismatch, generic `File exists`, or lock error without an extant file is
+/// never retried.
+fn git_lock_contention(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    stderr.lines().any(|line| {
+        line.contains("file exists")
+            && (line.contains("could not lock config file")
+                || ((line.contains("unable to create") || line.contains("cannot lock"))
+                    && line.contains(".lock")))
+    })
+}
+
+/// Delete one ref under a prepared `update-ref --stdin` transaction. The
+/// decision callback runs after Git has locked the ref and acknowledged
+/// `prepare`; false aborts the transaction without changing the ref.
+pub(crate) fn execute_git_prepared_ref_delete(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    expected_ref: (&GitRefName, GitOid),
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    commit_after_prepare: &mut dyn FnMut() -> bool,
+) -> Result<ExecOutcome, UtilityError> {
+    let (name, expected_old_oid) = expected_ref;
+    if runtime.home.identity.is_none() {
+        return Err(UtilityError::InvalidHome);
+    }
+    if cancel.is_cancelled() {
+        return Err(UtilityError::Cancelled);
+    }
+    runtime.home.verify()?;
+    repo.revalidate()?;
+    verify_repo_binding(repo)?;
+    let attribute_source = repo
+        .probe_data()
+        .ok_or(UtilityError::UnprobedRepository)?
+        .attribute_source
+        .as_str();
+    let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
+    args.insert(0, format!("--attr-source={attribute_source}").into());
+    args.extend(["update-ref".into(), "--stdin".into()]);
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(runtime.git.program()?.into_os_string());
+    argv.extend(args);
+    let mut env = environment(runtime, repo);
+    env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
+    let commands = format!(
+        "option no-deref\nstart\ndelete {} {}\nprepare\n",
+        name.as_str(),
+        expected_old_oid
+    );
+    let callback_executed = std::cell::Cell::new(false);
+    let outcome = retry_git_lock_contention(
+        budget,
+        cancel,
+        || !callback_executed.get(),
+        |attempt_budget| {
+            let options = || {
+                exec_options(
+                    &argv,
+                    repo.root_path(),
+                    attempt_budget,
+                    &env,
+                    None,
+                    Some(cancel),
+                )
+            };
+            let mut decide = || {
+                callback_executed.set(true);
+                commit_after_prepare()
+            };
+            runtime.git.execute_prepared_ref_transaction(
+                executor,
+                options,
+                commands.as_bytes(),
+                &mut decide,
+            )
+        },
+    )?;
+    validate_outcome(outcome)
+}
+
+/// Real time sets one Git mutation's deadline: every retry share is
 /// measured against it at this single boundary.
 #[allow(clippy::disallowed_methods)]
-fn config_lock_deadline(timeout: Duration) -> Option<Instant> {
+fn git_lock_deadline(timeout: Duration) -> Option<Instant> {
     Instant::now().checked_add(timeout)
 }
 
 /// The time the shared deadline still leaves, sampled at that same boundary.
 #[allow(clippy::disallowed_methods)]
-fn config_lock_remaining(deadline: Instant) -> Duration {
+fn git_lock_remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
-/// Set one lane upstream key. Reopen the repository after each call because
-/// Git replaces the common config file. Every worktree shares the common
-/// `.git/config`, so concurrent writers contend for its lock file; that
-/// specific failure is retried briefly with a bounded backoff. The budget
-/// bounds the whole operation, not one attempt: the deadline is computed once,
-/// each attempt only gets the time still left, retries stop when that time
-/// cannot cover another backoff and attempt, and a timeout names the attempts
-/// it counted.
+fn git_lock_retry_delay(backoff: Duration, sample: u64) -> Duration {
+    let window = (backoff.as_micros() as u64 / 2).max(1);
+    backoff.saturating_add(Duration::from_micros(sample % window))
+}
+
+/// Set one lane upstream key. Reopen the repository after the call because
+/// Git replaces the common config file. Git's explicit config lock collision
+/// gets the same bounded retry used by other typed mutations.
 pub fn set_lane_upstream_key(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -2123,63 +2333,21 @@ pub fn set_lane_upstream_key(
         key,
         value,
     };
-    let Some(deadline) = config_lock_deadline(budget.timeout) else {
-        return Err(UtilityError::InvalidBudget);
-    };
-    let mut backoff = CONFIG_LOCK_BACKOFF_START;
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let remaining = config_lock_remaining(deadline);
-        let attempt_budget =
-            budget
-                .attempt_share(remaining)
-                .ok_or(UtilityError::ConfigLockTimedOut {
-                    attempts: attempt - 1,
-                })?;
-        let result = execute_git_mutation(
-            executor,
-            repo,
-            runtime,
-            mutation.clone(),
-            attempt_budget,
-            cancel,
-        )
-        // An attempt spent its own share of the shared deadline; that
-        // exhaustion is the operation's, and it must name the attempts.
-        .map_err(|error| match error {
-            UtilityError::TimedOut => UtilityError::ConfigLockTimedOut { attempts: attempt },
+    let result = execute_git_mutation(executor, repo, runtime, mutation, budget, cancel).map_err(
+        |error| match error {
+            UtilityError::GitLockTimedOut { attempts } => {
+                UtilityError::ConfigLockTimedOut { attempts }
+            }
             error => error,
-        })?;
-        // Anything unexpected is already rejected by `validate_outcome`.
-        let status = match result.termination {
-            Termination::Exit(0) => return Ok(()),
-            Termination::Exit(status) => status,
-            Termination::Signal(signal) => return Err(UtilityError::Signalled { signal }),
-        };
-        let stderr = git_stderr_excerpt(&result.stderr.bytes);
-        // Any failure other than config lock contention is permanent.
-        if attempt == CONFIG_LOCK_RETRIES
-            || !stderr
-                .to_ascii_lowercase()
-                .contains("could not lock config file")
-        {
-            return Err(UtilityError::ConfigFailed { status, stderr });
-        }
-        if cancel.is_cancelled() {
-            return Err(UtilityError::Cancelled);
-        }
-        // Another attempt must fit in the deadline with room for its backoff;
-        // otherwise the operation's budget is spent, not just this attempt's.
-        if config_lock_remaining(deadline) <= backoff {
-            return Err(UtilityError::ConfigLockTimedOut { attempts: attempt });
-        }
-        Pause::wait(
-            &ThreadPause,
-            DurationMicros::from_micros(backoff.as_micros() as u64),
-            cancel,
-        );
-        backoff = backoff.saturating_mul(2);
+        },
+    )?;
+    match result.termination {
+        Termination::Exit(0) => Ok(()),
+        Termination::Exit(status) => Err(UtilityError::ConfigFailed {
+            status,
+            stderr: git_stderr_excerpt(&result.stderr.bytes),
+        }),
+        Termination::Signal(signal) => Err(UtilityError::Signalled { signal }),
     }
 }
 
@@ -3739,6 +3907,48 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     }
 
     #[test]
+    fn git_lock_retries_require_complete_diagnostics() -> Result<(), Box<dyn Error>> {
+        for loss in ["stderr_tail", "stdout_read", "sink", "decoder", "drain"] {
+            let mut output = exit_outcome(
+                128,
+                "fatal: Unable to create '/fixture/index.lock': File exists.",
+            );
+            match loss {
+                "stderr_tail" => output.stderr.truncated = true,
+                "stdout_read" => output.stdout.read_failed = true,
+                "sink" => output.stderr.sink_lost_bytes = 1,
+                "decoder" => output.stdout.decoder_lost_frames = 1,
+                "drain" => output.drain_truncated = true,
+                _ => unreachable!(),
+            }
+            let mut calls = 0;
+            let observed =
+                execute_with_git_lock_retry(Duration::from_secs(1), &CancelToken::new(), |_| {
+                    calls += 1;
+                    Ok(output.clone())
+                })?;
+            assert_eq!(
+                calls, 1,
+                "incomplete {loss} evidence cannot authorise replay"
+            );
+            assert_eq!(
+                observed, output,
+                "the caller keeps the original capture outcome"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn git_lock_retry_jitter_stays_bounded_and_varies() {
+        let base = Duration::from_millis(50);
+        let low = git_lock_retry_delay(base, 0);
+        let high = git_lock_retry_delay(base, 24_999);
+        assert_eq!(low, base);
+        assert!(high > low && high < base + base / 2);
+    }
+
+    #[test]
     fn lane_upstream_config_lock_contention_retries_until_success() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let outcomes = vec![
@@ -3759,11 +3969,290 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         Ok(())
     }
 
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
+    #[test]
+    fn git_mutations_retry_index_and_ref_lock_file_collisions() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let head = fixture.head()?;
+        for stderr in [
+            "fatal: Unable to create '/repo/.git/index.lock': File exists.\n",
+            "fatal: cannot lock ref 'refs/heads/topic': Unable to create '/repo/.git/refs/heads/topic.lock': File exists.\n",
+        ] {
+            let fake = ScriptedMutation::new(vec![exit_outcome(255, stderr), exit_outcome(0, "")]);
+            let outcome = execute_git_mutation(
+                &fake,
+                &fixture.repo,
+                &fixture.runtime,
+                GitMutation::FastForward { head },
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?;
+            assert_eq!(outcome.termination, Termination::Exit(0));
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 2, "{stderr}");
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
+    #[test]
+    fn git_mutations_do_not_retry_cas_mismatch_or_unrelated_file_exists()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let head = fixture.head()?;
+        for stderr in [
+            "fatal: cannot lock ref 'refs/heads/topic': is at abc but expected def\n",
+            "fatal: unable to create index: File exists\n",
+            "fatal: Unable to create '/repo/.git/index.lock': Permission denied\n",
+        ] {
+            let fake = ScriptedMutation::new(vec![exit_outcome(255, stderr)]);
+            let outcome = execute_git_mutation(
+                &fake,
+                &fixture.repo,
+                &fixture.runtime,
+                GitMutation::FastForward { head },
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?;
+            assert_eq!(outcome.termination, Termination::Exit(255), "{stderr}");
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "{stderr}");
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
+    #[test]
+    fn prepared_ref_lock_collision_retries_only_before_prepare_callback()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let branch = GitRefName::branch("lane/writer")?;
+        let head = fixture.head()?;
+        let lock_collision = exit_outcome(
+            255,
+            "fatal: cannot lock ref 'refs/heads/lane/writer': Unable to create '/repo/.git/refs/heads/lane/writer.lock': File exists.\n",
+        );
+        let fake = ScriptedPreparedRef::new(vec![
+            (lock_collision.clone(), false),
+            (exit_outcome(0, ""), true),
+        ]);
+        let decisions = AtomicUsize::new(0);
+        let mut decide = || {
+            decisions.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let outcome = execute_git_prepared_ref_delete(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            (&branch, head),
+            fixture.budget()?,
+            &CancelToken::new(),
+            &mut decide,
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(decisions.load(Ordering::SeqCst), 1);
+
+        let fake = ScriptedPreparedRef::new(vec![(lock_collision, true)]);
+        let decisions = AtomicUsize::new(0);
+        let mut decide = || {
+            decisions.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let outcome = execute_git_prepared_ref_delete(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            (&branch, head),
+            fixture.budget()?,
+            &CancelToken::new(),
+            &mut decide,
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(255));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(decisions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sibling_branch_config_reads_remain_complete_during_git_lock_retry()
+    -> Result<(), Box<dyn Error>> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Condvar};
+
+        struct Progress {
+            counts: Mutex<(usize, usize)>,
+            changed: Condvar,
+        }
+        impl Progress {
+            fn write_attempt(&self) {
+                self.counts.lock().unwrap().0 += 1;
+                self.changed.notify_all();
+            }
+            fn read(&self) {
+                self.counts.lock().unwrap().1 += 1;
+                self.changed.notify_all();
+            }
+            fn wait_for(&self, attempts: usize, reads: usize) -> bool {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut counts = self.counts.lock().unwrap();
+                while counts.0 < attempts || counts.1 < reads {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let (next, timeout) = self.changed.wait_timeout(counts, remaining).unwrap();
+                    counts = next;
+                    if timeout.timed_out() {
+                        break;
+                    }
+                }
+                counts.0 >= attempts && counts.1 >= reads
+            }
+        }
+        struct AttemptProbe<'a> {
+            inner: &'a dyn Executor,
+            progress: Arc<Progress>,
+        }
+        impl Executor for AttemptProbe<'_> {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                if options.argv.iter().any(|arg| arg == "config")
+                    && options.argv.iter().any(|arg| arg == "--replace-all")
+                {
+                    self.progress.write_attempt();
+                }
+                self.inner.execute(options)
+            }
+        }
+
+        fn remote(fixture: &Fixture) -> Result<String, String> {
+            let output = fixture
+                .run(&["config", "--local", "--get", "branch.sibling-a.remote"])
+                .map_err(|error| error.to_string())?;
+            if output.termination != Termination::Exit(0) {
+                return Err(format!("config read failed: {output:?}"));
+            }
+            String::from_utf8(output.stdout.bytes)
+                .map(|value| value.trim().to_owned())
+                .map_err(|error| error.to_string())
+        }
+
+        let fixture = Fixture::new()?;
+        let worktrees = fixture.root.join(".worktrees");
+        fs::create_dir_all(&worktrees)?;
+        let head = fixture.head()?.to_string();
+        for (branch, path) in [
+            ("sibling-a", ".worktrees/sibling-a"),
+            ("sibling-b", ".worktrees/sibling-b"),
+        ] {
+            let output = fixture.run(&["worktree", "add", "-b", branch, path, &head])?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        }
+        fixture.run(&[
+            "config",
+            "--local",
+            "--replace-all",
+            "branch.sibling-a.remote",
+            "old",
+        ])?;
+        let lock_path = fixture.repo.common_git_dir().join("config.lock");
+        let _held = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)?;
+
+        let progress = Arc::new(Progress {
+            counts: Mutex::new((0, 0)),
+            changed: Condvar::new(),
+        });
+        let finished = Arc::new(AtomicBool::new(false));
+        let branch = GitRefName::branch("sibling-a")?;
+        let fixture_ref = &fixture;
+        let snapshots = std::thread::scope(|scope| -> Result<Vec<String>, Box<dyn Error>> {
+            let writer_progress = Arc::clone(&progress);
+            let writer_finished = Arc::clone(&finished);
+            let writer = scope.spawn(move || {
+                let probe = AttemptProbe {
+                    inner: &fixture_ref.executor,
+                    progress: writer_progress,
+                };
+                let result = fixture_ref
+                    .budget()
+                    .map_err(|error| error.to_string())
+                    .and_then(|budget| {
+                        set_lane_upstream_key(
+                            &probe,
+                            &fixture_ref.repo,
+                            &fixture_ref.runtime,
+                            &branch,
+                            false,
+                            budget,
+                            &CancelToken::new(),
+                        )
+                        .map_err(|error| error.to_string())
+                    });
+                writer_finished.store(true, std::sync::atomic::Ordering::Release);
+                result
+            });
+
+            let reader_progress = Arc::clone(&progress);
+            let reader_finished = Arc::clone(&finished);
+            let reader = scope.spawn(move || -> Result<Vec<String>, String> {
+                let mut values = Vec::new();
+                while !reader_finished.load(std::sync::atomic::Ordering::Acquire) {
+                    let value = remote(fixture_ref)?;
+                    if !matches!(value.as_str(), "old" | "origin") {
+                        return Err(format!("partial or unexpected config snapshot: {value:?}"));
+                    }
+                    values.push(value);
+                    reader_progress.read();
+                }
+                let value = remote(fixture_ref)?;
+                if !matches!(value.as_str(), "old" | "origin") {
+                    return Err(format!("partial or unexpected final snapshot: {value:?}"));
+                }
+                values.push(value);
+                Ok(values)
+            });
+
+            let observed_retry_and_reads = progress.wait_for(2, 4);
+            drop(_held);
+            fs::remove_file(&lock_path)?;
+            writer
+                .join()
+                .map_err(|_| "config writer panicked")?
+                .map_err(|error| std::io::Error::other(error))?;
+            let values = reader
+                .join()
+                .map_err(|_| "config reader panicked")?
+                .map_err(|error| std::io::Error::other(error))?;
+            assert!(
+                observed_retry_and_reads,
+                "readers must observe the old snapshot while Git retries its real config.lock write"
+            );
+            Ok(values)
+        })?;
+        assert!(snapshots.len() >= 5, "{snapshots:?}");
+        assert!(
+            snapshots.iter().any(|value| value == "old"),
+            "{snapshots:?}"
+        );
+        assert!(
+            snapshots.iter().any(|value| value == "origin"),
+            "the complete new snapshot must be visible after Git's atomic rename: {snapshots:?}"
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|value| matches!(value.as_str(), "old" | "origin"))
+        );
+        Ok(())
+    }
+
     #[test]
     fn lane_upstream_config_lock_contention_fails_after_the_retry_limit()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
-        let outcomes = (0..CONFIG_LOCK_RETRIES)
+        let outcomes = (0..GIT_LOCK_MAX_ATTEMPTS)
             .map(|_| exit_outcome(255, LOCK_CONTENTION_STDERR))
             .collect();
         let fake = ScriptedConfig::new(outcomes, None);
@@ -3785,8 +4274,8 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         assert!(stderr.chars().count() <= MAX_FETCH_STDERR);
         assert_eq!(
             fake.calls(),
-            CONFIG_LOCK_RETRIES,
-            "retries must be bounded by CONFIG_LOCK_RETRIES"
+            GIT_LOCK_MAX_ATTEMPTS,
+            "attempts must be bounded by GIT_LOCK_MAX_ATTEMPTS"
         );
         Ok(())
     }
@@ -3831,6 +4320,91 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         }
     }
 
+    /// Script Git mutation failures without launching Git, while recording the
+    /// per-attempt timeout supplied by the shared operation deadline.
+    #[derive(Default)]
+    struct ScriptedMutation {
+        outcomes: Mutex<VecDeque<ExecOutcome>>,
+        calls: AtomicUsize,
+        timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl ScriptedMutation {
+        fn new(outcomes: Vec<ExecOutcome>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Executor for ScriptedMutation {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(
+                options.argv.iter().any(|arg| arg == "merge")
+                    || options.argv.iter().any(|arg| arg == "update-ref"),
+                "unexpected mutation spawn: {:?}",
+                options.argv
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.timeouts
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .push(options.timeout);
+            self.outcomes
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .pop_front()
+                .ok_or_else(|| ExecError::Io {
+                    operation: "scripted mutation",
+                    source: std::io::Error::other("mutation script exhausted"),
+                })
+        }
+    }
+
+    #[derive(Default)]
+    struct ScriptedPreparedRef {
+        outcomes: Mutex<VecDeque<(ExecOutcome, bool)>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedPreparedRef {
+        fn new(outcomes: Vec<(ExecOutcome, bool)>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Executor for ScriptedPreparedRef {
+        fn execute(&self, _options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            Err(ExecError::Busy)
+        }
+
+        fn execute_prepared_ref_transaction(
+            &self,
+            _options: ExecOptions<'_>,
+            _commands_through_prepare: &[u8],
+            commit_after_prepare: &mut dyn FnMut() -> bool,
+        ) -> Result<ExecOutcome, ExecError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (outcome, prepared) = self
+                .outcomes
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .pop_front()
+                .ok_or_else(|| ExecError::Io {
+                    operation: "scripted prepared ref",
+                    source: std::io::Error::other("prepared ref script exhausted"),
+                })?;
+            if prepared {
+                let _ = commit_after_prepare();
+            }
+            Ok(outcome)
+        }
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods)] // The elapsed span is the assertion.
     fn lane_upstream_config_lock_contention_stays_within_the_budget() -> Result<(), Box<dyn Error>>
@@ -3866,8 +4440,8 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             "the timeout error must name the attempts it counted"
         );
         assert!(
-            (1..=CONFIG_LOCK_RETRIES).contains(&attempts),
-            "attempts must be bounded by CONFIG_LOCK_RETRIES: {attempts}"
+            (1..=GIT_LOCK_MAX_ATTEMPTS).contains(&attempts),
+            "attempts must be bounded by GIT_LOCK_MAX_ATTEMPTS: {attempts}"
         );
         // Shrinking shares prove the shared deadline without asserting wall
         // time, which a descheduled CI runner can exceed.

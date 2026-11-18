@@ -914,6 +914,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::from_value(serde_json::json!({
                         "git_grants_digest": vec![0; 32], "publishing": false,
                         "common_git_dir": repo.join(".git"),
+                        "git_state": {"path": fixture.join("shared-git"), "scope": "subtree"},
                         "cargo_cache": {"path": fixture.join("cargo-cache"), "scope": "subtree"}
                     }))?;
                 permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));

@@ -310,6 +310,7 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         &cancel,
     )?;
     let linked = verify_worktree(&verified, &lane)?;
+    provenant_confinement::worktrees::acquire_worktree_subject(linked.repo())?;
     let selected = GitRefName::branch("lane/test")?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
     let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected, &home, &credentials)?;

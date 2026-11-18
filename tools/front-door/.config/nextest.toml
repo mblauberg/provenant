@@ -102,10 +102,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Two rounds of simultaneous real writer launches each settle a fixture
-# provider, which takes about 30 seconds on a developer Mac.
+# Two simultaneous distinct-branch writers and the shared-checkout commit
+# fixture each launch and settle real providers. Keep their outer watchdog
+# above their bounded inner waits without changing any product deadline.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_are_admitted_or_scheduled_for_retry)'
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=distinct_branch_writer_launches_start_without_shared_waits) | test(=shared_worktree_writers_commit_disjoint_paths))'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=distinct_branch_writer_launches_start_without_shared_waits) | test(=shared_worktree_writers_commit_disjoint_paths))'
+threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # One real writer launch from a fetched remote branch takes about 20 seconds on
@@ -216,4 +222,14 @@ threads-required = "num-test-threads"
 [[profile.ci.overrides]]
 filter = 'package(=provenant) & binary(=checks) & test(=release_checks_legal_private_symlink_and_bounded_evidence)'
 threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Sixteen real Git/run-store fixtures cover the stop/steer outcome matrix.
+# Keep every case and its inner deadline; bound their combined host work.
+[[profile.default.overrides]]
+filter = 'package(=provenant-run) & test(=holder::writer_recovery_tests::stopped_writer_preserves_work_and_arbitrates_steer_continuation)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant-run) & test(=holder::writer_recovery_tests::stopped_writer_preserves_work_and_arbitrates_steer_continuation)'
 slow-timeout = { period = "30s", terminate-after = 4 }

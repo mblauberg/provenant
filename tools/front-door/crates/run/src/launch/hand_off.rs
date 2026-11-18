@@ -247,6 +247,42 @@ impl RunStore {
                 }
             };
         }
+        // Admission initially verified this checkout before acquiring the
+        // shared occupancy lease. Recheck its held inode afterwards so a
+        // removal/recreation racing admission cannot transfer custody for the
+        // replacement path.
+        if let Some(writer) = plan
+            .confinement
+            .as_ref()
+            .and_then(|plan| plan.writer.as_ref())
+            && let Err(error) = writer.worktree.repo().revalidate_identity()
+        {
+            let error = RunError::Confinement(
+                provenant_confinement::permissions::PermissionError::from(error),
+            );
+            local_or_withdraw!(Err::<(), _>(typed_local(
+                &policy,
+                "writer worktree identity",
+                &error,
+            )));
+        }
+        if let Some(expected) = task.access.shared_worktree.as_ref() {
+            let actual = plan
+                .confinement
+                .as_ref()
+                .and_then(|plan| plan.writer.as_ref())
+                .and_then(|writer| {
+                    provenant_confinement::worktrees::worktree_subject(writer.worktree.repo()).ok()
+                });
+            if actual.as_ref() != Some(expected) {
+                local_or_withdraw!(Err::<(), _>(boundary_handoff(
+                    &policy,
+                    "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION",
+                    "shared writer checkout differs from its owning lane's grant".into(),
+                    provenant_records::diagnostic::BoundaryClass::LaneGit,
+                )));
+            }
+        }
         #[cfg(test)]
         if TEST_LOCAL_HANDOFF.with(|fault| fault.replace(false)) {
             local_or_withdraw!(Err::<(), _>(HandOff::Local(
@@ -384,6 +420,15 @@ impl RunStore {
                 })?;
                 return Err(typed_local(&policy, "Git setup", &error));
             }
+            // Create the host-derived data roots while occupancy is held, before
+            // shared Git state is initialised and permission anchors are captured.
+            if let Err(error) = confinement.prepare_writer_directories() {
+                local_or_withdraw!(Err::<(), _>(typed_local(
+                    &policy,
+                    "writer directories",
+                    &error
+                )));
+            }
             // Git setup has finished; cache seeding needs no repository lock.
             let seed_attempt = local_or_withdraw!(directory());
             // A lock, not an assertion: observers stop reporting this phase if
@@ -403,7 +448,7 @@ impl RunStore {
             }
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer
-                && let Err(error) = crate::objects::prepare_bound(
+                && let Err(error) = crate::objects::prepare_shared_bound(
                     &local_or_withdraw!(
                         provenant_os::git::git_executable()
                             .ok_or_else(|| local("Git", &RunError::GitUnavailable))
@@ -413,6 +458,15 @@ impl RunStore {
                     &confinement.plan.permissions().scratch.path,
                     writer.branch.as_str(),
                     writer.base,
+                    &local_or_withdraw!(match &confinement.plan.permissions().mode {
+                        provenant_confinement::permissions::AccessMode::WorktreeWrite(
+                            authority,
+                        ) => Ok(authority.git_state().path.clone()),
+                        _ => Err(local(
+                            "Git state",
+                            &RunError::Validation("writer Git authority missing")
+                        )),
+                    }),
                 )
                 .and_then(|()| {
                     writer.snapshot(
@@ -443,12 +497,6 @@ impl RunStore {
                         )));
                     }
                 }
-            } else if let Err(error) = confinement.prepare_writer_directories() {
-                local_or_withdraw!(Err::<(), _>(typed_local(
-                    &policy,
-                    "writer directories",
-                    &error
-                )));
             }
         }
         strip_hosted_credentials(&mut plan.environment);
@@ -1088,6 +1136,46 @@ mod tests {
         lease.withdraw_unlaunched()?;
         // Each handoff reserves a fresh publication file; these calls exercise
         // separate failure paths against the same attempt fixture.
+        store
+            .attempt_dir(id, false)?
+            .unlink(std::ffi::OsStr::new("reserve"))?;
+        // Spec: docs/specs/run-launch.md#admission-and-custody
+        // Even after occupancy is acquired, a grant cannot migrate to a
+        // different (or missing) checkout. Refusal withdraws this exact scope.
+        let mut shared = request.request.task.clone();
+        shared.access.shared_worktree = Some(provenant_records::custody::Subject::worktree(
+            temp.path().to_str().ok_or("path")?,
+            "other-incarnation",
+        ));
+        let result = store.hand_off(
+            &shared,
+            plan(),
+            provenant_core::ActorId::from_bytes([2; 16]),
+            &|_, _| Ok(Vec::new()),
+            &acquire,
+            &record,
+            &crate::limits::deadline_only(60),
+            &call,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(HandOff::Boundary {
+                    class: provenant_records::diagnostic::BoundaryClass::LaneGit,
+                    ..
+                })
+            ),
+            "a shared grant without its held checkout must refuse before launch"
+        );
+        let directory = store.attempt_dir(id, false)?;
+        custody::acquire_reader(
+            directory,
+            RunStore::scope(&record),
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?
+        .withdraw_unlaunched()?;
         store
             .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;

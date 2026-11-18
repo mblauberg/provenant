@@ -1577,6 +1577,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || !std::path::Path::new(&binding.worktree).is_absolute()
                 || binding.worktree.len() > 4096
                 || binding.head.parse::<provenant_core::GitOid>().is_err()
+                || binding.shared_worktree.as_ref().is_some_and(|subject| {
+                    subject
+                        .worktree_identity()
+                        .is_none_or(|identity| identity.path != binding.worktree)
+                        || binding.source_directory_identity.is_none()
+                })
                 || (node.source.is_none()
                     && node.continues.is_none()
                     && progress.source_commit.as_ref() != Some(&binding.head))

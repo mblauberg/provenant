@@ -480,6 +480,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         fn binding(&self, path: &str) -> Option<WriterWorktreeBinding> {
             Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: None,
                 worktree: format!("/fixture/{path}"),
                 head: "a".repeat(40),
@@ -523,11 +524,14 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             path: &str,
             _: &str,
             _: &str,
-        ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        _owner: Option<provenant_core::Digest>,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
             self.contend(1)?;
             Ok(self.binding(path))
         }
-        fn provision_child_worktree(&mut self, _: &str, _: &str) -> Result<bool, Self::Error> {
+        fn provision_child_worktree(&mut self, _: &str, _: &str,
+        _owner: Option<provenant_core::Digest>,
+    ) -> Result<bool, Self::Error> {
             self.contend(2)?;
             Ok(true)
         }

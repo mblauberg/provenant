@@ -278,6 +278,10 @@ pub struct LaneAccess {
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub capability_sources: CapabilitySources,
+    /// Host-granted shared writer incarnation, retained through preparation
+    /// and checked again after acquiring worktree occupancy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_worktree: Option<crate::custody::Subject>,
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
@@ -1754,6 +1758,7 @@ pub enum WriteSource {
     PrivateState,
     ReadOnlyException,
     LaneCache,
+    GitState,
 }
 
 /// Evidence on which a terminal decision was based.

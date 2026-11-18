@@ -70,7 +70,7 @@ project, using one bounded host process census for the pass. Failed project
 recovery does not prevent other projects or scheduled tasks from running.
 A sealed exit remains settlement evidence when the census is unavailable;
 live attempts retain their automatic fence. Unknown attempts are queued for
-proof-only recovery: the original guardian and custody locks, writer lease and
+proof-only recovery: the original guardian, custody and attempt holder locks and
 a fresh empty worktree census must prove absence before same-boot settlement.
 Unknown evidence itself never clears custody.
 Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
@@ -115,7 +115,7 @@ launch again.
 ### Quiescence before release
 
 A writer stays fenced until the provider is reaped, two complete censuses show
-no surviving member or escapee, and a fresh lock on the original lease inode
+no surviving member or escapee, and a fresh lock on the original holder inode
 succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
 decision with matching authority clears one, and that decision permits no signal.
 - Why: a leftover descendant could still write the worktree.
@@ -387,10 +387,13 @@ refuses credential-bearing URLs.
 - Why: roots differ.
 - Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
 
-### One writer; removal never forces
+### Shared occupancy; removal never forces
 
-Git's own inventory is the worktree registry. One writer holds each linked
-worktree, and custody outlives the requesting call. `worktree remove` refuses
+Git's own inventory is the worktree registry. A worktree's owning lane decides
+who else writes in it. Writers share occupancy leases, and custody outlives the
+requesting call. Each attempt also holds its own holder lease; proof that a
+sibling has settled cannot release another attempt's custody. Removal requires
+exclusive occupancy with zero live holders. `worktree remove` refuses
 the primary, a live writer or observed process, and has no force. Dirty work
 requires explicit discard, with its recoverable archive captured before removal;
 it deletes a branch only with current landing evidence or explicit discard.

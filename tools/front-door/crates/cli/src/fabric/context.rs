@@ -267,6 +267,26 @@ pub fn inspect_checkout_subject(
     }
 }
 
+/// Verify the nested creator receipt and capture the exact checkout incarnation
+/// through held Git handles. The launch seals this subject through occupancy.
+pub fn provisioned_checkout_subject(
+    roots: &Roots,
+    path: &Path,
+    owner: &provenant_core::Digest,
+) -> Result<provenant_records::custody::Subject, EdgeError> {
+    let repo = custody_checkout(roots, path)?;
+    let receipt = repo
+        .private_dir()
+        .read_stable(OsStr::new("provenant-provision-owner"), 256)?;
+    if receipt != owner.to_string().as_bytes() {
+        return Err(EdgeError::Invalid);
+    }
+    let subject = provenant_confinement::worktrees::worktree_subject(&repo)?;
+    repo.revalidate_identity()
+        .map_err(provenant_confinement::worktrees::WorktreeError::from)?;
+    Ok(subject)
+}
+
 /// Acquire through the verified Git boundary shared by creation and launch.
 pub fn checkout_subject(
     roots: &Roots,

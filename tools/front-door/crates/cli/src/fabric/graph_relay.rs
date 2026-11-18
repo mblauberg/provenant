@@ -75,6 +75,247 @@ fn journal_error<E>(_: E) -> ServiceError {
     ServiceError::Facade(FacadeError::io("access graph journal"))
 }
 
+fn same_path_at_checkout(candidate: &str, expected: &str, cwd: &std::path::Path) -> bool {
+    let candidate = std::path::Path::new(candidate);
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        cwd.join(candidate)
+    };
+    let expected = std::path::Path::new(expected);
+    candidate == expected
+        || candidate
+            .canonicalize()
+            .ok()
+            .zip(expected.canonicalize().ok())
+            .is_some_and(|(candidate, expected)| candidate == expected)
+}
+
+fn verify_live_sealed_worktree(
+    context: &Context,
+    sealed: &provenant_records::custody::Subject,
+) -> Result<String, ServiceError> {
+    let identity = sealed.worktree_identity().ok_or_else(|| {
+        refused(
+            "writer_parent_required",
+            "sealed parent worktree identity is invalid",
+        )
+    })?;
+    let current = crate::fabric::inspect_checkout_subject(
+        &context.roots,
+        std::path::Path::new(&identity.path),
+    )
+    .map_err(|error| refused("writer_parent_required", error.to_string()))?;
+    if !crate::run::nested_authority::same_worktree_incarnation(Some(sealed), current.as_ref()) {
+        return Err(refused(
+            "writer_parent_required",
+            "parent worktree incarnation changed after launch",
+        ));
+    }
+    Ok(identity.path)
+}
+
+/// Existing nested writer checkouts require the owning parent's exact sealed
+/// incarnation. New checkouts are provisioned independently. Bind the verified
+/// directory now so a later removal/recreation cannot substitute another tree
+/// between relay admission and shared occupancy acquisition.
+fn bind_shared_writers(
+    context: &Context,
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    sealed: Option<&provenant_records::custody::Subject>,
+) -> Result<(), ServiceError> {
+    use provenant_fabric_runtime::graph::{AccessMode, WriterWorktreeBinding};
+    let Some(expansion) = checkpoint.expansions.last() else {
+        return Ok(());
+    };
+    let writers = expansion
+        .nodes
+        .iter()
+        .chain(expansion.patch.iter().flat_map(|patch| &patch.replaced))
+        .filter(|node| node.access == AccessMode::WorktreeWrite && !node.provision_worktree)
+        .cloned()
+        .collect::<Vec<_>>();
+    for node in writers {
+        let sealed = sealed.ok_or_else(|| {
+            refused(
+                "writer_parent_required",
+                "an existing writer checkout needs its owning lane's authority",
+            )
+        })?;
+        let path = verify_live_sealed_worktree(context, sealed)?;
+        if !node
+            .worktree
+            .as_deref()
+            .is_some_and(|candidate| same_path_at_checkout(candidate, &path, &context.cwd))
+        {
+            return Err(refused(
+                "writer_parent_required",
+                "a nested writer may share only its owning lane's worktree; provision a new checkout for independent work",
+            ));
+        }
+        let request = provenant_run::resolve_writer(
+            context.roots.state.as_path(),
+            &context.cwd,
+            std::path::Path::new(&path),
+        )
+        .map_err(|error| refused("writer_parent_required", error.to_string()))?;
+        let writer = provenant_run::prepare_writer(
+            &request,
+            context.roots.state.as_path(),
+            context.identity.project,
+        )
+        .map_err(|error| refused("writer_parent_required", error.to_string()))?;
+        // Revalidate the authority after preparation, which can run Git probes.
+        verify_live_sealed_worktree(context, sealed)?;
+        writer
+            .worktree
+            .repo()
+            .revalidate_identity()
+            .map_err(|error| refused("writer_parent_required", error.to_string()))?;
+        let identity = writer.worktree.identity();
+        let progress = checkpoint
+            .nodes
+            .iter_mut()
+            .find(|row| row.id == node.id)
+            .ok_or_else(|| refused("invalid_graph", "shared writer progress missing"))?;
+        progress.writer_binding = Some(WriterWorktreeBinding {
+            extra: Default::default(),
+            shared_worktree: Some(sealed.clone()),
+            source_directory_identity: Some(provenant_records::run::SourceIdentity {
+                device: identity.device,
+                inode: identity.inode,
+            }),
+            worktree: path,
+            head: writer.source_commit().to_string(),
+        });
+        if node.source.is_none() && node.continues.is_none() && progress.source_commit.is_none() {
+            progress.source_commit = Some(writer.source_commit().to_string());
+        }
+        progress.writer_binding_pending = false;
+    }
+    Ok(())
+}
+
+/// Replay and fresh admission expose the same durable advisory warnings to
+/// the owning lane, alongside the child receipt or patch revision.
+fn admission_value(
+    mut value: Value,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Value {
+    if let Some(revision) = value["revision"].as_u64() {
+        let warnings = checkpoint
+            .expansions
+            .iter()
+            .filter(|expansion| {
+                expansion
+                    .patch
+                    .as_ref()
+                    .is_some_and(|patch| patch.revision == revision)
+            })
+            .flat_map(|expansion| expansion.floor_warnings.iter())
+            .take(64)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !warnings.is_empty() {
+            value["warnings"] = json!(warnings);
+        }
+    }
+    value
+}
+
+fn provisioning_owner_digest(
+    graph: &str,
+    node: &str,
+) -> Result<provenant_core::Digest, ServiceError> {
+    provenant_records::CanonicalV1::record_digest("nested-worktree-owner", 1, &(graph, node))
+        .map_err(|error| refused("invalid_graph", error.to_string()))
+}
+
+/// Assign lifetime creation authority before examining source readiness or
+/// active scheduling. A deferred writer must not fall back to host authority.
+fn bind_admitted_provisioning_owners(
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<(), ServiceError> {
+    use provenant_fabric_runtime::graph::AccessMode;
+    let writers = checkpoint
+        .expansions
+        .last()
+        .into_iter()
+        .flat_map(|expansion| {
+            expansion
+                .nodes
+                .iter()
+                .chain(expansion.patch.iter().flat_map(|patch| &patch.replaced))
+        })
+        .filter(|node| node.access == AccessMode::WorktreeWrite && node.provision_worktree)
+        .filter_map(|node| {
+            node.worktree
+                .as_ref()
+                .map(|path| (node.id.clone(), path.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut by_path = std::collections::BTreeMap::new();
+    for (id, path) in writers {
+        let logical = relay::provisioning_owner(checkpoint, &id);
+        let owner = match by_path.get(&path) {
+            Some(owner) => *owner,
+            None => {
+                let owner = provisioning_owner_digest(&checkpoint.graph_id, &logical)?;
+                by_path.insert(path.clone(), owner);
+                owner
+            }
+        };
+        for row in &mut checkpoint.nodes {
+            if row.id == id || row.id == logical || row.worktree.as_deref() == Some(path.as_str()) {
+                if row.provisioned_owner.is_some_and(|prior| prior != owner) {
+                    return Err(refused(
+                        "writer_parent_required",
+                        "nested provisioning belongs to another lane",
+                    ));
+                }
+                row.provisioned_owner = Some(owner);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bind_provisioning_owner(
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    node: &str,
+) -> Result<(), ServiceError> {
+    let path = checkpoint
+        .pending_writer_provisioning
+        .get(node)
+        .map(|pending| pending.path.clone());
+    let recorded = checkpoint
+        .nodes
+        .iter()
+        .filter(|row| {
+            row.id == node
+                || path
+                    .as_ref()
+                    .is_some_and(|path| row.worktree.as_ref() == Some(path))
+        })
+        .find_map(|row| row.provisioned_owner);
+    let owner = recorded.unwrap_or(provisioning_owner_digest(&checkpoint.graph_id, node)?);
+    if let Some(pending) = checkpoint.pending_writer_provisioning.get_mut(node) {
+        pending.owner = Some(owner);
+        for row in &mut checkpoint.nodes {
+            if row.id == node || row.worktree.as_deref() == Some(pending.path.as_str()) {
+                if row.provisioned_owner.is_some_and(|prior| prior != owner) {
+                    return Err(refused(
+                        "writer_parent_required",
+                        "nested provisioning belongs to another lane",
+                    ));
+                }
+                row.provisioned_owner = Some(owner);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Serve one graph frame for `attempt` on this host.
 pub fn serve(
     context: &Context,
@@ -102,6 +343,67 @@ pub fn serve_with_read(
     clock: &dyn Clock,
     read: &impl Fn(Value) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
+    serve_authorized(
+        context, attempt, arguments, budget, cancel, clock, None, false, read,
+    )
+}
+
+/// Serve a lane graph operation using the exact parent worktree incarnation
+/// sealed in its host handoff. This prevents a stale graph path from granting
+/// shared checkout authority after that path has been recreated.
+pub fn serve_with_read_and_parent(
+    context: &Context,
+    attempt: &str,
+    arguments: Value,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+    sealed_parent_worktree: Option<&provenant_records::custody::Subject>,
+    read: &impl Fn(Value) -> Result<Value, ServiceError>,
+) -> Result<Value, ServiceError> {
+    serve_authorized(
+        context,
+        attempt,
+        arguments,
+        budget,
+        cancel,
+        clock,
+        sealed_parent_worktree,
+        true,
+        read,
+    )
+}
+
+fn serve_authorized(
+    context: &Context,
+    attempt: &str,
+    arguments: Value,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+    sealed_parent_worktree: Option<&provenant_records::custody::Subject>,
+    nested: bool,
+    read: &impl Fn(Value) -> Result<Value, ServiceError>,
+) -> Result<Value, ServiceError> {
+    fn contains_provision_flag(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => {
+                fields.contains_key("provision_worktree")
+                    || fields.values().any(contains_provision_flag)
+            }
+            Value::Array(items) => items.iter().any(contains_provision_flag),
+            _ => false,
+        }
+    }
+    if nested
+        && matches!(arguments["op"].as_str(), Some("add" | "edit"))
+        && contains_provision_flag(&arguments)
+    {
+        return Err(refused(
+            "writer_parent_required",
+            "worktree provisioning is derived by the host; omit provision_worktree",
+        ));
+    }
     let op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
     // The lane has already started the launch allowance. This confirmed
@@ -193,7 +495,7 @@ pub fn serve_with_read(
             return match relay::replay_child(&document, &checkpoint, historical, request)
                 .map_err(patch_refused)?
             {
-                Some(receipt) => Ok(serde_json::to_value(receipt)?),
+                Some(receipt) => Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint)),
                 None => Err(not_a_node()),
             };
         }
@@ -205,7 +507,7 @@ pub fn serve_with_read(
             if let Some(receipt) = relay::replay_child(&document, &checkpoint, &parent, &request)
                 .map_err(patch_refused)?
             {
-                return Ok(serde_json::to_value(receipt)?);
+                return Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint));
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
@@ -256,6 +558,21 @@ pub fn serve_with_read(
                     &context.config.graph.limits,
                 )
                 .map_err(|error| refused("invalid_graph", error))?;
+                if nested && let Some(parent_path) = parent_path.as_deref() {
+                    let sealed = sealed_parent_worktree.ok_or_else(|| {
+                        refused(
+                            "writer_parent_required",
+                            "host handoff has no parent worktree authority",
+                        )
+                    })?;
+                    let path = verify_live_sealed_worktree(context, sealed)?;
+                    if !same_path_at_checkout(parent_path, &path, &context.cwd) {
+                        return Err(refused(
+                            "writer_parent_required",
+                            "parent worktree differs from host handoff",
+                        ));
+                    }
+                }
                 if let (None, Some(branch), Some(source)) = (
                     &parent_path,
                     &document.integration_branch,
@@ -324,7 +641,10 @@ pub fn serve_with_read(
             .map_err(patch_refused)?;
             if receipt.replayed {
                 // Nothing changed; the earlier admission is already journalled.
-                return Ok(serde_json::to_value(receipt)?);
+                return Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint));
+            }
+            if nested {
+                bind_admitted_provisioning_owners(&mut checkpoint)?;
             }
             if request.needs_worktree_provisioning()
                 && let Some(path) = receipt.worktree.as_deref()
@@ -340,6 +660,10 @@ pub fn serve_with_read(
                 // Checkpoint the fence before any Git effect; a crash after
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
+                if nested {
+                    bind_provisioning_owner(&mut checkpoint, &receipt.node)?;
+                    bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
+                }
                 journal.save(&checkpoint).map_err(journal_error)?;
                 // Reserve journal persistence and response delivery within the
                 // confirmed caller deadline, as the edit path does.
@@ -360,8 +684,18 @@ pub fn serve_with_read(
                 )? {
                     return Err(error);
                 }
+            } else if nested {
+                bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
             }
-            provision_added_writers(context, &mut journal, &mut checkpoint, &[], budget, cancel)?;
+            provision_added_writers(
+                context,
+                &mut journal,
+                &mut checkpoint,
+                &[],
+                budget,
+                cancel,
+                nested,
+            )?;
             serde_json::to_value(receipt)?
         }
         RelayOp::Edit { id, patch } => {
@@ -416,6 +750,10 @@ pub fn serve_with_read(
                 },
             )
             .map_err(patch_refused)?;
+            if nested && !admitted.replayed {
+                bind_admitted_provisioning_owners(&mut checkpoint)?;
+                bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
+            }
             // Leave time to persist a refusal and deliver it to the caller.
             // The relay's transport reserve alone does not cover journal I/O.
             let now = clock.mono_now();
@@ -432,6 +770,7 @@ pub fn serve_with_read(
                 &admitted.added,
                 provisioning_budget,
                 cancel,
+                nested,
             )?;
             json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
         }
@@ -479,6 +818,16 @@ pub fn serve_with_read(
             json!({"graph_id": graph_id, "node": parent, "waiting": waiting})
         }
     };
+    let value = admission_value(value, &checkpoint);
+    if let Some(warnings) = value.get("warnings").and_then(Value::as_array)
+        && let Some(owner) = checkpoint.nodes.iter_mut().find(|row| row.id == parent)
+    {
+        for warning in warnings.iter().filter_map(Value::as_str) {
+            if owner.warnings.len() < 64 && !owner.warnings.iter().any(|old| old == warning) {
+                owner.warnings.push(warning.to_owned());
+            }
+        }
+    }
     journal.save(&checkpoint).map_err(journal_error)?;
     Ok(value)
 }
@@ -502,6 +851,7 @@ fn provision_added_writers(
     added: &[String],
     budget: WaitBudget,
     cancel: &CancelToken,
+    nested: bool,
 ) -> Result<(), ServiceError> {
     use provenant_fabric_runtime::graph::{AccessMode, NodeState, SourceBinding};
     let pending = relay::pending_provisioning(checkpoint);
@@ -586,6 +936,9 @@ fn provision_added_writers(
             progress.provisioned_source = Some(source.clone());
         }
         relay::fence_provisioning(checkpoint, &owner, path, &source);
+        if nested {
+            bind_provisioning_owner(checkpoint, &owner)?;
+        }
         fresh.push(owner);
     }
     if !relay::pending_provisioning(checkpoint).is_empty() {
@@ -690,9 +1043,18 @@ fn recover_provisioning(
             .managed_writer_branch(std::path::Path::new(&path))
             .map(str::to_owned);
         let result = match branch.as_deref() {
-            Some(branch) => {
-                provision_writer_checked(context, &path, branch, &source, launch, cancel)
-            }
+            Some(branch) => provision_writer_checked(
+                context,
+                &path,
+                branch,
+                &source,
+                checkpoint
+                    .pending_writer_provisioning
+                    .get(&node)
+                    .and_then(|pending| pending.owner.as_ref()),
+                launch,
+                cancel,
+            ),
             None => Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest),
         };
         if let Err(error) = result {
@@ -1349,7 +1711,7 @@ pub fn provision_child(
 ) -> Result<(), ServiceError> {
     let clock = provenant_os::clock::SystemClock;
     let budget = writer_launch_budget(context, &clock, budget);
-    provision_child_with_budget(context, path, source, budget, cancel)
+    provision_child_with_budget(context, path, source, None, budget, cancel)
 }
 
 /// Provision against an already-started launch deadline; never renew it.
@@ -1357,6 +1719,7 @@ pub fn provision_child_with_budget(
     context: &Context,
     path: &str,
     source: &str,
+    owner: Option<&provenant_core::Digest>,
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
@@ -1365,7 +1728,9 @@ pub fn provision_child_with_budget(
         .managed_writer_branch(std::path::Path::new(path))
         .map(str::to_owned)
         .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
-    provision_writer(context, path, &branch, source, budget, cancel)
+    provision_writer_checked(context, path, &branch, source, owner, budget, cancel)
+        .map(|_| ())
+        .map_err(provisioning_refusal)
 }
 
 /// Provision a graph-owned writer at its checkpointed source commit.
@@ -1377,7 +1742,7 @@ pub fn provision_writer(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    provision_writer_checked(context, path, branch, source, budget, cancel)
+    provision_writer_checked(context, path, branch, source, None, budget, cancel)
         .map(|_| ())
         .map_err(provisioning_refusal)
 }
@@ -1477,6 +1842,7 @@ pub fn provision_writer_checked(
     path: &str,
     branch: &str,
     source: &str,
+    owner: Option<&provenant_core::Digest>,
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<std::path::PathBuf, provenant_confinement::worktrees::WorktreeError> {
@@ -1506,7 +1872,7 @@ pub fn provision_writer_checked(
             )
             .map_err(worktrees::WorktreeError::PortConfiguration)?;
             let expected = resolve_managed_writer_path(&ports, layout.root(), path, branch)?;
-            provision_in_context(&worktree_context, path, branch, source, cancel)?;
+            provision_in_context(&worktree_context, path, branch, source, owner, cancel)?;
             Ok(expected)
         },
     )
@@ -1517,6 +1883,7 @@ fn provision_in_context(
     path: &str,
     branch: &str,
     source: &str,
+    owner: Option<&provenant_core::Digest>,
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
@@ -1554,6 +1921,16 @@ fn provision_in_context(
                 path: existing.path.clone(),
                 detail: format!("worktree registration could not be verified: {error}"),
             })?;
+        if let Some(owner) = owner {
+            let receipt = tree
+                .repo()
+                .private_dir()
+                .read_stable(std::ffi::OsStr::new("provenant-provision-owner"), 256)
+                .map_err(|_| WorktreeError::UnknownWriter)?;
+            if receipt != owner.to_string().as_bytes() {
+                return Err(WorktreeError::UnknownWriter);
+            }
+        }
         let _writer = worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(
             |occupancy| match occupancy {
                 worktrees::Occupancy::Held => WorktreeError::WriterBusy {
@@ -1601,6 +1978,20 @@ fn provision_in_context(
         {
             return Err(WorktreeError::IdentityChanged);
         }
+        if let Some(owner) = owner {
+            let tree = provenant_confinement::verify_worktree(context.repo, &created.path)?;
+            tree.repo()
+                .private_dir()
+                .atomic_write(
+                    std::ffi::OsStr::new("provenant-provision-owner"),
+                    ".provision-owner-",
+                    owner.to_string().as_bytes(),
+                    provenant_os::fs::PublishMode::NoReplace,
+                )?
+                .require_durable()
+                .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
+            tree.repo().revalidate_identity()?;
+        }
         Ok(())
     })
 }
@@ -1616,11 +2007,12 @@ pub fn from_lane(
         .ok()
         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
         .ok_or_else(|| refused("graph_relay_unavailable", "not running inside a lane"))?;
-    provenant_fabric_runtime::relay::graph(
+    provenant_fabric_runtime::relay::graph_authenticated(
         &provenant_providers::LaneRuntime::fabric_socket(attempt),
         serde_json::to_value(op)?,
         cancel,
         within,
+        crate::run::nested_authority::server_is_current_ancestor,
     )
 }
 
@@ -1997,6 +2389,226 @@ mod child_wait_tests {
 mod provisioning_tests {
     use super::*;
 
+    fn fixture_git_text(
+        project: &std::path::Path,
+        args: &[&str],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(
+            String::from_utf8(provenant_os::fixture::run_git(project, args)?)?
+                .trim()
+                .to_owned(),
+        )
+    }
+
+    fn authority_fixture()
+    -> Result<(tempfile::TempDir, Context, std::path::PathBuf, String), Box<dyn std::error::Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        fixture_git_text(&project, &["init", "-q"])?;
+        fixture_git_text(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        let source = fixture_git_text(&project, &["rev-parse", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        Ok((root, context, project, source))
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn nested_provisioning_reuses_only_its_creators_exact_checkout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_root, context, project, source) = authority_fixture()?;
+        let git = |args: &[&str]| fixture_git_text(&project, args);
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = CancelToken::new();
+        provision_writer(
+            &context,
+            ".worktrees/unrelated",
+            "unrelated",
+            &source,
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+        )?;
+        let owner = provisioning_owner_digest("graph-one", "child")?;
+        let other_owner = provisioning_owner_digest("graph-two", "child")?;
+        let owned_path = ".worktrees/reserved";
+        let provision = |path, branch, owner: &provenant_core::Digest| {
+            provision_writer_checked(
+                &context,
+                path,
+                branch,
+                &source,
+                Some(owner),
+                WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                &cancel,
+            )
+        };
+        provision(owned_path, "reserved", &owner)?;
+        provision(owned_path, "reserved", &owner)?;
+        assert!(provision(owned_path, "reserved", &other_owner).is_err());
+        assert!(provision(".worktrees/unrelated", "unrelated", &owner).is_err());
+        let owned = project.join(owned_path).canonicalize()?;
+        git(&["worktree", "remove", owned.to_str().ok_or("path")?])?;
+        git(&["worktree", "add", owned.to_str().ok_or("path")?, "reserved"])?;
+        assert!(
+            provision(owned_path, "reserved", &owner).is_err(),
+            "a recycled checkout has no creator receipt"
+        );
+        assert!(owned.is_dir(), "refusal preserves the unrelated checkout");
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn deferred_nested_creation_retains_its_owner_before_source_resolution()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::GraphCheckpoint;
+        let path = ".worktrees/deferred";
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"deferred","plan_digest":"fixture",
+            "nodes":[{"id":"parent--later","state":"pending","worktree":path,"attempts":[]},
+                {"id":"dependency","state":"running","worktree":null,"attempts":[]}],
+            "expansions":[{"source":"parent","nodes":[{
+                "id":"parent--later","access":"worktree_write","worktree":path,"provision_worktree":true,
+                "source":{"type":"node","node":"dependency"},"prompt":"later"
+            }]}]
+        }))?;
+        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        let owner = checkpoint.nodes[0]
+            .provisioned_owner
+            .ok_or("deferred writer owner")?;
+        assert!(
+            checkpoint.pending_writer_provisioning.is_empty(),
+            "the source is not available yet"
+        );
+        checkpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint)?)?;
+        relay::fence_provisioning(&mut checkpoint, "parent--later", path, &"a".repeat(40));
+        assert_eq!(
+            checkpoint.pending_writer_provisioning["parent--later"].owner,
+            Some(owner)
+        );
+        relay::clear_provisioning(&mut checkpoint, "parent--later");
+        assert_eq!(checkpoint.nodes[0].provisioned_owner, Some(owner));
+        // A later admission cannot turn this target into another lane's
+        // creation simply because the original effect fence was cleared.
+        let mut foreign = checkpoint.expansions[0].clone();
+        foreign.nodes[0].id = "other--writer".into();
+        checkpoint.expansions.push(foreign);
+        let mut foreign_progress = checkpoint.nodes[0].clone();
+        foreign_progress.id = "other--writer".into();
+        foreign_progress.provisioned_owner = None;
+        checkpoint.nodes.push(foreign_progress);
+        assert_eq!(
+            bind_admitted_provisioning_owners(&mut checkpoint)
+                .unwrap_err()
+                .code(),
+            "writer_parent_required"
+        );
+        assert_eq!(checkpoint.nodes[0].provisioned_owner, Some(owner));
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn nested_worktree_authority_cannot_cross_owners_or_checkout_incarnations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::GraphCheckpoint;
+        let (_root, context, project, source) = authority_fixture()?;
+        let git = |args: &[&str]| fixture_git_text(&project, args);
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = CancelToken::new();
+        for name in ["parent", "unrelated"] {
+            provision_writer(
+                &context,
+                &format!(".worktrees/{name}"),
+                name,
+                &source,
+                WaitBudget::cli(clock.mono_now(), 5)?,
+                &cancel,
+            )?;
+        }
+        let forged = serve_with_read_and_parent(
+            &context,
+            "unused",
+            json!({
+                "op":"add","id":"child","prompt":"write","idempotency_key":"forged",
+                "launch":{"node":{"id":"child","access":"worktree_write","worktree":".worktrees/unrelated","provision_worktree":true}}
+            }),
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+            &clock,
+            None,
+            &|_| unreachable!("a forged provisioning flag must not perform an operation"),
+        );
+        assert_eq!(forged.unwrap_err().code(), "writer_parent_required");
+        let parent = project.join(".worktrees/parent").canonicalize()?;
+        let sealed = crate::fabric::checkout_subject(&context.roots, &parent)?;
+        let checkpoint = |path: &std::path::Path| -> Result<GraphCheckpoint, serde_json::Error> {
+            serde_json::from_value(json!({
+                "schema_version":2,"graph_id":"sharing","plan_digest":"fixture",
+                "nodes":[{"id":"parent--child","state":"pending","worktree":path,"attempts":[]}],
+                "expansions":[{"source":"parent","nodes":[{
+                    "id":"parent--child","access":"worktree_write","worktree":path,"prompt":"write"
+                }]}]
+            }))
+        };
+        let mut shared = checkpoint(&parent)?;
+        bind_shared_writers(&context, &mut shared, Some(&sealed))?;
+        let binding = shared.nodes[0]
+            .writer_binding
+            .as_ref()
+            .ok_or("shared binding")?;
+        assert_eq!(binding.worktree, parent.to_str().ok_or("path")?);
+        assert!(binding.source_directory_identity.is_some());
+        assert!(!shared.nodes[0].writer_binding_pending);
+        // An unrelated caller cannot inherit the owner's authority by naming
+        // its path, even when that checkout is temporarily unoccupied.
+        assert_eq!(
+            bind_shared_writers(&context, &mut checkpoint(&parent)?, None)
+                .unwrap_err()
+                .code(),
+            "writer_parent_required"
+        );
+        assert_eq!(
+            bind_shared_writers(
+                &context,
+                &mut checkpoint(&project.join(".worktrees/unrelated"))?,
+                Some(&sealed)
+            )
+            .unwrap_err()
+            .code(),
+            "writer_parent_required"
+        );
+        // A recycled path is a different authority, including before any child
+        // obtains a holder lease. The pinned directory binding also persists.
+        let old_identity = binding.source_directory_identity.clone();
+        git(&["worktree", "remove", parent.to_str().ok_or("path")?])?;
+        git(&["worktree", "add", parent.to_str().ok_or("path")?, "parent"])?;
+        let recreated = crate::fabric::checkout_subject(&context.roots, &parent)?;
+        assert_ne!(recreated, sealed);
+        assert_eq!(
+            bind_shared_writers(&context, &mut checkpoint(&parent)?, Some(&sealed))
+                .unwrap_err()
+                .code(),
+            "writer_parent_required"
+        );
+        assert_eq!(
+            shared.nodes[0]
+                .writer_binding
+                .as_ref()
+                .and_then(|binding| binding.source_directory_identity.clone()),
+            old_identity
+        );
+        Ok(())
+    }
+
     // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
     fn writer_provisioning_contention_keeps_its_fence_until_the_same_checkout_is_free()
@@ -2238,35 +2850,12 @@ mod provisioning_tests {
             .is_err()
         );
         let path = ".worktrees/graph-parent--child";
-        // Busy registry access is a retryable condition. It must not extend
-        // the caller's deadline or wait for the other writer to finish.
         let clock = provenant_os::clock::SystemClock;
-        let directory = provenant_os::fs::Directory::open_anchor(&project.join(".git"))?;
-        let held = directory.lock(
-            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel,
-            &clock,
-        )?;
-        let busy = provision_child_with_budget(
-            &context,
-            path,
-            &source,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel,
-        );
-        assert!(matches!(
-            busy,
-            Err(ServiceError::Facade(FacadeError::WriterLockBusy))
-        ));
-        assert!(!project.join(path).exists());
-        drop(held);
-        // The caller retries once the registry is available.
         provision_child_with_budget(
             &context,
             path,
             &source,
+            None,
             WaitBudget::cli(clock.mono_now(), 1)?,
             &cancel,
         )?;
@@ -2307,6 +2896,7 @@ mod provisioning_tests {
                         path,
                         path.trim_start_matches(".worktrees/"),
                         &source,
+                        None,
                         &cancel,
                     )
                 },
@@ -2333,6 +2923,7 @@ mod provisioning_tests {
                         path,
                         path.trim_start_matches(".worktrees/"),
                         &source,
+                        None,
                         &cancel,
                     )?;
                     // The fixture's TMPDIR may be an alias. Lock the same
@@ -2348,6 +2939,7 @@ mod provisioning_tests {
                         path,
                         path.trim_start_matches(".worktrees/"),
                         &source,
+                        None,
                         &cancel,
                     );
                     assert!(
@@ -2458,16 +3050,28 @@ mod provisioning_tests {
         git(&["remote", "add", "origin", remote])?;
         git(&["checkout", "--detach", "-q"])?;
         let request = json!({"op":"add","id":"writer","use":"implement","prompt":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
-        let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
+        let nested = |arguments| {
+            serve_with_read_and_parent(
+                &context,
+                "caller",
+                arguments,
+                budget,
+                &cancel,
+                &clock,
+                None,
+                &|_| unreachable!("no reads"),
+            )
+        };
+        let receipt = nested(request.clone())?;
         let path = receipt["worktree"].as_str().ok_or("missing worktree")?;
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
-        let replay = serve(&context, "caller", request, budget, &cancel, &clock)?;
+        let replay = nested(request)?;
         assert_eq!(replay["node"], receipt["node"]);
         assert_eq!(replay["replayed"], true);
         let edit = json!({"op":"edit","id":"g-writers","patch":{"schema_version":1,"idempotency_key":"edit-writer","nodes":[{
             "id":"edited","use":"implement","prompt":"Edit","write_scope":["other"]
         }]}});
-        let _ = serve(&context, "caller", edit, budget, &cancel, &clock)?;
+        let _ = nested(edit)?;
         assert_eq!(
             git(&[
                 "-C",
@@ -2476,6 +3080,126 @@ mod provisioning_tests {
                 "HEAD"
             ])?,
             source
+        );
+        // A writer guardian can both provision an independent child and
+        // share its own checkout without declaring an integration branch.
+        let owned = project.join(path).canonicalize()?;
+        let sealed = crate::fabric::checkout_subject(&context.roots, &owned)?;
+        let foreign = project
+            .join(".worktrees/g-writers-parent--edited")
+            .canonicalize()?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-owner","nodes":[{
+                "id":"owning","access":"worktree_write","worktree":owned,
+                "write_scope":["src"],"prompt":"own","route":{"alias":"senior"}
+            },{"id":"foreign","access":"worktree_write","worktree":foreign,"prompt":"other owner","route":{"alias":"senior"}}]
+        }))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-owner","plan_digest":"fixture",
+            "nodes":[{"id":"owning","state":"running","worktree":owned,"attempts":[{
+                "launched":true,"key":{"graph_id":"g-owner","node_id":"owning","route_index":0,"attempt":1},
+                "route":{"alias":"senior"},"state":"running","attempt_ref":format!("{}/owner-caller",context.identity.host),
+                "outcome":null,"launch_actor":"fixture"
+            }]},{"id":"foreign","state":"pending","worktree":foreign,"source_commit":source,
+                "writer_binding":{"worktree":foreign,"head":source},"attempts":[]}]
+        }))?;
+        {
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "g-owner",
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+                requester_path: None,
+                extra: Default::default(),
+                bases: None,
+                directory: project.clone(),
+                document,
+            })?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+            journal.save(&checkpoint)?;
+        }
+        let nested_owner = |arguments| {
+            serve_with_read_and_parent(
+                &context,
+                "owner-caller",
+                arguments,
+                budget,
+                &cancel,
+                &clock,
+                Some(&sealed),
+                &|_| unreachable!("no reads"),
+            )
+        };
+        let independent = nested_owner(
+            json!({"op":"add","id":"fresh","prompt":"work","writer":true,"idempotency_key":"fresh"}),
+        )?;
+        assert_ne!(independent["worktree"].as_str(), owned.to_str());
+        assert_eq!(
+            git(&[
+                "-C",
+                independent["worktree"].as_str().ok_or("path")?,
+                "rev-parse",
+                "HEAD"
+            ])?,
+            source
+        );
+        let sharing = json!({"op":"add","id":"shared","prompt":"share","idempotency_key":"shared",
+            "launch":{"node":{"id":"shared","access":"worktree_write","worktree":owned,"write_scope":["src/lib"],"prompt":"share","route":{"alias":"senior"}}}});
+        let templates = project.join(provenant_config::repository_files::TEMPLATES);
+        std::fs::create_dir_all(&templates)?;
+        std::fs::write(
+            templates.join("redirect.toml"),
+            format!(
+                "brief = 'unrelated checkout'\ntier = 'senior'\naccess = 'worktree_write'\n[node]\nworktree = {}\nprovision_worktree = true\n",
+                serde_json::to_string(foreign.to_str().ok_or("path")?)?,
+            ),
+        )?;
+        let redirected = nested_owner(json!({"op":"add","id":"redirected","use":"redirect",
+            "prompt":"try template authority","idempotency_key":"redirected"}));
+        assert_eq!(
+            redirected.unwrap_err().code(),
+            "writer_parent_required",
+            "a template cannot mint provisioning authority over a bound sibling"
+        );
+        let admitted = nested_owner(sharing.clone())?;
+        assert!(
+            !admitted["warnings"]
+                .as_array()
+                .ok_or("owner warning")?
+                .is_empty()
+        );
+        let replay = nested_owner(sharing)?;
+        assert_eq!(replay["warnings"], admitted["warnings"]);
+        assert_eq!(replay["replayed"], true);
+        let saved = FileJournal::read_checkpoint(
+            &context.roots.state,
+            context.identity.project,
+            "g-owner",
+        )?
+        .ok_or("checkpoint")?;
+        assert!(
+            saved
+                .nodes
+                .iter()
+                .find(|row| row.id == "owning--fresh")
+                .and_then(|row| row.provisioned_owner)
+                .is_some()
+        );
+        assert!(saved.pending_writer_provisioning.is_empty());
+        assert_eq!(
+            saved
+                .nodes
+                .iter()
+                .find(|row| row.id == "owning--shared")
+                .and_then(|row| row.writer_binding.as_ref())
+                .and_then(|binding| binding.shared_worktree.as_ref()),
+            Some(&sealed)
         );
         Ok(())
     }
@@ -2801,15 +3525,6 @@ mod provisioning_tests {
         relay::fence_provisioning(&mut reloaded, "a--w", path, &source);
         journal.save(&reloaded)?;
         drop(journal);
-        use provenant_os::fs::{Directory, LockMode};
-        let directory = Directory::open_anchor(&project.join(".git"))?;
-        let held = directory.lock(
-            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel,
-            &clock,
-        )?;
         let restarted = Context::open(context.roots.clone(), &home, &project)?;
         let short = WaitBudget::up_to(
             clock.mono_now(),
@@ -2835,7 +3550,6 @@ mod provisioning_tests {
         );
         assert_eq!(saved.nodes[1].state, NodeState::Pending);
         assert!(saved.nodes[1].advance_owner_code.is_none());
-        drop(held);
 
         // A mismatched source is another refusal before mutation; it cannot
         // reconcile the original checkout either.
@@ -2860,8 +3574,8 @@ mod provisioning_tests {
         );
         git(&["-C", path, "reset", "--hard", &source])?;
 
-        // With the lock free and identity restored, a fresh bounded recovery
-        // budget verifies the exact checkout despite the expired launch.
+        // With identity restored, a fresh bounded recovery budget verifies
+        // the exact checkout despite the expired launch.
         let budget = WaitBudget::cli(clock.mono_now(), 5)?;
         serve(
             &restarted,

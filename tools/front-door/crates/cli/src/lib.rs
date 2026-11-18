@@ -2548,9 +2548,36 @@ mod tests {
         words.push("overflow.md");
         invalid(&words);
         valid(&["internal", "supervise"]);
-        valid(&["internal", "supervise", "3", "4", "5", "6", "7"]);
+        // Seven capabilities, plus the optional native profile descriptor.
+        valid(&["internal", "supervise", "3", "4", "5", "6", "7", "8", "9"]);
+        valid(&[
+            "internal",
+            "supervise",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+        ]);
         invalid(&["internal", "supervise", "3"]);
-        invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
+        invalid(&["internal", "supervise", "3", "4", "5", "6", "7", "8"]);
+        invalid(&[
+            "internal",
+            "supervise",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+        ]);
+        invalid(&["internal", "supervise", "2", "4", "5", "6", "7", "8", "9"]);
     }
     #[test]
     fn wait_and_output_bounds() {

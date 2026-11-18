@@ -1,4 +1,4 @@
-//! Private lane Git state. Paths stay compatible with provider confinement;
+//! Lane Git state. Shared writer paths stay under host-issued worktree grants;
 //! only host-sealed directory identities may be reopened for settlement.
 use super::*;
 
@@ -78,6 +78,7 @@ pub(crate) fn prepare_refs(
         scratch,
         &format!("ref: {branch}\n"),
         Some((branch, base)),
+        None,
     )
 }
 
@@ -91,6 +92,7 @@ fn prepare_refs_from(
     scratch: &Directory,
     head: &str,
     branch: Option<(&str, GitOid)>,
+    minimal_config: Option<&[u8]>,
 ) -> Result<()> {
     let common = directory(scratch, OsStr::new("git-common"))?;
     let write = |directory: &Directory, name: &str, bytes: &[u8]| -> Result<()> {
@@ -101,11 +103,22 @@ fn prepare_refs_from(
     };
     // Keep the repository's remotes and branch upstream in the lane copy.
     // The host never reads this mutable copy back during settlement.
-    write(
-        &common,
-        "config",
-        &source_common.read_stable(OsStr::new("config"), 1024 * 1024)?,
-    )?;
+    match minimal_config {
+        Some(config) => common
+            .atomic_write_with_permissions(
+                OsStr::new("config"),
+                ".objects-",
+                config,
+                0o444,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()?,
+        None => write(
+            &common,
+            "config",
+            &source_common.read_stable(OsStr::new("config"), 1024 * 1024)?,
+        )?,
+    }
     match source_common.read_stable(OsStr::new("shallow"), 1024 * 1024) {
         Ok(bytes) => write(&common, "shallow", &bytes)?,
         Err(error) if error.is_not_found() => {}
@@ -116,7 +129,12 @@ fn prepare_refs_from(
     directory(&common, OsStr::new("refs"))?;
     copy_index(git, source_private, &common, root_path)?;
     // Preserve per-worktree settings and merge metadata alongside the index.
-    for name in ["config.worktree", "MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
+    let private_files: &[&str] = if minimal_config.is_some() {
+        &["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"]
+    } else {
+        &["config.worktree", "MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"]
+    };
+    for name in private_files {
         match source_private.read_stable(OsStr::new(name), 1024 * 1024) {
             Ok(bytes) => write(&common, name, &bytes)?,
             Err(error) if error.is_not_found() => {}
@@ -194,6 +212,7 @@ pub(crate) fn prepare_read_only(
         repo.root_path(),
         &held,
         &head,
+        None,
         None,
     )?;
     repo.revalidate().map_err(|_| invalid())?;
@@ -379,6 +398,40 @@ pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
             schema_version: 2,
             candidate: candidate.into(),
             identities: Some(ViewIdentities::read(&held, &refs, &objects)?),
+            shared: None,
+            extra: Default::default(),
+        })?,
+        crate::RECORD_LIMIT,
+    )
+}
+
+fn bind_shared(
+    attempt: &Directory,
+    held: &Directory,
+    private_refs: &Directory,
+    private_objects: &Directory,
+    shared: SharedViewBinding,
+) -> Result<()> {
+    let held_path = held.current_path()?;
+    let candidate = held_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| valid_candidate(name))
+        .ok_or_else(invalid)?
+        .to_owned();
+    let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
+    let reopened = temporary.open_verified_directory(OsStr::new(&candidate))?;
+    if !reopened.metadata()?.same_identity(&held.metadata()?) {
+        return Err(invalid());
+    }
+    crate::artifacts::seal(
+        attempt,
+        "writer-objects.json",
+        &crate::db::bytes(&ObjectBinding {
+            schema_version: 3,
+            candidate,
+            identities: Some(ViewIdentities::read(held, private_refs, private_objects)?),
+            shared: Some(shared),
             extra: Default::default(),
         })?,
         crate::RECORD_LIMIT,
@@ -391,9 +444,46 @@ pub(super) struct ObjectBinding {
     candidate: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identities: Option<ViewIdentities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared: Option<SharedViewBinding>,
     #[serde(default, flatten)]
     extra: provenant_records::ExtraFields,
 }
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SharedViewBinding {
+    receipt: SharedViewReceipt,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SharedViewReceipt {
+    schema_version: u64,
+    root: std::path::PathBuf,
+    subject: provenant_records::custody::Subject,
+    branch: String,
+    object_format: String,
+    alternate_objects: std::path::PathBuf,
+    identities: SharedViewIdentities,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SharedViewIdentities {
+    root: DirectoryIdentity,
+    refs: DirectoryIdentity,
+    objects: DirectoryIdentity,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
+}
+
+impl PartialEq for SharedViewIdentities {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.refs == other.refs && self.objects == other.objects
+    }
+}
+
+impl Eq for SharedViewIdentities {}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DirectoryIdentity {
@@ -450,6 +540,251 @@ impl ViewIdentities {
     }
 }
 
+impl SharedViewIdentities {
+    fn read(root: &Directory, refs: &Directory, objects: &Directory) -> Result<Self> {
+        Ok(Self {
+            root: DirectoryIdentity::read(root)?,
+            refs: DirectoryIdentity::read(refs)?,
+            objects: DirectoryIdentity::read(objects)?,
+            extra: Default::default(),
+        })
+    }
+}
+
+const SHARED_VIEW_RECEIPT: &str = "owner.json";
+const SHARED_VIEW_INIT_LOCK: &str = "init.lock";
+
+fn object_format(base: GitOid) -> &'static str {
+    if base.to_string().len() == 64 {
+        "sha256"
+    } else {
+        "sha1"
+    }
+}
+
+fn minimal_git_config(object_format: &str) -> &'static [u8] {
+    if object_format == "sha256" {
+        b"[core]\n\trepositoryformatversion = 1\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor = false\n[extensions]\n\tobjectformat = sha256\n"
+    } else {
+        b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor = false\n"
+    }
+}
+
+fn shared_receipt_matches(left: &SharedViewReceipt, right: &SharedViewReceipt) -> bool {
+    left.schema_version == right.schema_version
+        && left.root == right.root
+        && left.subject == right.subject
+        && left.branch == right.branch
+        && left.object_format == right.object_format
+        && left.alternate_objects == right.alternate_objects
+        && left.identities == right.identities
+}
+
+fn verify_shared_view(receipt: &SharedViewReceipt) -> Result<(Directory, Directory, Directory)> {
+    if receipt.schema_version != 1
+        || !matches!(receipt.object_format.as_str(), "sha1" | "sha256")
+        || !receipt.root.is_absolute()
+        || !receipt.alternate_objects.is_absolute()
+        || receipt.subject.worktree_identity().is_none()
+    {
+        return Err(invalid());
+    }
+    let root = Directory::open_anchor(&receipt.root)?;
+    let root_metadata = root.metadata()?;
+    if root.current_path()? != receipt.root
+        || root_metadata.kind != FileKind::Directory
+        || root_metadata.uid != provenant_os::fs::effective_uid()
+        || root_metadata.mode & 0o077 != 0
+        || DirectoryIdentity::read(&root)? != receipt.identities.root
+    {
+        return Err(invalid());
+    }
+    let receipt_metadata = root.metadata_at(OsStr::new(SHARED_VIEW_RECEIPT), false)?;
+    if receipt_metadata.kind != FileKind::Regular
+        || receipt_metadata.uid != provenant_os::fs::effective_uid()
+        || receipt_metadata.links != 1
+        || receipt_metadata.mode & 0o077 != 0
+    {
+        return Err(invalid());
+    }
+    let raw = root.read_stable(OsStr::new(SHARED_VIEW_RECEIPT), 16 * 1024)?;
+    let stored: SharedViewReceipt = provenant_records::decode(
+        raw.as_slice(),
+        provenant_records::Limits {
+            max_bytes: 16 * 1024,
+            ..Default::default()
+        },
+    )?;
+    if !shared_receipt_matches(&stored, receipt) {
+        return Err(invalid());
+    }
+    let refs = root.open_verified_directory(OsStr::new("git-common"))?;
+    let objects = root.open_verified_directory(OsStr::new("git-objects"))?;
+    if DirectoryIdentity::read(&refs)? != receipt.identities.refs
+        || DirectoryIdentity::read(&objects)? != receipt.identities.objects
+    {
+        return Err(invalid());
+    }
+    let config = refs.read_stable(OsStr::new("config"), 1024)?;
+    if config != minimal_git_config(&receipt.object_format)
+        || refs.metadata_at(OsStr::new("config"), false)?.mode & 0o222 != 0
+    {
+        return Err(invalid());
+    }
+    let info = objects.open_verified_directory(OsStr::new("info"))?;
+    match info.metadata_at(OsStr::new("http-alternates"), false) {
+        Err(error) if error.is_not_found() => {}
+        Ok(_) | Err(_) => return Err(invalid()),
+    }
+    let alternates_name = OsStr::new("alternates");
+    let alternates_metadata = info.metadata_at(alternates_name, false)?;
+    let expected_alternates = format!("{}\n", quote_alternate(&receipt.alternate_objects));
+    if alternates_metadata.kind != FileKind::Regular
+        || alternates_metadata.uid != provenant_os::fs::effective_uid()
+        || alternates_metadata.links != 1
+        || alternates_metadata.mode & 0o222 != 0
+        || info.read_stable(alternates_name, 16 * 1024)?.as_slice()
+            != expected_alternates.as_bytes()
+    {
+        return Err(invalid());
+    }
+    let alternate_objects = Directory::open_anchor(&receipt.alternate_objects)?;
+    if alternate_objects.metadata()?.kind != FileKind::Directory
+        || alternate_objects.metadata()?.uid != provenant_os::fs::effective_uid()
+    {
+        return Err(invalid());
+    }
+    Ok((root, refs, objects))
+}
+
+fn open_or_create_shared_view(
+    git: &Path,
+    repo: &VerifiedRepo,
+    shared_root: &Path,
+    branch: &str,
+    base: GitOid,
+) -> Result<SharedViewBinding> {
+    repo.revalidate().map_err(|_| invalid())?;
+    if !shared_root.is_absolute() {
+        return Err(invalid());
+    }
+    let root = Directory::open_anchor(shared_root)?;
+    let root_path = root.current_path()?;
+    let root_metadata = root.metadata()?;
+    if root_metadata.kind != FileKind::Directory
+        || root_metadata.uid != provenant_os::fs::effective_uid()
+        || root_metadata.mode & 0o077 != 0
+    {
+        return Err(invalid());
+    }
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5).map_err(|_| invalid())?;
+    let _initialise = root.lock(
+        OsStr::new(SHARED_VIEW_INIT_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let subject =
+        provenant_confinement::worktrees::worktree_subject(repo).map_err(|_| invalid())?;
+    let format = object_format(base);
+    let alternate_objects = repo.common_git_dir().join("objects");
+    if !subject
+        .worktree_identity()
+        .is_some_and(|identity| Path::new(&identity.path) == repo.root_path())
+    {
+        return Err(invalid());
+    }
+    match root.read_stable(OsStr::new(SHARED_VIEW_RECEIPT), 16 * 1024) {
+        Ok(raw) => {
+            let receipt: SharedViewReceipt = provenant_records::decode(
+                raw.as_slice(),
+                provenant_records::Limits {
+                    max_bytes: 16 * 1024,
+                    ..Default::default()
+                },
+            )?;
+            if receipt.root != root_path
+                || receipt.subject != subject
+                || receipt.branch != branch
+                || receipt.object_format != format
+                || receipt.alternate_objects != alternate_objects
+            {
+                return Err(invalid());
+            }
+            verify_shared_view(&receipt)?;
+            return Ok(SharedViewBinding { receipt });
+        }
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    for name in ["git-common", "git-objects"] {
+        let child = match root.open_verified_directory(OsStr::new(name)) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => directory(&root, OsStr::new(name))?,
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = child.metadata()?;
+        let entries = child
+            .entries()?
+            .collect::<provenant_os::fs::Result<Vec<_>>>()?;
+        if metadata.uid != provenant_os::fs::effective_uid()
+            || metadata.mode & 0o077 != 0
+            || !entries.is_empty()
+        {
+            return Err(invalid());
+        }
+    }
+    let minimal = minimal_git_config(format);
+    prepare_refs_from(
+        git,
+        repo.common_dir(),
+        repo.private_dir(),
+        repo.common_git_dir(),
+        repo.root_path(),
+        &root,
+        &format!("ref: {branch}\n"),
+        Some((branch, base)),
+        Some(minimal),
+    )?;
+    let objects = directory(&root, OsStr::new("git-objects"))?;
+    let info = directory(&objects, OsStr::new("info"))?;
+    let alternate_contents = format!("{}\n", quote_alternate(&alternate_objects));
+    info.atomic_write_with_permissions(
+        OsStr::new("alternates"),
+        ".objects-",
+        alternate_contents.as_bytes(),
+        0o444,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    let refs = root.open_verified_directory(OsStr::new("git-common"))?;
+    refs.sync()?;
+    objects.sync()?;
+    let receipt = SharedViewReceipt {
+        schema_version: 1,
+        root: root_path,
+        subject,
+        branch: branch.to_owned(),
+        object_format: format.to_owned(),
+        alternate_objects,
+        identities: SharedViewIdentities::read(&root, &refs, &objects)?,
+        extra: Default::default(),
+    };
+    root.atomic_write(
+        OsStr::new(SHARED_VIEW_RECEIPT),
+        ".worktree-git-",
+        &crate::db::bytes(&receipt)?,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    root.sync()?;
+    verify_shared_view(&receipt)?;
+    repo.revalidate().map_err(|_| invalid())?;
+    Ok(SharedViewBinding { receipt })
+}
+
 fn valid_candidate(name: &str) -> bool {
     name.strip_prefix("candidate-")
         .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
@@ -463,6 +798,18 @@ pub(crate) fn prepare_bound(
     branch: &str,
     base: GitOid,
 ) -> Result<()> {
+    prepare_candidate(git, repo, attempt, scratch, branch, base)?;
+    bind(attempt, scratch)
+}
+
+fn prepare_candidate(
+    git: &Path,
+    repo: &VerifiedRepo,
+    attempt: &Directory,
+    scratch: &Path,
+    branch: &str,
+    base: GitOid,
+) -> Result<(Directory, Directory, Directory)> {
     let candidate = scratch
         .file_name()
         .and_then(OsStr::to_str)
@@ -489,7 +836,25 @@ pub(crate) fn prepare_bound(
     )?
     .require_durable()?;
     prepare_refs(git, repo, &held, branch, base)?;
-    bind(attempt, scratch)
+    let objects = held.open_verified_directory(OsStr::new("git-objects"))?;
+    let refs = held.open_verified_directory(OsStr::new("git-common"))?;
+    Ok((held, refs, objects))
+}
+
+pub(crate) fn prepare_shared_bound(
+    git: &Path,
+    repo: &VerifiedRepo,
+    attempt: &Directory,
+    scratch: &Path,
+    branch: &str,
+    base: GitOid,
+    shared_root: &Path,
+) -> Result<()> {
+    repo.revalidate().map_err(|_| invalid())?;
+    let (held, private_refs, private_objects) =
+        prepare_candidate(git, repo, attempt, scratch, branch, base)?;
+    let shared = open_or_create_shared_view(git, repo, shared_root, branch, base)?;
+    bind_shared(attempt, &held, &private_refs, &private_objects, shared)
 }
 
 pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding>> {
@@ -499,7 +864,7 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
         return Ok(None);
     };
     // Keep the records crate's bounded, duplicate-key-refusing decoder while
-    // admitting both persisted versions at this owning boundary.
+    // admitting the persisted private and shared view versions.
     let binding: ObjectBinding = provenant_records::decode(
         bytes.as_slice(),
         provenant_records::Limits {
@@ -507,12 +872,13 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
             ..Default::default()
         },
     )?;
-    if !valid_candidate(&binding.candidate)
-        || !matches!(
-            (binding.schema_version, binding.identities.is_some()),
-            (1, false) | (2, true)
-        )
-    {
+    let valid_shape = match binding.schema_version {
+        1 => binding.identities.is_none() && binding.shared.is_none(),
+        2 => binding.identities.is_some() && binding.shared.is_none(),
+        3 => binding.identities.is_some() && binding.shared.is_some(),
+        _ => false,
+    };
+    if !valid_candidate(&binding.candidate) || !valid_shape {
         return Err(invalid());
     }
     Ok(Some(binding))
@@ -523,17 +889,22 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
         return Ok(None);
     };
     let candidate = binding.candidate;
+    let shared = binding.shared;
     // Open every lane-controlled component without following links.
     let temporary = attempt.open_verified_directory(OsStr::new("tmp"))?;
     let scratch = temporary.open_verified_directory(OsStr::new(&candidate))?;
     let objects = scratch.open_verified_directory(OsStr::new("git-objects"))?;
     let refs = scratch.open_verified_directory(OsStr::new("git-common"))?;
     // Version 1 runs predate identity sealing. Preserve their no-follow recovery
-    // path; every new launch uses version 2 and refuses replaced directories.
+    // path; newer private and shared launches seal their identities.
     if let Some(expected) = binding.identities
         && expected != ViewIdentities::read(&scratch, &refs, &objects)?
     {
         return Err(RunError::Validation("private Git view identity changed"));
+    }
+    if let Some(shared) = shared {
+        let (_, refs, objects) = verify_shared_view(&shared.receipt)?;
+        return Ok(Some(ObjectSource { objects, refs }));
     }
     Ok(Some(ObjectSource { objects, refs }))
 }

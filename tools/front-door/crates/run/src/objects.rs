@@ -1,9 +1,12 @@
 //! Import lane objects through Git's quarantined receive path.
 use crate::{AdmissionError, Result, RunError};
-use provenant_confinement::repo::VerifiedRepo;
-use provenant_core::{CancelToken, Clock, GitOid};
+use provenant_confinement::{
+    repo::VerifiedRepo,
+    utility::{UtilityError, execute_with_git_lock_retry},
+};
+use provenant_core::{AttemptId, CancelToken, Clock, GitOid};
 use provenant_os::{
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::{Directory, FileKind, PublishMode},
 };
 use std::{
@@ -18,7 +21,7 @@ pub(crate) mod worktree;
 use view::object_binding;
 pub(crate) use view::{
     ObjectSource, bound_source, copy_index, merge_head, merge_objects, prepare_bound,
-    prepare_read_only, private_tip, restore_index, set_private_tip,
+    prepare_read_only, prepare_shared_bound, private_tip, restore_index, set_private_tip,
 };
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
@@ -58,6 +61,11 @@ pub(crate) struct Execution<'a> {
     pub(crate) discard: bool,
     pub(crate) input: Option<&'a [u8]>,
     pub(crate) clean_stderr: bool,
+}
+
+pub(crate) struct ImportScope<'a> {
+    pub(crate) attempt: AttemptId,
+    pub(crate) custody: Option<&'a provenant_supervisor::custody::Recovery>,
 }
 
 impl Default for Execution<'_> {
@@ -129,33 +137,69 @@ pub(crate) fn execute_bounded(
         .chain(arguments.iter().cloned())
         .collect();
     let executor = SystemExecutor::new(1).map_err(|_| invalid())?;
-    let mut options = ExecOptions::new(&argv, cwd, settings.timeout);
-    options.env = Some(&env);
-    options.cancel = cancel;
-    options.process_group = true;
-    options.stdout = if settings.discard {
-        StreamPolicy::Discard
-    } else {
-        StreamPolicy::Capture {
-            limit: 64 * 1024 * 1024,
+    let retry_cancel = cancel.cloned().unwrap_or_default();
+    let mut incomplete = None;
+    let mut run_attempt = |timeout| {
+        let mut options = ExecOptions::new(&argv, cwd, timeout);
+        options.env = Some(&env);
+        options.cancel = Some(&retry_cancel);
+        options.process_group = true;
+        options.stdout = if settings.discard {
+            StreamPolicy::Discard
+        } else {
+            StreamPolicy::Capture {
+                limit: 64 * 1024 * 1024,
+            }
+        };
+        options.stdin = settings.input;
+        options.stderr = StreamPolicy::Tail { limit: 4096 };
+        let output = executor.execute(options)?;
+        if output.cancelled {
+            return Err(UtilityError::Cancelled);
         }
+        if output.timed_out {
+            return Err(UtilityError::TimedOut);
+        }
+        if output.drain_truncated
+            || output.stdout.truncated
+            || output.stdout.read_failed
+            || output.stderr.read_failed
+        {
+            incomplete = Some(output);
+            return Err(UtilityError::Incomplete);
+        }
+        Ok(output)
     };
-    options.stdin = settings.input;
-    options.stderr = StreamPolicy::Tail { limit: 4096 };
-    let output = executor.execute(options).map_err(|_| invalid())?;
-    if output.cancelled {
-        return Err(RunError::Validation("lane import cancelled"));
-    }
-    if output.timed_out {
-        return Err(RunError::ObjectImportLimit(
-            "Git operation exceeded its byte-scaled time budget",
-        ));
-    }
+    let buffered_transaction = settings.input.is_some()
+        && arguments.len() >= 2
+        && arguments[0] == OsStr::new("update-ref")
+        && arguments[1] == OsStr::new("--stdin")
+        && settings.input.is_some_and(is_atomic_ref_transaction);
+    let retry_safe = settings.input.is_none() || buffered_transaction;
+    let result = if retry_safe {
+        execute_with_git_lock_retry(settings.timeout, &retry_cancel, &mut run_attempt)
+    } else {
+        run_attempt(settings.timeout)
+    };
+    let output = result.map_err(|error| match error {
+        UtilityError::Cancelled => RunError::Validation("lane import cancelled"),
+        UtilityError::TimedOut | UtilityError::GitLockTimedOut { .. } => {
+            RunError::ObjectImportLimit("Git operation exceeded its byte-scaled time budget")
+        }
+        UtilityError::Incomplete => {
+            let output = incomplete.take();
+            if output.as_ref().is_some_and(|output| {
+                String::from_utf8_lossy(&output.stderr.bytes)
+                    .contains("pack exceeds maximum allowed size")
+            }) {
+                RunError::ObjectImportLimit("incoming pack exceeds the lane object byte limit")
+            } else {
+                operation_io(git_dir, output)
+            }
+        }
+        _ => invalid(),
+    })?;
     if output.termination != Termination::Exit(0)
-        || output.drain_truncated
-        || output.stdout.truncated
-        || output.stdout.read_failed
-        || output.stderr.read_failed
         || settings.clean_stderr && !output.stderr.bytes.is_empty()
     {
         if String::from_utf8_lossy(&output.stderr.bytes)
@@ -165,15 +209,35 @@ pub(crate) fn execute_bounded(
                 "incoming pack exceeds the lane object byte limit",
             ));
         }
-        return Err(RunError::OperationIo {
-            operation: "import lane Git objects",
-            path: Some(git_dir.into()),
-            source: std::io::Error::other(
-                String::from_utf8_lossy(&output.stderr.bytes).into_owned(),
-            ),
-        });
+        return Err(operation_io(git_dir, Some(output)));
     }
     Ok(output.stdout.bytes)
+}
+
+fn operation_io(git_dir: &Path, output: Option<ExecOutcome>) -> RunError {
+    RunError::OperationIo {
+        operation: "import lane Git objects",
+        path: Some(git_dir.into()),
+        source: std::io::Error::other(
+            output
+                .map(|output| String::from_utf8_lossy(&output.stderr.bytes).into_owned())
+                .unwrap_or_else(|| "Git capture was incomplete".to_owned()),
+        ),
+    }
+}
+
+fn is_atomic_ref_transaction(input: &[u8]) -> bool {
+    let commands = input
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    commands.len() >= 4
+        && commands.first().copied() == Some(&b"start"[..])
+        && commands.get(commands.len() - 2).copied() == Some(&b"prepare"[..])
+        && commands.last().copied() == Some(&b"commit"[..])
+        && commands[1..commands.len() - 2]
+            .iter()
+            .all(|line| line.starts_with(b"delete refs/provenant/import-extra/"))
 }
 
 pub(crate) fn quote_alternate(path: &Path) -> String {
@@ -212,10 +276,14 @@ pub(crate) fn clear_import_refs(
     if objects.is_empty() {
         return Ok(());
     }
-    let input = objects
-        .iter()
-        .map(|oid| format!("delete refs/provenant/import-extra/{attempt}/{oid}\n"))
-        .collect::<String>();
+    let mut input = String::from("start\n");
+    input.push_str(
+        &objects
+            .iter()
+            .map(|oid| format!("delete refs/provenant/import-extra/{attempt}/{oid}\n"))
+            .collect::<String>(),
+    );
+    input.push_str("prepare\ncommit\n");
     execute_bounded(
         git,
         repo.common_git_dir(),
@@ -379,7 +447,7 @@ pub(crate) fn publish_branch(
     base: GitOid,
     launch_ref: Option<&str>,
     head: GitOid,
-    _policy: &provenant_records::policy::Policy,
+    attempt: AttemptId,
 ) -> Result<Ancestor> {
     let current = resolve_ref(git, repo, branch)?;
     // Fast-forward from the launch base or from later lane commits, but not
@@ -428,10 +496,14 @@ pub(crate) fn publish_branch(
         git,
         repo.common_git_dir(),
         repo.root_path(),
-        &args(&["update-ref", "-d", &format!("refs/provenant/import/{head}")]),
+        &args(&["update-ref", "-d", &import_pin(attempt, head)]),
         None,
     )?;
     Ok(ancestor)
+}
+
+pub(crate) fn import_pin(attempt: AttemptId, head: GitOid) -> String {
+    format!("refs/provenant/import/{attempt}/{head}")
 }
 
 fn directory(parent: &Directory, name: &OsStr) -> Result<Directory> {
@@ -684,7 +756,15 @@ pub(crate) fn settle(
     source: Option<&Directory>,
     head: GitOid,
 ) -> Result<()> {
-    settle_cancel(git, repo, source, head, None, None)
+    settle_cancel(
+        git,
+        repo,
+        source,
+        AttemptId::from_bytes([0; 16]),
+        head,
+        None,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -692,11 +772,20 @@ pub(crate) fn settle_cancel(
     git: &Path,
     repo: &VerifiedRepo,
     source: Option<&Directory>,
+    attempt: AttemptId,
     head: GitOid,
     cancel: Option<&CancelToken>,
     custody: Option<&provenant_supervisor::custody::Recovery>,
 ) -> Result<()> {
-    settle_many(git, repo, source, head, &[], cancel, custody)
+    settle_many(
+        git,
+        repo,
+        source,
+        head,
+        &[],
+        cancel,
+        ImportScope { attempt, custody },
+    )
 }
 
 pub(crate) fn settle_many(
@@ -706,7 +795,7 @@ pub(crate) fn settle_many(
     head: GitOid,
     extra: &[GitOid],
     cancel: Option<&CancelToken>,
-    custody: Option<&provenant_supervisor::custody::Recovery>,
+    scope: ImportScope<'_>,
 ) -> Result<()> {
     let source = source.ok_or(RunError::Validation("writer has no private object directory; recover its commits on the host and start a fresh run"))?;
     repo.revalidate().map_err(|_| invalid())?;
@@ -750,7 +839,7 @@ pub(crate) fn settle_many(
             .join(" ");
         // Git resolves the alternate path again. Recheck custody immediately
         // before letting the sender access any lane-controlled path.
-        if custody.is_some_and(|custody| {
+        if scope.custody.is_some_and(|custody| {
             custody.observe() != provenant_supervisor::custody::RecoveryState::Absent
         }) {
             return Err(RunError::Validation(
@@ -763,14 +852,18 @@ pub(crate) fn settle_many(
                 "lane object directory identity changed",
             ));
         }
-        let scope = custody
-            .map(|held| held.scope().attempt.to_string())
-            .unwrap_or_else(|| provenant_core::AttemptId::from_bytes([0; 16]).to_string());
-        let mut refspecs = vec![format!("{head}:refs/provenant/import/{head}")];
+        if scope
+            .custody
+            .is_some_and(|held| held.scope().attempt != scope.attempt)
+        {
+            return Err(RunError::Validation("writer import attempt mismatch"));
+        }
+        let attempt_scope = scope.attempt.to_string();
+        let mut refspecs = vec![format!("{head}:{}", import_pin(scope.attempt, head))];
         refspecs.extend(
             extra
                 .iter()
-                .map(|oid| format!("{oid}:refs/provenant/import-extra/{scope}/{oid}")),
+                .map(|oid| format!("{oid}:refs/provenant/import-extra/{attempt_scope}/{oid}")),
         );
         refspecs.sort();
         refspecs.dedup();

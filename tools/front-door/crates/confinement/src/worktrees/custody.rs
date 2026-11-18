@@ -134,20 +134,17 @@ pub fn submodule_evidence(
         repo.root_path(),
         repo.private_git_dir(),
         0,
-        false,
-        &mut Vec::new(),
         &mut evidence,
         cancel,
     )?;
     Ok(evidence)
 }
 
-pub(super) fn hold_submodules(
+pub(super) fn verify_removal_submodules(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
-) -> Result<(Vec<LockGuard>, Vec<SubmoduleEvidence>), WorktreeError> {
-    let mut guards = Vec::new();
+) -> Result<Vec<SubmoduleEvidence>, WorktreeError> {
     let mut evidence = Vec::new();
     inspect_submodules(
         context,
@@ -155,12 +152,10 @@ pub(super) fn hold_submodules(
         repo.root_path(),
         repo.private_git_dir(),
         0,
-        true,
-        &mut guards,
         &mut evidence,
         cancel,
     )?;
-    Ok((guards, evidence))
+    Ok(evidence)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -170,8 +165,6 @@ fn inspect_submodules(
     removed_root: &Path,
     removed_admin: &Path,
     depth: usize,
-    hold: bool,
-    guards: &mut Vec<LockGuard>,
     evidence: &mut Vec<SubmoduleEvidence>,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
@@ -257,20 +250,6 @@ fn inspect_submodules(
                 "submodule Git custody is outside the current project's retained store",
             ));
         }
-        if hold {
-            let guard = lock_repository(
-                child.common_dir(),
-                LockMode::Shared,
-                WaitBudget::nonblocking(context.clock.mono_now()),
-                cancel,
-                context.clock,
-            )
-            .map_err(|error| match error {
-                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
-                error => error.into(),
-            })?;
-            guards.push(guard);
-        }
         check_writer_terminal(child)?;
         inspect_submodules(
             context,
@@ -278,8 +257,6 @@ fn inspect_submodules(
             removed_root,
             removed_admin,
             depth + 1,
-            hold,
-            guards,
             evidence,
             cancel,
         )?;
@@ -639,7 +616,7 @@ pub(super) fn lock_worktree(
     lock_worktree_impl(context, entry, cancel, preview, false)
 }
 
-/// Launch admission runs before taking the repository registry lock.
+/// Launch admission reobserves occupancy after taking worktree custody.
 pub(super) fn lock_worktree_for_launch(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
@@ -762,24 +739,6 @@ fn lock_worktree_impl(
         }
         None => Ok(LockedWorktree { verified, writer }),
     }
-}
-
-pub(super) fn repository_lock<'a>(
-    context: &WorktreeContext<'a>,
-    mode: LockMode,
-    cancel: &CancelToken,
-) -> Result<LockGuard, WorktreeError> {
-    lock_repository(
-        context.repo.common_dir(),
-        mode,
-        context.lock_budget,
-        cancel,
-        context.clock,
-    )
-    .map_err(|error| match error {
-        FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
-        other => other.into(),
-    })
 }
 
 pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> {

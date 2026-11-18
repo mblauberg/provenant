@@ -530,7 +530,7 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
 
 #[test]
 fn unsettled_reservation_fences_a_slot_after_its_lock_disappears() -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();

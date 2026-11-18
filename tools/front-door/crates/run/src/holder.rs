@@ -313,6 +313,10 @@ pub struct SealedTask {
     pub request_digest: provenant_core::Digest,
     pub effective_network: NetworkAccess,
     pub effective_database_ipc: bool,
+    /// Exact checkout incarnation this guardian is authorised to share with
+    /// nested writer attempts. A path alone cannot survive removal/recreation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_worktree: Option<provenant_records::custody::Subject>,
 }
 impl SealedTask {
     /// Restore host-sealed launch policy before validating the next generation.
@@ -4320,7 +4324,7 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
         fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -4596,7 +4600,7 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let pin = format!("refs/provenant/import/{}", launch.base);
+            let pin = crate::objects::import_pin(scope.attempt, launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let mut lease = provenant_supervisor::custody::acquire_writer(
@@ -5286,7 +5290,7 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let pin = format!("refs/provenant/import/{}", launch.base);
+            let pin = crate::objects::import_pin(scope.attempt, launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -5525,7 +5529,7 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
         fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -5673,7 +5677,7 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let pin = format!("refs/provenant/import/{}", launch.base);
+            let pin = crate::objects::import_pin(scope.attempt, launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -5913,7 +5917,7 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
         fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -7352,7 +7356,7 @@ mod writer_recovery_tests {
                             launch.base,
                             None,
                             head,
-                            &provenant_records::policy::Policy::default(),
+                            id,
                         )
                         .is_err()
                     );
@@ -7533,7 +7537,7 @@ mod writer_recovery_tests {
                     crate::objects::resolve_ref(
                         &git,
                         launch.worktree.repo(),
-                        &format!("refs/provenant/import/{}", published_head.unwrap())
+                        &crate::objects::import_pin(id, published_head.unwrap())
                     )
                     .is_err()
                 );

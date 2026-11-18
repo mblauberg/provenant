@@ -1142,6 +1142,7 @@ pub(super) fn fixture_access_plan(
             "git_grants_digest": vec![0; 32],
             "publishing": true,
             "common_git_dir": "/fixture/repo/.git",
+            "git_state": {"path": "/fixture/home/Library/Application Support/provenant/worktree-git/fixture", "scope": "subtree"},
             "cargo_cache": {"path": "/fixture/home/Library/Caches/provenant-lane-cargo/fixture", "scope": "subtree"}
         })).expect("fixture authority; no compilation is attempted");
         permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));

@@ -5,6 +5,7 @@
 //! it adopted, or never observed, is retained. Each deletion is leased on the
 //! tip the caller just checked, so a ref that moved meanwhile is kept.
 use super::*;
+use provenant_os::fs::FileKind;
 use provenant_records::custody::RemovalRecord;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -217,8 +218,8 @@ pub enum RefDeletion {
 }
 
 /// Delete a local branch or remote-tracking ref only while it holds
-/// `expected`. A branch any worktree has checked out is kept. The repository
-/// mutation lock serialises this with worktree creation and removal.
+/// `expected`. A branch observed checked out in the inventory or prepared
+/// transaction check is kept. Git's reference transaction enforces the tip CAS.
 pub fn delete_ref_leased(
     context: &WorktreeContext<'_>,
     reference: &GitRefName,
@@ -235,11 +236,48 @@ pub fn delete_ref_leased_when(
     cancel: &CancelToken,
     eligible: &dyn Fn() -> Result<(), WorktreeError>,
 ) -> Result<RefDeletion, WorktreeError> {
+    let mut after_prepare = || {};
+    delete_ref_leased_when_inner(
+        context,
+        reference,
+        expected,
+        cancel,
+        eligible,
+        &mut after_prepare,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn delete_ref_leased_when_with_prepare_hook(
+    context: &WorktreeContext<'_>,
+    reference: &GitRefName,
+    expected: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
+    after_prepare: &mut dyn FnMut(),
+) -> Result<RefDeletion, WorktreeError> {
+    delete_ref_leased_when_inner(
+        context,
+        reference,
+        expected,
+        cancel,
+        eligible,
+        after_prepare,
+    )
+}
+
+fn delete_ref_leased_when_inner(
+    context: &WorktreeContext<'_>,
+    reference: &GitRefName,
+    expected: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
+    after_prepare: &mut dyn FnMut(),
+) -> Result<RefDeletion, WorktreeError> {
     let name = reference.as_str();
     if !(name.starts_with("refs/heads/") || name.starts_with("refs/remotes/")) {
         return Err(WorktreeError::InvalidRequest);
     }
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
     if name.starts_with("refs/heads/") {
         let fresh = context.facts.fresh_inventory(context, cancel)?;
@@ -258,22 +296,92 @@ pub fn delete_ref_leased_when(
     }
     eligible()?;
     let _ = context.facts.take_inventory(context);
-    let deleted = execute_git_mutation(
+    let mut prepared_check_result = None;
+    let mut prepared_check = || {
+        after_prepare();
+        match branch_registered_as_checked_out(context.repo, reference) {
+            Ok(checked_out) => {
+                prepared_check_result = Some(Ok(checked_out));
+                !checked_out
+            }
+            Err(error) => {
+                prepared_check_result = Some(Err(error));
+                false
+            }
+        }
+    };
+    let deleted = execute_git_prepared_ref_delete(
         context.executor,
         context.repo,
         context.utility,
-        GitMutation::DeleteRef {
-            name: reference.clone(),
-            expected_old_oid: expected,
-        },
+        (reference, expected),
         context.mutation_budget,
         cancel,
+        &mut prepared_check,
     )?;
+    match prepared_check_result {
+        Some(Err(error)) => return Err(error),
+        Some(Ok(true)) => return Ok(RefDeletion::CheckedOut),
+        Some(Ok(false)) | None => {}
+    }
     Ok(if exit_code(&deleted)? == 0 {
         RefDeletion::Removed
     } else {
         RefDeletion::Changed
     })
+}
+
+/// Check the checked-out branch refs from Git's stable worktree HEAD files.
+/// This runs while `update-ref` holds the target ref lock, so a concurrent
+/// `worktree add` either appears here or loses its ref update to that lock.
+fn branch_registered_as_checked_out(
+    repo: &VerifiedRepo,
+    branch: &GitRefName,
+) -> Result<bool, WorktreeError> {
+    if head_targets_branch(repo.common_dir(), branch)? {
+        return Ok(true);
+    }
+    let registrations_name = OsStr::new("worktrees");
+    let registrations_metadata = match repo.common_dir().metadata_at(registrations_name, false) {
+        Ok(metadata) => metadata,
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if registrations_metadata.kind != FileKind::Directory {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let registrations = repo
+        .common_dir()
+        .open_verified_directory(registrations_name)?;
+    let mut count = 0usize;
+    for name in registrations.entries()? {
+        let name = name?;
+        count = count.saturating_add(1);
+        if count > MAX_WORKTREES {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        if registrations.metadata_at(&name, false)?.kind != FileKind::Directory {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let worktree = registrations.open_verified_directory(&name)?;
+        if head_targets_branch(&worktree, branch)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn head_targets_branch(git_dir: &Directory, branch: &GitRefName) -> Result<bool, WorktreeError> {
+    let bytes = git_dir.read_stable(OsStr::new("HEAD"), 4096)?;
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    if let Some(reference) = bytes.strip_prefix(b"ref: ") {
+        let reference = std::str::from_utf8(reference).map_err(|_| WorktreeError::InvalidOutput)?;
+        let reference = GitRefName::new(reference).map_err(|_| WorktreeError::InvalidOutput)?;
+        return Ok(reference.as_str() == branch.as_str());
+    }
+    let oid = std::str::from_utf8(bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+    GitOid::parse(oid).map_err(|_| WorktreeError::InvalidOutput)?;
+    Ok(false)
 }
 
 /// A branch's tip, or `None` when it does not exist.

@@ -300,6 +300,8 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         "2147483647",
         "2147483647",
         "2147483647",
+        "2147483647",
+        "2147483647",
     ])?;
     assert_eq!(code(&internal), 3); // Reaches supervisor's typed invalid-handshake error.
     rig.assert_v1_root_untouched()

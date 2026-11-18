@@ -5911,6 +5911,7 @@ mod tests {
             {
                 Ok(Some(graph::WriterWorktreeBinding {
                     extra: Default::default(),
+                    shared_worktree: None,
                     source_directory_identity: None,
                     worktree: worktree.into(),
                     head: self.source.clone(),

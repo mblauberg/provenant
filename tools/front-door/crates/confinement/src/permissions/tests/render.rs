@@ -192,6 +192,10 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
         git_grants_digest: [0; 32],
         publishing: false,
         common_git_dir: "/fixture/repo/.git".into(),
+        git_state: PathGrant {
+            path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
+            scope: PathScope::Subtree,
+        },
         cargo_cache: PathGrant {
             path: "/fixture/cache".into(),
             scope: PathScope::Subtree,
@@ -231,6 +235,155 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
         assert!(
             rule_index_with_facts(&source, RuleAction::Deny, operation, &[path], &["subpath"],)
                 .is_some()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn shared_git_state_writes_are_scoped_and_host_owned_paths_stay_read_only()
+-> Result<(), PermissionError> {
+    use super::render::{
+        RuleAction, has_rule_atoms, rule_index_with_facts, rule_index_with_targets,
+    };
+
+    let (mut plan, profile) = write_grants_fixture();
+    plan.read_only = None;
+    let state =
+        PathBuf::from("/fixture/home/Library/Application Support/provenant/worktree-git/fixture");
+    let namespace = state
+        .parent()
+        .ok_or(PermissionError::InvalidFixture)?
+        .to_owned();
+    plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+        git_grants_digest: [0; 32],
+        publishing: false,
+        common_git_dir: "/fixture/repo/.git".into(),
+        cargo_cache: PathGrant {
+            path: "/fixture/cache".into(),
+            scope: PathScope::Subtree,
+        },
+        git_state: PathGrant {
+            path: state.clone(),
+            scope: PathScope::Subtree,
+        },
+    }));
+    let grants = GrantSet::build(
+        &plan,
+        &profile,
+        Path::new("/fixture/home"),
+        Some(worktree_grants_fixture()),
+    )?;
+    let source = render(&grants)?;
+    let common = state.join("git-common");
+    let objects = state.join("git-objects");
+    let object_info = objects.join("info");
+
+    let namespace_strings = [
+        namespace.to_str().ok_or(PermissionError::InvalidFixture)?,
+        common.to_str().ok_or(PermissionError::InvalidFixture)?,
+        objects.to_str().ok_or(PermissionError::InvalidFixture)?,
+    ];
+    assert!(
+        rule_index_with_facts(
+            &source,
+            RuleAction::Deny,
+            "file-read*",
+            &namespace_strings,
+            &["require-all", "subpath", "require-not"],
+        )
+        .is_some()
+    );
+    assert!(
+        rule_index_with_facts(
+            &source,
+            RuleAction::Deny,
+            "file-write*",
+            &namespace_strings,
+            &["require-all", "subpath", "require-not"],
+        )
+        .is_some()
+    );
+
+    for path in [
+        state.as_path(),
+        state.parent().ok_or(PermissionError::InvalidFixture)?,
+        common.as_path(),
+        object_info.as_path(),
+    ] {
+        assert!(
+            rule_index_with_targets(
+                &source,
+                RuleAction::Deny,
+                "file-write-unlink",
+                &[path.to_str().ok_or(PermissionError::InvalidFixture)?],
+            )
+            .is_some(),
+            "host-owned Git-state path could be replaced: {}",
+            path.display()
+        );
+    }
+
+    assert!(has_rule_atoms(
+        &source,
+        RuleAction::Deny,
+        "file-write*",
+        &["require-all", "subpath", "require-not"],
+    ));
+    for path in [
+        common.join("config"),
+        common.join("config.lock"),
+        common.join("config.worktree"),
+        common.join("config.worktree.lock"),
+        objects.join("info/alternates"),
+        objects.join("info/http-alternates"),
+    ] {
+        assert!(
+            rule_index_with_targets(
+                &source,
+                RuleAction::Deny,
+                "file-write*",
+                &[path.to_str().ok_or(PermissionError::InvalidFixture)?],
+            )
+            .is_some(),
+            "host-owned Git state remained writable: {}",
+            path.display()
+        );
+    }
+    for path in [&common, &objects] {
+        assert!(source.contains(&format!("(subpath \"{}\")", path.display())));
+        assert!(
+            rule_index_with_facts(
+                &source,
+                RuleAction::Deny,
+                "file-write-create",
+                &[path.to_str().ok_or(PermissionError::InvalidFixture)?],
+                &["require-all", "vnode-type", "SYMLINK", "subpath"],
+            )
+            .is_some()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn read_only_profiles_deny_the_shared_git_state_namespace() -> Result<(), PermissionError> {
+    use super::render::{RuleAction, rule_index_with_targets};
+
+    let (plan, profile) = write_grants_fixture();
+    let home = Path::new("/fixture/home");
+    let namespace = home.join("Library/Application Support/provenant/worktree-git");
+    let grants = GrantSet::build(&plan, &profile, home, None)?;
+    let source = render(&grants)?;
+    let target = namespace.to_str().ok_or(PermissionError::InvalidFixture)?;
+
+    for operation in ["file-read*", "file-clone", "file-write*"] {
+        assert!(
+            rule_index_with_targets(&source, RuleAction::Deny, operation, &[target]).is_some(),
+            "read-only profile did not deny {operation} beneath {}",
+            namespace.display()
         );
     }
     Ok(())
@@ -1827,6 +1980,10 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
         git_grants_digest: [0; 32],
         publishing: false,
         common_git_dir: "/fixture/primary/.git".into(),
+        git_state: PathGrant {
+            path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
+            scope: PathScope::Subtree,
+        },
         cargo_cache: subtree("/fixture/cache"),
     }));
     plan.write_roots = vec![locks, target];

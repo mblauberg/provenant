@@ -899,6 +899,13 @@ pub(crate) fn private_git_objects(
     }
     let scratch = &input.confined.permissions().scratch.path;
     let private = scratch.join("git-common");
+    let (git_common, git_objects) = match &input.confined.permissions().mode {
+        AccessMode::WorktreeWrite(authority) => {
+            let shared = &authority.git_state().path;
+            (shared.join("git-common"), shared.join("git-objects"))
+        }
+        AccessMode::ReadOnly => (private.clone(), scratch.join("git-objects")),
+    };
     let config = scratch.join("gitconfig");
     let identity = provenant_os::sys::git_global_identity(input.provenant.git);
     let identity = identity
@@ -946,6 +953,57 @@ pub(crate) fn private_git_objects(
             git_config_quote(value)
         ));
         spec.profile.spec.runtime_reads.push(exact(&path));
+    }
+    if matches!(
+        input.confined.permissions().mode,
+        AccessMode::WorktreeWrite(_)
+    ) {
+        // The shared common config contains only host-generated repository
+        // format metadata. Preserve repository and worktree settings in this
+        // attempt's config snapshot only for this shared Git directory, after
+        // host globals and before identity. Other repositories selected with
+        // `-C` or `--git-dir` must not inherit its remotes or helpers.
+        let gitdir = git_common.to_str().ok_or_else(|| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation(
+                    "the shared Git directory cannot be represented in the private writer Git view",
+                ),
+                ProviderError::InvalidPath,
+            )
+        })?;
+        if gitdir.chars().any(char::is_control) {
+            return Err(input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the shared Git directory contains control characters"),
+                ProviderError::InvalidPath,
+            ));
+        }
+        config_text.push_str(&format!(
+            "[includeIf {}]\n",
+            git_config_quote(&format!("gitdir:{gitdir}"))
+        ));
+        for path in [private.join("config"), private.join("config.worktree")] {
+            let value = path.to_str().ok_or_else(|| {
+                input.policy.boundary_error(
+                    "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                    Facts::violation(
+                        "the attempt-local Git configuration path cannot be represented in the private writer Git view",
+                    ),
+                    ProviderError::InvalidPath,
+                )
+            })?;
+            if value.chars().any(char::is_control) {
+                return Err(input.policy.boundary_error(
+                    "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                    Facts::violation(
+                        "the attempt-local Git configuration path contains control characters",
+                    ),
+                    ProviderError::InvalidPath,
+                ));
+            }
+            config_text.push_str(&format!("\tpath = {}\n", git_config_quote(value)));
+        }
     }
     config_text.push_str("[user]\n\tuseConfigOnly = true\n");
     for (key, value) in &identity {
@@ -1010,13 +1068,10 @@ pub(crate) fn private_git_objects(
         .filter(|root| input.cwd.starts_with(root))
         .unwrap_or(input.cwd);
     let mut bound = vec![
-        ("GIT_DIR".into(), private.clone().into()),
-        ("GIT_COMMON_DIR".into(), private.into()),
+        ("GIT_DIR".into(), git_common.clone().into()),
+        ("GIT_COMMON_DIR".into(), git_common.into()),
         ("GIT_WORK_TREE".into(), worktree.into()),
-        (
-            "GIT_OBJECT_DIRECTORY".into(),
-            scratch.join("git-objects").into(),
-        ),
+        ("GIT_OBJECT_DIRECTORY".into(), git_objects.into()),
     ];
     spec.git_wrapper.identity_config = Some(config);
     spec.env.retain(|(key, value)| {

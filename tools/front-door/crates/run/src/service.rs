@@ -37,6 +37,7 @@ impl Service<'_> {
                     | WriteSource::ToolWrite
                     | WriteSource::ReadOnlyException
                     | WriteSource::LaneCache
+                    | WriteSource::GitState
             )
         });
         if Self::has_writes(writer || explicit_writes, write_roots) {

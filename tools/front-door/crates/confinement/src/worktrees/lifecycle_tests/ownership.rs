@@ -1,5 +1,41 @@
 use super::*;
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn satisfied_source_pin_does_not_exclude_shared_holders_or_their_edits()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "shared-source".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let held = provenant_supervisor::custody::lock_writer_occupancy(
+        &slot,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    fs::write(info.path.join("keep"), "parent's uncommitted work")?;
+    fast_forward(&context, &info.path, info.head, &cancel())?;
+    assert_eq!(
+        fs::read_to_string(info.path.join("keep"))?,
+        "parent's uncommitted work"
+    );
+    assert!(matches!(
+        cache_writer_guard(context.project_state, &info.path),
+        Err(Occupancy::Held)
+    ));
+    drop(held);
+    Ok(())
+}
+
 #[test]
 fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box<dyn Error>> {
     for scenario in ["dirty", "diverged", "leased"] {
@@ -1136,8 +1172,7 @@ fn observed_holder_is_advisory_for_launch(kind: ProcessEvidenceKind) -> Result<(
 }
 
 #[test]
-fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
--> Result<(), Box<dyn Error>> {
+fn dozen_writer_worktrees_claim_concurrently() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
@@ -1168,11 +1203,6 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
             info.head,
         ));
     }
-    // A repository mutation on another tree must not delay these claims.
-    let _registry = context
-        .repo
-        .common_dir()
-        .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)?;
     let barrier = std::sync::Barrier::new(claims.len());
     std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
         let handles: Vec<_> = claims
@@ -1205,10 +1235,9 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
 }
 
 #[test]
-fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dyn Error>> {
+fn writer_git_preparation_holds_only_worktree_custody() -> Result<(), Box<dyn Error>> {
     struct Probe<'a> {
         inner: &'a dyn Executor,
-        registry: &'a Directory,
         calls: std::sync::atomic::AtomicUsize,
         slot: Directory,
         claiming: std::sync::atomic::AtomicBool,
@@ -1218,11 +1247,6 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
             &self,
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            drop(
-                self.registry
-                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                    .expect("writer Git must leave the shared registry free"),
-            );
             if self.claiming.load(std::sync::atomic::Ordering::SeqCst) {
                 assert!(
                     matches!(
@@ -1251,7 +1275,6 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
     let tree = verify_worktree(&fixture.repo, &info.path)?;
     let probe = Probe {
         inner: context.executor,
-        registry: context.repo.common_dir(),
         calls: Default::default(),
         slot: context
             .project_state

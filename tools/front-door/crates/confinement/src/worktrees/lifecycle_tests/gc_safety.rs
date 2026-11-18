@@ -1,5 +1,65 @@
 use super::*;
 
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+#[test]
+fn gc_keeps_worktree_until_every_shared_holder_leaves() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_merged_worktree(&test, &context, "shared-gc")?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &lane)?;
+    let upstream = fixture.head()?;
+    let evidence = gc_landing_evidence(&fixture, upstream)?;
+    let slot = context
+        .project_state
+        .open_verified_directory(&state_dir_name(&lane.path))?;
+    let mut holders = vec![
+        slot.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Shared)?,
+        slot.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Shared)?,
+    ];
+    let policy = WorktreeGcPolicy {
+        upstream: Some(upstream),
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        include_foreign: true,
+        retirement_port: Some(&retirement),
+        retirement_feeds: Some(&retirement),
+        mode: CollectionMode::Worktrees,
+        proof: Some(&evidence),
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
+    };
+    while !holders.is_empty() {
+        let report = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+        assert!(
+            lane.path.is_dir(),
+            "GC removed a worktree with {} shared holders",
+            holders.len()
+        );
+        assert!(report.worktrees.removed.is_empty());
+        drop(holders.pop());
+    }
+    let report = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+    assert!(
+        !lane.path.exists(),
+        "zero-holder worktree should now be removable"
+    );
+    assert!(
+        report
+            .worktrees
+            .removed
+            .iter()
+            .any(|removed| removed.path == lane.path)
+    );
+    Ok(())
+}
+
 #[test]
 fn remove_registered_detached_worktree() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
@@ -77,11 +137,6 @@ fn retirement_preserves_unique_tips_before_removing_the_worktree() -> Result<(),
                     .iter()
                     .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&created.path))
                     .ok_or("worktree vanished before retirement")?;
-                let repository = if discard {
-                    super::super::lifecycle::Repository::Discard
-                } else {
-                    super::super::lifecycle::Repository::Remove
-                };
                 let mut archive_bundle = None;
                 let removed = super::super::lifecycle::remove_tree_when_before_delete(
                     &context,
@@ -90,7 +145,7 @@ fn retirement_preserves_unique_tips_before_removing_the_worktree() -> Result<(),
                     &cancel(),
                     &|_| Ok(()),
                     Some(&Default::default()),
-                    repository,
+                    discard,
                     |_, _, archive| {
                         if discard {
                             let archive = archive.ok_or(WorktreeError::IdentityChanged)?;
@@ -700,7 +755,7 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
 }
 
 #[test]
-fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dyn Error>> {
+fn gc_output_pruning_holds_writer_custody() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
@@ -723,16 +778,11 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
         let count = calls.get() + 1;
         calls.set(count);
         if count == 1 {
-            let repository_free = context
-                .repo
-                .common_dir()
-                .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                .is_ok();
             let writer_held = matches!(
                 state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
                 Err(FsError::LockTimeout { .. })
             );
-            observations.set(Some((repository_free, writer_held)));
+            observations.set(Some(writer_held));
         }
         true
     };
@@ -758,7 +808,7 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
         },
         &cancel(),
     )?;
-    assert_eq!(observations.get(), Some((true, true)));
+    assert_eq!(observations.get(), Some(true));
     assert!(!target.exists());
     assert_eq!(report.output.len(), 1);
     assert!(report.output[0].removed);
@@ -787,16 +837,11 @@ fn landing_output_pruning_keeps_the_writer_lease_through_retirement() -> Result<
     let output_observation = std::cell::Cell::new(None);
     let retirement_observation = std::cell::Cell::new(None);
     let terminal = |_: &Path| {
-        let repository_free = context
-            .repo
-            .common_dir()
-            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-            .is_ok();
         let writer_held = matches!(
             state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
             Err(FsError::LockTimeout { .. })
         );
-        output_observation.set(Some((repository_free, writer_held)));
+        output_observation.set(Some(writer_held));
         true
     };
     let no_live_lanes = |candidate: &Path| {
@@ -833,7 +878,7 @@ fn landing_output_pruning_keeps_the_writer_lease_through_retirement() -> Result<
         &cancel(),
     )?;
 
-    assert_eq!(output_observation.get(), Some((true, true)));
+    assert_eq!(output_observation.get(), Some(true));
     assert_eq!(retirement_observation.get(), Some((true, true)));
     assert!(!lane.path.exists());
     assert!(report.output[0].removed);
@@ -864,12 +909,7 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
         let lanes = list(&context, &cancel())?;
         let changed = std::cell::Cell::new(false);
         let no_live = |candidate: &Path| {
-            let repository_held = context
-                .repo
-                .common_dir()
-                .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                .is_err();
-            if !changed.get() && candidate == path && repository_held {
+            if !changed.get() && candidate == path {
                 changed.set(true);
                 match change {
                     Change::Ignored => fs::write(path.join(".env"), "new secret").unwrap(),
@@ -925,7 +965,7 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn Error>> {
+fn gc_foreign_prunes_while_writer_custody_is_held() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
@@ -943,29 +983,27 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&lane.path))?;
-    let observations = std::cell::RefCell::new(Vec::new());
-    let no_live_lanes = |_: &Path| {
-        if state
-            .try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
-            .is_err()
-        {
-            observations.borrow_mut().push(
-                context
-                    .repo
-                    .common_dir()
-                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                    .is_ok(),
+    let target = lane.path.join("target");
+    let prune_boundary = std::cell::Cell::new(None);
+    let terminal = |candidate: &Path| {
+        if candidate == lane.path {
+            let writer_held = matches!(
+                state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                Err(FsError::LockTimeout { .. })
             );
+            // `terminal` is called immediately before collect_lane_output walks
+            // and prunes this candidate, at the effect boundary under test.
+            prune_boundary.set(Some((writer_held, target.exists())));
         }
-        true
+        false
     };
     let report = collect(
         &context,
         std::slice::from_ref(&lane),
         &WorktreeGcPolicy {
             upstream: Some(upstream),
-            terminal: &|_| false,
-            no_live_lanes: &no_live_lanes,
+            terminal: &terminal,
+            no_live_lanes: &|_| true,
             regenerable: &["target".into()],
             keep: &[],
             written_before_ns: i128::MAX,
@@ -990,9 +1028,14 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
     }));
     assert!(!lane.path.exists());
     assert!(!branch_exists(&fixture, "foreign-output-lock"));
-    let observed = observations.borrow();
-    assert_eq!(observed.first(), Some(&true));
-    assert_eq!(observed.last(), Some(&false));
+    assert_eq!(prune_boundary.get(), Some((true, true)));
+    assert!(!target.exists());
+    assert!(
+        report
+            .idle_output
+            .iter()
+            .any(|output| output.path == target && output.removed)
+    );
     Ok(())
 }
 
@@ -1008,16 +1051,45 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
     retirement.seed_lane(&context, &second)?;
     let upstream = fixture.head()?;
     let evidence = gc_landing_evidence(&fixture, upstream)?;
+    let output_walk_started = std::cell::Cell::new(false);
+    let post_output_eligibility_passed_without_custody = std::cell::Cell::new(false);
     let mutation_boundary_rejected = std::cell::Cell::new(false);
+    let first_state = context
+        .project_state
+        .open_verified_directory(&state_dir_name(&first.path))?;
     let no_live_lanes = |path: &Path| {
-        let repository_held = context
-            .repo
-            .common_dir()
-            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-            .is_err();
-        let reject = path == first.path && repository_held;
-        mutation_boundary_rejected.set(mutation_boundary_rejected.get() || reject);
-        !reject
+        if path != first.path {
+            return true;
+        }
+        let writer_held = matches!(
+            first_state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+            Err(FsError::LockTimeout { .. })
+        );
+        if output_walk_started.get() {
+            if !writer_held {
+                // Worktree GC releases its initial lease before starting the
+                // final fenced removal. Observe that unlocked eligibility
+                // pass before refusing under the removal lease below.
+                post_output_eligibility_passed_without_custody.set(true);
+            } else if post_output_eligibility_passed_without_custody.get() {
+                // This is the final eligibility callback under the newly
+                // acquired writer lease, immediately before Git mutation.
+                // Refuse here to model custody becoming unknown at the
+                // effect boundary, after initial eligibility passed.
+                mutation_boundary_rejected.set(true);
+                return false;
+            }
+        }
+        true
+    };
+    let terminal = |candidate: &Path| {
+        if candidate == first.path {
+            // Output collection begins after the initial eligibility check
+            // while GC holds its first lease; this marks the later removal
+            // eligibility callbacks without relying on repository locking.
+            output_walk_started.set(true);
+        }
+        true
     };
     let report = collect(
         &context,
@@ -1032,7 +1104,7 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
             integration_patterns: &[],
             excluded_paths: &[],
             upstream: Some(upstream),
-            terminal: &|_| true,
+            terminal: &terminal,
             no_live_lanes: &no_live_lanes,
             regenerable: &["target".to_owned()],
             keep: &[],
@@ -1041,21 +1113,29 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
         },
         &cancel(),
     )?;
+    assert!(output_walk_started.get());
+    assert!(post_output_eligibility_passed_without_custody.get());
     assert!(mutation_boundary_rejected.get());
     assert!(first.path.is_dir());
     assert!(branch_exists(&fixture, "gc-prune-failed"));
     assert!(report.worktrees.retained.iter().any(|retained| {
         retained.branch == "gc-prune-failed" && retained.reason == RetainReason::UnknownWriter
     }));
-    assert!(report.removals.iter().any(|removal| {
-        worktree_subject_matches_path(&removal.subject, &first.path)
-            && matches!(
-                &removal.outcome,
-                provenant_records::custody::RemovalOutcome::Kept {
-                    cause: provenant_records::custody::RemovalUncertainty::CustodyUnknown
-                }
-            )
-    }));
+    let first_removals: Vec<_> = report
+        .removals
+        .iter()
+        .filter(|removal| {
+            worktree_subject_matches_path(&removal.subject, &first.path)
+                && removal.tip == first.head
+        })
+        .collect();
+    assert_eq!(first_removals.len(), 1, "{first_removals:?}");
+    assert!(matches!(
+        &first_removals[0].outcome,
+        provenant_records::custody::RemovalOutcome::Kept {
+            cause: provenant_records::custody::RemovalUncertainty::CustodyUnknown
+        }
+    ));
     assert!(report.removals.iter().any(|removal| {
         worktree_subject_matches_path(&removal.subject, &second.path)
             && matches!(
@@ -1300,109 +1380,6 @@ fn gc_merged_tree_previews_and_removes_declared_output() -> Result<(), Box<dyn E
 #[test]
 fn gc_retires_only_lanes_contained_in_a_retained_ref() -> Result<(), Box<dyn Error>> {
     merge_proof_scenario()
-}
-
-#[test]
-fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>> {
-    for scenario in ["managed", "managed-preview", "foreign", "foreign-preview"] {
-        let fixture = Fixture::new()?;
-        let test_context = TestContext::new(&fixture)?;
-        let mut context = test_context.context();
-        let foreign = scenario.starts_with("foreign");
-        // A foreign lane has no owner; a managed one is owned and seeded.
-        let mut lane = if foreign {
-            gc_merged_unowned_worktree(&fixture, &context, "gc-census-lock")?
-        } else {
-            gc_merged_worktree(&test_context, &context, "gc-census-lock")?
-        };
-        let retirement = HostRetirementFixture::new(&test_context)?;
-        if !foreign {
-            retirement.seed_lane(&context, &lane)?;
-        }
-        let upstream = fixture.head()?;
-        let evidence = gc_landing_evidence(&fixture, upstream)?;
-        let probe = LockProbeWorkers {
-            common: context.repo.common_dir(),
-            repository_held: Default::default(),
-        };
-        context.workers = &probe;
-        if foreign {
-            lane.occupancy =
-                Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
-        }
-        let report = collect(
-            &context,
-            std::slice::from_ref(&lane),
-            &WorktreeGcPolicy {
-                include_foreign: foreign,
-                retirement_port: Some(&retirement),
-                retirement_feeds: Some(&retirement),
-                mode: CollectionMode::Worktrees,
-                proof: Some(&evidence),
-                upstream_reference: None,
-                integration_patterns: &[],
-                excluded_paths: &[],
-                upstream: Some(upstream),
-                terminal: &|_| !foreign,
-                no_live_lanes: &|_| true,
-                regenerable: &[],
-                keep: &[],
-                written_before_ns: i128::MAX,
-                dry_run: scenario.ends_with("preview"),
-            },
-            &cancel(),
-        )?;
-        if scenario.ends_with("preview") {
-            assert!(
-                report
-                    .worktrees
-                    .removed
-                    .iter()
-                    .any(|tree| tree.path == lane.path)
-            );
-            assert!(lane.path.is_dir());
-        } else {
-            assert!(report.removals.iter().any(|removal| {
-                worktree_subject_matches_path(&removal.subject, &lane.path)
-                    && matches!(
-                        &removal.outcome,
-                        provenant_records::custody::RemovalOutcome::Removed { .. }
-                    )
-            }));
-            assert!(!lane.path.exists());
-        }
-        let observed = probe.repository_held.lock().unwrap().clone();
-        assert!(!observed.is_empty(), "{scenario}");
-        assert!(
-            observed.iter().all(|held| !held),
-            "{scenario}: census under the repository lock {observed:?}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<(), Box<dyn Error>>
-{
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let mut context = test.context();
-    let probe = LockProbeWorkers {
-        common: context.repo.common_dir(),
-        repository_held: Default::default(),
-    };
-    context.workers = &probe;
-
-    // `collect` and the CLI's project-GC discovery both obtain their candidate
-    // set through this inventory path before applying GC policy.
-    let inventory = list(&context, &cancel())?;
-    assert!(!inventory.is_empty());
-    assert_eq!(
-        *probe.repository_held.lock().unwrap(),
-        vec![false],
-        "native census must run after the Git registration snapshot lock drops"
-    );
-    Ok(())
 }
 
 #[test]

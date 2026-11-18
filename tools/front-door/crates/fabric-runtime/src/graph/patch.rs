@@ -10,6 +10,7 @@ use super::template::{CompileError, Compiler, Layer, ParameterRefusal, Template,
 use super::*;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 pub const PATCH_SCHEMA_VERSION: u64 = 1;
 const KEY_BYTES: usize = 128;
@@ -379,6 +380,9 @@ fn admit_patch_for_retry(
                 })
             })
             .collect();
+        let incoming: BTreeSet<String> =
+            compiled.nodes.iter().map(|node| node.id.clone()).collect();
+        let warnings = advisory_write_scope_warnings(&compiled.nodes, &incoming);
         let mut record = PatchRecord {
             extra: Default::default(),
             child_receipt: None,
@@ -402,7 +406,7 @@ fn admit_patch_for_retry(
             retry_generation: None,
             final_result: false,
             final_fragment: false,
-            floor_warnings: Vec::new(),
+            floor_warnings: warnings,
             source: String::new(),
             nodes: Vec::new(),
             uses,
@@ -1167,6 +1171,390 @@ pub(super) struct Admission {
     pub warnings: Vec<String>,
 }
 
+/// Compare optional write-scope claims for writers that share a checkout.
+/// Claims are advisory metadata: an overlap adds an owner-facing warning but
+/// never changes admission.
+fn advisory_write_scope_warnings(
+    nodes: &[GraphNode],
+    changed_roots: &BTreeSet<String>,
+) -> Vec<String> {
+    const MAX_WARNINGS: usize = 64;
+
+    fn changed(id: &str, roots: &BTreeSet<String>) -> bool {
+        roots.iter().any(|root| {
+            id == root
+                || id
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with("--"))
+        })
+    }
+
+    fn collect<'a>(node: &'a GraphNode, claims: &mut BTreeMap<String, (&'a GraphNode, PathBuf)>) {
+        if node.access == AccessMode::WorktreeWrite
+            && let Some(worktree) = node.worktree.as_deref()
+        {
+            claims
+                .entry(node.id.clone())
+                .or_insert_with(|| (node, lexical_path(Path::new(worktree))));
+        }
+        if let Some(composite) = &node.composite {
+            for child in &composite.nodes {
+                collect(child, claims);
+            }
+        }
+        if let Some(loop_body) = &node.loop_body {
+            for child in &loop_body.body {
+                collect(child, claims);
+            }
+        }
+        if let Some(fallback) = node.plan.as_ref().and_then(|plan| plan.fallback.as_ref()) {
+            for child in &fallback.nodes {
+                collect(child, claims);
+            }
+        }
+    }
+
+    let mut claims = BTreeMap::new();
+    for node in nodes {
+        collect(node, &mut claims);
+    }
+    let claims: Vec<_> = claims
+        .into_iter()
+        .map(|(id, (node, worktree))| (id, node, worktree))
+        .collect();
+    let mut warnings = Vec::new();
+    for left in 0..claims.len() {
+        for right in left + 1..claims.len() {
+            let (left_id, left_node, left_worktree) = &claims[left];
+            let (right_id, right_node, right_worktree) = &claims[right];
+            if (!changed(left_id, changed_roots) && !changed(right_id, changed_roots))
+                || left_worktree != right_worktree
+                || left_node.write_scope.is_empty()
+                || right_node.write_scope.is_empty()
+            {
+                continue;
+            }
+            let overlaps = left_node.write_scope.iter().any(|left_scope| {
+                right_node
+                    .write_scope
+                    .iter()
+                    .any(|right_scope| scopes_overlap(left_worktree, left_scope, right_scope))
+            });
+            if overlaps {
+                warnings.push(format!(
+                    "Advisory write-scope overlap between writers {left_id} and {right_id} in one worktree; both remain admitted."
+                ));
+                if warnings.len() == MAX_WARNINGS {
+                    warnings.push("Additional advisory write-scope overlaps were omitted.".into());
+                    return warnings;
+                }
+            }
+        }
+    }
+    warnings
+}
+
+fn scopes_overlap(worktree: &Path, left: &str, right: &str) -> bool {
+    // Git pathspec and glob syntax is deliberately treated as broad. This may
+    // warn on unrelated paths, while never allowing a declared overlap to hide.
+    let opaque = |scope: &str| {
+        scope.starts_with(':') || scope.bytes().any(|byte| matches!(byte, b'*' | b'?' | b'['))
+    };
+    if opaque(left) || opaque(right) {
+        return true;
+    }
+    if !worktree.is_absolute() && Path::new(left).is_absolute() != Path::new(right).is_absolute() {
+        return true;
+    }
+    let resolve = |scope: &str| {
+        let path = Path::new(scope);
+        if path.is_absolute() {
+            lexical_path(path)
+        } else {
+            lexical_path(&worktree.join(path))
+        }
+    };
+    let left = resolve(left);
+    let right = resolve(right);
+    left.starts_with(&right) || right.starts_with(&left)
+}
+
+fn lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::Prefix(_) | Component::RootDir) => {}
+                Some(Component::ParentDir) | None if !path.is_absolute() => {
+                    normalized.push(component.as_os_str());
+                }
+                Some(Component::ParentDir) | None => {}
+                Some(Component::CurDir) => unreachable!("normalised path has no dot component"),
+            },
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+#[cfg(test)]
+mod advisory_write_scope_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn writer(id: &str, worktree: &str, scopes: &[&str]) -> GraphNode {
+        serde_json::from_value(json!({
+            "id": id,
+            "access": "worktree_write",
+            "worktree": worktree,
+            "write_scope": scopes,
+            "prompt": "write",
+            "route": {"alias": "senior"}
+        }))
+        .expect("valid writer fixture")
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn overlapping_shared_worktree_scopes_are_admitted_and_warning_is_persisted() {
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version": 1,
+            "graph_id": "shared-worktree-claims",
+            "nodes": [{
+                "id": "first",
+                "access": "worktree_write",
+                "worktree": "/repo/shared",
+                "write_scope": ["src/lib"],
+                "prompt": "first writer",
+                "route": {"alias": "senior"}
+            }]
+        }))
+        .expect("valid initial graph");
+        let limits = plans::generous();
+        document.admit(&limits).expect("initial graph is valid");
+        let expanded = super::super::plans::expand(&document, &[], &[], &limits)
+            .expect("initial graph expands");
+        let (plan, _) =
+            super::super::validate_flat_plan(&expanded, &limits).expect("initial graph validates");
+        let digest = super::super::journal::plan_digest(&plan)
+            .expect("initial graph digest")
+            .to_string();
+        let mut checkpoint = super::super::transitions::initial_checkpoint(
+            &document, &plan, digest, None, None, None,
+        );
+        let library = TemplateLibrary::bundled();
+        let resolvers = BTreeMap::new();
+        let patch = Patch {
+            schema_version: PATCH_SCHEMA_VERSION,
+            expected_revision: Some(0),
+            nodes: vec![json!({
+                "id": "second",
+                "access": "worktree_write",
+                "worktree": "/repo/shared",
+                "write_scope": ["src/lib/module.rs"],
+                "prompt": "second writer",
+                "route": {"alias": "senior"}
+            })],
+            ..Default::default()
+        };
+
+        let admission = admit_patch(
+            &mut LiveGraph {
+                document: &document,
+                checkpoint: &mut checkpoint,
+            },
+            None,
+            &patch,
+            &PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                scan: &|_| Ok(()),
+                journal: None,
+                limits: &limits,
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            },
+        )
+        .expect("overlapping advisory claims remain admissible");
+
+        assert_eq!(admission.added, ["second"]);
+        assert!(
+            checkpoint
+                .nodes
+                .iter()
+                .any(|node| { node.id == "first" && node.state == NodeState::Pending })
+        );
+        assert!(
+            checkpoint
+                .nodes
+                .iter()
+                .any(|node| { node.id == "second" && node.state == NodeState::Pending })
+        );
+        let warnings = &checkpoint
+            .expansions
+            .last()
+            .expect("admission persisted")
+            .floor_warnings;
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("first"));
+        assert!(warnings[0].contains("second"));
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn overlapping_static_submission_scopes_are_admitted_and_warning_is_durable() {
+        let mut document: GraphDocument = serde_json::from_value(json!({
+            "schema_version": 1,
+            "graph_id": "static-shared-worktree-claims",
+            "integration_branch": "batch/static-shared-worktree-claims",
+            "nodes": [
+                {
+                    "id": "first",
+                    "access": "worktree_write",
+                    "worktree": "/repo/shared",
+                    "write_scope": ["src/lib"],
+                    "prompt": "first writer",
+                    "route": {"alias": "senior"}
+                },
+                {
+                    "id": "second",
+                    "access": "worktree_write",
+                    "worktree": "/repo/shared",
+                    "write_scope": ["src/lib/module.rs"],
+                    "prompt": "second writer",
+                    "route": {"alias": "senior"}
+                }
+            ]
+        }))
+        .expect("valid static graph");
+        let limits = plans::generous();
+        super::submission(
+            &mut document,
+            "static-scope-overlap",
+            &limits,
+            provenant_config::PortTable::builtin().worktree_layout,
+        )
+        .expect("overlapping advisory claims do not refuse submission");
+        let expanded = super::super::plans::expand(&document, &[], &[], &limits)
+            .expect("static graph expands");
+        let (plan, _) =
+            super::super::validate_flat_plan(&expanded, &limits).expect("static graph validates");
+        let digest = super::super::journal::plan_digest(&plan)
+            .expect("static graph digest")
+            .to_string();
+        let mut checkpoint = super::super::transitions::initial_checkpoint(
+            &document, &plan, digest, None, None, None,
+        );
+        let library = TemplateLibrary::bundled();
+        let resolvers = BTreeMap::new();
+        let submission = document
+            .submission_patch
+            .as_ref()
+            .expect("submission patch was retained")
+            .clone();
+        let admitted = admit_patch(
+            &mut LiveGraph {
+                document: &document,
+                checkpoint: &mut checkpoint,
+            },
+            None,
+            &submission,
+            &PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                scan: &scan_for_secrets,
+                journal: None,
+                limits: &limits,
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            },
+        )
+        .expect("initial static admission succeeds");
+
+        assert_eq!(
+            admitted.added,
+            vec!["first".to_owned(), "second".to_owned()]
+        );
+        assert!(
+            checkpoint
+                .nodes
+                .iter()
+                .all(|node| node.state == NodeState::Pending)
+        );
+        let persisted: GraphCheckpoint = serde_json::from_value(
+            serde_json::to_value(&checkpoint).expect("checkpoint serializes"),
+        )
+        .expect("checkpoint reloads");
+        let warnings = &persisted
+            .expansions
+            .last()
+            .expect("initial expansion persisted")
+            .floor_warnings;
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("first"));
+        assert!(warnings[0].contains("second"));
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn disjoint_or_absent_claims_do_not_warn() {
+        let changed = BTreeSet::from(["second".to_owned()]);
+        let disjoint = vec![
+            writer("first", ".worktrees/shared", &["src/lib"]),
+            writer("second", ".worktrees/shared", &["src/library"]),
+        ];
+        assert!(advisory_write_scope_warnings(&disjoint, &changed).is_empty());
+
+        let isolated = vec![
+            writer("first", ".worktrees/one", &["src/lib"]),
+            writer("second", ".worktrees/two", &["src/lib/module.rs"]),
+        ];
+        assert!(advisory_write_scope_warnings(&isolated, &changed).is_empty());
+
+        let absent = vec![
+            writer("first", ".worktrees/shared", &["src/lib"]),
+            writer("second", ".worktrees/shared", &[]),
+        ];
+        assert!(advisory_write_scope_warnings(&absent, &changed).is_empty());
+    }
+
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn glob_claims_are_compared_conservatively() {
+        let nodes = vec![
+            writer("first", ".worktrees/shared", &["src/*.rs"]),
+            writer("second", ".worktrees/shared", &["docs/readme.md"]),
+        ];
+        let changed = BTreeSet::from(["second".to_owned()]);
+        assert_eq!(advisory_write_scope_warnings(&nodes, &changed).len(), 1);
+    }
+
+    #[test]
+    fn lexical_scope_paths_preserve_leading_parent_components() {
+        assert_eq!(
+            lexical_path(Path::new("../../src/lib")),
+            PathBuf::from("../../src/lib")
+        );
+        assert_eq!(
+            lexical_path(Path::new("a/../../src/lib")),
+            PathBuf::from("../src/lib")
+        );
+    }
+
+    #[test]
+    fn mixed_scope_paths_resolve_against_an_absolute_worktree() {
+        assert!(scopes_overlap(
+            Path::new("/repo/shared"),
+            "src/lib",
+            "/repo/shared/src/lib/module.rs"
+        ));
+    }
+}
+
 fn scan(patch: &Patch, context: &PatchContext<'_>) -> Result<(), PatchError> {
     let text =
         serde_json::to_string(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
@@ -1551,6 +1939,16 @@ pub(super) fn prepare(
             parameter: None,
         });
     }
+    let mut changed_roots: BTreeSet<String> =
+        expansion.nodes.iter().map(|node| node.id.clone()).collect();
+    if let Some(record) = &expansion.patch {
+        changed_roots.extend(record.replaced.iter().map(|node| node.id.clone()));
+    }
+    warnings.extend(advisory_write_scope_warnings(
+        &preview.nodes,
+        &changed_roots,
+    ));
+    expansion.floor_warnings.extend(warnings.iter().cloned());
     let mut expansions = checkpoint.expansions.clone();
     expansions.push(expansion.clone());
     let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);

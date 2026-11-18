@@ -514,3 +514,124 @@ fn non_interruptible_transaction_finishes_after_its_soft_deadline() {
     assert_eq!(outcome.stdout.bytes, b"committed");
     assert!(!outcome.timed_out);
 }
+
+#[test]
+fn prepared_ref_transaction_commits_or_aborts_after_prepare_ack()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let script = "while IFS= read -r line; do\n  if [ \"$line\" = prepare ]; then\n    printf 'prepare: ok\\n'\n    IFS= read -r decision\n    printf '%s: ok\\n' \"$decision\"\n    exit 0\n  fi\ndone\nexit 2\n";
+    for (commit, expected) in [(true, "commit: ok"), (false, "abort: ok")] {
+        let argv = [
+            OsString::from("/bin/sh"),
+            OsString::from("-c"),
+            OsString::from(script),
+        ];
+        let options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(2));
+        let mut called = false;
+        let mut decide = || {
+            called = true;
+            commit
+        };
+        let outcome = SystemExecutor::new(1)?.execute_prepared_ref_transaction(
+            options,
+            b"start\nprepare\n",
+            &mut decide,
+        )?;
+        assert!(called, "decision must wait for the prepare acknowledgement");
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert!(String::from_utf8_lossy(&outcome.stdout.bytes).contains("prepare: ok"));
+        assert!(String::from_utf8_lossy(&outcome.stdout.bytes).contains(expected));
+    }
+    Ok(())
+}
+
+#[test]
+fn prepared_ref_transaction_cannot_commit_after_callback_deadline_or_cancellation() {
+    for (requested, cancelled, before_deadline, expected) in [
+        (true, false, true, true),
+        (true, true, true, false),
+        (true, false, false, false),
+        (false, false, true, false),
+    ] {
+        assert_eq!(
+            prepared_ref_commit_allowed(requested, cancelled, before_deadline),
+            expected
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The callback must outlive the native process deadline.
+fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
+-> Result<(), Box<dyn std::error::Error>> {
+    for expires in [false, true] {
+        let temp = tempfile::tempdir()?;
+        for args in [
+            vec!["init", "-q"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+        ] {
+            let output = crate::fixture::git_command()
+                .current_dir(temp.path())
+                .args(args)
+                .output()?;
+            assert!(output.status.success(), "{output:?}");
+        }
+        let branch_output = crate::fixture::git_command()
+            .current_dir(temp.path())
+            .args(["symbolic-ref", "HEAD"])
+            .output()?;
+        assert!(branch_output.status.success(), "{branch_output:?}");
+        let branch = String::from_utf8(branch_output.stdout)?.trim().to_owned();
+        let tip_output = crate::fixture::git_command()
+            .current_dir(temp.path())
+            .args(["rev-parse", &branch])
+            .output()?;
+        assert!(tip_output.status.success(), "{tip_output:?}");
+        let tip = String::from_utf8(tip_output.stdout)?.trim().to_owned();
+
+        let git = crate::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+        let argv = [
+            git.into_os_string(),
+            OsString::from("update-ref"),
+            OsString::from("--stdin"),
+        ];
+        let env = crate::fixture::git_env();
+        let cancel = CancelToken::new();
+        let timeout = if expires {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(10)
+        };
+        let mut options = ExecOptions::new(&argv, temp.path(), timeout);
+        options.env = Some(&env);
+        options.cancel = Some(&cancel);
+        let mut called = false;
+        let mut decide = || {
+            called = true;
+            if expires {
+                std::thread::sleep(Duration::from_millis(2_100));
+            } else {
+                cancel.cancel();
+            }
+            true
+        };
+        let commands = format!("start\ndelete {branch} {tip}\nprepare\n");
+        let outcome = SystemExecutor::new(1)?.execute_prepared_ref_transaction(
+            options,
+            commands.as_bytes(),
+            &mut decide,
+        )?;
+        assert!(called, "Git must prepare before asking for the decision");
+        if expires {
+            assert!(outcome.timed_out, "{outcome:?}");
+        }
+
+        let retained = crate::fixture::git_command()
+            .current_dir(temp.path())
+            .args(["rev-parse", &branch])
+            .output()?;
+        assert!(retained.status.success(), "{retained:?}");
+        assert_eq!(String::from_utf8(retained.stdout)?.trim(), tip);
+    }
+    Ok(())
+}

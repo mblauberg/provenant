@@ -717,6 +717,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
         project.to_str().ok_or("path")?,
     ])?;
     let linked = crate::repo::verify_worktree(&fixture.repo, &project)?;
+    crate::worktrees::acquire_worktree_subject(linked.repo())?;
     let selected_ref = GitRefName::branch("discovery")?;
     let authority = WorktreeWriteAuthority::for_worktree(
         &linked,

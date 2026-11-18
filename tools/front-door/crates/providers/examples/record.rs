@@ -901,6 +901,7 @@ fn main() -> Result<()> {
         private_dir(scratch)?;
         let mode = match &worktree {
             Some(tree) => {
+                provenant_confinement::worktrees::acquire_worktree_subject(tree.repo())?;
                 AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority::for_worktree(
                     tree,
                     &selected_ref,

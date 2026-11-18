@@ -379,8 +379,9 @@ pub enum AccessMode {
     WorktreeWrite(Box<WorktreeWriteAuthority>),
 }
 
-/// A digest binds the plan to Git grants and its one host-derived build cache.
-/// The common directory also binds provider setup to the verified repository.
+/// A digest binds the plan to Git grants, persistent shared Git state and its
+/// one host-derived build cache. Paths are derived by the host from a verified
+/// worktree, never accepted from a provider request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeWriteAuthority {
@@ -389,12 +390,21 @@ pub struct WorktreeWriteAuthority {
     pub(super) publishing: bool,
     /// Common Git directory from the verified repository binding.
     pub(super) common_git_dir: PathBuf,
+    /// Persistent Git state for this exact worktree incarnation and branch.
+    /// The host container remains read-only; only its `git-common` and
+    /// `git-objects` children are writable by the lane.
+    pub(super) git_state: PathGrant,
 }
 
 impl WorktreeWriteAuthority {
     /// Repository selected by the host, for the lane-private object alternate.
     pub fn common_git_dir(&self) -> &Path {
         &self.common_git_dir
+    }
+
+    /// Host-derived, worktree-incarnation scoped Git state container.
+    pub fn git_state(&self) -> &PathGrant {
+        &self.git_state
     }
 
     pub fn set_publishing(&mut self, enabled: bool) {
@@ -416,11 +426,13 @@ impl WorktreeWriteAuthority {
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
         grants.validate(credentials)?;
         let cargo_cache = worktree_cargo_cache(home, worktree, credentials)?;
+        let git_state = worktree_git_state(home, worktree, selected_ref, credentials)?;
         Ok(Self {
-            git_grants_digest: grants.digest(&cargo_cache),
+            git_grants_digest: grants.digest(&cargo_cache, &git_state),
             cargo_cache,
             publishing: true,
             common_git_dir: worktree.repo().common_git_dir().to_path_buf(),
+            git_state,
         })
     }
 }
@@ -467,8 +479,9 @@ pub struct WriteGrant {
 }
 
 /// List explicit write allowances in rendering order. Baseline `/dev/null` and
-/// here-document access are omitted, as are concrete worktree/Git paths; writer
-/// records carry the existing Git grants digest instead. This list grants no authority.
+/// here-document access are omitted. The shared Git-state data children are
+/// listed as `GitState`; concrete host repository Git paths remain implicit in
+/// the writer digest. This list grants no authority by itself.
 pub fn write_grants(plan: &PlanPermissions, profile: &ProviderProfile) -> Vec<WriteGrant> {
     let mut grants = Vec::new();
     let mut push = |source, grant: &PathGrant, scope| {
@@ -513,6 +526,9 @@ pub fn write_grants(plan: &PlanPermissions, profile: &ProviderProfile) -> Vec<Wr
             &authority.cargo_cache,
             PathScope::Subtree,
         );
+        for grant in super::grants::worktree_git_state_writes(&authority.git_state) {
+            push(WriteSource::GitState, &grant, grant.scope);
+        }
     }
     grants
 }

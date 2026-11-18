@@ -241,6 +241,7 @@ pub(super) fn lane_access_checked(
     Ok(run::LaneAccess {
         extra: Default::default(),
         capability_sources: Default::default(),
+        shared_worktree: None,
         network,
         database_ipc: postgres,
         read_roots: resolve(&access.read_root, "--read-root")?,

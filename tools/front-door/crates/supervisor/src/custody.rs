@@ -20,6 +20,7 @@ use thiserror::Error;
 
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
+const HOLDER_LOCK: &str = "holder.lock";
 use provenant_records::custody::Scope;
 
 /// Run seals this beside the reservation when private Git must be retained.
@@ -468,6 +469,7 @@ pub struct CustodyLease {
     pub(crate) directory: Directory,
     pub(crate) lock_directory: Directory,
     pub(crate) lease: Option<LockGuard>,
+    pub(crate) holder: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     launched: bool,
 }
@@ -520,7 +522,7 @@ impl CustodyLease {
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let clock = provenant_os::clock::SystemClock::new();
-            self.lease = Some(lock_writer_exclusion(
+            self.lease = Some(lock_writer_occupancy(
                 &self.lock_directory,
                 WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
                 &CancelToken::new(),
@@ -529,7 +531,7 @@ impl CustodyLease {
         }
         Ok(())
     }
-    /// Reacquire writer exclusion after a completed guardian handoff (up to 5 s).
+    /// Reacquire shared occupancy after a completed guardian handoff (up to 5 s).
     pub fn into_recovery(mut self) -> Result<Recovery> {
         self.ensure_lease()?;
         let reservation: Reservation =
@@ -539,6 +541,7 @@ impl CustodyLease {
             directory: self.directory,
             lock_directory: self.lock_directory,
             lease: Some(self.lease.ok_or(CustodyError::Fenced)?),
+            holder: self.holder.take(),
             reservation,
             guardian_quiescent: false,
             loss_locks: None,
@@ -567,8 +570,9 @@ pub fn acquire_reader(
     )
 }
 /// The supplied directory is a stable exclusion slot, not a registry.
-/// Only the private guardian handoff inherits the flock. Recovery evidence
-/// belongs to its attempt; unresolved predecessor launches exclude new writers.
+/// Active holders share worktree occupancy and retain a slot-local per-attempt
+/// holder lock through guardian settlement. Recovery evidence remains scoped
+/// to its attempt.
 pub fn acquire_writer(
     directory: Directory,
     scope: Scope,
@@ -598,13 +602,25 @@ pub(crate) fn acquire_writer_with_observer(
     observer: &dyn ProcessObserver,
 ) -> Result<CustodyLease> {
     let lease =
-        lock_writer_exclusion(&directory, budget, cancel, clock).map_err(|error| match error {
+        lock_writer_occupancy(&directory, budget, cancel, clock).map_err(|error| match error {
             CustodyError::Filesystem(FsError::LockTimeout { .. }) => CustodyError::Busy,
             other => other,
         })?;
     let lock_directory = directory;
-    ensure_no_exclusive_reservation(&lock_directory)?;
     let directory = create_attempt_evidence(&lock_directory, scope)?;
+    let holder = directory
+        .lock(
+            OsStr::new(HOLDER_LOCK),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => CustodyError::Busy,
+            other => other.into(),
+        })?;
+    ensure_no_exclusive_reservation(&lock_directory)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
         Ok(_) => {
             let reservation: Reservation =
@@ -698,6 +714,7 @@ pub(crate) fn acquire_writer_with_observer(
         directory,
         lock_directory,
         lease: Some(lease),
+        holder: Some(holder),
         reservation,
         launched: false,
     })
@@ -795,7 +812,8 @@ pub fn pending_import(slot: &Directory) -> Result<Option<PendingImport>> {
     }
     Ok(None)
 }
-/// Unresolved attempt launches exclude new attempts until recovery.
+/// Active sibling holders may coexist; an unresolved reservation whose
+/// slot-local holder proof is absent remains a fence until recovery.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
@@ -838,17 +856,21 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             }
             None => {}
         }
-        // Providers no longer inherit writer.lock. After guardian loss the
-        // durable unresolved launch must exclude every new attempt, not just
-        // readmission of its original attempt, even with a free flock. Prepared
-        // reservations have no child: HandingOff is durable before any spawn.
-        if reservation.unresolved_cleanup
+        // Providers do not inherit writer.lock. Each active reservation instead
+        // keeps its slot-local holder lock through guardian settlement. A free,
+        // missing or unreadable lock leaves the durable fence in force.
+        if (reservation.unresolved_cleanup
             && matches!(
                 reservation.launch_state,
                 LaunchState::HandingOff | LaunchState::Spawned
-            )
+            ))
+            || reservation.launch_state == LaunchState::Settling
         {
-            return Err(CustodyError::Fenced);
+            match child.try_lock_existing(OsStr::new(HOLDER_LOCK), LockMode::Exclusive) {
+                Err(FsError::LockTimeout { .. }) => {}
+                Ok(_live_holder) => return Err(CustodyError::Fenced),
+                Err(_) => return Err(CustodyError::Fenced),
+            }
         }
     }
     Ok(())
@@ -1287,15 +1309,16 @@ pub fn launch(
     }
     // Death evidence precedes every native guardian process. A crash during
     // preparation leaves Prepared custody, which has no child to fence.
-    let prepared = match owned.lease.lease.as_ref() {
-        Some(writer) => liveness::prepare_guardian_lifetime(
+    let prepared = match (owned.lease.lease.as_ref(), owned.lease.holder.as_ref()) {
+        (Some(writer), Some(holder)) => liveness::prepare_guardian_lifetime(
             &owned.lease.directory,
             &publication.directory,
             scope,
             writer,
             &publication.custody,
+            holder,
         ),
-        None => Err(CustodyError::Fenced),
+        _ => Err(CustodyError::Fenced),
     };
     if let Err(error) = prepared {
         return Err(failure(error, publication));
@@ -2038,12 +2061,34 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Acquire writer exclusion without keeping the observation gate while another
-/// writer owns the lease. Every attempt revalidates both stable lock inodes.
-/// Observation gates always try once; only actual writer custody may use the caller budget.
+/// Acquire shared worktree occupancy without keeping the observation gate
+/// while another holder owns the lease.
+#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
+pub fn lock_writer_occupancy(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard> {
+    lock_writer_mode(directory, LockMode::Shared, budget, cancel, clock)
+}
+
+/// Acquire exclusive worktree occupancy for removal and other operations that
+/// require every active holder to leave.
 #[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
 pub fn lock_writer_exclusion(
     directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard> {
+    lock_writer_mode(directory, LockMode::Exclusive, budget, cancel, clock)
+}
+
+#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
+fn lock_writer_mode(
+    directory: &Directory,
+    mode: LockMode,
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
@@ -2062,7 +2107,7 @@ pub fn lock_writer_exclusion(
         let observation = writer_admission_guard(directory)?;
         let attempt = directory.lock(
             OsStr::new("writer.lock"),
-            LockMode::Exclusive,
+            mode,
             WaitBudget::nonblocking(clock.mono_now()),
             cancel,
             clock,
@@ -2116,13 +2161,14 @@ fn observation_error(error: FsError) -> CustodyError {
     }
 }
 
-/// Recovery carries a verified reservation and optional writer exclusion.
-/// Worktree settlement retains the kernel lock through import and publication.
+/// Recovery carries a verified reservation and shared or exclusive worktree
+/// occupancy. Removal and destructive recovery require exclusive occupancy.
 #[derive(Debug)]
 pub struct Recovery {
     pub(crate) directory: Directory,
     pub(crate) lock_directory: Directory,
     pub(crate) lease: Option<LockGuard>,
+    pub(crate) holder: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     // The guardian's durable cleanup or native reboot proof establishes this.
     pub(crate) guardian_quiescent: bool,
@@ -2169,10 +2215,18 @@ pub fn acquire_recovery(
     if reservation.scope.attempt != scope.attempt {
         return Err(CustodyError::Fenced);
     }
+    let holder = directory.lock(
+        OsStr::new(HOLDER_LOCK),
+        LockMode::Exclusive,
+        budget,
+        cancel,
+        clock,
+    )?;
     Ok(Recovery {
         directory,
         lock_directory,
         lease: Some(lease),
+        holder: Some(holder),
         reservation,
         guardian_quiescent: false,
         loss_locks: None,
@@ -2239,10 +2293,18 @@ pub(crate) fn acquire_reboot_recovery_with(
     {
         return Err(CustodyError::InvalidRecord);
     }
+    let holder = directory.lock(
+        OsStr::new(HOLDER_LOCK),
+        LockMode::Exclusive,
+        budget,
+        cancel,
+        clock,
+    )?;
     Ok(Recovery {
         directory,
         lock_directory,
         lease: Some(lease),
+        holder: Some(holder),
         reservation,
         guardian_quiescent: false,
         loss_locks: None,
@@ -2431,9 +2493,9 @@ impl Recovery {
             && self.reservation.attempt_inode == Some(metadata.inode)
             && self.observe() == RecoveryState::Absent)
     }
-    /// Prove the provider absent before host settlement. Worktree exclusion
-    /// spans import and publication: a reservation is recovery evidence, not
-    /// a substitute for the flock. Read-only attempts may release their lock.
+    /// Prove the provider absent before host settlement. Worktree occupancy
+    /// spans import and publication: a reservation is evidence, not a substitute
+    /// for the flock. Read-only attempts may release their lock.
     pub fn prepare_settlement(&mut self) -> Result<()> {
         if self.observe() != RecoveryState::Absent {
             return Err(CustodyError::Fenced);
@@ -2447,7 +2509,7 @@ impl Recovery {
         }
         Ok(())
     }
-    /// Reacquire released read-only exclusion for the final storage transaction. Re-read the scope
+    /// Reacquire released read-only occupancy for the final storage transaction. Re-read the scope
     /// under the lock rather than trusting a detached recovery's snapshot.
     fn ensure_writer_lock(&mut self) -> Result<()> {
         if self.lease.is_none() {
@@ -2468,9 +2530,19 @@ impl Recovery {
             }
             self.lease = Some(lease);
         }
+        if self.holder.is_none() {
+            let clock = provenant_os::clock::SystemClock::new();
+            self.holder = Some(self.directory.lock(
+                OsStr::new(HOLDER_LOCK),
+                LockMode::Exclusive,
+                WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+                &CancelToken::new(),
+                &clock,
+            )?);
+        }
         Ok(())
     }
-    /// Clear an already verified release while retaining writer exclusion.
+    /// Clear an already verified release while retaining writer occupancy.
     pub(crate) fn clear_settled_reservation(&mut self) -> Result<()> {
         self.ensure_writer_lock()?;
         if let Some(proof) = &self.loss_locks {

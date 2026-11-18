@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(test, feature = "fixture"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
@@ -242,12 +243,33 @@ pub enum ExecError {
         #[source]
         source: io::Error,
     },
+    #[error("prepared Git reference transaction is not supported by this executor")]
+    PreparedRefTransactionUnsupported,
+    #[error("prepared Git reference transaction options are invalid")]
+    InvalidPreparedRefTransaction,
 }
 fn io_error(operation: &'static str) -> impl FnOnce(io::Error) -> ExecError {
     move |source| ExecError::Io { operation, source }
 }
 pub trait Executor: Send + Sync {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError>;
+
+    /// Execute the initial `git update-ref --stdin` transaction commands up
+    /// through `prepare`, then ask whether to commit while Git still holds the
+    /// reference locks. `commit_after_prepare` returns true to commit and false
+    /// to abort. The executor owns child timeout, cancellation, stream draining
+    /// and cleanup. The synchronous decision callback is not preempted, so
+    /// callers must keep it bounded. Deadline and cancellation are checked
+    /// before and after it; a late or cancelled decision cannot commit.
+    fn execute_prepared_ref_transaction(
+        &self,
+        options: ExecOptions<'_>,
+        commands_through_prepare: &[u8],
+        commit_after_prepare: &mut dyn FnMut() -> bool,
+    ) -> Result<ExecOutcome, ExecError> {
+        let _ = (options, commands_through_prepare, commit_after_prepare);
+        Err(ExecError::PreparedRefTransactionUnsupported)
+    }
 }
 /// Construct once at the process edge; all clones share one admission queue.
 /// The process-wide reaper worker is shared by every instance. The host must
@@ -437,10 +459,89 @@ impl Executor for SystemExecutor {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
         run(&self.reaper, options)
     }
+
+    fn execute_prepared_ref_transaction(
+        &self,
+        options: ExecOptions<'_>,
+        commands_through_prepare: &[u8],
+        commit_after_prepare: &mut dyn FnMut() -> bool,
+    ) -> Result<ExecOutcome, ExecError> {
+        run_prepared_ref_transaction(
+            &self.reaper,
+            options,
+            commands_through_prepare,
+            commit_after_prepare,
+        )
+    }
 }
+fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+    run_inner(reaper, options, None)
+}
+
+struct PreparedRefTransaction<'a> {
+    commands_through_prepare: &'a [u8],
+    commit_after_prepare: &'a mut dyn FnMut() -> bool,
+}
+
+struct PreparedRefAck(AtomicBool);
+
+impl PreparedRefAck {
+    fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn observed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+fn prepared_ref_commit_allowed(requested: bool, cancelled: bool, before_deadline: bool) -> bool {
+    requested && !cancelled && before_deadline
+}
+
+impl FrameSink for PreparedRefAck {
+    fn try_frame(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
+        if bytes == b"prepare: ok" {
+            self.0.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+fn run_prepared_ref_transaction(
+    reaper: &Reaper,
+    options: ExecOptions<'_>,
+    commands_through_prepare: &[u8],
+    commit_after_prepare: &mut dyn FnMut() -> bool,
+) -> Result<ExecOutcome, ExecError> {
+    if options.stdin.is_some()
+        || !options.stdout.piped()
+        || options.stdout_decoder.is_some()
+        || options.stdout_filter.is_some()
+        || options.secret_input.is_some()
+        || options.wait_for_completion
+        || commands_through_prepare.len() > 4096
+        || !commands_through_prepare.ends_with(b"prepare\n")
+    {
+        return Err(ExecError::InvalidPreparedRefTransaction);
+    }
+    run_inner(
+        reaper,
+        options,
+        Some(PreparedRefTransaction {
+            commands_through_prepare,
+            commit_after_prepare,
+        }),
+    )
+}
+
 // Process supervision deadlines use the operating system's monotonic clock.
 #[allow(clippy::disallowed_methods)]
-fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+fn run_inner<'a>(
+    reaper: &Reaper,
+    options: ExecOptions<'a>,
+    mut transaction: Option<PreparedRefTransaction<'_>>,
+) -> Result<ExecOutcome, ExecError> {
     if options.argv.is_empty() {
         return Err(ExecError::EmptyArgv);
     }
@@ -472,7 +573,7 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             argv: options.argv,
             env: options.env,
             cwd: options.cwd,
-            input: options.stdin.is_some(),
+            input: options.stdin.is_some() || transaction.is_some(),
             secret_input: options.secret_input,
             inherited_lease: options.inherited_lease,
             inherited_profile: options.inherited_profile,
@@ -488,11 +589,13 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let mut stdin = child.stdin.take();
-    let mut out_pump = StreamCapture::new(
-        options.stdout,
-        options.stdout_decoder.map(FrameDelivery::Raw),
-        options.stdout_filter,
-    )?;
+    let transaction_ack = PreparedRefAck::new();
+    let stdout_decoder = if transaction.is_some() {
+        Some(FrameDelivery::Raw(&transaction_ack))
+    } else {
+        options.stdout_decoder.map(FrameDelivery::Raw)
+    };
+    let mut out_pump = StreamCapture::new(options.stdout, stdout_decoder, options.stdout_filter)?;
     let mut err_pump = StreamCapture::new(
         options.stderr,
         options.stderr_decoder.map(FrameDelivery::Raw),
@@ -500,6 +603,8 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     )?;
     let input = options.stdin.unwrap_or_default();
     let mut written = 0;
+    let mut transaction_action = None;
+    let mut transaction_action_written = 0;
     let mut output = ExecOutcome {
         termination: Termination::Exit(0),
         stdout: CapturedStream::default(),
@@ -530,13 +635,50 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         }
         out_pump.read(&mut stdout);
         err_pump.read(&mut stderr);
-        if written == input.len() || status.is_some() {
+        if status.is_none()
+            && transaction_action.is_none()
+            && transaction_ack.observed()
+            && let Some(transaction) = transaction.as_mut()
+        {
+            let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
+            let requested = if !cancelled && Instant::now() < deadline {
+                (transaction.commit_after_prepare)()
+            } else {
+                false
+            };
+            let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
+            transaction_action = Some(prepared_ref_commit_allowed(
+                requested,
+                cancelled,
+                Instant::now() < deadline,
+            ));
+        }
+
+        let (pending_input, pending_written, close_when_written) = match transaction.as_ref() {
+            Some(transaction) => match transaction_action {
+                None => (transaction.commands_through_prepare, &mut written, false),
+                Some(commit) => (
+                    if commit {
+                        &b"commit\n"[..]
+                    } else {
+                        &b"abort\n"[..]
+                    },
+                    &mut transaction_action_written,
+                    true,
+                ),
+            },
+            None => (input, &mut written, true),
+        };
+        let remaining_input = &pending_input[*pending_written..];
+        if close_when_written && remaining_input.is_empty() || status.is_some() {
             stdin = None;
         }
-        if let Some(pipe) = stdin.as_mut() {
-            match pipe.write(&input[written..input.len().min(written.saturating_add(16 * 1024))]) {
+        if !remaining_input.is_empty()
+            && let Some(pipe) = stdin.as_mut()
+        {
+            match pipe.write(&remaining_input[..remaining_input.len().min(16 * 1024)]) {
                 Ok(0) => stdin = None,
-                Ok(n) => written += n,
+                Ok(n) => *pending_written += n,
                 Err(error) if matches!(error.kind(), io::ErrorKind::BrokenPipe) => stdin = None,
                 Err(error)
                     if matches!(
@@ -599,7 +741,12 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             // RawChild::drop transfers its pre-reserved slot without signalling.
             return Err(ExecError::CleanupPending);
         }
-        if let Err(error) = child.ready(stdout.as_ref(), stderr.as_ref(), stdin.as_ref()) {
+        let stdin_ready = if transaction.is_some() && transaction_action.is_none() {
+            None
+        } else {
+            stdin.as_ref()
+        };
+        if let Err(error) = child.ready(stdout.as_ref(), stderr.as_ref(), stdin_ready) {
             child.fail_and_transfer();
             return Err(io_error("poll")(error));
         }

@@ -146,6 +146,12 @@ fn process_info_includes_host_and_reports_own_rss() -> Result<(), Box<dyn std::e
                 git_grants_digest: [7; 32],
                 publishing: false,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,
@@ -445,6 +451,12 @@ fn ambient_profiles_deny_host_task_memory_ptrace_and_keychain_ipc()
                 git_grants_digest: [7; 32],
                 publishing: false,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,
@@ -533,6 +545,12 @@ fn ambient_pty_creation_keeps_host_terminals_private() -> Result<(), Box<dyn std
                 git_grants_digest: [7; 32],
                 publishing: false,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,

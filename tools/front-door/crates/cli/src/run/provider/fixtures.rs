@@ -88,6 +88,7 @@ pub(crate) fn start_fabric_relay(
     ctx: std::sync::Arc<crate::fabric::Context>,
     graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
     graph_read: Option<std::sync::Arc<super::super::holder::GraphRead>>,
+    authorize_graph: impl Fn(Option<i64>) -> bool + Send + Sync + 'static,
 ) -> Result<provenant_fabric_runtime::relay::HostRelay, String> {
     use provenant_core::{CancelToken, Clock};
     use provenant_fabric_runtime::coordination::CoordinationService;
@@ -123,7 +124,7 @@ pub(crate) fn start_fabric_relay(
     let attempt = context.attempt_id.to_string();
     let graph_clock = provenant_os::clock::SystemClock::new();
     let graph_holder = context.clone();
-    provenant_fabric_runtime::relay::HostRelay::start_with_graph(
+    provenant_fabric_runtime::relay::HostRelay::start_with_peer_graph(
         LaneRuntime::fabric_socket(context.attempt_id),
         provenant_records::Limits {
             max_bytes: ctx.config.limits.input_frame_bytes,
@@ -146,18 +147,29 @@ pub(crate) fn start_fabric_relay(
             )?;
             call.execute_lane_coordination(&coordination, &ctx.config.limits, budget, cancel)
         },
-        move |arguments, cancel: &CancelToken, within| {
+        move |arguments, peer_pid, cancel: &CancelToken, within| {
+            if !authorize_graph(peer_pid) {
+                return Err(provenant_fabric_runtime::relay::ServiceError::Cli {
+                    code: "graph_caller_refused".into(),
+                    message: "graph caller is not in this attempt's live process tree".into(),
+                    data: serde_json::Value::Null,
+                });
+            }
             let budget = provenant_fabric_runtime::relay::host_budget(&graph_clock, within)?;
             let observe = arguments["op"] == "read";
             serve_graph_frame(
                 || {
-                    crate::fabric::graph_relay::serve_with_read(
+                    crate::fabric::graph_relay::serve_with_read_and_parent(
                         &graph_ctx,
                         &attempt,
                         arguments,
                         budget,
                         cancel,
                         &graph_clock,
+                        graph_holder
+                            .sealed
+                            .as_ref()
+                            .and_then(|sealed| sealed.writer_worktree.as_ref()),
                         &|input| match &graph_read {
                             Some(read) => read(
                                 &graph_holder,

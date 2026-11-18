@@ -270,11 +270,9 @@ fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
 }
 
 #[test]
-fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_tip()
--> Result<(), Box<dyn Error>> {
+fn default_base_fetch_failure_ignores_cached_tip() -> Result<(), Box<dyn Error>> {
     struct FailedFetch<'a> {
         inner: &'a dyn Executor,
-        project_state: &'a Directory,
         calls: std::sync::atomic::AtomicUsize,
         mutation_timeout: std::time::Duration,
     }
@@ -288,11 +286,6 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
                 .iter()
                 .any(|word| word == "fetch" || word == "ls-remote")
             {
-                let guard = self
-                    .project_state
-                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
-                    .expect("remote discovery must not own the registry lock");
-                drop(guard);
                 assert_eq!(options.timeout, self.mutation_timeout);
             }
             if options.argv.iter().any(|word| word == "fetch") {
@@ -341,7 +334,6 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
     context.mutation_budget = UtilityBudget::bounded(mutation_timeout)?;
     let failed = FailedFetch {
         inner: context.executor,
-        project_state: context.repo.common_dir(),
         calls: Default::default(),
         mutation_timeout,
     };

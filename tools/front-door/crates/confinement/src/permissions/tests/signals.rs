@@ -128,6 +128,12 @@ test "$notified" = yes
                 git_grants_digest: [7; 32],
                 publishing: false,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,

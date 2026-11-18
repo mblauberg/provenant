@@ -72,7 +72,7 @@ pub struct PlanSpec {
     /// Fragment units that no dependency orders form one wave. With this set,
     /// writers in the same worktree must be ordered; relative scopes are only
     /// advisory settlement metadata. Without it, shared worktrees are admitted
-    /// and serialized by the writer lease.
+    /// under shared occupancy leases.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disjoint_waves: bool,
     /// Consumers of the plan node also read what the fragment's template
@@ -889,12 +889,6 @@ fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
     }
 }
 
-pub(super) fn writers_conflict(left: &PlannedNode, right: &PlannedNode) -> bool {
-    left.access == AccessMode::WorktreeWrite
-        && right.access == AccessMode::WorktreeWrite
-        && left.worktree == right.worktree
-}
-
 pub(super) fn prepare(
     child: &mut GraphNode,
     node: &PlannedNode,
@@ -1275,7 +1269,7 @@ pub(super) fn flatten_fragment(
     parent: Option<&PlannedNode>,
     spec: Option<&PlanSpec>,
     document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
+    _checkpoint: &GraphCheckpoint,
     worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<Vec<GraphNode>, String> {
     let units: BTreeMap<String, Vec<String>> = local_nodes
@@ -1304,6 +1298,23 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
+    // Authored templates may name an existing worktree, but only this host
+    // derives provisioning authority for paths it generates below.
+    fn clear_authored_provisioning(nodes: &mut [GraphNode]) {
+        for node in nodes {
+            node.provision_worktree = false;
+            if let Some(composite) = &mut node.composite {
+                clear_authored_provisioning(&mut composite.nodes);
+            }
+            if let Some(body) = &mut node.loop_body {
+                clear_authored_provisioning(&mut body.body);
+            }
+            if let Some(fallback) = node.plan.as_mut().and_then(|plan| plan.fallback.as_mut()) {
+                clear_authored_provisioning(&mut fallback.nodes);
+            }
+        }
+    }
+    clear_authored_provisioning(&mut local_nodes);
     fn provision_paths(
         nodes: &mut [GraphNode],
         graph: &str,
@@ -1456,34 +1467,6 @@ pub(super) fn flatten_fragment(
     if spec.is_some_and(|spec| spec.disjoint_waves) {
         check_waves(&units, &nodes)?;
     }
-    // Writers sharing a worktree use one checkout; admission fences serialise
-    // them. Relative path metadata does not connect otherwise isolated trees.
-    let mut components: Vec<usize> = (0..nodes.len()).collect();
-    for i in 0..nodes.len() {
-        for j in 0..i {
-            if nodes[i].access == AccessMode::WorktreeWrite
-                && nodes[j].access == AccessMode::WorktreeWrite
-                && nodes[i].worktree == nodes[j].worktree
-            {
-                let old = components[i].max(components[j]);
-                let new = components[i].min(components[j]);
-                for value in &mut components {
-                    if *value == old {
-                        *value = new;
-                    }
-                }
-            }
-        }
-    }
-    for i in 0..nodes.len() {
-        if components[i] != i {
-            let first = nodes[components[i]].clone();
-            if document.integration_branch.is_none() {
-                return Err("writers sharing a worktree require an integration_branch".into());
-            }
-            nodes[i].worktree = first.worktree;
-        }
-    }
     if let Some(parent) = parent {
         let local_ids: BTreeSet<_> = nodes.iter().map(|node| node.id.clone()).collect();
         let id = |name: &str| {
@@ -1566,7 +1549,6 @@ pub(super) fn flatten_fragment(
     for child in &mut nodes {
         child.round = None;
     }
-    coordinate(&mut nodes, document, checkpoint)?;
     Ok(nodes)
 }
 
@@ -1609,66 +1591,6 @@ fn check_waves(units: &BTreeMap<String, Vec<String>>, nodes: &[GraphNode]) -> Re
                 return Err(format!(
                     "{left} and {right} write to the same worktree in one wave; order one after the other with depends_on"
                 ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn coordinate(
-    nodes: &mut [GraphNode],
-    document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-) -> Result<(), String> {
-    let paths: std::collections::BTreeSet<_> = nodes
-        .iter()
-        .filter(|n| n.access == AccessMode::WorktreeWrite)
-        .filter_map(|n| n.worktree.clone())
-        .collect();
-    for path in paths {
-        let members: Vec<_> = nodes
-            .iter()
-            .filter(|n| n.worktree.as_ref() == Some(&path))
-            .collect();
-        let existing: Vec<_> = document
-            .nodes
-            .iter()
-            .filter(|n| {
-                n.access == AccessMode::WorktreeWrite
-                    && !checkpoint.nodes.iter().any(|progress| {
-                        progress.id == n.id
-                            && matches!(progress.state, NodeState::Skipped | NodeState::Blocked)
-                    })
-                    && members.iter().any(|child| n.worktree == child.worktree)
-            })
-            .collect();
-        let checkouts: std::collections::BTreeSet<_> = existing
-            .iter()
-            .filter_map(|n| n.worktree.as_ref())
-            .collect();
-        if checkouts.len() > 1 {
-            return Err("expansion connects existing writers on different branches; use one shared worktree".into());
-        }
-        if let Some(checkout) = checkouts.first() {
-            let continues_settled_branch = members.iter().all(|child| {
-                child.continues.as_ref().is_some_and(|target| {
-                    existing.iter().all(|writer| {
-                        (writer.id == *target || writer.continues.as_ref() == Some(target))
-                            && writer.worktree == child.worktree
-                            && checkpoint.nodes.iter().any(|progress| {
-                                progress.id == writer.id && progress.state.settled()
-                            })
-                    })
-                })
-            });
-            if document.integration_branch.is_none() && !continues_settled_branch {
-                return Err("writers sharing a worktree require an integration_branch".into());
-            }
-            for child in nodes
-                .iter_mut()
-                .filter(|n| n.worktree.as_ref() == Some(&path))
-            {
-                child.worktree = Some((*checkout).clone());
             }
         }
     }

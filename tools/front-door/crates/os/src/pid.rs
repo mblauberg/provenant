@@ -3,6 +3,14 @@ use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Return the kernel supplied process id of a connected Unix stream peer.
+/// This is identity input only; the caller must verify the current process
+/// incarnation and its authority relationship before acting on it.
+#[cfg(unix)]
+pub fn unix_peer_pid(stream: &std::os::unix::net::UnixStream) -> io::Result<i64> {
+    crate::sys::pid::unix_peer_pid(stream)
+}
+
 /// An observed process state. Errors remain distinct from a vanished process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessState {

@@ -16,8 +16,10 @@ pub(crate) struct Inherited {
     pub channel: UnixStream,
     pub writer_directory: Directory,
     pub attempt_directory: Directory,
+    pub evidence_directory: Directory,
     pub writer: LockGuard,
     pub custody: LockGuard,
+    pub holder: LockGuard,
     pub profile: Option<File>,
 }
 fn deadline(timeout: Duration) -> io::Result<Instant> {
@@ -112,13 +114,15 @@ pub(crate) fn receive_cancellable(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "One private handoff transfers four held capabilities and one bounded channel message."
+    reason = "One private handoff transfers five held capabilities and one bounded channel message."
 )]
 pub(crate) fn spawn(
     writer_directory: &Directory,
     attempt_directory: &Directory,
+    evidence_directory: &Directory,
     writer: &LockGuard,
     custody: &LockGuard,
+    holder: &LockGuard,
     profile: Option<&File>,
     environment: &[(OsString, OsString)],
     config_environment: &[OsString],
@@ -137,8 +141,10 @@ pub(crate) fn spawn(
         child_channel.as_fd(),
         writer_directory.handoff_file().as_fd(),
         attempt_directory.handoff_file().as_fd(),
+        evidence_directory.handoff_file().as_fd(),
         writer.handoff_file().as_fd(),
         custody.handoff_file().as_fd(),
+        holder.handoff_file().as_fd(),
     ];
     if let Some(profile) = profile {
         descriptors.push(profile.as_fd());
@@ -240,7 +246,7 @@ fn handoff_unknown(profile: bool) -> CustodyError {
 /// descriptors or an unlocked/mismatched lock refuse the handshake before exec.
 pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
     let mut descriptors = Vec::with_capacity(args.len());
-    let mut malformed = !matches!(args.len(), 5 | 6);
+    let mut malformed = !matches!(args.len(), 7 | 8);
     for arg in args {
         let Some(fd) = arg
             .to_str()
@@ -362,27 +368,44 @@ pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
         Directory::from_handoff(files.next().ok_or(CustodyError::InvalidRecord)?)?;
     let attempt_directory =
         Directory::from_handoff(files.next().ok_or(CustodyError::InvalidRecord)?)?;
+    let evidence_directory =
+        Directory::from_handoff(files.next().ok_or(CustodyError::InvalidRecord)?)?;
     let writer = verify_lock(
         &writer_directory,
         "writer.lock",
         files.next().ok_or(CustodyError::InvalidRecord)?,
+        provenant_os::fs::LockMode::Shared,
     )?;
     let custody = verify_lock(
         &attempt_directory,
         "custody.lock",
         files.next().ok_or(CustodyError::InvalidRecord)?,
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let holder = verify_lock(
+        &evidence_directory,
+        "holder.lock",
+        files.next().ok_or(CustodyError::InvalidRecord)?,
+        provenant_os::fs::LockMode::Exclusive,
     )?;
     Ok(Inherited {
         channel,
         writer_directory,
         attempt_directory,
+        evidence_directory,
         writer,
         custody,
+        holder,
         profile: files.next(),
     })
 }
 
-fn verify_lock(directory: &Directory, name: &str, file: File) -> Result<LockGuard> {
+fn verify_lock(
+    directory: &Directory,
+    name: &str,
+    file: File,
+    mode: provenant_os::fs::LockMode,
+) -> Result<LockGuard> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
     let root = directory.metadata()?;
@@ -401,9 +424,10 @@ fn verify_lock(directory: &Directory, name: &str, file: File) -> Result<LockGuar
         return Err(CustodyError::InvalidRecord);
     }
     // Acquiring on the inherited description succeeds only while that exact
-    // open description holds exclusion (or was previously unlocked). Probe a
-    // separate description too, proving that it now excludes every other owner.
-    provenant_os::sys::fs::try_flock(&file, provenant_os::fs::LockMode::Exclusive)?;
+    // open description holds the expected mode (or was previously unlocked).
+    // A separate exclusive probe must conflict, proving a shared occupancy lock
+    // or exclusive attempt lock is still held by this inherited description.
+    provenant_os::sys::fs::try_flock(&file, mode)?;
     let probe = provenant_os::sys::fs::open_lock(directory.handoff_file(), OsStr::new(name))?;
     match provenant_os::sys::fs::try_flock(&probe, provenant_os::fs::LockMode::Exclusive) {
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -422,18 +446,30 @@ mod tests {
     fn inherited_custody_does_not_hold_preparation_lease()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let directory = Directory::open_anchor(temp.path())?;
-        let writer = directory.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-        let custody = directory.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+        let slot_path = temp.path().join("slot");
+        let attempt_path = temp.path().join("attempt");
+        let evidence_path = slot_path.join("evidence");
+        std::fs::create_dir(&slot_path)?;
+        std::fs::create_dir(&attempt_path)?;
+        std::fs::create_dir(&evidence_path)?;
+        let slot = Directory::open_anchor(&slot_path)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        let evidence = Directory::open_anchor(&evidence_path)?;
+        let writer = slot.try_lock(OsStr::new("writer.lock"), LockMode::Shared)?;
+        let sibling = slot.try_lock(OsStr::new("writer.lock"), LockMode::Shared)?;
+        let custody = attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+        let holder = evidence.try_lock(OsStr::new("holder.lock"), LockMode::Exclusive)?;
         let provider = provider_fence::acquire(temp.path(), "codex", LockMode::Shared)?;
         let (_parent, channel) = UnixStream::pair()?;
         // The private spawn duplicates these descriptions into its child.
         let raw = [
             channel.into_raw_fd(),
-            directory.handoff_file().try_clone()?.into_raw_fd(),
-            directory.handoff_file().try_clone()?.into_raw_fd(),
+            slot.handoff_file().try_clone()?.into_raw_fd(),
+            attempt.handoff_file().try_clone()?.into_raw_fd(),
+            evidence.handoff_file().try_clone()?.into_raw_fd(),
             writer.handoff_file().try_clone()?.into_raw_fd(),
             custody.handoff_file().try_clone()?.into_raw_fd(),
+            holder.handoff_file().try_clone()?.into_raw_fd(),
         ];
         let args: Vec<_> = raw
             .into_iter()
@@ -443,6 +479,7 @@ mod tests {
         drop(provider);
         let _update = provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
         drop(inherited);
+        drop(sibling);
         Ok(())
     }
 }

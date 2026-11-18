@@ -528,7 +528,7 @@ pub(super) fn remove_resolves_directory_names_and_remote_integration_refs() -> R
     rig.assert_v1_root_untouched()
 }
 
-// Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
 pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     let rig = repository()?;
     let merged = branch_commit(&rig, "merged")?;

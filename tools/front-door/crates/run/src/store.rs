@@ -1922,24 +1922,11 @@ impl RunStore {
             let attempt = self.attempt_dir(record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
             let mut remove_import_pin = slot.is_some();
-            if let Some(slot) = &slot {
-                let own = slot.metadata()?;
+            if slot.is_some() {
                 match self.writer_fence_listing() {
                     Ok(listing) => {
                         if !listing.issues.is_empty() {
                             remove_import_pin = false;
-                        }
-                        for fence in listing.reservations {
-                            if fence.scope == Self::scope(record) {
-                                continue;
-                            }
-                            if let Some(path) = fence.custody_directory() {
-                                let other =
-                                    provenant_os::fs::Directory::open_anchor(path)?.metadata()?;
-                                if own.device == other.device && own.inode == other.inode {
-                                    remove_import_pin = false;
-                                }
-                            }
                         }
                     }
                     Err(_) => remove_import_pin = false,

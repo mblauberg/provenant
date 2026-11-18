@@ -124,11 +124,8 @@ pub fn doctor(
         Err(error) if error.is_not_found() => crate::transport::normalise(&requested),
         Err(error) => return Err(error.into()),
     };
-    let entries = {
-        let _lock = repository_lock(context, LockMode::Shared, cancel)?;
-        context.repo.revalidate()?;
-        context.facts.read_inventory(context, cancel)?
-    };
+    context.repo.revalidate()?;
+    let entries = context.facts.read_inventory(context, cancel)?;
     let mut report = WorktreeDiagnosis {
         path: StructuredPathWire::from_path(&path)?,
         state: WorktreeDiagnosisState::Unregistered,

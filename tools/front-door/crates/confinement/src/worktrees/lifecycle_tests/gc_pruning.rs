@@ -156,10 +156,9 @@ fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<
 }
 
 #[test]
-fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>> {
+fn removal_preparation_keeps_writer_custody() -> Result<(), Box<dyn Error>> {
     struct PreparationProbe<'a> {
         inner: &'a dyn Executor,
-        common: &'a Directory,
         writer: &'a Directory,
         artifact: PathBuf,
         preparation_seen: std::sync::atomic::AtomicBool,
@@ -179,23 +178,16 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
                     Err(FsError::LockTimeout { .. })
                 )
             {
-                // Preparation checks ignored output under writer custody. A
-                // launch in another tree must still be able to take Shared.
-                let launch = self
-                    .common
-                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Shared);
-                assert!(
-                    launch.is_ok(),
-                    "launch blocked during output preparation: {launch:?}"
-                );
+                // Ignored-output inspection remains under the tree's writer
+                // custody through preparation.
                 self.preparation_seen.store(true, Ordering::SeqCst);
             }
             if options.argv.iter().any(|arg| arg == "worktree")
                 && options.argv.iter().any(|arg| arg == "remove")
             {
                 assert!(matches!(
-                    self.common
-                        .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Shared),
+                    self.writer
+                        .try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
                     Err(FsError::LockTimeout { .. })
                 ));
                 self.mutation_seen.store(true, Ordering::SeqCst);
@@ -218,18 +210,12 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         .open_verified_directory(&state_dir_name(&info.path))?;
     let probe = PreparationProbe {
         inner: context.executor,
-        common: context.repo.common_dir(),
         writer: &writer,
         artifact,
         preparation_seen: Default::default(),
         mutation_seen: Default::default(),
     };
     context.executor = &probe;
-    let workers = LockProbeWorkers {
-        common: context.repo.common_dir(),
-        repository_held: Default::default(),
-    };
-    context.workers = &workers;
     let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
@@ -256,12 +242,6 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         probe
             .mutation_seen
             .load(std::sync::atomic::Ordering::SeqCst)
-    );
-    let observed = workers.repository_held.lock().unwrap();
-    assert!(!observed.is_empty());
-    assert!(
-        observed.iter().all(|held| !held),
-        "census held repository lock: {observed:?}"
     );
     Ok(())
 }

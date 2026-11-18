@@ -574,6 +574,9 @@ impl<'a> GrantSet<'a> {
         if let Some(grants) = worktree.as_ref() {
             reads.push(grants.worktree.clone());
         }
+        if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+            reads.push(authority.git_state.clone());
+        }
         reads.extend(plan.protected_roots.iter().cloned());
         reads.extend(profile.spec.runtime_reads.iter().cloned());
         reads.extend(profile.spec.process_executables.iter().cloned());
@@ -932,6 +935,7 @@ fn render_profile_with_policy(
         push_worktree_rule(
             &mut source,
             worktree_grants.ok_or(PermissionError::GitWriteAuthorityMissing)?,
+            &authority.git_state,
         )?;
         for operation in ["file-read*", "file-write*"] {
             push_rule(
@@ -1260,6 +1264,35 @@ fn push_boundaries(
 ) -> Result<(), PermissionError> {
     let mut ancestors = std::collections::BTreeSet::new();
     let mut mandatory = mandatory_for_plan(plan, home, worktree)?;
+    let shared_git_namespace = PathGrant {
+        path: home.join("Library/Application Support/provenant/worktree-git"),
+        scope: PathScope::Subtree,
+    };
+    let shared_git_writes = match &plan.mode {
+        AccessMode::WorktreeWrite(authority) => {
+            super::grants::worktree_git_state_writes(&authority.git_state).to_vec()
+        }
+        _ => Vec::new(),
+    };
+    // This storage is private to the host unless this exact plan carries a
+    // host-derived writer grant. Apply the boundary even when the namespace
+    // does not exist yet, so read-only lanes cannot inspect another lane's
+    // persistent Git state through the sandbox's permissive defaults.
+    let shared_git_denial = DenialRoot::from(&shared_git_namespace);
+    push_read_denial(source, &shared_git_denial, &shared_git_writes)?;
+    push_denial(
+        source,
+        "file-clone",
+        &shared_git_namespace,
+        &shared_git_writes,
+    )?;
+    push_denial(
+        source,
+        "file-write*",
+        &shared_git_namespace,
+        &shared_git_writes,
+    )?;
+    push_ancestor_guards(source, &shared_git_namespace, &mut ancestors)?;
     // Every declared authentication family is private, selected or otherwise.
     for root in profile
         .spec
@@ -1555,6 +1588,17 @@ fn push_boundaries(
     {
         push_rule(source, "deny", "file-write*", &root.path, root.scope)?;
         push_ancestor_guards(source, root, &mut ancestors)?;
+    }
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+        // The persistent container is host-owned. Prevent a provider from
+        // replacing it or any parent directory entry while allowing writes
+        // only within the two data children carved out above.
+        push_ancestor_guards(source, &authority.git_state, &mut ancestors)?;
+        for grant in super::grants::worktree_git_state_host_files(&authority.git_state) {
+            // In particular, protect `git-objects/info`: replacing that
+            // directory would bypass the exact alternates-file write denials.
+            push_ancestor_guards(source, &grant, &mut ancestors)?;
+        }
     }
     for root in &plan.secret_roots {
         for operation in [

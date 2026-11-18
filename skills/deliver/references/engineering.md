@@ -37,7 +37,7 @@ checklists: name the alternatives and say which one you chose and why.
   before runtime with types, lints and generators.
 - Checks default to allow or warn and have one deciding point. Add no new
   refusal, lock, floor, queue or wait. Hard holds belong only at real
-  boundaries: credentials, Git isolation (one writer per worktree), data
+  boundaries: credentials, Git isolation, data
   integrity and authority (who may approve or merge). When busy, skip and
   retry. Speed comes from structure (caching, derivation), not locks.
 

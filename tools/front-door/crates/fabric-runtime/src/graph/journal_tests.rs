@@ -1872,6 +1872,7 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
             self.bindings += 1;
             Ok(Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: None,
                 worktree: "/fixture/lane".into(),
                 head: self.head.clone(),

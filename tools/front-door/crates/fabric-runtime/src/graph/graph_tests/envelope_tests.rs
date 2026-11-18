@@ -339,6 +339,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 concurrency_warning: None,
                 repair_growth: None,
                 provisioned_source: None,
+                provisioned_owner: None,
                 removed_requirements: node.removed_requirements.clone(),
                 extra: Default::default(),
                 review_verdict_correction_refused: (template::review_behaviour(node)

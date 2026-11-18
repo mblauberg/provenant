@@ -889,6 +889,7 @@ pub(super) fn initial_checkpoint(
                 repair_growth: None,
                 review_verdict_correction_refused: None,
                 provisioned_source: None,
+                provisioned_owner: None,
                 warnings: Vec::new(),
                 fragment: None,
                 handoff: None,
@@ -1022,7 +1023,6 @@ pub(super) fn apply_source_commit(
 /// effect. Waiting and refusal states can be saved by the same driver path.
 pub(super) enum Admission {
     Ready,
-    WriterBusy,
     PolicyRefused { code: &'static str, detail: String },
     SaveAndWait,
 }
@@ -1038,19 +1038,6 @@ pub(super) fn admit_attempt(
 ) -> Admission {
     let node = &plan.nodes[node_index];
     let cap = limits.node_prompt_bytes;
-    if node.access == AccessMode::WorktreeWrite
-        && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
-            index != node_index
-                && other.state == NodeState::Running
-                && !(relay::yields_slot(other) && node.id.starts_with(&format!("{}--", other.id)))
-                && plan
-                    .nodes
-                    .iter()
-                    .any(|peer| peer.id == other.id && plans::writers_conflict(node, peer))
-        })
-    {
-        return Admission::WriterBusy;
-    }
     let over_concurrency_cap = limits.concurrency.is_some_and(|cap| {
         checkpoint
             .nodes
@@ -1932,6 +1919,60 @@ mod tests {
             },
         );
         key
+    }
+
+    #[test]
+    fn shared_worktree_writer_is_admitted_while_sibling_runs() {
+        // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "shared-worktree-admission",
+            "nodes": [
+                {"id":"one", "access":"worktree_write", "worktree":"/fixture/shared",
+                    "write_scope":["src/one"], "prompt":"edit the first path",
+                    "routes":[{"adapter":"first", "model":"first/model"}]},
+                {"id":"two", "access":"worktree_write", "worktree":"/fixture/shared",
+                    "write_scope":["src/one"], "prompt":"edit the same claimed path",
+                    "routes":[{"adapter":"first", "model":"first/model"}]}
+            ]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits {
+            concurrency: None,
+            ..Default::default()
+        };
+        let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+        let mut checkpoint =
+            initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+        let budget = crate::config::GraphBudget::default();
+        let policy = provenant_records::policy::Policy::default();
+
+        assert!(matches!(
+            admit_attempt(
+                0,
+                &plan,
+                &mut checkpoint,
+                &positions,
+                &limits,
+                &budget,
+                &policy
+            ),
+            Admission::Ready
+        ));
+        checkpoint.nodes[0].state = NodeState::Running;
+
+        assert!(matches!(
+            admit_attempt(
+                1,
+                &plan,
+                &mut checkpoint,
+                &positions,
+                &limits,
+                &budget,
+                &policy
+            ),
+            Admission::Ready
+        ));
     }
 
     #[test]

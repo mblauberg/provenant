@@ -1826,6 +1826,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Ok(Some(
             provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: Some(provenant_records::run::SourceIdentity {
                     device: identity.device,
                     inode: identity.inode,
@@ -1841,12 +1842,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         path: &str,
         branch: &str,
         base: &str,
+        owner: Option<provenant_core::Digest>,
     ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
         let provisioned = provenant_cli::fabric::graph_relay::provision_writer_checked(
             &self.factory.context,
             path,
             branch,
             base,
+            owner.as_ref(),
             self.writer_launch_budget.unwrap_or(self.budget),
             self.cancel,
         )
@@ -1857,11 +1860,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.bind_writer_worktree(path)
     }
 
-    fn provision_child_worktree(&mut self, path: &str, source: &str) -> Result<bool, Self::Error> {
+    fn provision_child_worktree(
+        &mut self,
+        path: &str,
+        source: &str,
+        owner: Option<provenant_core::Digest>,
+    ) -> Result<bool, Self::Error> {
         provenant_cli::fabric::graph_relay::provision_child_with_budget(
             &self.factory.context,
             path,
             source,
+            owner.as_ref(),
             self.writer_launch_budget.unwrap_or(self.budget),
             self.cancel,
         )
@@ -2856,6 +2865,61 @@ impl BoundGraphOwner<'_> {
                     ),
                 });
             }
+            // A shared writer was authorised and directory-bound by its
+            // owning lane's guardian. Revalidate that grant before any Git
+            // preparation, and never advance a checkout its parent still uses.
+            let shared_writer = if !accepted && worktree.is_some() {
+                let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    &key.graph_id,
+                )
+                .map_err(graph_journal_error)?;
+                let progress = checkpoint.as_ref().and_then(|checkpoint| {
+                    checkpoint.nodes.iter().find(|row| row.id == key.node_id)
+                });
+                let shared = progress
+                    .and_then(|row| row.writer_binding.as_ref())
+                    .and_then(|binding| binding.shared_worktree.as_ref());
+                if let Some(expected) = shared {
+                    let current = provenant_cli::fabric::inspect_checkout_subject(
+                        &self.factory.context.roots,
+                        writer_directory,
+                    )
+                    .map_err(|_| FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: "shared worktree identity unavailable".into(),
+                    })?;
+                    if current.as_ref() != Some(expected) {
+                        return Err(FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason: "shared worktree incarnation changed".into(),
+                        });
+                    }
+                    Some(expected.clone())
+                } else if let Some(creator) =
+                    progress.and_then(|row| row.provisioned_owner.as_ref())
+                {
+                    Some(
+                        provenant_cli::fabric::provisioned_checkout_subject(
+                            &self.factory.context.roots,
+                            writer_directory,
+                            creator,
+                        )
+                        .map_err(|_| FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason: "nested worktree creation authority changed".into(),
+                        })?,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             // Preserve the specific detached-writer refusal in node status.
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -2958,6 +3022,7 @@ impl BoundGraphOwner<'_> {
                 // Preparation verifies its exact head and ancestry; advancing
                 // it here would refuse the uncommitted work it must retain.
                 && source_head.is_none()
+                && shared_writer.is_none()
                 && let (Some(path), Some(commit)) = (worktree, source_commit)
             {
                 let head = commit
@@ -3477,6 +3542,9 @@ impl BoundGraphOwner<'_> {
             {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 self.launch_warnings.push(warning);
+            }
+            if !accepted {
+                grants.shared_worktree = shared_writer;
             }
             if peer_root && let Some(network) = route.peer_network {
                 grants.network = Some(network);
@@ -4206,17 +4274,15 @@ mod journal_error_tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // Real registry contention across two launch stages.
-    fn provisioned_writer_fast_forward_leaves_sibling_registry_mutation_alone()
+    fn provisioned_writer_fast_forward_preserves_launch_budget()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::provisioned_writer_fast_forward_leaves_sibling_registry_mutation_alone",
+            "fabric::owner::journal_error_tests::provisioned_writer_fast_forward_preserves_launch_budget",
         )? {
             return Ok(());
         }
         use provenant_fabric_runtime::graph::{AccessMode, AttemptOwner};
-        use provenant_os::fs::{Directory, LockMode};
         let rig = crate::worktree_tests::repository()?;
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "base"])?;
         let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
@@ -4255,16 +4321,8 @@ mod journal_error_tests {
         let deadline = owner
             .begin_launch(AccessMode::WorktreeWrite, None)?
             .ok_or("deadline")?;
-        owner.provision_writer_worktree(".worktrees/later", "later", source.trim())?;
+        owner.provision_writer_worktree(".worktrees/later", "later", source.trim(), None)?;
         let budget = owner.writer_launch_budget.ok_or("budget")?;
-        let directory = Directory::open_anchor(&rig.project.join(".git"))?;
-        let held = directory.lock(
-            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(factory.clock.mono_now()),
-            &cancel,
-            &factory.clock,
-        )?;
         owner.fast_forward_writer(
             &rig.project,
             &rig.project.join(".worktrees/later"),
@@ -4278,7 +4336,6 @@ mod journal_error_tests {
             owner.begin_launch(AccessMode::WorktreeWrite, Some(deadline))?,
             Some(deadline)
         );
-        drop(held);
         assert_eq!(
             crate::worktree_tests::git(&rig, &["-C", ".worktrees/later", "rev-parse", "HEAD"])?
                 .trim(),

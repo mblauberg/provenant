@@ -3,6 +3,7 @@ use super::*;
 
 const LOCK: &str = "guardian.lock";
 const RECORD: &str = "guardian-lock.json";
+const HOLDER_LOCK: &str = "holder.lock";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Identity {
@@ -33,9 +34,24 @@ struct GuardianLock {
     guardian: Identity,
     writer: Identity,
     custody: Identity,
+    #[serde(default)]
+    holder: Option<Identity>,
 }
 impl GuardianLock {
     fn names_match(&self, recovery: &Recovery, attempt: &Directory) -> Result<bool> {
+        let holder_matches = match (self.holder, recovery.holder.as_ref()) {
+            (Some(identity), Some(holder)) => {
+                identity.matches_lock(holder.metadata()?)
+                    && identity.matches_lock(
+                        recovery
+                            .directory
+                            .metadata_at(OsStr::new(HOLDER_LOCK), false)?,
+                    )
+            }
+            // Missing per-attempt proof never substitutes another holder's
+            // shared occupancy, even during exclusive recovery.
+            _ => false,
+        };
         Ok(self.attempt.matches(attempt.metadata()?)
             && self
                 .guardian
@@ -47,7 +63,8 @@ impl GuardianLock {
                 recovery
                     .lock_directory
                     .metadata_at(OsStr::new("writer.lock"), false)?,
-            ))
+            )
+            && holder_matches)
     }
 }
 
@@ -59,6 +76,7 @@ pub(crate) fn prepare_guardian_lifetime(
     scope: Scope,
     writer: &LockGuard,
     custody: &LockGuard,
+    holder: &LockGuard,
 ) -> Result<()> {
     let guardian = evidence.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let record = GuardianLock {
@@ -69,6 +87,7 @@ pub(crate) fn prepare_guardian_lifetime(
         guardian: Identity::of(guardian.metadata()?),
         writer: Identity::of(writer.metadata()?),
         custody: Identity::of(custody.metadata()?),
+        holder: Some(Identity::of(holder.metadata()?)),
     };
     write_record(evidence, RECORD, &record, PublishMode::NoReplace)?.require_durable()?;
     Ok(())
@@ -83,7 +102,9 @@ pub(crate) fn hold_guardian_lifetime(
     guardian_process: &ProcessIdentity,
     writer: &LockGuard,
     custody: &LockGuard,
+    holder: &LockGuard,
 ) -> Result<LockGuard> {
+    let holder_metadata = holder.metadata()?;
     guardian_process
         .validate()
         .map_err(|_| CustodyError::InvalidRecord)?;
@@ -102,6 +123,9 @@ pub(crate) fn hold_guardian_lifetime(
         || !record.guardian.matches_lock(guardian.metadata()?)
         || !record.writer.matches_lock(writer.metadata()?)
         || !record.custody.matches_lock(custody.metadata()?)
+        || !record
+            .holder
+            .is_some_and(|identity| identity.matches_lock(holder_metadata))
     {
         return Err(CustodyError::Fenced);
     }
@@ -139,7 +163,7 @@ impl GuardianLossRecovery {
     pub fn scope(&self) -> Scope {
         self.recovery.scope()
     }
-    /// Retain writer exclusion for the shared settlement driver. Native proof
+    /// Retain worktree occupancy for the settlement driver. Native proof
     /// covers cleanup even when the guardian died before republishing its exit.
     pub fn into_recovery(mut self) -> Result<Recovery> {
         if !self.record.names_match(&self.recovery, &self.attempt)? {

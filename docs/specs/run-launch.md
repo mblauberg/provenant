@@ -7,12 +7,40 @@ Paths are relative to `tools/front-door/`.
 
 ## Admission and custody
 
-Admission commits the reservation and attempt together. A verified worktree has
-at most one writer; resource probes do not hold the shared registry lock or run
-inside the transaction. Busy capacity is not a queue. Direct-run custody uses
+Admission commits the reservation and attempt together. A worktree's owning lane
+decides who else writes in it; active lanes share an occupancy lease. Resource
+probes run outside the admission transaction. Busy capacity is not a queue. Direct-run custody uses
 the same captured project and actor identity as the run store. Uncertain custody
 keeps its ownership until release is proved.
-- Why: admission must not create duplicate writers or hold coordination locks across external work.
+- Why: shared work must remain possible without holding coordination locks across external work.
+
+Nested sharing is authorised by the owning guardian's host-sealed worktree
+incarnation and a kernel-observed caller relationship. An existing nested writer
+may share that exact checkout; independent work provisions its own checkout.
+Admission pins the shared checkout's directory identity, rechecked at dispatch
+and after acquiring occupancy, so a removed/recreated path cannot inherit the
+grant. Nested provisioning records its creating graph/node in the checkout's
+private Git directory; recovery never reclaims an existing checkout without
+that receipt. Missing creation evidence retains the checkout for host recovery.
+Shared launches observe the live branch and never advance the parent's
+checkout. Direct host requests retain authority to select existing checkouts.
+Optional `write_scope` paths are advisory claims: overlaps in one worktree warn
+the owning lane in its admission receipt and checkpoint and refuse nothing.
+Writers use pathspec commits (`git commit -- <owned paths>`) to avoid committing
+a sibling's staged paths.
+- Why: sharing follows the owner's decision while unrelated lanes stay isolated.
+
+Authorised writers share incarnation- and branch-bound private Git data,
+including HEAD, index, refs and objects. Per-attempt configuration and credentials
+remain separate; private data outlives an individual attempt's scratch.
+Git owns the atomicity of config, index, refs and worktree registration. Provenant
+holds no repository-wide lock around Git commands. Explicit `*.lock` collisions
+receive brief bounded retries with jitter; semantic conflicts and permission
+failures are returned immediately. Prepared ref deletion retries only before
+Git has acknowledged preparation. A satisfied source pin has no checkout effect
+and does not exclude shared holders or their edits; an actual checkout advance
+still requires exclusive occupancy.
+- Why: independent worktrees and coherent config reads must not queue behind sibling launches.
 
 Before entering handoff or spawning a guardian, the launcher durably prepares
 the per-attempt `guardian.lock` inode alongside the attempt, writer and custody
@@ -20,13 +48,13 @@ identities. The guardian acquires and verifies that original inode before
 acknowledging custody or spawning the provider, then records its native process
 identity. The prepared record is sufficient even if the guardian dies before
 publishing its own identity or updating the pre-handoff reservation: the
-original free writer and custody leases exclude a live launcher or guardian.
+original free holder and custody leases exclude a live launcher or guardian.
 Only the guardian holds the life lock after preparation;
 the provider and its descendants never inherit it. The guardian retains it
 through terminal publication and custody release. Kernel process teardown
 releases it even when the guardian cannot publish an exit.
-Tick's settlement driver consumes that proof under writer exclusion and a
-fresh worktree occupancy census. A retained or unknown process observation
+Tick's settlement driver consumes that proof under the appropriate occupancy
+lease and a fresh worktree occupancy census. A retained or unknown process observation
 cannot substitute for the original free locks or positive non-occupancy.
 - Why: a stale process checkpoint cannot prove same-boot guardian death; the
   original kernel lock can supply that evidence without PID-reuse heuristics.
@@ -46,7 +74,7 @@ acknowledged as success.
 
 Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.
-- Why: continuation must preserve both history and exclusive custody.
+- Why: continuation must preserve both history and its attempt's custody.
 
 ## Policy and confinement
 

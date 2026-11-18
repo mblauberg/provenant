@@ -598,7 +598,7 @@ impl WriterLaunch {
         Ok(std::str::from_utf8(&upstream).is_ok_and(|tip| tip.trim() == head.to_string()))
     }
 
-    /// Select the lane head while settlement holds writer exclusion. Native Git
+    /// Select the lane head while settlement retains occupancy. Native Git
     /// advances the shared branch without updating the private candidate ref.
     fn effective_head(&self, attempt: &Directory, base: GitOid) -> Result<(GitOid, bool)> {
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
@@ -866,7 +866,7 @@ pub(crate) fn cleanup_git_pins(
         ))?;
     let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
     if remove_import_pin && let Some(head) = head {
-        refs.push(format!("refs/provenant/import/{head}"));
+        refs.push(crate::objects::import_pin(scope.attempt, head));
     }
     for reference in refs {
         crate::objects::command(
@@ -946,7 +946,7 @@ impl crate::RunStore {
 }
 
 /// Reopen the persisted scope and verify current Git worktree membership.
-/// The subsequent supervisor writer flock supplies exclusion.
+/// The subsequent supervisor occupancy lease protects the worktree from removal.
 pub fn prepare_writer(
     request: &WriterRequest,
     state: &Path,
@@ -973,37 +973,18 @@ fn prepare_writer_with_facts_and_clock(
     state: &Path,
     project: ProjectId,
     facts: &worktrees::RepoFacts,
-    clock: &dyn Clock,
+    _clock: &dyn Clock,
 ) -> Result<WriterLaunch> {
-    use provenant_core::WaitBudget;
-    use provenant_os::fs::LockMode;
     let utility = runtime(state)?;
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-    // Discover only the structural anchor before taking the lock. Even the
-    // first probed open reads config snapshots and must exclude sibling writes.
-    let common = provenant_confinement::repo::VerifiedRepo::open_common_directory(&request.project)
-        .map_err(worktrees::WorktreeError::from)?;
     let cancel = CancelToken::new();
-    let _config_lock = worktrees::lock_repository(
-        &common,
-        LockMode::Shared,
-        WaitBudget::cli(clock.mono_now(), 60)
-            .map_err(error("set writer config lock budget", None))?,
-        &cancel,
-        clock,
-    )?;
     let repo = utility
         .open_repo(&executor, &request.project, budget()?, &cancel)
         .map_err(utility_error(
             "open writer repository",
             Some(&request.project),
         ))?;
-    if !common.metadata()?.same_identity(&repo.common_identity()) {
-        return Err(RunError::Validation(
-            "writer repository changed during setup",
-        ));
-    }
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
     let branch = writer_branch(&worktree)?;
@@ -1396,33 +1377,16 @@ fn prepare_writer_git(
     cancel: &CancelToken,
     _policy: &provenant_records::policy::Policy,
 ) -> Result<()> {
-    use provenant_core::{Clock, WaitBudget};
-    use provenant_os::{clock::SystemClock, fs::LockMode};
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
     let private_identity = writer.worktree.repo().private_identity();
     let common_identity = writer.worktree.repo().common_identity();
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-    let old_repo = writer.worktree.repo();
     let project = writer.executor_root.clone();
     let path = writer.worktree.path().to_path_buf();
-    let common = old_repo.common_dir().try_clone()?;
-    let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
-        let clock = SystemClock::new();
-        Ok(worktrees::lock_repository(
-            &common,
-            mode,
-            WaitBudget::cli(clock.mono_now(), 60)
-                .map_err(error("set writer config lock budget", None))?,
-            cancel,
-            &clock,
-        )?)
-    };
-    // Sibling config replacements can exhaust even a bounded stable read.
-    // Share the initial snapshot phase, then release before the fetch so
-    // overlapping origin requests can still coalesce without this lock.
-    let config_lock = lock_config(LockMode::Shared)?;
+    // Git replaces config atomically. Open a verified snapshot and reopen after
+    // fetch so a sibling's completed config update is observed coherently.
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(utility_error("reopen writer repository", Some(&project)))?;
@@ -1464,7 +1428,6 @@ fn prepare_writer_git(
     let repo = writer.worktree.repo();
     repo.revalidate()
         .map_err(error("verify writer repository before fetch", Some(&path)))?;
-    drop(config_lock);
     crate::HostDeliveryContext::refresh_origin(
         &WriterRequest {
             extra: Default::default(),
@@ -1477,13 +1440,12 @@ fn prepare_writer_git(
         cancel,
         &writer.facts,
     )?;
-    // Keep post-fetch snapshots and both upstream writes in one exclusive
-    // phase. Reopening outside this phase races siblings' atomic config writes.
-    let config_lock = lock_config(LockMode::Exclusive)?;
+    // Fetch may race with sibling config writes. Reopen after it and let Git's
+    // config.lock serialize the independent upstream updates.
     repo.revalidate_identity()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
-    // Configuration may legitimately change while fetch owns no mutation lock.
-    // Refresh every dependent snapshot only after regaining the common owner.
+    // Configuration may legitimately change while fetch runs; refresh every
+    // dependent snapshot from Git's atomically replaced config file.
     let fresh_repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(utility_error(
@@ -1633,7 +1595,6 @@ fn prepare_writer_git(
         return Err(RunError::Validation("writer branch changed before launch"));
     }
     writer.worktree = refreshed;
-    drop(config_lock);
     Ok(())
 }
 
@@ -2361,11 +2322,6 @@ mod cargo_setup_tests {
             fixture.run_git(&["config", "--local", "--get", "branch.chore/x.merge"])?,
             branch
         );
-        let common = Directory::open_anchor(&fixture.git_dir)?;
-        drop(common.try_lock_existing(
-            OsStr::new(worktrees::REPOSITORY_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-        )?);
         Ok(())
     }
 
@@ -2438,66 +2394,6 @@ mod cargo_setup_tests {
         std::fs::write(&branch_lock, b"held")?;
         fixture.prepare_git(&mut writer)?;
         assert_eq!(std::fs::read(&branch_lock)?, b"held");
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::disallowed_methods)] // The holder thread must keep the real flock for a real interval.
-    fn writer_preparation_waits_for_the_config_lock_holder() -> FixtureResult<()> {
-        // #3393: a concurrent launch queues on the repository lock rather than
-        // failing, and never reads the holder's unfinished Git config.
-        if clean_environment_child(stringify!(
-            writer_preparation_waits_for_the_config_lock_holder
-        ))? {
-            return Ok(());
-        }
-        let fixture = WriterFixture::new()?;
-        let lane = fixture.add_worktree("chore/config", "lane")?;
-        let request = fixture.request(&lane);
-        let common = Directory::open_anchor(&fixture.git_dir)?;
-        let config_lock = common.try_lock(
-            OsStr::new(worktrees::REPOSITORY_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let config = common.read_bounded(OsStr::new("config"), 1024 * 1024)?;
-        common
-            .atomic_write(
-                OsStr::new("config"),
-                ".test-config-",
-                b"[unfinished",
-                provenant_os::fs::PublishMode::Replace,
-            )?
-            .require_durable()?;
-        let holder_dir = Directory::open_anchor(&fixture.git_dir)?;
-        let holder = std::thread::spawn(move || -> std::result::Result<(), String> {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            let restored = holder_dir
-                .atomic_write(
-                    OsStr::new("config"),
-                    ".test-config-",
-                    &config,
-                    provenant_os::fs::PublishMode::Replace,
-                )
-                .and_then(|publication| publication.require_durable())
-                .map_err(|error| error.to_string());
-            drop(config_lock);
-            restored
-        });
-
-        let clock = crate::tests::clock();
-        let result = prepare_writer_with_facts_and_clock(
-            &request,
-            &fixture.state,
-            fixture.custody_project,
-            &worktrees::RepoFacts::default(),
-            &clock,
-        );
-        holder.join().map_err(|_| "lock holder panicked")??;
-        result?;
-        assert_ne!(
-            common.read_bounded(OsStr::new("config"), 1024 * 1024)?,
-            b"[unfinished"
-        );
         Ok(())
     }
 
@@ -3358,7 +3254,7 @@ impl WriterLaunch {
             && crate::artifacts::read_sealed(attempt, "budget-commit.json", crate::RECORD_LIMIT)?
                 .is_none()
         {
-            // Recovery holds writer exclusion and custody is absent. Commit
+            // Recovery retains occupancy and this attempt has no live custody. Commit
             // failure is diagnostic and must not replace the budget outcome.
             let (note, work) = match self.commit_budget_stop(attempt, base) {
                 Ok(commit) => (commit.note.to_owned(), commit.committed),
@@ -3426,7 +3322,10 @@ impl WriterLaunch {
                 verified_tip,
                 &merge_objects,
                 Some(&import_cancel),
-                Some(custody),
+                crate::objects::ImportScope {
+                    attempt: custody.scope().attempt,
+                    custody: Some(custody),
+                },
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
         }
@@ -3451,7 +3350,7 @@ impl WriterLaunch {
                 base,
                 request.task.base_ref.as_deref(),
                 verified_tip,
-                enforcement,
+                custody.scope().attempt,
             )?;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.

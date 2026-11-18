@@ -1347,6 +1347,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let worktree = verify_worktree(&repo, path)?;
     let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
     let credentials = provenant_core::CredentialRoots::for_home(&rig.home);
+    provenant_confinement::worktrees::acquire_worktree_subject(worktree.repo())?;
     let authority =
         WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home, &credentials)?;
     prepare_writer_directories(&worktree, &branch, &authority, &rig.home, &credentials)?;

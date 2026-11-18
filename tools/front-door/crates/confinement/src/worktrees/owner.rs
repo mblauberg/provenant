@@ -140,8 +140,8 @@ pub fn update_owner_when_unchanged(
 ) -> Result<(), WorktreeError> {
     validate(updated)?;
     validate_binding(context)?;
-    // Ownership is a per-worktree record. Serialise its CAS without holding
-    // the repository mutation lock through inventory and cleanliness probes.
+    // Serialize only this worktree's owner-record CAS; its writer-custody guard
+    // excludes concurrent owner publication while the record is saved.
     let slot = writer_directory(context.project_state, worktree.path())?;
     let _owner = slot
         .lock(
@@ -182,7 +182,7 @@ pub fn update_owner_when_unchanged(
 }
 
 /// Refresh a lane's generation-qualified ref link while the caller already
-/// holds repository and writer custody. The caller checks pending retirement
+/// holds its worktree's writer custody. The caller checks pending retirement
 /// records before advancing the RefLedger; this function only CAS-publishes the
 /// verified owner snapshot and does not reacquire locks.
 pub fn refresh_owner_reference_while_held(
@@ -257,8 +257,8 @@ pub fn save_lane_owner_when_free(
     }
     validate(owner)?;
     validate_binding(context)?;
-    // Ownership is a per-worktree record. Serialise its CAS without holding
-    // the repository mutation lock through inventory and cleanliness probes.
+    // Serialize only this worktree's owner-record CAS; its writer-custody guard
+    // excludes concurrent owner publication while the record is saved.
     let slot = writer_directory(context.project_state, worktree.path())?;
     let _owner = slot
         .lock(
@@ -425,7 +425,6 @@ pub fn prune_owned(
 
     collect(context, &lanes, &output_policy, cancel)?;
 
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
         .iter()
@@ -489,7 +488,7 @@ pub fn prune_owned(
             .ok_or(WorktreeError::UnknownWriter)
         },
         Some(&settings),
-        Repository::Held,
+        false,
         |verified, canonical, _archive| {
             if canonical != path || load_owner(verified)?.as_ref() != Some(&owner) {
                 return Err(WorktreeError::IdentityChanged);
