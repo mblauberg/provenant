@@ -2,6 +2,21 @@ use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
 use std::{collections::HashSet, path::Path};
 
+fn console_tree_command(
+    max_depth: u64,
+    max_nodes: u64,
+    detail: bool,
+    subtree: Option<String>,
+) -> provenant_cli::console::Console {
+    provenant_cli::console::Console::Tree {
+        max_depth,
+        max_nodes,
+        detail,
+        hosts: None,
+        subtree,
+    }
+}
+
 pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<Vec<HostHealth>, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
@@ -505,15 +520,11 @@ pub fn peer(
                 max_nodes,
                 detail,
                 selected,
+                subtree,
                 ..
             } => {
-                let command = provenant_cli::console::Console::Tree {
-                    max_depth: *max_depth,
-                    max_nodes: *max_nodes,
-                    detail: *detail,
-                    hosts: None,
-                    subtree: None,
-                };
+                let command =
+                    console_tree_command(*max_depth, *max_nodes, *detail, subtree.clone());
                 if *max_nodes > context.config.limits.page_rows {
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
@@ -1828,6 +1839,25 @@ pub(super) fn peer_retained_receipt(
     .map_err(graph_journal_error)?
     .map(|checkpoint| peer_graph_receipt(factory, operation_id.clone(), &graph, &checkpoint))
     .transpose()
+}
+
+#[cfg(test)]
+mod console_tree_tests {
+    use super::*;
+
+    // Spec: docs/specs/lane-contracts.md#shared-notes
+    #[test]
+    fn peer_console_tree_preserves_the_requested_subtree_for_local_selection() {
+        let command = console_tree_command(7, 42, true, Some("attempt-root".into()));
+        assert!(matches!(command,
+            provenant_cli::console::Console::Tree {
+                max_depth: 7,
+                max_nodes: 42,
+                detail: true,
+                hosts: None,
+                subtree: Some(root),
+            } if root == "attempt-root"));
+    }
 }
 
 #[cfg(test)]
