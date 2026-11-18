@@ -379,10 +379,13 @@ fn project_peer_output_with(
                 (bytes, true, 0)
             }
         };
-        let OutputBytes::Utf8(text) = bytes else {
-            return Err(failure());
+        let page_bytes = match bytes {
+            OutputBytes::Utf8(text) => text.as_bytes().to_vec(),
+            OutputBytes::Base64(text) => {
+                provenant_fabric_runtime::handoff::decode_base64(text).ok_or_else(failure)?
+            }
         };
-        raw.extend_from_slice(text.as_bytes());
+        raw.extend_from_slice(&page_bytes);
         if raw.len() as u64 > CAP {
             return Err(failure());
         }
@@ -480,7 +483,7 @@ mod output_projection_tests {
     fn projects_before_paging_and_binds_published_bytes() {
         use super::*;
         let secret = "a-long-private-value";
-        let raw = format!("{}{}tail", "x".repeat(65530), secret);
+        let raw = format!("{}é{}tail", "x".repeat(65535), secret);
         let projector =
             provenant_confinement::publication::Projector::new([secret.as_bytes().to_vec()])
                 .unwrap();
@@ -505,7 +508,7 @@ mod output_projection_tests {
             serde_json::from_value(serde_json::json!({
                 "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
                 "offset":start, "next_offset":end, "eof":end == raw.len(), "digest":actual_digest,
-                "bytes":{"encoding":"utf8","data":&raw[start..end]}, "length":raw.len()
+                "bytes":OutputBytes::from_bytes(raw.as_bytes()[start..end].to_vec()), "length":raw.len()
             })).map_err(|_| FacadeError::StateCorrupt)
         }).unwrap();
         let OutputResult::Chunk {
@@ -519,7 +522,7 @@ mod output_projection_tests {
         else {
             panic!("projected chunk")
         };
-        let expected = format!("{}[REDACTED]tail", "x".repeat(65530));
+        let expected = format!("{}é[REDACTED]tail", "x".repeat(65535));
         assert_eq!(page, expected[65520..]);
         assert!(!page.contains(secret));
         assert_eq!(length, Some(expected.len() as u64));
