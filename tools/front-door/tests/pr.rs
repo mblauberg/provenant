@@ -1,4 +1,5 @@
 mod support;
+use sha2::Digest;
 use std::{
     fs,
     io::{self, Write},
@@ -84,6 +85,10 @@ fn live_pr_origin(rig: &TestRig) -> Result<String> {
     )?;
     fs::write(rig.project.join("base-sha"), &base)?;
     fs::write(rig.project.join("live-pr"), "")?;
+    fs::write(
+        rig.project.join(".git/info/exclude"),
+        "/head.json\n/checks.json\n/base-sha\n/live-pr\n/gh-calls\n/head-read\n/head-seq\n/merge-args\n/merged\n/merge-*\n/reviews.json\n",
+    )?;
     let refs = fixture_git(rig, &["ls-remote", "--heads", "origin"])?;
     assert!(
         refs.lines()
@@ -96,6 +101,21 @@ fn live_pr_origin(rig: &TestRig) -> Result<String> {
         "{refs}"
     );
     Ok(head)
+}
+
+fn bind_sync_project(rig: &TestRig) -> Result {
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let common = fs::canonicalize(rig.project.join(".git"))?;
+    provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            common,
+            fs::canonicalize(&rig.project)?,
+        )?,
+    )?;
+    Ok(())
 }
 
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
@@ -445,6 +465,7 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         vec!["land", "1668", "--head"],
         vec!["pr", "watch", "0"],
         vec!["pr", "watch", "--admin"],
+        vec!["pr", "sync", "0"],
     ] {
         assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
     }
@@ -468,6 +489,133 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     let refusal: serde_json::Value = serde_json::from_slice(&config_refusal.stdout.bytes)?;
     assert_eq!(refusal["error"]["code"], "LAND_POLICY", "{refusal}");
     assert!(!rig.project.join("gh-calls").exists());
+    Ok(())
+}
+
+fn pr_sync_command_accepts_multiple_numbers_and_repair_flag() -> Result {
+    let rig = self::rig()?;
+    let output = rig.command(&["pr", "sync", "1668", "1669", "--repair"])?;
+    assert_ne!(
+        code(&output),
+        2,
+        "valid pr sync syntax was rejected: {output:?}"
+    );
+    Ok(())
+}
+
+fn pr_sync_merges_base_pushes_and_records_repository_scoped_carry() -> Result {
+    let rig = self::rig()?;
+    let approved = live_pr_origin(&rig)?;
+    fixture_git(&rig, &["checkout", "main"])?;
+    fs::write(rig.project.join("upstream.txt"), "advance the base\n")?;
+    fixture_git(&rig, &["add", "upstream.txt"])?;
+    fixture_git(&rig, &["commit", "-qm", "advance base"])?;
+    fixture_git(&rig, &["push", "-q", "origin", "main"])?;
+    let base = fixture_git(&rig, &["rev-parse", "HEAD"])?;
+    fs::write(rig.project.join("base-sha"), &base)?;
+    fixture_git(&rig, &["checkout", "feature"])?;
+    fs::write(
+        rig.project.join("reviews.json"),
+        serde_json::to_vec(&serde_json::json!([[{
+            "id": 7,
+            "user": {"login": "reviewer"},
+            "state": "APPROVED",
+            "commit_id": approved.clone()
+        }]]))?,
+    )?;
+    bind_sync_project(&rig)?;
+    let output = rig.command(&["pr", "sync", "1668"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let origin = rig.root.join("origin.git");
+    let pushed = fixture_git(
+        &rig,
+        &[
+            "--git-dir",
+            origin.to_str().ok_or("origin path")?,
+            "rev-parse",
+            "refs/heads/feature",
+        ],
+    )?;
+    assert_ne!(pushed, approved, "sync must push a merge commit");
+    let parents = fixture_git(&rig, &["rev-list", "--parents", "-n", "1", &pushed])?;
+    assert!(parents.split_whitespace().any(|parent| parent == approved));
+    assert!(parents.split_whitespace().any(|parent| parent == base));
+    let receipts = fs::read_dir(rig.state.join("landing/approval-carry"))?;
+    let repo_key = format!("{:x}", sha2::Sha256::digest(b"owner/repo"));
+    let prefix = format!("{repo_key}-1668-");
+    let receipt = receipts
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .ok_or("sync approval carry receipt")?;
+    let receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt.path())?)?;
+    assert_eq!(receipt["repository"], "owner/repo");
+    assert_eq!(receipt["approved_head"], approved);
+    assert_eq!(receipt["current_head"], pushed);
+    assert_eq!(receipt["base_head"], base);
+    fs::write(
+        rig.project.join("head.json"),
+        serde_json::to_vec(&serde_json::json!({"headRefOid": pushed}))?,
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\napproval_tier='carry'\napproval_carry=['clean_merge']\npublish='rest_ordered'\n",
+    )?;
+    let landed = rig.command(&["land", "1668", "--json"])?;
+    assert_eq!(
+        code(&landed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&landed.stdout.bytes)
+    );
+    let landed: serde_json::Value = serde_json::from_slice(&landed.stdout.bytes)?;
+    assert_eq!(landed["data"]["merged"], true, "{landed}");
+    assert!(
+        landed["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("carried independent approval"))),
+        "{landed}"
+    );
+    Ok(())
+}
+
+fn pr_sync_conflict_aborts_cleanly_and_reports_repair_command() -> Result {
+    let rig = self::rig()?;
+    live_pr_origin(&rig)?;
+    fixture_git(&rig, &["checkout", "main"])?;
+    fs::write(rig.project.join("base.txt"), "base changed upstream\n")?;
+    fixture_git(&rig, &["add", "base.txt"])?;
+    fixture_git(&rig, &["commit", "-qm", "advance base"])?;
+    fixture_git(&rig, &["push", "-q", "origin", "main"])?;
+    let base = fixture_git(&rig, &["rev-parse", "HEAD"])?;
+    fs::write(rig.project.join("base-sha"), base)?;
+    fixture_git(&rig, &["checkout", "feature"])?;
+    fs::write(rig.project.join("base.txt"), "base changed in PR\n")?;
+    fixture_git(&rig, &["add", "base.txt"])?;
+    fixture_git(&rig, &["commit", "-qm", "change base file"])?;
+    let head = fixture_git(&rig, &["rev-parse", "HEAD"])?;
+    fixture_git(&rig, &["push", "-q", "origin", "feature"])?;
+    fs::write(
+        rig.project.join("head.json"),
+        serde_json::to_vec(&serde_json::json!({"headRefOid": head}))?,
+    )?;
+    bind_sync_project(&rig)?;
+    let output = rig.command(&["pr", "sync", "1668"])?;
+    assert_ne!(code(&output), 0, "conflict must fail sync");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(text.contains("base.txt"), "{text}");
+    assert!(
+        text.contains("provenant run implement --worktree"),
+        "{text}"
+    );
+    assert!(!rig.project.join(".git/MERGE_HEAD").exists());
+    assert!(fixture_git(&rig, &["status", "--porcelain"])?.is_empty());
     Ok(())
 }
 
@@ -655,7 +803,11 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
         }
         "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
-            io::stdout().write_all(b"[[]]")?;
+            if Path::new("reviews.json").exists() {
+                io::stdout().write_all(&fs::read("reviews.json")?)?;
+            } else {
+                io::stdout().write_all(b"[[]]")?;
+            }
         }
         "api repos/{owner}/{repo}/pulls/1668" => {
             if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
@@ -1038,6 +1190,18 @@ fn main() -> ExitCode {
             (
                 "pr_external_failures_and_invalid_arguments_fail_closed",
                 pr_external_failures_and_invalid_arguments_fail_closed,
+            ),
+            (
+                "pr_sync_command_accepts_multiple_numbers_and_repair_flag",
+                pr_sync_command_accepts_multiple_numbers_and_repair_flag,
+            ),
+            (
+                "pr_sync_merges_base_pushes_and_records_repository_scoped_carry",
+                pr_sync_merges_base_pushes_and_records_repository_scoped_carry,
+            ),
+            (
+                "pr_sync_conflict_aborts_cleanly_and_reports_repair_command",
+                pr_sync_conflict_aborts_cleanly_and_reports_repair_command,
             ),
             (
                 "pr_status_prints_one_compact_line_per_pull_request",

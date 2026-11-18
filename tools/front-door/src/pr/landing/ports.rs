@@ -206,9 +206,26 @@ pub trait Repo {
         Ok(Vec::new())
     }
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
+    /// Direct parents of one commit, in Git's recorded order.
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        let Some(project) = self.project_path() else {
+            return Ok(Vec::new());
+        };
+        super::super::git::parents(project, commit)
+            .map_err(|error| LandingError::Failed(error.to_string()))
+    }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
     /// The paths that differ between two commits or trees, both names of a rename.
     fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError>;
+    /// Exact PR-side diff text used to prove that a merged base did not alter
+    /// the reviewed change set.
+    fn diff_content(&mut self, from: &str, to: &str) -> Result<String, LandingError> {
+        let Some(project) = self.project_path() else {
+            return Err(LandingError::Unimplemented("repository diff content"));
+        };
+        super::super::git::diff_content(project, from, to)
+            .map_err(|error| LandingError::Failed(error.to_string()))
+    }
     /// The merge base of two commits, or `None` when they share no history.
     fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError>;
 }

@@ -271,6 +271,53 @@ impl Git {
     }
 }
 
+pub(super) fn parents(dir: &Path, commit: &str) -> Result<Vec<String>> {
+    let oid = provenant_core::GitOid::parse(commit)?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
+    let executable = git.to_str().ok_or("Git executable path is not UTF-8")?;
+    let oid = oid.to_string();
+    let args = [
+        executable,
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
+        "--end-of-options",
+        &oid,
+    ];
+    let output = execute_for(dir, &args, GIT_TIMEOUT, false)?;
+    if output.termination != Termination::Exit(0) {
+        return Err("git parent lookup failed".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout.bytes)
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_owned)
+        .collect())
+}
+
+pub(super) fn diff_content(dir: &Path, from: &str, to: &str) -> Result<String> {
+    let from = provenant_core::GitOid::parse(from)?.to_string();
+    let to = provenant_core::GitOid::parse(to)?.to_string();
+    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
+    let executable = git.to_str().ok_or("Git executable path is not UTF-8")?;
+    let args = [
+        executable,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--binary",
+        &from,
+        &to,
+    ];
+    let output = execute_for(dir, &args, GIT_TIMEOUT, false)?;
+    if output.termination != Termination::Exit(0) {
+        return Err("git diff content failed".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout.bytes).into_owned())
+}
+
 #[cfg(test)]
 #[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod resolve_commit_tests {

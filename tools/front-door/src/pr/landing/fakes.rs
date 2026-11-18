@@ -244,6 +244,7 @@ impl ReviewRecords for FakeReviews {
 }
 #[derive(Default)]
 pub struct FakeRepo {
+    pub project_path: Option<std::path::PathBuf>,
     pub command_result: Option<Result<PublishResult, LandingError>>,
     pub command_publishes: bool,
     pub target: String,
@@ -257,6 +258,7 @@ pub struct FakeRepo {
     pub trees: BTreeMap<String, String>,
     /// Paths between two commits or trees; any other pair changes `src/lib.rs`.
     pub paths: BTreeMap<(String, String), Vec<String>>,
+    pub diffs: BTreeMap<(String, String), String>,
     pub parents: BTreeMap<String, Vec<String>>,
     pub pushes: Vec<(String, String, Option<String>)>,
     pub push_attempts: Vec<String>,
@@ -273,6 +275,9 @@ pub struct FakeRepo {
     pub local_followed: Vec<u64>,
 }
 impl Repo for FakeRepo {
+    fn project_path(&self) -> Option<&std::path::Path> {
+        self.project_path.as_deref()
+    }
     fn publish_command(
         &mut self,
         _command: &provenant_records::landing::RepositoryCommand,
@@ -416,12 +421,22 @@ impl Repo for FakeRepo {
         }
         Ok(false)
     }
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        Ok(self.parents.get(commit).cloned().unwrap_or_default())
+    }
     fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError> {
         Ok(self
             .paths
             .get(&(from.to_owned(), to.to_owned()))
             .cloned()
             .unwrap_or_else(|| vec!["src/lib.rs".into()]))
+    }
+    fn diff_content(&mut self, from: &str, to: &str) -> Result<String, LandingError> {
+        Ok(self
+            .diffs
+            .get(&(from.to_owned(), to.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| format!("{from}->{to}")))
     }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.trees
