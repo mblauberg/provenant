@@ -1169,7 +1169,7 @@ fn admit_submission(
         refusal
     })?;
     admit_candidate(
-        &document,
+        document,
         None,
         &[],
         context.limits,
