@@ -99,6 +99,15 @@ pub enum ParseOutcome {
 /// Iterator contains arguments after argv[0]. Only the JSON transport bit is
 /// pre-scanned; Clap owns option values, including recovery for help and errors.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
+    parse_with_models(args, build_model)
+}
+
+// Model construction is independent of an invocation. Tests walking the whole
+// grammar can reuse built models while exercising the complete parse boundary.
+fn parse_with_models(
+    args: impl IntoIterator<Item = OsString>,
+    models: impl Fn(bool, bool) -> clap::Command,
+) -> ParseOutcome {
     let mut args: Vec<_> = args.into_iter().collect();
     if args.is_empty() {
         args.push(OsString::from("help"));
@@ -107,7 +116,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         .iter()
         .take_while(|arg| *arg != "--")
         .any(|arg| arg == "--json");
-    let mut model = command_model();
+    let mut model = models(false, false);
     let mut argv = vec![OsString::from("provenant")];
     argv.extend(args);
     let matches = match model.try_get_matches_from_mut(&argv) {
@@ -115,7 +124,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         Err(error) => {
             // Help/version short-circuit Clap. A passive, tolerant pass recovers
             // only values Clap accepted, without interpreting option text here.
-            let recovered = build_model(true, true)
+            let recovered = models(true, true)
                 .ignore_errors(true)
                 .try_get_matches_from(&argv)
                 .ok();
@@ -140,10 +149,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                         } else if is_core_scope(&model, &scope) {
                             (
                                 error.to_string(),
-                                scoped_catalogue(compact_help_model(), &scope),
+                                scoped_catalogue(models(false, false), &scope),
                             )
                         } else {
-                            expanded_scoped_help(&scope)
+                            expanded_scoped_help(&scope, models(false, true))
                         };
                         let text = if is_core_scope(&model, &scope) {
                             append_child_index(text, &scope)
@@ -192,9 +201,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     if let Command::Help { command, all } = &invocation.command {
         let scope = format!("provenant {}", command.join(" "));
         let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
-            expanded_model()
+            models(false, true)
         } else {
-            compact_help_model()
+            models(false, false)
         };
         let mut selected = &mut expanded;
         let mut scope = String::from("provenant");
@@ -703,9 +712,6 @@ fn all_command_help(model: &clap::Command) -> String {
 fn expanded_model() -> clap::Command {
     build_model(false, true)
 }
-fn compact_help_model() -> clap::Command {
-    build_model(false, false)
-}
 fn build_model(passive: bool, advanced: bool) -> clap::Command {
     // Compact help keeps the command catalogue small, while each command's
     // arguments remain visible directly from the clap grammar.
@@ -888,8 +894,7 @@ fn is_core_scope(model: &clap::Command, scope: &str) -> bool {
     }
     selected.get::<metadata::CoreCommand>().is_some()
 }
-fn expanded_scoped_help(scope: &str) -> (String, HelpCatalogue) {
-    let mut model = expanded_model();
+fn expanded_scoped_help(scope: &str, mut model: clap::Command) -> (String, HelpCatalogue) {
     let mut selected = &mut model;
     for component in scope.split_whitespace().skip(1) {
         let Some(child) = selected.find_subcommand_mut(component) else {
@@ -1452,6 +1457,7 @@ mod tests {
         }
 
         let model = expanded_model();
+        let parse = reusable_parser();
         let ParseOutcome::Help { text: all_help, .. } = parsed(&["help", "--all"]) else {
             panic!("expected help --all")
         };
@@ -1463,7 +1469,7 @@ mod tests {
                 .skip(1)
                 .chain(std::iter::once("--help"))
                 .collect::<Vec<_>>();
-            let ParseOutcome::Help { text, .. } = parsed(&args) else {
+            let ParseOutcome::Help { text, .. } = parse(&args) else {
                 panic!("expected help for {path}")
             };
             let command = path
@@ -2123,6 +2129,15 @@ mod tests {
             assert!(error.to_string().contains(suggestion), "{error}");
         }
     }
+    fn reusable_parser() -> impl Fn(&[&str]) -> ParseOutcome {
+        let models: [clap::Command; 4] =
+            std::array::from_fn(|index| build_model(index & 2 != 0, index & 1 != 0));
+        move |words| {
+            parse_with_models(words.iter().map(OsString::from), |passive, advanced| {
+                models[usize::from(passive) * 2 + usize::from(advanced)].clone()
+            })
+        }
+    }
     fn parsed(words: &[&str]) -> ParseOutcome {
         parse(words.iter().map(OsString::from))
     }
@@ -2460,6 +2475,7 @@ mod tests {
     /// Spec: docs/specs/cli.md#targets
     #[test]
     fn every_target_verb_parses_the_generated_target_table_alike() {
+        let parse = reusable_parser();
         let names = ["a", "fix-login", "g-0123abcd", &"n".repeat(48)];
         let nodes = ["review", "build.v2", "x_y-z", &"N".repeat(200)];
         let mut graph_targets = Vec::new();
@@ -2591,7 +2607,7 @@ mod tests {
                 argv.push(text);
                 argv.extend(&extras);
                 assert_eq!(
-                    matches!(parsed(&argv), ParseOutcome::Invocation(_)),
+                    matches!(parse(&argv), ParseOutcome::Invocation(_)),
                     should_accept,
                     "{words:?} {flag} {text:?}"
                 );

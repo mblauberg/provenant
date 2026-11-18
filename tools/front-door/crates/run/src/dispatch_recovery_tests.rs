@@ -552,54 +552,6 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     Ok(())
 }
 #[test]
-fn cancelling_a_start_that_holds_only_a_writer_fence_frees_the_writer() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let context = context(temp.path())?;
-    let store = RunStore::open(&context, &call)?;
-    let run = input();
-    let id = run.attempt_id;
-    store.create(&run, &call)?;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    let custody = context
-        .state_root
-        .as_path()
-        .join("worktrees")
-        .join(context.project_id.to_string())
-        .join("lane");
-    std::fs::create_dir_all(&custody)?;
-    let held = provenant_supervisor::fixture::acquire_writer(
-        Directory::open_anchor(&custody)?,
-        RunStore::scope(&store.record(id, &call)?),
-        call.lock_budget(),
-        &cancel,
-        &clock,
-    )?;
-    assert_eq!(store.writer_fences()?.len(), 1);
-    // The launcher is the holder: cancel asks it to stop and cannot yet settle.
-    assert!(!matches!(
-        store.cancel(id, "stop", &call)?,
-        crate::CancelReceipt::Cancelled
-    ));
-    // Once the launcher has let go, a repeat cancel settles and frees the writer.
-    drop(held);
-    assert_eq!(
-        store.cancel(id, "stop", &call)?,
-        crate::CancelReceipt::Cancelled
-    );
-    assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
-    assert!(store.writer_fences()?.is_empty());
-    Ok(())
-}
-#[test]
 fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_release() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -632,6 +584,7 @@ fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_relea
         &cancel,
         &clock,
     )?;
+    assert_eq!(store.writer_fences()?.len(), 1);
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
     let attempt = store.attempt_dir(id, false)?;
     let first = artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
