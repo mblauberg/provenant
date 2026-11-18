@@ -4564,10 +4564,7 @@ fn detached_graph_retry_reports_discarded_exclusion() -> Result {
         String::from_utf8_lossy(&refusal.stdout.bytes),
         String::from_utf8_lossy(&refusal.stderr.bytes)
     );
-    assert!(
-        refusal_text.contains("legacy-bare-model"),
-        "{refusal_text}"
-    );
+    assert!(refusal_text.contains("legacy-bare-model"), "{refusal_text}");
 
     // Initial launch succeeds without the unresolvable exclusion.
     fs::write(
@@ -4606,8 +4603,9 @@ fn detached_graph_retry_reports_discarded_exclusion() -> Result {
     let mut execution = FileJournal::execution(&resolved_roots.state, project, "stale-exclusion")?
         .ok_or("execution not found")?;
     execution.document.exclude = vec!["legacy-bare-model".into()];
-    let mut checkpoint = FileJournal::read_checkpoint(&resolved_roots.state, project, "stale-exclusion")?
-        .ok_or("checkpoint not found")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&resolved_roots.state, project, "stale-exclusion")?
+            .ok_or("checkpoint not found")?;
     checkpoint.plan_digest =
         provenant_fabric_runtime::graph::graph_plan_digest(&execution.document)?.to_string();
 

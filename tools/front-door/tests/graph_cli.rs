@@ -1843,8 +1843,14 @@ fn succeeded_graph_retry_suggests_no_succeeded_node() -> Result {
     let (output, refusal) = rig.run(&["retry", "all-succeeded"])?;
     assert!(!output.status.success(), "{refusal}");
     let message = refusal["error"]["message"].as_str().unwrap_or_default();
-    assert!(!message.contains("first"), "must not suggest succeeded node: {message}");
-    assert!(!message.contains("second"), "must not suggest succeeded node: {message}");
+    assert!(
+        !message.contains("first"),
+        "must not suggest succeeded node: {message}"
+    );
+    assert!(
+        !message.contains("second"),
+        "must not suggest succeeded node: {message}"
+    );
     assert!(message.contains("all-succeeded/NODE"), "{message}");
     Ok(())
 }
@@ -1857,9 +1863,11 @@ fn cancelled_graph_retry_resumes_without_refusal() -> Result {
 
     let rig = GraphProject::new()?;
     let id = "cancelled-retry";
-    let path = rig.document(&json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
-        {"id":"work","kind":"gate","access":"read_only","condition":{"type":"budget"}}
-    ]}))?;
+    let path = rig.document(
+        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+            {"id":"work","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]}),
+    )?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
 
@@ -1901,7 +1909,10 @@ fn cancelled_graph_retry_resumes_without_refusal() -> Result {
     drop(journal);
 
     let (output, retried) = rig.run(&["retry", id])?;
-    assert!(output.status.success(), "cancelled graph retry must not be refused: {retried}");
+    assert!(
+        output.status.success(),
+        "cancelled graph retry must not be refused: {retried}"
+    );
     let resumed = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
     assert!(!resumed.cancelled, "cancelled state must be cleared");
     Ok(())
@@ -2009,9 +2020,18 @@ fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
     drop(journal);
 
     let (output, retried) = rig.run(&["retry", &id])?;
-    assert!(output.status.success(), "expansion paused retry must not be refused: {retried}");
+    assert!(
+        output.status.success(),
+        "expansion paused retry must not be refused: {retried}"
+    );
     let resumed = FileJournal::read_checkpoint(&state, project, &id)?.ok_or("checkpoint")?;
-    assert!(!resumed.nodes.iter().any(|n| matches!(&n.expansion_cause, Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. }))));
-    assert!(resumed.pause.is_none(), "graph pause must be cleared on resume");
+    assert!(!resumed.nodes.iter().any(|n| matches!(
+        &n.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+    )));
+    assert!(
+        resumed.pause.is_none(),
+        "graph pause must be cleared on resume"
+    );
     Ok(())
 }

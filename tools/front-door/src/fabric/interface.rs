@@ -1948,10 +1948,9 @@ impl Factory {
             override_launch(node, input)?;
             self.validate_host_placement(node)?;
         }
-        if let Err(reason) = provenant_cli::route::validate_graph_exclusions(
-            &document.exclude,
-            &self.context.roots,
-        ) {
+        if let Err(reason) =
+            provenant_cli::route::validate_graph_exclusions(&document.exclude, &self.context.roots)
+        {
             return Err(FacadeError::DispatchRefused {
                 reason,
                 disk: None,
