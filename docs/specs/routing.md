@@ -72,8 +72,12 @@ effort.
 
 ## Pinned review selection
 
-When `provenant run review-panel` or a review leaf supplies both `subject` and
-`review_base`, the host resolves them to immutable commits once. Before
+When `provenant run review-panel` or a review leaf supplies `--pr N`, the host
+pins the PR's base and head, independently of the launching checkout. Supplying
+both `subject` and `review_base` pins an explicit range instead. The host uses
+base...head (three-dot) for diff evidence and selection, including branches with
+merges from main. Without a subject, the host warns which checkout-derived range
+it chose and why. Nested review launches retain the same pins. Before
 expanding the full panel, it
 derives changed paths and measured size from the merge-base-to-subject diff and
 passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
@@ -96,7 +100,7 @@ the current checkout head.
 Use this command for the complete policy-selected panel:
 
 ```sh
-provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main
+provenant run review-panel --pr 123 --brief-file brief.md
 ```
 
 The host passes the brief to framing, every selected lens, verification and

@@ -500,6 +500,78 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     resolve_fetching(&executor, git, cwd, base, &env, None)
 }
 
+/// Materialise a PR's immutable commit without changing refs or the checkout.
+/// Transport configuration is checked at the same boundary as tracking-ref fetches.
+pub fn resolve_review_commit(
+    git: &Path,
+    cwd: &Path,
+    host_state: &Path,
+    repository: &str,
+    reference: &str,
+    commit: &str,
+) -> Result<String> {
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    resolve_review_commit_with(
+        &executor, git, cwd, host_state, repository, reference, commit,
+    )
+}
+
+fn resolve_review_commit_with(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    host_state: &Path,
+    repository: &str,
+    reference: &str,
+    commit: &str,
+) -> Result<String> {
+    provenant_core::GitOid::parse(commit).map_err(|_| RunError::InvalidBase(commit.into()))?;
+    if !repository.starts_with("https://") || repository.contains(['\n', '\r', '\0']) {
+        return Err(RunError::Validation("PR repository must be an HTTPS URL"));
+    }
+    let suffix = reference
+        .strip_prefix("refs/")
+        .ok_or(RunError::Validation("PR fetch requires a full ref"))?;
+    provenant_confinement::repo::GitRefName::branch(suffix)
+        .map_err(|_| RunError::Validation("invalid PR fetch ref"))?;
+    let env = repository_environment(executor, git, cwd)?;
+    if let Ok(oid) = resolve(executor, git, cwd, commit, &env, Some(host_state)) {
+        return Ok(oid);
+    }
+    let transport_env = transport_environment(&env);
+    check_transport(executor, git, cwd, &env, &transport_env, Some(host_state))?;
+    let hardening = transport_args();
+    let args: Vec<&str> = hardening
+        .iter()
+        .map(String::as_str)
+        .chain([
+            "fetch",
+            "--quiet",
+            "--no-auto-maintenance",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "--",
+            repository,
+            reference,
+        ])
+        .collect();
+    let (output, timed_out) = read_git_within(
+        executor,
+        git,
+        cwd,
+        &args,
+        CONTEXT_LIMIT,
+        &transport_env,
+        FETCH_TIMEOUT,
+    )?;
+    if timed_out || output.truncated {
+        return Err(RunError::Validation("PR commit fetch was incomplete"));
+    }
+    resolve(executor, git, cwd, commit, &env, Some(host_state))
+}
+
 /// Resolve a graph base with the command's caps while retaining the read-only
 /// resolver's support for native alternates and nonstandard Git directories.
 pub fn resolve_git_base_with_facts(
@@ -1433,6 +1505,94 @@ mod tests {
         assert!(diff.contains("feature.txt"));
         assert!(!diff.contains("merged.txt"));
         assert!(!diff.contains("later.txt"));
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn review_commit_fetch_preserves_checkout_refs_and_fetch_head() -> TestResult {
+        struct IsolatedTransport(SystemExecutor);
+        impl Executor for IsolatedTransport {
+            fn execute(
+                &self,
+                options: ExecOptions<'_>,
+            ) -> std::result::Result<ExecOutcome, ExecError> {
+                let mut env = options.env.unwrap_or_default().to_vec();
+                // This fixture owns its repository config; host/lane Git includes
+                // and credential overrides must not become test transport inputs.
+                env.retain(|(key, _)| {
+                    !key.to_str()
+                        .is_some_and(|key| key.starts_with("GIT_CONFIG_"))
+                });
+                env.extend([
+                    ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                    ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
+                    ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ]);
+                let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
+                isolated.env = Some(&env);
+                isolated.stdout = options.stdout;
+                isolated.stderr = options.stderr;
+                isolated.stdin = options.stdin;
+                isolated.stop_on_output_limit = options.stop_on_output_limit;
+                self.0.execute(isolated)
+            }
+        }
+        let host_state = tempfile::tempdir()?;
+        let upstream = small_history()?;
+        let local = small_history()?;
+        let run = |root: &Path, args: &[&str]| git(&local.executor, &local.binary, root, args);
+        run(
+            &upstream.root,
+            &["commit", "--allow-empty", "-qm", "PR head"],
+        )?;
+        let commit = read_git(
+            &local.executor,
+            &local.binary,
+            &upstream.root,
+            &["rev-parse", "HEAD"],
+            256,
+        )?;
+        let commit = std::str::from_utf8(&commit.bytes)?.trim();
+        run(&upstream.root, &["update-ref", "refs/pull/7/head", commit])?;
+        let before = read_git(
+            &local.executor,
+            &local.binary,
+            &local.root,
+            &["show-ref", "--head"],
+            4096,
+        )?;
+        let fetch_head = local.root.join(".git/FETCH_HEAD");
+        std::fs::write(&fetch_head, "retained fetch observation\n")?;
+        let rewrite = format!("url.file://{}/.insteadOf", upstream.root.display());
+        run(
+            &local.root,
+            &["config", &rewrite, "https://review.invalid/"],
+        )?;
+        assert_eq!(
+            resolve_review_commit_with(
+                &IsolatedTransport(SystemExecutor::new(1)?),
+                &local.binary,
+                &local.root,
+                host_state.path(),
+                "https://review.invalid/",
+                "refs/pull/7/head",
+                commit
+            )?,
+            commit
+        );
+        let after = read_git(
+            &local.executor,
+            &local.binary,
+            &local.root,
+            &["show-ref", "--head"],
+            4096,
+        )?;
+        assert_eq!(before.bytes, after.bytes);
+        assert_eq!(
+            std::fs::read_to_string(fetch_head)?,
+            "retained fetch observation\n"
+        );
         Ok(())
     }
 

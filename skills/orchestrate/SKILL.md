@@ -10,7 +10,7 @@ and inline templates. Dotted names select flavours such as `review.security`.
 
 ## Commands
 
-Use `provenant help --all` for commands and options. Explain a graph before
+Use `provenant help --all` for commands and options; pin a PR with `provenant run review-panel --pr 123 --brief-file brief.md`. Explain a graph before
 submitting it; check its authority, write scope and gates first.
 
 ## Divide the work

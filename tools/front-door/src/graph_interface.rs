@@ -570,6 +570,9 @@ fn run_input(
         if let Some(branch) = request.branch {
             input["branch"] = json!(branch);
         }
+        if let Some(pr) = request.pr {
+            input["pr"] = json!(pr);
+        }
         if let Some(base) = request.base {
             input["base"] = json!(base);
         }
@@ -800,6 +803,7 @@ mod tests {
             worktree: None,
             branch: None,
             base: None,
+            pr: None,
             write_scope: Vec::new(),
             over: Vec::new(),
             set: Vec::new(),
@@ -810,6 +814,15 @@ mod tests {
             no_sandbox: false,
             explain: false,
         }
+    }
+
+    #[test]
+    fn review_pr_reaches_host_launch_input() {
+        let mut request = run_request();
+        request.template = Some("review.correctness".into());
+        request.pr = Some(7);
+        let input = run_input(request).unwrap();
+        assert_eq!(input["pr"], 7);
     }
 
     #[test]
