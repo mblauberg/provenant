@@ -267,6 +267,8 @@ jobs:
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names
         run: scripts/check-retired-names
+      - name: Check the root toolchain pin matches the workspace pin
+        run: cmp rust-toolchain.toml tools/front-door/rust-toolchain.toml
       - name: Test scratch-path advisory
         run: scripts/test-check-scratch-paths
       - name: Advise on scratch-path citations
