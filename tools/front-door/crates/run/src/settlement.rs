@@ -12,6 +12,7 @@ use std::{ffi::OsStr, sync::mpsc, time::Duration};
 
 const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
+const STALLED_RETRY_MS: u64 = 3 * 60 * 1000;
 const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
 
 /// Permission to preserve committed work under quiescent native custody.
@@ -184,15 +185,44 @@ pub(crate) fn blocked(
 
 /// Read-only, scope-checked diagnostic for status. The guardian records this
 /// even when no canonical outcome could be committed yet.
-pub fn blocking_reason_for(
+pub fn diagnostic_for(
     root: &std::path::Path,
     record: &provenant_records::run::AttemptRecord,
+    now: Option<provenant_core::WallTime>,
 ) -> Option<String> {
     let attempt =
         Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id))).ok()?;
-    read(&attempt, crate::RunStore::scope(record))
-        .ok()?
-        .blocking_reason
+    let journal = read(&attempt, crate::RunStore::scope(record)).ok()?;
+    let since = match record.state {
+        crate::AttemptState::Terminal { finished_at, .. } => {
+            u64::try_from(finished_at.unix_millis()).ok()
+        }
+        _ => Some(journal.owner_since_ms).filter(|since| *since > 0),
+    };
+    diagnostic(
+        &journal,
+        since,
+        now.and_then(|at| u64::try_from(at.unix_millis()).ok()),
+    )
+}
+
+fn diagnostic(journal: &Journal, since_ms: Option<u64>, now_ms: Option<u64>) -> Option<String> {
+    let reason = journal.blocking_reason.as_deref()?;
+    if journal.recovery_failures >= LIMIT {
+        return Some(format!(
+            "settlement blocked after {LIMIT} failures: {reason}; correct the cause and reconcile explicitly"
+        ));
+    }
+    let elapsed = since_ms
+        .zip(now_ms)
+        .map(|(since, now)| now.saturating_sub(since));
+    if let Some(elapsed) = elapsed.filter(|elapsed| *elapsed >= STALLED_RETRY_MS) {
+        return Some(format!(
+            "settlement retry stalled for {}s: {reason}",
+            elapsed / 1000
+        ));
+    }
+    Some(format!("settlement retry pending: {reason}"))
 }
 
 pub(crate) fn clear_blocked(attempt: &Directory, scope: Scope) -> Result<()> {
@@ -495,7 +525,9 @@ impl Guard {
         }) {
             return Ok((None, Some(ClaimRefusal::LiveOwner)));
         }
-        if journal.attempts == LIMIT && journal.phase == Phase::Import {
+        if (journal.attempts == LIMIT || journal.recovery_failures >= LIMIT)
+            && journal.phase == Phase::Import
+        {
             return Err(RunError::ObjectImportLimit(
                 "settlement exhausted three attempts; private Git retained for host recovery",
             ));
@@ -553,7 +585,7 @@ impl Driver<'_> {
         self.journal.attempts
     }
     pub(crate) fn exhausted(&self) -> bool {
-        self.journal.attempts >= LIMIT
+        self.journal.attempts >= LIMIT || self.journal.recovery_failures >= LIMIT
     }
     /// Charge only a driver which has reached the actual object import.
     pub(crate) fn begin_import(&mut self) -> Result<()> {
@@ -610,8 +642,11 @@ impl Driver<'_> {
         })
     }
     pub(crate) fn record_failure(&mut self, reason: &str) -> Result<()> {
+        let now = now_ms(self.clock)?;
         self.update(|journal| {
+            journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
             journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
+            journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
             Ok(())
         })
     }
@@ -639,7 +674,8 @@ impl Drop for Driver<'_> {
         if journal.owner.as_ref() == Some(&self.owner) {
             journal.owner = None;
             if let Ok(now) = now_ms(self.clock) {
-                journal.retry_after_ms = now.saturating_add(backoff_ms(journal.attempts));
+                journal.retry_after_ms =
+                    now.saturating_add(backoff_ms(journal.attempts.max(journal.recovery_failures)));
             }
             let _ = write(&self.attempt, &journal);
         }
@@ -2105,6 +2141,95 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn preimport_failures_wait_for_the_deadline_then_settle_blocked() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let mut journal = Journal::new(scope());
+        // A worker can start while a previous owner's cooldown is still active.
+        journal.retry_after_ms = 30_000;
+        write(&attempt, &journal)?;
+        let mut times = Vec::new();
+        resume_reconcile(&attempt, scope(), &clock, || {
+            times.push(now_ms(&clock)?);
+            let mut driver = Guard::claim(&attempt, scope(), &clock)?
+                .ok_or(RunError::Validation("deadline not honoured"))?;
+            driver.record_failure("preimport step failed")?;
+            assert_eq!(driver.attempts(), 0);
+            drop(driver);
+            Ok(true)
+        })?;
+        assert_eq!(times.len(), LIMIT as usize);
+        assert!(times[0] >= 30_000);
+        for (index, pair) in times.windows(2).enumerate() {
+            assert!(pair[1] - pair[0] >= backoff_ms(index as u32 + 1));
+        }
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.recovery_failures, LIMIT);
+        assert_eq!(
+            journal.attempts, 0,
+            "preimport errors must have their own cap"
+        );
+        assert!(journal.owner.is_none());
+        let status = diagnostic(&journal, Some(0), Some(now_ms(&clock)?)).ok_or("status reason")?;
+        assert!(status.contains("settlement blocked"));
+        assert!(status.contains("preimport step failed"));
+        resume_reconcile(&attempt, scope(), &clock, || {
+            panic!("exhausted worker retried")
+        })?;
+        assert!(matches!(
+            Guard::claim(&attempt, scope(), &clock),
+            Err(RunError::ObjectImportLimit(_))
+        ));
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn expired_retry_deadline_cannot_make_a_pending_step_busy() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let mut times = Vec::new();
+        resume_reconcile(&attempt, scope(), &clock, || {
+            times.push(now_ms(&clock)?);
+            // Model a step that leaves the same already-expired deadline.
+            Ok(true)
+        })?;
+        assert_eq!(times.len(), LIMIT as usize);
+        assert!(
+            times
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] >= backoff_ms(1))
+        );
+        assert_eq!(read(&attempt, scope())?.recovery_failures, LIMIT);
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn settlement_status_flags_old_retries_and_retains_the_cause() -> TestResult {
+        let mut journal = Journal::new(scope());
+        journal.blocking_reason = Some("writer lock busy".into());
+        journal.recovery_failures = 1;
+        let recent = diagnostic(&journal, Some(0), Some(179_999)).ok_or("recent reason")?;
+        assert!(recent.contains("retry pending"));
+        let stale = diagnostic(&journal, Some(0), Some(180_000)).ok_or("stalled reason")?;
+        assert!(stale.contains("retry stalled for 180s"));
+        assert!(stale.contains("writer lock busy"));
+        journal.recovery_failures = LIMIT;
+        assert!(
+            diagnostic(&journal, None, None)
+                .ok_or("blocked reason")?
+                .contains("settlement blocked")
+        );
+        journal.blocking_reason = None;
+        assert!(diagnostic(&journal, Some(0), Some(180_000)).is_none());
+        Ok(())
+    }
+
     #[test]
     fn retry_claims_wait_without_spending_import_attempts() -> TestResult {
         let mut clock = clock();
@@ -3312,23 +3437,64 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    for delay_ms in std::iter::once(0).chain((1..LIMIT).map(backoff_ms)) {
-        if delay_ms != 0 {
-            let (_wake, sleep) = mpsc::channel::<()>();
-            let _ = sleep.recv_timeout(Duration::from_millis(delay_ms));
-        }
+    let scope = crate::RunStore::scope(&store.record(request.attempt, &call)?);
+    resume_reconcile(&directory, scope, &clock, || {
         let found = store.reconcile_with_observer(
             request.attempt,
             providers,
             &call,
             &SystemProcessObserver,
         )?;
-        if !found
-            .iter()
-            .any(|(_, state)| matches!(state, crate::Reconciled::Settling {..}) || matches!(state, crate::Reconciled::Uncertain { reason } if !matches!(reason, crate::UncertainReason::HostStalled)))
-        {
-            break;
+        Ok(found.iter().any(|(_, state)| {
+            matches!(state, crate::Reconciled::Settling { .. })
+                || matches!(state, crate::Reconciled::Uncertain { reason }
+                    if !matches!(reason, crate::UncertainReason::HostStalled))
+        }))
+    })
+}
+
+/// Every failed pass waits even when its stored deadline has already elapsed.
+/// The durable failure budget also covers errors before object import begins.
+fn resume_reconcile(
+    attempt: &Directory,
+    scope: Scope,
+    clock: &dyn Clock,
+    mut reconcile: impl FnMut() -> Result<bool>,
+) -> Result<()> {
+    for pass in 0..LIMIT {
+        let journal = read(attempt, scope)?;
+        if journal.recovery_failures >= LIMIT {
+            return Ok(());
         }
+        let delay_ms = journal
+            .retry_after_ms
+            .saturating_sub(now_ms(clock)?)
+            .max(if pass == 0 { 0 } else { backoff_ms(pass) });
+        if delay_ms > 0 {
+            let deadline = clock
+                .mono_now()
+                .checked_add(DurationMicros::from_micros(
+                    delay_ms
+                        .checked_mul(1000)
+                        .ok_or(RunError::Admission(AdmissionError::Clock))?,
+                ))
+                .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
+            clock
+                .wait_until(deadline)
+                .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
+        }
+        if !reconcile()? {
+            return Ok(());
+        }
+    }
+    let _lock = journal_lock(attempt)?;
+    let mut journal = read(attempt, scope)?;
+    if !owner_active(attempt, &journal, now_ms(clock)?)? {
+        journal.recovery_failures = LIMIT;
+        journal.blocking_reason.get_or_insert_with(|| {
+            "settlement retry budget exhausted; retained for explicit reconciliation".into()
+        });
+        write(attempt, &journal)?;
     }
     Ok(())
 }
