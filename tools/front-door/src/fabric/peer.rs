@@ -329,6 +329,13 @@ fn project_peer_output_with(
         } => (*offset, *max_bytes, *part == OutputPart::Events),
         OutputInput::Fetch { max_bytes, .. } => (0, *max_bytes, false),
     };
+    if matches!(input, OutputInput::Read { .. })
+        && !(1..=provenant_records::run::OUTPUT_LIMIT).contains(&requested_max)
+    {
+        return Err(super::run_error(provenant_run::RunError::TooLarge {
+            limit: provenant_records::run::OUTPUT_LIMIT,
+        }));
+    }
     let mut read = input.clone();
     if let OutputInput::Read {
         offset, max_bytes, ..
@@ -426,9 +433,12 @@ fn project_peer_output_with(
                 *provenant_records::CanonicalV1::file_digest(all).bytes(),
             );
             if !events {
-                let start = usize::try_from(requested_offset)
-                    .map_err(|_| failure())?
-                    .min(all.len());
+                let start = usize::try_from(requested_offset).map_err(|_| failure())?;
+                if start > all.len() {
+                    return Err(super::run_error(provenant_run::RunError::Validation(
+                        "offset past EOF",
+                    )));
+                }
                 let end = start
                     .saturating_add(usize::try_from(requested_max).map_err(|_| failure())?)
                     .min(all.len());
@@ -521,6 +531,32 @@ mod output_projection_tests {
                 *provenant_records::CanonicalV1::file_digest(expected.as_bytes()).bytes()
             )
         );
+        for max_bytes in [0, provenant_records::run::OUTPUT_LIMIT + 1] {
+            let mut invalid = input.clone();
+            if let OutputInput::Read { max_bytes: max, .. } = &mut invalid {
+                *max = max_bytes;
+            }
+            let error =
+                project_peer_output_with(&invalid, &projector, |_| unreachable!()).unwrap_err();
+            assert_eq!(
+                error.code(),
+                super::super::run_error(provenant_run::RunError::TooLarge {
+                    limit: provenant_records::run::OUTPUT_LIMIT,
+                })
+                .code()
+            );
+        }
+        let mut past_end = input.clone();
+        if let OutputInput::Read { offset, .. } = &mut past_end {
+            *offset = u64::MAX;
+        }
+        assert!(project_peer_output_with(&past_end, &projector, |_| {
+            serde_json::from_value(serde_json::json!({
+                "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
+                "offset":0, "next_offset":4, "eof":true, "digest":actual_digest,
+                "bytes":{"encoding":"utf8","data":"test"}, "length":4
+            })).map_err(|_| FacadeError::StateCorrupt)
+        }).is_err());
     }
 }
 

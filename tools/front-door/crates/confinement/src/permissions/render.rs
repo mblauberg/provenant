@@ -1092,6 +1092,18 @@ fn mandatory_for_plan(
             root.kind.clone(),
         )?;
     }
+    let mut lane_roots = mandatory.credential_roots().lane_roots().to_vec();
+    for root in plan.credential_roots.lane_roots() {
+        if !lane_roots.contains(root) {
+            lane_roots.push(root.clone());
+        }
+    }
+    mandatory.set_credential_roots(
+        mandatory
+            .credential_roots()
+            .clone()
+            .with_lane_roots(lane_roots),
+    )?;
 
     Ok(mandatory)
 }
