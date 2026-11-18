@@ -529,7 +529,10 @@ fn indexed_watch(
         }
         match detail {
             Some(detail) if detail["heartbeat"] == true => continue,
-            Some(detail) if detail["head"].as_str() == Some(expected_head) => {
+            Some(detail)
+                if detail["head"].as_str() == Some(expected_head)
+                    && detail["checks"].is_array() =>
+            {
                 let rows = detail["checks"]
                     .as_array()
                     .ok_or_else(|| "PR journal event has no checks array".to_owned())?;
@@ -1051,6 +1054,37 @@ mod unreported_checks_tests {
             .expect("only the watched head can settle the wait");
         assert_eq!(events.get(), 2);
         assert_eq!(reads.get(), 2, "the moved head triggered one reconcile");
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn indexed_watch_reconciles_webhook_markers_even_when_the_head_matches() {
+        use serde_json::json;
+
+        let reads = Cell::new(0);
+        let events = Cell::new(0);
+        let request = provenant_config::ports::Request::within(Duration::from_secs(30));
+        let mut read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![check(if reads.get() == 1 {
+                "pending"
+            } else {
+                "pass"
+            })])
+        };
+        let mut next = |_| {
+            events.set(events.get() + 1);
+            Ok(Some(json!({
+                "repository":"owner/repo",
+                "number":7,
+                "head":HEAD,
+                "source":"webhook"
+            })))
+        };
+        indexed_watch(&mut read, &mut next, &request, HEAD, "7")
+            .expect("identifier marker triggers an authoritative check read");
+        assert_eq!(events.get(), 1);
+        assert_eq!(reads.get(), 2, "the webhook marker triggered one reconcile");
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events

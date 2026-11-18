@@ -259,11 +259,24 @@ impl Journal {
             let full = page.items.len() == REPLAY_PAGE as usize;
             for event in page.items {
                 self.cursor = event.cursor.seq;
-                if event.detail["repository"].as_str() == Some(repository)
-                    && event.detail["number"].as_u64() == Some(number)
-                    && event.detail["status"].is_object()
+                let detail = &event.detail;
+                let webhook = detail["source"] == "webhook";
+                let mentions_pr = detail["number"].as_u64() == Some(number)
+                    || detail["pull_requests"].as_array().is_some_and(|pulls| {
+                        pulls.iter().any(|pull| pull.as_u64() == Some(number))
+                    });
+                if detail["repository"].as_str() == Some(repository)
+                    && mentions_pr
+                    && (webhook || detail["status"].is_object())
                 {
-                    return Ok(Some(event.detail));
+                    // Webhooks are change hints, not authoritative state. Keep
+                    // the local marker to the identifiers needed for a targeted
+                    // read; the source store remains authoritative.
+                    return if webhook {
+                        Ok(Some(json!({"repository":repository,"number":number})))
+                    } else {
+                        Ok(Some(event.detail))
+                    };
                 }
             }
             if page.truncated || full {
@@ -384,155 +397,164 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
                 Err(error) => return Err(error.into()),
             };
-            index_graphs(&resolved.roots, project)?;
-            index_notes(&resolved.roots, project)?;
-            let mut inputs = provenant_core::RootInputs::new(
-                resolved.home.clone(),
-                context.project_root.clone(),
-            );
-            inputs.state_dir = Some(resolved.roots.state.as_path().to_owned());
-            inputs.workspaces.push(context.project_root.clone());
-            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let (settings, origin) = provenant_cli::wait::Settings::resolve(&roots)?;
-            let now = SystemClock.wall_now()?.as_micros();
-            // Monitor-only consumers also receive forge events. Repository
-            // discovery is cached by the host, never repeated by each chair.
-            let mut repository: String = read(&dir, "repository.json")?;
-            if repository.is_empty() {
-                repository = match crate::pr::status::wait_repository(
-                    roots.state.as_path(),
-                    &context.project_root,
-                    &provenant_config::ports::Request::within(Duration::from_secs(
-                        settings.pr_read_timeout_seconds,
-                    )),
-                ) {
-                    Ok(repository) => repository,
-                    Err(error) => {
-                        warn(&format!(
-                            "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
-                            origin.describe("domains.wait.forge_source")
-                        ));
-                        return Ok(());
+            continue_after_index(
+                project,
+                || index_graphs(&resolved.roots, project),
+                || index_notes(&resolved.roots, project),
+                || {
+                    let mut inputs = provenant_core::RootInputs::new(
+                        resolved.home.clone(),
+                        context.project_root.clone(),
+                    );
+                    inputs.state_dir = Some(resolved.roots.state.as_path().to_owned());
+                    inputs.workspaces.push(context.project_root.clone());
+                    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+                    let (settings, origin) = provenant_cli::wait::Settings::resolve(&roots)?;
+                    let now = SystemClock.wall_now()?.as_micros();
+                    // Monitor-only consumers also receive forge events. Repository
+                    // discovery is cached by the host, never repeated by each chair.
+                    let mut repository: String = read(&dir, "repository.json")?;
+                    if repository.is_empty() {
+                        repository = match crate::pr::status::wait_repository(
+                            roots.state.as_path(),
+                            &context.project_root,
+                            &provenant_config::ports::Request::within(Duration::from_secs(
+                                settings.pr_read_timeout_seconds,
+                            )),
+                        ) {
+                            Ok(repository) => repository,
+                            Err(error) => {
+                                warn(&format!(
+                                    "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
+                                    origin.describe("domains.wait.forge_source")
+                                ));
+                                return Ok(());
+                            }
+                        };
+                        if !valid_repository(&repository) {
+                            return Err("invalid discovered repository".into());
+                        }
+                        save(&dir, "repository.json", &repository)?;
                     }
-                };
-                if !valid_repository(&repository) {
-                    return Err("invalid discovered repository".into());
-                }
-                save(&dir, "repository.json", &repository)?;
-            }
-            let mut feed: PollProgress = read(&dir, "feed-progress.json")?;
-            if now >= feed.next_micros {
-                let request = provenant_config::ports::Request::within(Duration::from_secs(
-                    settings.pr_read_timeout_seconds,
-                ));
-                let result = (|| -> Result<()> {
-                    let selected = source(
-                        &dir,
-                        &repository,
-                        &settings.forge_source,
-                        &origin.describe("domains.wait.forge_source"),
-                        &context,
-                        &request,
-                        now,
-                    )?;
-                    if selected == "webhook"
-                        && let Err(error) =
-                            start_forwarder(&roots, project, &context.project_root, &repository)
-                    {
-                        warn(&format!(
-                            "forwarder unavailable: {error}; conditional reconciliation continues"
-                        ));
+                    let mut feed: PollProgress = read(&dir, "feed-progress.json")?;
+                    if now >= feed.next_micros {
+                        let request = provenant_config::ports::Request::within(
+                            Duration::from_secs(settings.pr_read_timeout_seconds),
+                        );
+                        let result = (|| -> Result<()> {
+                            let selected = source(
+                                &dir,
+                                &repository,
+                                &settings.forge_source,
+                                &origin.describe("domains.wait.forge_source"),
+                                &context,
+                                &request,
+                                now,
+                            )?;
+                            if selected == "webhook"
+                                && let Err(error) = start_forwarder(
+                                    &roots,
+                                    project,
+                                    &context.project_root,
+                                    &repository,
+                                )
+                            {
+                                warn(&format!(
+                                    "forwarder unavailable: {error}; conditional reconciliation continues"
+                                ));
+                            }
+                            poll_repository(
+                                &roots,
+                                project,
+                                &context.project_root,
+                                &repository,
+                                &dir,
+                                &request,
+                            )
+                        })();
+                        feed.schedule(
+                            now,
+                            result.is_ok(),
+                            Duration::from_millis(settings.pr_slow_interval_ms),
+                        );
+                        save(&dir, "feed-progress.json", &feed)?;
+                        if let Err(error) = result {
+                            errors.push(format!("{repository}: {error}"));
+                        }
                     }
-                    poll_repository(
-                        &roots,
-                        project,
-                        &context.project_root,
-                        &repository,
-                        &dir,
-                        &request,
-                    )
-                })();
-                feed.schedule(
-                    now,
-                    result.is_ok(),
-                    Duration::from_millis(settings.pr_slow_interval_ms),
-                );
-                save(&dir, "feed-progress.json", &feed)?;
-                if let Err(error) = result {
-                    errors.push(format!("{repository}: {error}"));
-                }
-            }
-            for name in dir.entries()? {
-                let name = name?;
-                let Some(name) = name
-                    .to_str()
-                    .filter(|name| name.starts_with("pr-") && name.ends_with(".json"))
-                else {
-                    continue;
-                };
-                let subscription: Subscription = read(&dir, name)?;
-                if !valid_repository(&subscription.repository)
-                    || subscription.number == 0
-                    || !subscription.repository.eq_ignore_ascii_case(&repository)
-                {
-                    errors.push(format!("invalid forge subscription: {name}"));
-                    continue;
-                }
-                let progress_name = format!("progress-{name}");
-                let mut progress: PollProgress = read(&dir, &progress_name)?;
-                if progress.closed || now < progress.next_micros {
-                    continue;
-                }
-                let request = provenant_config::ports::Request::within(Duration::from_secs(
-                    settings.pr_read_timeout_seconds,
-                ));
-                let mut selected = source(
-                    &dir,
-                    &subscription.repository,
-                    &settings.forge_source,
-                    &origin.describe("domains.wait.forge_source"),
-                    &context,
-                    &request,
-                    now,
-                )?;
-                if selected == "webhook"
-                    && let Err(error) = start_forwarder(
-                        &roots,
-                        project,
-                        &context.project_root,
-                        &subscription.repository,
-                    )
-                {
-                    warn(&format!(
-                        "forwarder unavailable: {error}; using conditional poller"
-                    ));
-                    selected = "poll".into();
-                }
-                // Conditional reconciliation also heals forwarder disconnects and
-                // forge history gaps. Webhook mode uses the slower gap cadence.
-                let interval = if selected == "webhook" {
-                    GAP
-                } else {
-                    Duration::from_millis(settings.pr_interval_ms)
-                };
-                let result = poll_one(
-                    &roots,
-                    project,
-                    &context.project_root,
-                    &subscription,
-                    &request,
-                    &mut progress,
-                );
-                progress.schedule(now, result.is_ok(), interval);
-                save(&dir, &progress_name, &progress)?;
-                if let Err(error) = result {
-                    errors.push(format!(
-                        "{} #{}: {error}",
-                        subscription.repository, subscription.number
-                    ));
-                }
-            }
-            Ok(())
+                    for name in dir.entries()? {
+                        let name = name?;
+                        let Some(name) = name
+                            .to_str()
+                            .filter(|name| name.starts_with("pr-") && name.ends_with(".json"))
+                        else {
+                            continue;
+                        };
+                        let subscription: Subscription = read(&dir, name)?;
+                        if !valid_repository(&subscription.repository)
+                            || subscription.number == 0
+                            || !subscription.repository.eq_ignore_ascii_case(&repository)
+                        {
+                            errors.push(format!("invalid forge subscription: {name}"));
+                            continue;
+                        }
+                        let progress_name = format!("progress-{name}");
+                        let mut progress: PollProgress = read(&dir, &progress_name)?;
+                        if progress.closed || now < progress.next_micros {
+                            continue;
+                        }
+                        let request = provenant_config::ports::Request::within(
+                            Duration::from_secs(settings.pr_read_timeout_seconds),
+                        );
+                        let mut selected = source(
+                            &dir,
+                            &subscription.repository,
+                            &settings.forge_source,
+                            &origin.describe("domains.wait.forge_source"),
+                            &context,
+                            &request,
+                            now,
+                        )?;
+                        if selected == "webhook"
+                            && let Err(error) = start_forwarder(
+                                &roots,
+                                project,
+                                &context.project_root,
+                                &subscription.repository,
+                            )
+                        {
+                            warn(&format!(
+                                "forwarder unavailable: {error}; using conditional poller"
+                            ));
+                            selected = "poll".into();
+                        }
+                        // Conditional reconciliation also heals forwarder disconnects and
+                        // forge history gaps. Webhook mode uses the slower gap cadence.
+                        let interval = if selected == "webhook" {
+                            GAP
+                        } else {
+                            Duration::from_millis(settings.pr_interval_ms)
+                        };
+                        let result = poll_one(
+                            &roots,
+                            project,
+                            &context.project_root,
+                            &subscription,
+                            &request,
+                            &mut progress,
+                        );
+                        progress.schedule(now, result.is_ok(), interval);
+                        save(&dir, &progress_name, &progress)?;
+                        if let Err(error) = result {
+                            errors.push(format!(
+                                "{} #{}: {error}",
+                                subscription.repository, subscription.number
+                            ));
+                        }
+                    }
+                    Ok(())
+                },
+            )
         })();
         if let Err(error) = result {
             errors.push(format!("{}: {error}", binding.project_id()));
@@ -637,6 +659,27 @@ fn poll_repository(
         )?;
     }
     Ok(())
+}
+
+/// Indexing is replayable enrichment. A broken local journal must not stop the
+/// host from discovering repositories or polling their authoritative source.
+fn continue_after_index<T>(
+    project: ProjectId,
+    graphs: impl FnOnce() -> Result<()>,
+    notes: impl FnOnce() -> Result<()>,
+    forge: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Err(error) = graphs() {
+        warn(&format!(
+            "graph observation indexing failed for {project}: {error}; will retry"
+        ));
+    }
+    if let Err(error) = notes() {
+        warn(&format!(
+            "note observation indexing failed for {project}: {error}; will retry"
+        ));
+    }
+    forge()
 }
 
 fn poll_one(
@@ -1151,6 +1194,35 @@ mod tests {
         (temp, roots, ProjectId::from_bytes([34; 16]))
     }
 
+    #[test]
+    fn failed_local_indexes_are_independent_and_nonfatal() {
+        let project = ProjectId::from_bytes([36; 16]);
+        let graph_calls = std::cell::Cell::new(0);
+        let note_calls = std::cell::Cell::new(0);
+        let forge_calls = std::cell::Cell::new(0);
+        let tick = || {
+            continue_after_index(
+                project,
+                || {
+                    graph_calls.set(graph_calls.get() + 1);
+                    Err("corrupt graph checkpoint".into())
+                },
+                || {
+                    note_calls.set(note_calls.get() + 1);
+                    Err("corrupt note file".into())
+                },
+                || {
+                    forge_calls.set(forge_calls.get() + 1);
+                    Ok(())
+                },
+            )
+        };
+        tick().unwrap();
+        assert_eq!(graph_calls.get(), 1);
+        assert_eq!(note_calls.get(), 1);
+        assert_eq!(forge_calls.get(), 1);
+    }
+
     // Spec: docs/specs/lane-contracts.md#observation-events
     #[test]
     fn note_and_correction_reconcile_once_across_consumer_reconnects() -> Result<()> {
@@ -1342,6 +1414,25 @@ mod tests {
             kept.number, subscription.number,
             "expiry keeps the host interest alive"
         );
+    }
+
+    #[test]
+    fn webhook_pr_events_wake_waiters_with_identifier_only_markers() -> Result<()> {
+        let (_temp, roots, project) = fixture();
+        let mut journal = Journal::for_project(roots.clone(), project).unwrap();
+        let payload = json!({"check_run":{"id":42,"head_sha":"abc",
+            "status":"completed","conclusion":"success",
+            "pull_requests":[{"number":7},{"number":9}]}});
+        let (kind, detail) = normalise_webhook("owner/repo", payload).unwrap();
+        append(&roots, project, "webhook:check-run:42".into(), kind, detail)?;
+
+        let marker = journal
+            .next_pr("owner/repo", 9, Duration::ZERO, &CancelToken::new())?
+            .expect("webhook association wakes the matching PR waiter");
+        assert_eq!(marker, json!({"repository":"owner/repo","number":9}));
+        assert!(marker.get("status").is_none());
+        assert!(marker.get("head").is_none());
+        Ok(())
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events

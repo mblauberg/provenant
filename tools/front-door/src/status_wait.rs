@@ -1489,7 +1489,20 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         ) {
                             Ok(Some(detail)) => {
                                 last_reconcile = Instant::now();
-                                reading_pr_event(*number, detail)
+                                if detail["status"].is_object() {
+                                    reading_pr_event(*number, detail)
+                                } else {
+                                    // Webhook records carry identifiers only;
+                                    // fetch the authoritative PR status now.
+                                    read(
+                                        source,
+                                        edge,
+                                        &mut session,
+                                        deadline,
+                                        pr_read_timeout,
+                                        &stop.cancel,
+                                    )
+                                }
                             }
                             Ok(None) if last_reconcile.elapsed() >= Duration::from_secs(60) => {
                                 last_reconcile = Instant::now();
