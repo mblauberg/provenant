@@ -5145,8 +5145,8 @@ impl RunStore {
         Ok((run, ready))
     }
 
-    /// Up to `limit` attempts needing recovery or terminal temporary cleanup in
-    /// this project. Nonterminal work takes priority over temporary cleanup.
+    /// Up to `limit` attempts needing recovery in this project. Retained scratch
+    /// is collected separately after its work has finished.
     pub fn open_attempts(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         self.open_attempts_readonly(limit, call)
@@ -5180,21 +5180,6 @@ impl RunStore {
                 runs.push(fence.scope.attempt);
             }
         }
-        if runs.len() < limit as usize {
-            let mut query = self.db.prepare(
-                "SELECT id FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 ORDER BY sequence LIMIT ?2",
-            )?;
-            let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
-            while runs.len() < limit as usize {
-                let Some(row) = rows.next()? else { break };
-                let run = AttemptId::parse(&row.get::<_, String>(0)?)
-                    .map_err(|_| RunError::Validation("attempt index ID"))?;
-                if runs.contains(&run) {
-                    continue;
-                }
-                runs.push(run);
-            }
-        }
         // A closed run whose reactions are still owed needs a drain too.
         if runs.len() < limit as usize {
             let owed: Vec<String> = {
@@ -5212,6 +5197,27 @@ impl RunStore {
                     AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
                 if !runs.contains(&run) && runs.len() < limit as usize {
                     runs.push(run);
+                }
+            }
+        }
+        // Retry terminal settlement effects without treating every retained
+        // scratch directory as actionable recovery work.
+        if runs.len() < limit as usize {
+            let mut query = self.db.prepare(
+                "SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.project=?1 AND a.terminal=1 ORDER BY a.sequence",
+            )?;
+            let mut rows = query.query([self.context.project_id.to_string()])?;
+            while runs.len() < limit as usize {
+                call.check()?;
+                let Some(row) = rows.next()? else { break };
+                let id = AttemptId::parse(&row.get::<_, String>(0)?)
+                    .map_err(|_| RunError::Validation("attempt index ID"))?;
+                if !runs.contains(&id)
+                    && self
+                        .effects_pending(id, &row.get::<_, Vec<u8>>(1)?, call)
+                        .unwrap_or(true)
+                {
+                    runs.push(id);
                 }
             }
         }

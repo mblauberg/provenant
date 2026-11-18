@@ -39,20 +39,17 @@ pub(crate) fn refusal_expiry(
     observed: i64,
     reset: Option<i64>,
 ) -> Result<i64, QuotaError> {
-    if adapter != "agy"
+    let revalidation = provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.refusal_revalidation_seconds);
+    if revalidation.is_none()
         && let Some(reset) = reset
     {
         return Ok(reset);
     }
-    let lifetime = if adapter == "agy" { 300 } else { 3600 };
     let bounded = observed
-        .checked_add(lifetime)
+        .checked_add(revalidation.unwrap_or(3600))
         .ok_or(QuotaError::TimeRange)?;
-    Ok(match reset {
-        Some(reset) if adapter == "agy" => reset.min(bounded),
-        Some(reset) => reset,
-        None => bounded,
-    })
+    Ok(reset.map_or(bounded, |reset| reset.min(bounded)))
 }
 
 /// Short-lived provider capacity evidence, separate from quota admission.

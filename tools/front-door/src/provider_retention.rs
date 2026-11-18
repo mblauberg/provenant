@@ -506,8 +506,9 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
         "graph_id": graph.clone(),
-        "nodes": []
+        "nodes": [{"id":"retention", "access":"read_only", "prompt":"fixture", "route":{"alias":"senior"}}]
     }))?;
+    let digest = provenant_fabric_runtime::graph::graph_plan_digest(&document)?.to_string();
     let budget = WaitBudget::cli(clock.mono_now(), 5)?;
     let mut journal = FileJournal::open(
         &roots.state,
@@ -529,9 +530,9 @@ pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
     let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
         "graph_id": graph.clone(),
-        "plan_digest": "fixture",
+        "plan_digest": digest,
         "cancelled": true,
-        "nodes": []
+        "nodes": [{"id":"retention", "state":"skipped", "attempts":[]}]
     }))?;
     journal.save(&checkpoint)?;
     drop(journal);

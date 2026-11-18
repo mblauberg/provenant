@@ -689,7 +689,20 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
 
     // Keep one representative CLI show; exercise every declaration and its
     // parameter bindings through the in-process compiler.
-    let compiler = Compiler::new(&library);
+    let resolvers = [
+        ("review-frame".to_owned(), vec!["true".to_owned()]),
+        ("review-verify".to_owned(), vec!["true".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["true".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
+        ("review-panel".to_owned(), vec!["correctness".to_owned()]),
+        ("review-advice-correctness".to_owned(), vec![String::new()]),
+    ]
+    .into_iter()
+    .collect();
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
     for entry in listed {
         let name = entry["name"].as_str().ok_or("template name")?;
         let template = &entry["template"];
@@ -733,7 +746,7 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
         (
             "repair",
             vec![
-                json!({"id":"exercise", "use":"repair", "repeat":{"until":"accepted", "max_rounds":1, "review_repair":true}}),
+                json!({"id":"exercise", "use":"repair", "with":{"worktree":rig.project, "write_scope":["."]}, "repeat":{"until":"accepted", "max_rounds":1, "review_repair":true}}),
             ],
         ),
         (
@@ -746,7 +759,7 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
         (
             "implement",
             vec![
-                json!({"id":"exercise", "use":"implement", "with":{"worktree":rig.project, "write_scope":["."]}}),
+                json!({"id":"exercise", "use":"implement", "worktree":rig.project, "write_scope":["."]}),
             ],
         ),
     ] {

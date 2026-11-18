@@ -486,7 +486,12 @@ impl RunStore {
         Ok(pending)
     }
 
-    fn effects_pending(&self, id: AttemptId, raw: &[u8], call: &Request<'_>) -> Result<bool> {
+    pub(crate) fn effects_pending(
+        &self,
+        id: AttemptId,
+        raw: &[u8],
+        call: &Request<'_>,
+    ) -> Result<bool> {
         // A cancelled delivery waits for an explicit `lane deliver`.
         let retryable = |effect: &EffectDisposition| {
             matches!(

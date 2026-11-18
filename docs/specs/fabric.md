@@ -162,7 +162,7 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 Every bundled template is parsed and structurally checked by the shared
 `TemplateLibrary`; its declared parameter schema is applied by the shared
 `Compiler` before graph admission. The CLI catalogue exposes those declarations,
-while specialized launch behaviour remains covered at the command boundary.
+while specialised launch behaviour remains covered at the command boundary.
 - Why: adding a bundled template must not require another per-template CLI
   subprocess to prove its schema is accepted.
 - Owner: `crates/fabric-runtime/src/graph/template.rs`

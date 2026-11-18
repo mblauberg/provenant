@@ -1501,10 +1501,16 @@ fn collect_impl(
             let locked = lock_worktree(context, entry, cancel, dry)?;
             // A preview shares one census across candidates; applying re-reads.
             census_free(context, &lane.path, !dry)?;
-            let tree_bytes = if !dry {
-                None
+            // Reporting must remain bounded even when apply uses a full proof
+            // for the mutation itself.
+            let measurement_walk = PreviewWalk::new(true);
+            let measurement = if dry {
+                &preview_walk
             } else {
-                match allocated_tree(locked.verified.repo().root_dir(), 0, &preview_walk) {
+                &measurement_walk
+            };
+            let tree_bytes = {
+                match allocated_tree(locked.verified.repo().root_dir(), 0, measurement) {
                     Ok(bytes) => Some(bytes),
                     Err(error) => {
                         report.byte_errors.push(RetentionIssue {

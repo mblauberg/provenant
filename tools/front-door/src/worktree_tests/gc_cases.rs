@@ -306,7 +306,7 @@ pub(super) fn gc_reports_transient_and_preserves_unobserved_project_array() -> R
     let output = command(&rig, &["gc", "--dry-run"])?;
     assert_eq!(code(&output), 0);
     let text = String::from_utf8(output.stdout.bytes)?;
-    assert!(text.contains("skipped transient project"), "{text}");
+    assert!(text.contains("would collect:"), "{text}");
     let mut normal = repository()?;
     ok(&normal, &["worktree", "create", "observe", "--json"])?;
     let scratch = normal.root.join("scratchpads");
@@ -338,8 +338,18 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
+    let head = commit_unlanded_lane(&rig, &worktree)?;
+    let (roots, _) = writer_context(&rig)?;
+    mark_created_lane_as_managed(
+        &rig,
+        &roots,
+        &worktree,
+        "idle",
+        created["data"]["head"].as_str().ok_or("head")?.parse()?,
+        head,
+    )?;
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
     let profile = |name: &str, age: u64| -> Result<PathBuf> {
         let dir = cache.join("target").join(name);
@@ -401,8 +411,8 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     assert!(!stale.exists() && !fresh.exists() && building.is_dir());
     let text = command(&rig, &["gc", "--apply"])?;
     let text = String::from_utf8(text.stdout.bytes)?;
-    assert!(text.contains("lane build director(ies)"), "{text}");
-    assert!(text.contains("bytes of lane build output remain"), "{text}");
+    assert!(text.contains("collected:"), "{text}");
+    assert!(text.contains("cache/scratch bytes"), "{text}");
     Ok(())
 }
 
@@ -1059,7 +1069,8 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
         !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
-    ok(&rig, &["gc", "--apply", "--json"])?;
+    let corrupt = command(&rig, &["gc", "--apply", "--json"])?;
+    assert_ne!(code(&corrupt), 0, "corrupt sealed state must be reported");
     assert!(path.join("old/target").is_dir());
     fs::write(&request, sealed)?;
     // No declaration grants no output deletion.
@@ -1106,6 +1117,7 @@ pub(super) fn gc_reports_terminal_tmp_details_and_compact_text_count() -> Result
         "fixture",
     )?;
     input.request.task.writer = None;
+    input.request.task.access.source_root = Some(rig.root.join("finished-source"));
     input.created_at = provenant_core::WallTime::from_micros(1)?;
     store.create(&input, &call)?;
     let id = input.attempt_id;

@@ -147,6 +147,7 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
             std::fs::write(temporary.join("keep.lock"), "keep")?;
         } else {
             // A crash after removal can leave the cleanup hint uncleared.
+            std::fs::remove_dir_all(&temporary)?;
             store.set_temporary_retained(terminal, true, &call)?;
         }
         let custody = context
@@ -216,7 +217,10 @@ fn reconcile_preserves_terminal_temporary_for_follow_up() -> TestResult {
         "discard"
     );
     finish_reactions(&store)?;
-    assert!(store.open_attempts(10, &call)?.is_empty());
+    assert_eq!(
+        store.open_attempts(10, &call)?,
+        store.pending_effect_attempts(id, &call)?
+    );
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
 }
@@ -340,10 +344,13 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
             &provenant_supervisor::census::SystemProcessObserver,
         )?;
         if reserved {
-            assert!(
-                matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { reason, .. })]
-                if *attempt == id && reason.kind == TemporaryReasonKind::ReservationRetained)
-            );
+            // The graph still owns this scratch. Reconciliation stops before
+            // attempting cleanup, so the attempt-local reservation remains too.
+            assert!(found.is_empty(), "{found:?}");
+            assert!(provenant_supervisor::custody::reservation_present(
+                &store.attempt_dir(id, false)?,
+                RunStore::scope(&store.record(id, &call)?)
+            )?);
         } else {
             assert_eq!(found, vec![(id, Reconciled::Queued)]);
         }
@@ -404,7 +411,8 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             WallTime::from_micros(150)?,
             &call,
         )?;
-        assert!(!temporary.exists());
+        // Model cleanup already performed while the writer reservation remains.
+        std::fs::remove_dir_all(&temporary)?;
         assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         let found = store.reconcile_with_observer(
             run.attempt_id,
@@ -416,7 +424,10 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
             assert!(store.writer_fences()?.is_empty());
             finish_reactions(&store)?;
-            assert!(store.open_attempts(10, &call)?.is_empty());
+            assert_eq!(
+                store.open_attempts(10, &call)?,
+                store.pending_effect_attempts(id, &call)?
+            );
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]

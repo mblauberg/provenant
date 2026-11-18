@@ -3198,8 +3198,33 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
+    let mut retained = input();
+    retained.attempt_id = AttemptId::from_bytes([42; 16]);
+    retained.operation_id = OperationId::parse("retained-before-reaction")?;
+    rekey(&mut retained);
+    store.create(&retained, &call)?;
+    let scratch = store.temporary_path(retained.attempt_id, &call)?;
+    store.withdraw(
+        retained.attempt_id,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
+        Outcome::Cancelled,
+        "fixture",
+        WallTime::from_micros(150)?,
+        &call,
+    )?;
+    store.drain_reactions(retained.attempt_id, &clock, &cancel, &mut |reaction, _| {
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        reaction.ledger_done = true;
+        reaction.graph_done = true;
+        Ok(())
+    })?;
     let input = settle_one(&store, &call)?;
-    assert_eq!(store.open_attempts(10, &call)?, vec![input.attempt_id]);
+    // Even a full scan must reach the pending reaction before retained scratch.
+    assert_eq!(store.open_attempts(1, &call)?, vec![input.attempt_id]);
+    assert!(scratch.exists());
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.notice_done = true;
         reaction.log_done = true;

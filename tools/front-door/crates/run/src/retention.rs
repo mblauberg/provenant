@@ -1738,13 +1738,13 @@ mod tests {
             dry_run,
             call,
         )?;
-        let mut scratch = store.gc_temporary(
-            &root,
-            &ScratchPolicy::new(scratch_days.saturating_mul(86_400)),
-            now,
-            dry_run,
-            call,
-        )?;
+        // These fixtures exercise age and collection mechanics for unowned work.
+        let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
+        let policy = ScratchPolicy {
+            owner: Some(&unowned),
+            ..ScratchPolicy::new(scratch_days.saturating_mul(86_400))
+        };
+        let mut scratch = store.gc_temporary(&root, &policy, now, dry_run, call)?;
         report.removed.append(&mut scratch.removed);
         report.tightened.append(&mut scratch.tightened);
         report.attempt_tmp.append(&mut scratch.attempt_tmp);
@@ -2066,9 +2066,14 @@ mod tests {
         )?;
         assert!(scoped.attempt_tmp.is_empty());
         assert!(attempt.join("tmp/payload").is_file());
+        let unowned = |_: &AttemptRecord, _: &CanonicalRequest| ScratchOwner::Unowned;
+        let policy = ScratchPolicy {
+            owner: Some(&unowned),
+            ..ScratchPolicy::new(7 * 86_400)
+        };
         let report = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
-            &ScratchPolicy::new(7 * 86_400),
+            &policy,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,
@@ -2695,6 +2700,7 @@ mod tests {
         assert!(!attempt.join("tmp").exists());
         assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
         std::os::unix::fs::symlink(outside.path(), attempt.join("tmp"))?;
+        store.set_temporary_retained(input.attempt_id, true, &call)?;
         let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.attempt_tmp.len(), 1);
@@ -2852,8 +2858,11 @@ mod tests {
         fs::write(attempt.join("tmp/payload"), "disposable")?;
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert_eq!(report.kept.len(), 1);
-        assert_eq!(report.attempt_tmp.len(), 1);
-        assert!(!attempt.join("tmp").exists());
+        assert!(report.attempt_tmp.is_empty());
+        assert!(
+            attempt.join("tmp/payload").exists(),
+            "pending continuation retains scratch"
+        );
         assert!(
             attempt
                 .join("provider-state/candidate-0/auth.json")
@@ -2872,6 +2881,10 @@ mod tests {
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!attempt.join("provider-state").exists());
+        assert!(
+            !attempt.join("tmp").exists(),
+            "scratch is collectable after continuation settles"
+        );
         assert_eq!(store.resume(&resume, &call)?.attempt_id, resume.attempt_id);
         let fresh = Resume {
             extend: Vec::new(),
