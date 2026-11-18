@@ -1,5 +1,5 @@
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
-use super::grants::write_grants_fixture;
+use super::grants::{worktree_grants_fixture, write_grants_fixture};
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::repo::GitRefName;
