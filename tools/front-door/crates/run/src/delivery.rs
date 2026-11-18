@@ -1926,17 +1926,9 @@ impl HostDeliveryContext {
             )));
         }
         if commit_log && output.stdout.truncated {
-            let valid = match std::str::from_utf8(&output.stdout.bytes) {
-                Ok(s) => s,
-                Err(error) => {
-                    std::str::from_utf8(&output.stdout.bytes[..error.valid_up_to()]).unwrap_or("")
-                }
-            };
-            let truncated = match valid.rfind('\n') {
-                Some(pos) if !valid[..pos].trim().is_empty() => valid[..pos].trim_end(),
-                _ => "",
-            };
-            return Ok(format!("{truncated}{}", PR_BODY_TRUNCATION_NOTE.trim_end()));
+            // A truncated log may end in the middle of a credential, including
+            // one spanning lines. No prefix of it is safe to publish.
+            return Ok(PR_BODY_TRUNCATION_NOTE.trim().to_owned());
         }
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())

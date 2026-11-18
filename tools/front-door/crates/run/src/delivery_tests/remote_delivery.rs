@@ -635,8 +635,13 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
         host.head(&fixture.writer)?,
         "Run fixture\nAttempt fixture",
     )?;
-    assert!(body.len() <= PR_BODY_LIMIT && body.ends_with(PR_BODY_TRUNCATION_NOTE.trim_end()));
-    assert!(!body.contains(&"s".repeat(10)));
+    assert_eq!(
+        body,
+        format!(
+            "Run fixture\nAttempt fixture\n\n{}",
+            PR_BODY_TRUNCATION_NOTE.trim()
+        )
+    );
     Ok(())
 }
 
