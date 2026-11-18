@@ -262,6 +262,47 @@
     }
 
     #[test]
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    fn unknown_identity_flows_from_resolution_to_dispatch_admission() -> Result<(), Box<dyn Error>> {
+        use provenant_records::policy::{Policy, Source, Strength};
+        use std::os::unix::fs::PermissionsExt;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(&self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> { Ok(path.into()) }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs = provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::set_permissions(roots.state.as_path(), std::fs::Permissions::from_mode(0o700))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let records = [provenant_providers::AvailabilityRecord {
+            schema_version: 1, adapter: "codex".into(), executable: "/fixture/codex".into(),
+            version: "fixture".into(), fixture_ref: "fixture".into(), catalogue_revision: catalogue.revision().into(),
+            account_key: None, plan: None, observed_models: vec!["test".into()],
+            observed_unix_seconds: now, expires_unix_seconds: now + 300, last_update: None,
+        }];
+        let access = [provenant_routing::AccessContext { adapter: "codex", disclosure_ref: "fixture", confinement_ref: "fixture" }];
+        let request = super::RouteRequest { read_heavy: false, model: Some(super::Model("codex/test".into())), route: None, effort: None, confidential: false, fallback: vec![], exclude: vec![] }.to_domain()?;
+        let resolve = |policy: &Policy, access: &[provenant_routing::AccessContext<'_>]| super::resolve_dispatch_rejecting_family(
+            &request, &roots, super::REGISTRY, None, ("fixture", 0), &records, access, "fixture", None, &[], &[], None, None, None, Some(policy));
+        let default = Policy::default();
+        let route = resolve(&default, &access)?;
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+        assert!(route.account_key.is_none());
+        super::check_dispatch_candidate(&roots, &route, super::REGISTRY, &default)?;
+        let mut strict = Policy::default();
+        strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), Strength::Refuse)].into(), Source::Project);
+        let route = resolve(&strict, &access)?;
+        assert!(matches!(route.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::UnknownAccount, .. }));
+        let route = resolve(&default, &[])?;
+        assert!(matches!(route.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::ConfinementUnavailable, .. }));
+        Ok(())
+    }
+
+    #[test]
     fn go_allowance_preference_never_refuses_a_ready_dispatch() -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::PermissionsExt;
         struct Resolver;

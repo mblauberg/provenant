@@ -1199,6 +1199,33 @@ fn unresolved_names_list_close_matches_and_examples() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/routing.md#one-resolution-bounded-alternatives
+fn duplicate_primary_fallback_warns_and_is_dropped() -> Result {
+    let rig = rig()?.without_state()?;
+    let output = rig.command(&[
+        "--json",
+        "route",
+        "resolve",
+        "--model",
+        "codex/a",
+        "--fallback",
+        "codex/a",
+    ])?;
+    assert_eq!(code(&output), 0);
+    let resolved = support::json(&output)?;
+    assert_eq!(resolved["data"]["adapter"], "codex");
+    assert_eq!(resolved["data"]["model"], "a");
+    assert_eq!(resolved["data"]["alternatives"], serde_json::json!([]));
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(stderr.contains("ROUTING_ALTERNATIVES"), "{stderr}");
+    assert!(!rig.home.join("provider-started").exists());
+    rig.assert_v1_root_untouched()?;
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#parsing
 fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     let rig = rig()?.without_state()?;
     for args in [
@@ -1213,14 +1240,6 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
             "codex/a",
             "--fallback",
             "claude/a,agy/b,opencode/c",
-        ],
-        vec![
-            "route",
-            "resolve",
-            "--model",
-            "codex/a",
-            "--fallback",
-            "codex/a",
         ],
         vec!["route", "resolve", "--route", "missing"],
         vec!["route", "resolve", "missing-route"],

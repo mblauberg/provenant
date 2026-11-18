@@ -1184,7 +1184,9 @@ fn account_reason<'q>(
     let mut reason = availability_reason(Some(availability), context).filter(|r| {
         !matches!(
             r,
-            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+            RouteExclusionReason::StaleAvailability
+                | RouteExclusionReason::UnknownAvailability
+                | RouteExclusionReason::UnknownAccount
         )
     });
     // Missing access means preparation did not establish confinement. Only an
@@ -1281,6 +1283,21 @@ fn account_reason<'q>(
             .blocks()
     {
         reason = Some(RouteExclusionReason::UnknownAvailability);
+    }
+    // Identity uncertainty is advisory by default, but must not mask an
+    // independent credential, confinement or authority refusal.
+    if reason.is_none()
+        && availability.account_key.is_none()
+        && context
+            .config
+            .launch_policy
+            .check(
+                "QUOTA_IDENTITY_UNKNOWN",
+                provenant_records::policy::Facts::violation("account identity unknown"),
+            )
+            .blocks()
+    {
+        reason = Some(RouteExclusionReason::UnknownAccount);
     }
     (reason, quota)
 }
@@ -1610,6 +1627,32 @@ fn admissible<'c>(
             effort: effort.to_owned(),
             support: format!("{} takes no effort control", spec.name),
         });
+    }
+    if entry.is_none()
+        && let Some(effort) = effort
+    {
+        context.config.launch_policy.warn_or(
+            "ROUTING_EFFORT_UNCATALOGUED",
+            provenant_records::policy::Facts::violation(
+                "effort unverifiable for uncatalogued model; passed through",
+            ),
+            |_| {
+                let nearest = context.catalogue.nearest_models(model);
+                let support = if nearest.is_empty() {
+                    "model is not in the catalogue; no effort controls are recorded".to_owned()
+                } else {
+                    format!(
+                        "model is not in the catalogue; nearest catalogued IDs: {}",
+                        nearest.join(", ")
+                    )
+                };
+                RoutingError::UnsupportedEffort {
+                    model: model.as_str().to_owned(),
+                    effort: effort.to_owned(),
+                    support,
+                }
+            },
+        )?;
     }
     if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
@@ -2490,11 +2533,19 @@ fn resolve_inner(
             .policy,
         request.intent,
     )?;
-    if models.contains(&primary_model) {
-        return Err(RoutingError::Alternatives);
-    }
+    let drop_primary = if models.contains(&primary_model) {
+        context.config.launch_policy.warn_or(
+            "ROUTING_ALTERNATIVES",
+            provenant_records::policy::Facts::violation("alternative equals primary; dropped"),
+            |_| RoutingError::Alternatives,
+        )?;
+        true
+    } else {
+        false
+    };
     let alternatives = models
         .iter()
+        .filter(|model| !drop_primary || *model != &primary_model)
         .filter(|model| excluded_members.family_reason(model).is_none())
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         // Fallbacks are automatic alternatives even when attached to a model

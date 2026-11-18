@@ -293,40 +293,64 @@ impl Admission<'_> {
     /// persisted refusals.
     /// Partial coverage is advisory; explicit provider refusals are checked separately.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
-        match route.readiness {
+        self.check_with_policy(route, self.policy)
+    }
+
+    /// Check with explicit policy enforcement for non-boundary quota rules.
+    pub fn check_with_policy(
+        &self,
+        route: &ResolvedRoute,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<(), QuotaError> {
+        let ready = matches!(route.readiness,
             RouteReadiness::Ready {
                 expires_unix_seconds,
                 ..
-            } if expires_unix_seconds > self.now_unix_seconds => {}
-            _ => return Err(QuotaError::Refused("provider readiness")),
+            } if expires_unix_seconds > self.now_unix_seconds
+        );
+        if !ready {
+            policy.warn_or(
+                "QUOTA_READINESS_STALE",
+                provenant_records::policy::Facts::violation("provider readiness expired"),
+                |_| QuotaError::Refused("provider readiness"),
+            )?;
         }
-        let key = route
-            .account_key
-            .as_ref()
-            .ok_or(QuotaError::Refused("account identity unknown"))?;
-        if let Some(block) = self.account_block(&route.adapter, key, &route.model)? {
-            return Err(QuotaError::Refused(block.repair()));
-        }
-        let record = self
-            .records
-            .iter()
-            .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
-        let snapshot = self.fresh_snapshot(&route.adapter, record);
-        if let Some(snapshot) = snapshot {
-            if snapshot.status == QuotaStatus::AuthRequired {
-                return Err(QuotaError::Refused(
-                    "authentication required; sign in to the selected account",
-                ));
+        let key = match route.account_key.as_ref() {
+            Some(key) => Some(key),
+            None => {
+                policy.warn_or(
+                    "QUOTA_IDENTITY_UNKNOWN",
+                    provenant_records::policy::Facts::violation("account identity unknown"),
+                    |_| QuotaError::Refused("account identity unknown"),
+                )?;
+                None
             }
-            if partial_headroom(
-                snapshot,
-                &route.adapter,
-                &route.model,
-                self.pools,
-                self.now_unix_seconds,
-            ) == PartialHeadroom::Exhausted
-            {
-                return Err(QuotaError::AllowanceExhausted);
+        };
+        if let Some(key) = key {
+            if let Some(block) = self.account_block(&route.adapter, key, &route.model)? {
+                return Err(QuotaError::Refused(block.repair()));
+            }
+            let record = self
+                .records
+                .iter()
+                .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
+            let snapshot = self.fresh_snapshot(&route.adapter, record);
+            if let Some(snapshot) = snapshot {
+                if snapshot.status == QuotaStatus::AuthRequired {
+                    return Err(QuotaError::Refused(
+                        "authentication required; sign in to the selected account",
+                    ));
+                }
+                if partial_headroom(
+                    snapshot,
+                    &route.adapter,
+                    &route.model,
+                    self.pools,
+                    self.now_unix_seconds,
+                ) == PartialHeadroom::Exhausted
+                {
+                    return Err(QuotaError::AllowanceExhausted);
+                }
             }
         }
         Ok(())
@@ -683,6 +707,7 @@ mod admission_tests {
         record
     }
     #[test]
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
     fn stale_availability_warning_does_not_bypass_exhaustion() {
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
@@ -714,7 +739,19 @@ mod admission_tests {
             availability_ref: "fixture".into(),
             expires_unix_seconds: 950,
         };
-        assert!(admission(&[]).check(&route).is_err());
+        assert!(admission(&[]).check(&route).is_ok());
+        assert!(admission(&exhausted).check(&route).is_err());
+        assert!(admission(&auth).check(&route).is_err());
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(
+            &[(
+                "QUOTA_READINESS_STALE".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]
+            .into(),
+            provenant_records::policy::Source::Project,
+        );
+        assert!(admission(&[]).check_with_policy(&route, &strict).is_err());
     }
     #[test]
     fn account_mismatch_blocks_until_identity_verifies_again() {
@@ -1517,6 +1554,53 @@ mod admission_tests {
             .check(&r)
             .is_ok()
         );
+    }
+
+    #[test]
+    fn stale_readiness_and_unknown_identity_warn_or_refuse_by_policy() {
+        use provenant_records::policy::{Policy, Source, Strength};
+
+        let default_policy = Policy::default();
+        let admission = Admission {
+            policy: &default_policy,
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 1000,
+            records: &[],
+            pools: &[],
+        };
+        let mut stale = route();
+        stale.readiness = RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 500,
+        };
+        assert!(admission.check(&stale).is_ok());
+
+        let mut strict = Policy::default();
+        strict.overlay(
+            &std::collections::BTreeMap::from([("QUOTA_READINESS_STALE".into(), Strength::Refuse)]),
+            Source::Project,
+        );
+        assert!(matches!(
+            admission.check_with_policy(&stale, &strict),
+            Err(QuotaError::Refused("provider readiness"))
+        ));
+
+        let mut unknown = route();
+        unknown.account_key = None;
+        assert!(admission.check(&unknown).is_ok());
+        strict.overlay(
+            &std::collections::BTreeMap::from([(
+                "QUOTA_IDENTITY_UNKNOWN".into(),
+                Strength::Refuse,
+            )]),
+            Source::Project,
+        );
+        assert!(matches!(
+            admission.check_with_policy(&unknown, &strict),
+            Err(QuotaError::Refused("account identity unknown"))
+        ));
     }
 }
 

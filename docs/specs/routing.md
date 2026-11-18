@@ -39,7 +39,10 @@ the accepted classification. This does not classify arbitrary later file access.
 ## One resolution, bounded alternatives
 
 Resolution selects a route and bounded, ordered eligible alternatives from one
-snapshot. Preparation fallback follows [retry ownership](retry-owner.md).
+snapshot. An alternative equal to the primary model is dropped with a
+`ROUTING_ALTERNATIVES` warning by default; strict policy refuses it. Malformed
+choices, invalid efforts and duplicate entries within the fallback list remain
+usage errors. Preparation fallback follows [retry ownership](retry-owner.md).
 
 - Why: the fallback plan is decided once and visible.
 
@@ -205,7 +208,10 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. A continuation retains the applied provider and optional account key
+refused. An availability record without an account key may proceed with a
+warning by default; strict `QUOTA_IDENTITY_UNKNOWN` policy excludes it.
+Independent credential, confinement and authority refusals still apply.
+A continuation retains the applied provider and optional account key
 as a pair. A missing provider, or a retained key without an account for that
 provider, is refused; a same-key account from another provider is never
 substituted. An absent applied account key remains absent. Credential roots
