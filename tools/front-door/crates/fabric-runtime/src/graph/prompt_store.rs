@@ -216,10 +216,10 @@ pub(super) fn collect(
         continuation: None,
     };
     let mut entries = directory.entries()?;
-    if let Some(position) = resume {
-        if entries.seek(position).is_err() {
-            entries = directory.entries()?;
-        }
+    if let Some(position) = resume
+        && entries.seek(position).is_err()
+    {
+        entries = directory.entries()?;
     }
     loop {
         let before = entries.position()?;

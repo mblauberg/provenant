@@ -885,56 +885,47 @@ impl FileJournal {
         }) {
             return Self::collect_unreferenced_artifacts(root, project, control, clock);
         }
-        if cursor
+        if let Some(cursor) = cursor
             .as_ref()
-            .is_some_and(|cursor| cursor.phase == "checkpoint-prompts")
+            .filter(|cursor| cursor.phase == "checkpoint-prompts")
+            && let Some(id) = cursor.id.as_deref()
         {
-            if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id.as_deref()) {
-                let candidate = control.start_at.map_or_else(
-                    || directory.anchored_path().join(checkpoint_file_name(id)),
-                    std::path::Path::to_path_buf,
+            let candidate = control.start_at.map_or_else(
+                || directory.anchored_path().join(checkpoint_file_name(id)),
+                std::path::Path::to_path_buf,
+            );
+            let cleaned = Self::collect_unreferenced_id(
+                root,
+                project,
+                &directory,
+                id,
+                &candidate,
+                control,
+                clock,
+                cursor
+                    .nested_directory
+                    .matches(&directory)
+                    .then_some(cursor.nested),
+            )?;
+            report.removed = report
+                .removed
+                .saturating_add(usize::from(cleaned.recovered));
+            if let Some(path) = cleaned.interrupted_at {
+                let next = cleaned.prompt_cookie.map_or_else(
+                    || GraphCollectionCursor::cleanup(id, cursor.cookie, &directory),
+                    |nested| {
+                        GraphCollectionCursor::nested(
+                            "checkpoint-prompts",
+                            id,
+                            cursor.cookie,
+                            nested,
+                            &directory,
+                            GraphDirectoryStamp::read(&directory),
+                        )
+                    },
                 );
-                let cleaned = Self::collect_unreferenced_id(
-                    root,
-                    project,
-                    &directory,
-                    id,
-                    &candidate,
-                    control,
-                    clock,
-                    cursor
-                        .as_ref()
-                        .unwrap()
-                        .nested_directory
-                        .matches(&directory)
-                        .then_some(cursor.as_ref().unwrap().nested),
-                )?;
-                report.removed = report
-                    .removed
-                    .saturating_add(usize::from(cleaned.recovered));
-                if let Some(path) = cleaned.interrupted_at {
-                    let next = cleaned.prompt_cookie.map_or_else(
-                        || {
-                            GraphCollectionCursor::cleanup(
-                                id,
-                                cursor.as_ref().unwrap().cookie,
-                                &directory,
-                            )
-                        },
-                        |nested| {
-                            GraphCollectionCursor::nested(
-                                "checkpoint-prompts",
-                                id,
-                                cursor.as_ref().unwrap().cookie,
-                                nested,
-                                &directory,
-                                GraphDirectoryStamp::read(&directory),
-                            )
-                        },
-                    );
-                    interrupt_graph_collection(&mut report, path, next);
-                    return Ok(report);
-                }
+                interrupt_graph_collection(&mut report, path, next);
+                return Ok(report);
             }
         }
         let mut entries = directory.entries()?;
@@ -943,12 +934,9 @@ impl FileJournal {
                 cursor.phase.as_str(),
                 "checkpoints" | "cleanup" | "checkpoint-scratch" | "checkpoint-prompts"
             )
-        }) {
-            if cursor.directory.matches(&directory) && entries.seek(cursor.cookie).is_err() {
-                entries = directory.entries()?;
-            } else if !cursor.directory.matches(&directory) {
-                entries = directory.entries()?;
-            }
+        }) && (!cursor.directory.matches(&directory) || entries.seek(cursor.cookie).is_err())
+        {
+            entries = directory.entries()?;
         }
         loop {
             let before = entries.position()?;
@@ -975,7 +963,7 @@ impl FileJournal {
             let journal = match Self::open(
                 root,
                 project,
-                &id,
+                id,
                 WaitBudget::nonblocking(clock.mono_now()),
                 cancel,
                 clock,
@@ -985,7 +973,7 @@ impl FileJournal {
                 Err(error) if error.is_unreadable() => continue,
                 Err(error) => return Err(error),
             };
-            let Some(stored) = load_checkpoint(&journal.directory, &id)? else {
+            let Some(stored) = load_checkpoint(&journal.directory, id)? else {
                 continue;
             };
             let checkpoint = &stored.checkpoint;
@@ -1004,7 +992,7 @@ impl FileJournal {
             let metadata = journal
                 .directory
                 .metadata_at(&name, false)
-                .map_err(|error| JournalError::from(error).for_graph(&id))?;
+                .map_err(|error| JournalError::from(error).for_graph(id))?;
             if metadata.modified_ns >= before_ns {
                 continue;
             }
@@ -1058,14 +1046,14 @@ impl FileJournal {
                 }
                 journal.directory.unlink(&name)?;
                 report.removed = report.removed.saturating_add(1);
-                let prompts = prompt_store::collect(&journal.directory, &id, control, None)?;
+                let prompts = prompt_store::collect(&journal.directory, id, control, None)?;
                 if prompts.interrupted_at.is_some() {
                     interrupt_graph_collection(
                         &mut report,
                         path.clone(),
                         GraphCollectionCursor::nested(
                             "checkpoint-prompts",
-                            &id,
+                            id,
                             before,
                             prompts.continuation.unwrap_or_default(),
                             &directory,
@@ -1074,12 +1062,12 @@ impl FileJournal {
                     );
                     return Ok(());
                 }
-                for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
+                for sidecar in [unreadable_marker_name(id), advance_error_name(id)] {
                     if !control.should_continue() {
                         interrupt_graph_collection(
                             &mut report,
                             path.clone(),
-                            GraphCollectionCursor::orphan_cleanup(&id, before, false, &directory),
+                            GraphCollectionCursor::orphan_cleanup(id, before, false, &directory),
                         );
                         return Ok(());
                     }
@@ -1094,11 +1082,11 @@ impl FileJournal {
                     interrupt_graph_collection(
                         &mut report,
                         path.clone(),
-                        GraphCollectionCursor::orphan_cleanup(&id, before, false, &directory),
+                        GraphCollectionCursor::orphan_cleanup(id, before, false, &directory),
                     );
                     return Ok(());
                 }
-                remove_pending_marker(&markers, &id)?;
+                remove_pending_marker(&markers, id)?;
                 journal
                     .directory
                     .sync()
@@ -1108,7 +1096,7 @@ impl FileJournal {
                     interrupt_graph_collection(
                         &mut report,
                         path.clone(),
-                        GraphCollectionCursor::orphan_cleanup(&id, before, false, &directory),
+                        GraphCollectionCursor::orphan_cleanup(id, before, false, &directory),
                     );
                     return Ok(());
                 }
@@ -1117,7 +1105,7 @@ impl FileJournal {
                     .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
                 Ok(())
             })()
-            .map_err(|error| error.for_graph(&id))?;
+            .map_err(|error| error.for_graph(id))?;
             if report.interrupted_at.is_some() {
                 return Ok(report);
             }
@@ -1170,62 +1158,56 @@ impl FileJournal {
         if matches!(
             phase,
             "orphan-cleanup" | "pending-cleanup" | "orphan-prompts" | "pending-prompts"
-        ) {
-            if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id.as_deref()) {
-                let outer_path = control
-                    .start_at
-                    .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| directory.anchored_path().join(format!("graph-{id}.lock")));
-                let prompt_resume = matches!(phase, "orphan-prompts" | "pending-prompts")
-                    .then(|| {
-                        let cursor = cursor.as_ref().expect("cursor exists");
-                        cursor
-                            .nested_directory
-                            .matches(&directory)
-                            .then_some(cursor.nested)
-                    })
-                    .flatten();
-                let cleaned = Self::collect_unreferenced_id(
-                    root,
-                    project,
-                    &directory,
-                    id,
-                    &outer_path,
-                    control,
-                    clock,
-                    prompt_resume,
-                )?;
-                report.removed = report
-                    .removed
-                    .saturating_add(usize::from(cleaned.recovered));
-                if let Some(path) = cleaned.interrupted_at {
-                    let next = cleaned.prompt_cookie.map_or_else(
-                        || {
-                            GraphCollectionCursor::orphan_cleanup(
-                                id,
-                                cursor.as_ref().unwrap().cookie,
-                                pending_phase,
-                                cursor_directory,
-                            )
-                        },
-                        |nested| {
-                            GraphCollectionCursor::nested(
-                                if pending_phase {
-                                    "pending-prompts"
-                                } else {
-                                    "orphan-prompts"
-                                },
-                                id,
-                                cursor.as_ref().unwrap().cookie,
-                                nested,
-                                cursor_directory,
-                                GraphDirectoryStamp::read(&directory),
-                            )
-                        },
-                    );
-                    interrupt_graph_collection(&mut report, path, next);
-                    return Ok(report);
-                }
+        ) && let Some(cursor) = cursor.as_ref()
+            && let Some(id) = cursor.id.as_deref()
+        {
+            let outer_path = control
+                .start_at
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| directory.anchored_path().join(format!("graph-{id}.lock")));
+            let prompt_resume = matches!(phase, "orphan-prompts" | "pending-prompts")
+                .then_some(cursor.nested)
+                .filter(|_| cursor.nested_directory.matches(&directory));
+            let cleaned = Self::collect_unreferenced_id(
+                root,
+                project,
+                &directory,
+                id,
+                &outer_path,
+                control,
+                clock,
+                prompt_resume,
+            )?;
+            report.removed = report
+                .removed
+                .saturating_add(usize::from(cleaned.recovered));
+            if let Some(path) = cleaned.interrupted_at {
+                let next = cleaned.prompt_cookie.map_or_else(
+                    || {
+                        GraphCollectionCursor::orphan_cleanup(
+                            id,
+                            cursor.cookie,
+                            pending_phase,
+                            cursor_directory,
+                        )
+                    },
+                    |nested| {
+                        GraphCollectionCursor::nested(
+                            if pending_phase {
+                                "pending-prompts"
+                            } else {
+                                "orphan-prompts"
+                            },
+                            id,
+                            cursor.cookie,
+                            nested,
+                            cursor_directory,
+                            GraphDirectoryStamp::read(&directory),
+                        )
+                    },
+                );
+                interrupt_graph_collection(&mut report, path, next);
+                return Ok(report);
             }
         }
 
@@ -1360,6 +1342,7 @@ impl FileJournal {
         Ok(report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_unreferenced_id(
         root: &StateRoot,
         project: ProjectId,
@@ -1374,7 +1357,7 @@ impl FileJournal {
         if !valid_identifier(id) {
             return Ok(result);
         }
-        let reserved = entry_exists(directory, &OsStr::new(&format!("graph-{id}.reserved")))?
+        let reserved = entry_exists(directory, OsStr::new(&format!("graph-{id}.reserved")))?
             || entry_exists(directory, &events::name(id))?;
         if !reserved || entry_exists(directory, &checkpoint_file_name(id))? {
             return Ok(result);
@@ -2062,20 +2045,11 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
 
 /// Remove scratch documents equal to this graph's retained document. The
 /// execution directory may already have been removed.
+#[derive(Default)]
 struct ScratchCollection {
     interrupted: bool,
     cookie: Option<provenant_os::fs::DirectoryPosition>,
     directory: GraphDirectoryStamp,
-}
-
-impl Default for ScratchCollection {
-    fn default() -> Self {
-        Self {
-            interrupted: false,
-            cookie: None,
-            directory: GraphDirectoryStamp::default(),
-        }
-    }
 }
 
 fn collect_scratch_documents(
