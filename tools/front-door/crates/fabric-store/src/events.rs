@@ -1,5 +1,5 @@
 use crate::*;
-use provenant_records::RecordHeader;
+use provenant_records::{RecordHeader, lane_contract::ObservationEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -9,6 +9,7 @@ pub enum EventKind {
     MailRead,
     RunChanged,
     CustodyChanged,
+    Observation,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {
@@ -79,7 +80,83 @@ pub(crate) fn event(
         at,
     }
 }
+pub(crate) fn append_observation(
+    tx: &rusqlite::Connection,
+    observation: &ObservationEvent,
+    at: WallTime,
+) -> Result<i64> {
+    if observation.cursor.seq != 0 {
+        return Err(Error::Invalid("unassigned observation cursor"));
+    }
+    text(&observation.id, "observation identity")?;
+    let detail = String::from_utf8(encode(observation)?)
+        .map_err(|_| Error::Invalid("observation encoding"))?;
+    let record = event(
+        observation.cursor.project,
+        None,
+        EventKind::Observation,
+        None,
+        detail,
+        at,
+    );
+    let dedup = format!("observation:{}", observation.id);
+    append(tx, &record, Some(&dedup))
+}
 impl Store {
+    /// Index a source observation. The source supplies a stable identity and
+    /// timestamp; the store assigns the project cursor on replay.
+    pub fn append_observation(
+        &self,
+        observation: &ObservationEvent,
+        at: WallTime,
+        request: &Request<'_>,
+    ) -> Result<i64> {
+        self.write(request, |tx| append_observation(tx, observation, at))
+    }
+
+    /// Latest project observation cursor, captured before a subscriber reconciles.
+    pub fn observation_tip(&self, project: ProjectId, request: &Request<'_>) -> Result<i64> {
+        request.check()?;
+        Ok(self.db.query_row(
+            "SELECT coalesce(max(seq),0) FROM events WHERE project=?1 AND json_extract(CAST(record AS TEXT),'$.kind')='observation'",
+            params![project.to_string()], |row| row.get(0),
+        )?)
+    }
+
+    /// Replay only observation records, in store sequence order. Repeating a
+    /// read from the last acknowledged cursor can redeliver the last event.
+    pub fn observations(
+        &self,
+        project: ProjectId,
+        after: i64,
+        limit: u64,
+        request: &Request<'_>,
+    ) -> Result<Page<ObservationEvent>> {
+        request.check()?;
+        let limit = page(after, limit)?;
+        let mut statement = self.db.prepare(
+            "SELECT substr(record,1,?4),seq FROM events WHERE project=?1 AND seq>?2 AND json_extract(CAST(record AS TEXT),'$.kind')='observation' ORDER BY seq LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![project.to_string(), after, limit, MAX_RECORD_READ_BYTES],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let rows = bounded_rows(rows, |bytes, seq| {
+            let record: EventRecord = decode(&bytes)?;
+            let mut observation: ObservationEvent = decode(record.detail.as_bytes())?;
+            if observation.cursor.project != project || observation.cursor.seq != 0 {
+                return Err(Error::Invalid("stored observation cursor"));
+            }
+            observation.cursor.seq = seq;
+            Ok(observation)
+        })?;
+        Ok(Page {
+            extra: Default::default(),
+            items: rows.items,
+            truncated: rows.truncated,
+        })
+    }
+
     pub fn note(
         &self,
         record: &EventRecord,

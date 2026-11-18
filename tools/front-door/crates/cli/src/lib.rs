@@ -32,6 +32,7 @@ pub mod install;
 pub mod limits;
 mod metadata;
 pub mod mileage;
+pub mod notes;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
@@ -2983,6 +2984,21 @@ mod tests {
         }
         assert!(catalog.error_codes.iter().all(|c| !c.summary.is_empty()));
     }
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn events_accepts_a_named_consumer_and_rejects_an_ambiguous_start() {
+        assert!(matches!(
+            parsed(&["events", "--follow", "--json", "--consumer", "chair"]),
+            ParseOutcome::Invocation(_)
+        ));
+        invalid(&["events", "--consumer", "chair", "--from", "1"]);
+        assert!(matches!(
+            parsed(&["events", "--from", "0"]),
+            ParseOutcome::Invocation(_)
+        ));
+        invalid(&["events", "--from", "-1"]);
+    }
+
     #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [

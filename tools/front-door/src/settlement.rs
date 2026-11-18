@@ -421,7 +421,53 @@ fn react(
             }
         }
     }
+    if !reaction.observation_done {
+        match append_observation(reaction, roots) {
+            Ok(()) => reaction.observation_done = true,
+            Err(error) => {
+                first.get_or_insert(error);
+            }
+        }
+    }
     first.map_or(Ok(()), Err)
+}
+
+/// Index the frozen settlement. Replays use the same identity and payload.
+fn append_observation(reaction: &Reaction, roots: &Roots) -> Result<(), Error> {
+    use provenant_records::lane_contract::{
+        Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = Store::open(&roots.state, &request)?;
+    let event = ObservationEvent {
+        header: provenant_records::RecordHeader::V1,
+        id: format!("lane-settlement:{}", reaction.attempt),
+        cursor: ObservationCursor {
+            project: reaction.project,
+            seq: 0,
+        },
+        lineage: ObservationLineage {
+            attempt: Some(reaction.attempt),
+            parent_attempt: None,
+            work: None,
+            extra: Default::default(),
+        },
+        kind: ObservationKind::LaneLifecycle,
+        coverage: Coverage::Partial,
+        detail: serde_json::json!({"state":"settled", "notice": reaction.notice}),
+        extra: Default::default(),
+    };
+    store.append_observation(
+        &event,
+        provenant_core::WallTime::from_micros(reaction.finished_micros)?,
+        &request,
+    )?;
+    Ok(())
 }
 
 /// Post the frozen notice to the dispatcher's inbox. Quiet cases and a
@@ -576,6 +622,7 @@ mod tests {
             notice_done: false,
             log_done: false,
             ledger_done: false,
+            observation_done: false,
         }
     }
 
@@ -600,6 +647,29 @@ mod tests {
             .into_iter()
             .map(|delivery| delivery.message.body)
             .collect()
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn settlement_replay_indexes_one_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp.path().canonicalize().unwrap());
+        let reaction = reaction("settled fixture", None);
+        append_observation(&reaction, &roots).unwrap();
+        append_observation(&reaction, &roots).unwrap();
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let request = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = Store::open(&roots.state, &request).unwrap();
+        let page = store
+            .observations(reaction.project, 0, 100, &request)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].lineage.attempt, Some(reaction.attempt));
+        assert_eq!(page.items[0].detail["state"], "settled");
     }
 
     #[test]
