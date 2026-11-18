@@ -24,3 +24,14 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+
+  # Keep the single Rust toolchain pin current.
+  - package-ecosystem: rust-toolchain
+    directory: /tools/front-door
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies

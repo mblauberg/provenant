@@ -902,6 +902,14 @@ impl Registry<'_> {
             decoded.terminal_cause = Some(run::TerminalCause::ProviderCaptureDefect { line });
             decoded
         };
+        // Only lost framing is missing evidence. A complete frame that reports a
+        // provider failure, or a stream past its bound, is a definite outcome.
+        let provider_failed = |error: &provenant_providers::ProviderError| {
+            failed(&provenant_confinement::redact::bounded_line(
+                &error.to_string(),
+                512,
+            ))
+        };
         let Some(adapter) = REGISTRY
             .iter()
             .find(|r| Some(r.adapter.id()) == route.provider.as_deref())
@@ -950,9 +958,13 @@ impl Registry<'_> {
                     decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
                     return Ok(decoded);
                 }
-                Err(error) => {
+                Err(
+                    error @ (provenant_providers::ProviderError::Malformed
+                    | provenant_providers::ProviderError::IncompleteFrame),
+                ) => {
                     return Ok(capture_defect(index + 1, &error.to_string()));
                 }
+                Err(error) => return Ok(provider_failed(&error)),
             }
         }
         // The prepared route key was checked against the provider identity port.
@@ -992,13 +1004,25 @@ impl Registry<'_> {
                 decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
                 return Ok(decoded);
             }
-            Err(error) => {
+            Err(
+                error @ (provenant_providers::ProviderError::Malformed
+                | provenant_providers::ProviderError::IncompleteFrame),
+            ) => {
                 return Ok(capture_defect(
                     stdout.split_inclusive(|byte| *byte == b'\n').count(),
                     &error.to_string(),
                 ));
             }
+            Err(error) => return Ok(provider_failed(&error)),
         };
+        if outcome.status() == OutcomeStatus::Malformed && !outcome.framing_loss() {
+            return Ok(failed(&provenant_confinement::redact::bounded_line(
+                outcome
+                    .protocol_error()
+                    .unwrap_or("provider protocol is malformed"),
+                512,
+            )));
+        }
         if outcome.status() == OutcomeStatus::Malformed {
             return Ok(capture_defect(
                 stdout.split_inclusive(|byte| *byte == b'\n').count(),
@@ -1649,7 +1673,7 @@ fn attach_freshness(
         .date();
     let freshness = prices.freshness(today);
     if freshness.stale {
-        human.push_str(&format!(
+        human.insert_str(0, &format!(
             "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
             freshness.age_days,
             freshness.reviewed_at,

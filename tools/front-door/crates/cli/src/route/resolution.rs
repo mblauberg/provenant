@@ -238,6 +238,7 @@ pub(super) fn snapshot_governs(adapter: &str, plan: Option<&str>, model: &ModelI
 }
 pub(super) fn quota_observations(
     catalogue: &Catalogue,
+    config: &provenant_routing::RoutingConfig,
     availability: &[AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
     policies: &[provenant_quota::QuotaPolicy],
@@ -262,10 +263,11 @@ pub(super) fn quota_observations(
             .checked_add(i64::try_from(ttl).map_err(|_| provenant_quota::QuotaError::TimeRange)?)
             .ok_or(provenant_quota::QuotaError::TimeRange)?;
         let mut models: BTreeSet<ModelId> = catalogue
-            .models()
-            .iter()
-            .filter(|entry| entry.model.adapter() == adapter)
-            .map(|entry| entry.model.clone())
+            .pool_models()
+            .chain(config.pools.values().flatten().map(|member| &member.model))
+            .chain(config.routes.values().map(|route| &route.model))
+            .filter(|model| model.adapter() == adapter)
+            .cloned()
             .collect();
         for observed_model in availability
             .iter()
@@ -468,7 +470,7 @@ pub(super) fn with_context<T>(
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     // A lane holds no grant on the shared quota store: route without a
     // snapshot there rather than refusing the nested dispatch.
     let mut quota_records = match crate::quota::read_cache(roots) {
@@ -537,6 +539,7 @@ pub(super) fn with_context<T>(
     }
     let quota = quota_observations(
         &catalogue,
+        &config,
         availability,
         &quota_records,
         &policies,
@@ -688,7 +691,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
     selection_evidence: Option<&provenant_routing::SelectionEvidence>,
     launch_policy: Option<&provenant_records::policy::Policy>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     let (excluded_families, required, preferred) = match excluded_families {
         Some((families, required, preferred)) => (Some(families), required, preferred),
         None => (None, false, &[][..]),
@@ -1123,7 +1126,7 @@ pub(crate) fn check_dispatch_candidate(
     registry: &[provenant_providers::Registration],
     policy: &provenant_records::policy::Policy,
 ) -> Result<(), EdgeError> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = crate::model_discovery::effective(roots)?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
     let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let domains = resolved_config.domains;
@@ -1320,7 +1323,7 @@ pub fn depletion_facts(
     routing_config.provider_scopes = resolved.providers.clone();
     routing_config.explicit_provider_model_scopes =
         explicit_provider_model_scopes(&resolved.origins);
-    let catalogue = Catalogue::bundled().map_err(|error| text(&error))?;
+    let catalogue = crate::model_discovery::effective(roots).map_err(|error| text(&error))?;
     let route = stopped
         .applied_route
         .as_ref()

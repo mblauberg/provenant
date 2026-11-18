@@ -252,8 +252,10 @@ that fence is not session-readiness evidence. The guardian seals this live
 conflict separately from the bounded stdout tail, so a failed ledger write or a
 discarded head frame cannot erase it. Oversized frames, undecodable
 delimiter-complete frames, unreadable output, or drain-truncated live output
-also seal incomplete identity evidence; settlement leaves that result
-unsettled instead of admitting a same-session continuation. The guardian
+also seal incomplete identity evidence. By default settlement warns with the
+policy source and uses the observed exit and result; `policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE`
+can suppress the warning or refuse settlement and continuation. An observed
+identity conflict remains fatal at every setting. The guardian
 immediately routes a live identity conflict through its existing protocol
 rejection stop path while preserving the separate conflict evidence for
 settlement. It separately records an incomplete JSON record in the final bytes
@@ -275,7 +277,7 @@ observed child session on that same authorised route; it never claims to have
 resumed the predecessor's provider session. Optional model telemetry keeps the configured identity policy:
 missing telemetry alone does not negate the session acknowledgement, while a
 known contradiction fences continuation. A later terminal session mismatch or
-incomplete session/capture proof changes that
+incomplete session/capture proof under strict policy changes that
 interim status to `not_continued`; Run retains the earlier live acknowledgement
 fact with the terminal disposition. Terminal matching evidence finalises
 `resumed`. The disposition is durable in Run even if child evidence is later
@@ -374,7 +376,7 @@ uses `pr_slow_interval_ms` while checks run and returns to `pr_interval_ms`
 within `pr_near_end_window_ms` of the median duration for that check name,
 learned from the latest 64 cached commit pages in the repository observer.
 These settings change request cadence only; they do not change a gate verdict.
-Their sources are shown by `provenant config show`.
+Their sources are shown by `provenant config show --full`.
 - Why: deterministic decisions need durable evidence without a launch.
 
 ### Bounded loops

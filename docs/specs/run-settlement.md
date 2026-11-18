@@ -16,8 +16,11 @@ import refusal retains private Git for recovery.
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`
-and warns. A tip that descends from none of them settles `failed` with a typed
-`LANE_TIP_UNROOTED` cause naming the tip and launch base. That refusal is final:
+and warns. A tip that descends from none of them warns by default; strict
+`LANE_TIP_UNROOTED` policy refuses it with a typed cause naming the tip and
+launch base. When publication displaces a branch tip that is not an ancestor of
+the new tip, the same Git ref transaction retains it at
+`refs/provenant/recovery/<displaced-oid>`. That refusal is final:
 its inputs do not change on retry, so settlement seals it like an exhausted
 import and never retries it. Refusals that depend on a moving branch stay retryable.
 - Why: rebasing a lane onto the branch it feeds is legitimate, and a refusal that

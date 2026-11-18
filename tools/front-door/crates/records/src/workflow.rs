@@ -778,7 +778,7 @@ mod tests {
                 actor_id: ActorId::from_bytes([5; 16]),
                 route: Box::new(RouteProvenance::ChairAttested {
                     extra: Default::default(),
-                    route: "codex/gpt-6.1-sol@high".into(),
+                    route: "codex/fixture@high".into(),
                     tier: ModelTier::Principal,
                     declared_family: None,
                     evidence: approval().evidence,

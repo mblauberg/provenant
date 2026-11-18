@@ -10,7 +10,7 @@ The outward contract is declared in `crates/cli/src/external_contract.rs`, cover
 The [consumer contract](consumer-contract.md) describes output and variable tiers; command names may change freely. Direct internal-state readers are unsupported.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
-Repository CI's `select-macos-checks` selects native work for unknown paths and Git failures; only explicitly classified Linux-only paths skip macOS while retaining Rust. `flaky-quarantine` validates filter entries before tests run, and `check-ci-status` requires a separate inventory validation: both platform lists when macOS is selected, Linux otherwise. An identity absent from the available lists blocks CI. Native evidence remains required whenever macOS is selected.
+Repository CI selection, its gate and quarantine validation are specified in [CI](ci.md).
 
 ## Targets
 
@@ -163,6 +163,18 @@ Transfer to a named session is deferred.
 - Why: a chair acting on a listing must see work still running.
 
 ### Output references and bounded tails
+
+`result NAME[/NODE[#N]]` reads the current lane evidence in one call: state,
+branch, recorded head, handoff status and note, and verification reported in the
+handoff. `--json` retains the structured evidence and `--full` shows the complete
+human view. Missing or unavailable evidence is not proof of a check.
+`retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
+`gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
+idle age; scheduled GC uses the configured `gc.idle`.
+`templates show NAME` inspects an effective template. Configuration edits report the changed key, its effective value and source, and the previous value. A pre-launch refusal retains a redacted cause and names a retry command.
+
+`config show` summarises the effective configuration; `--full` shows its values
+and sources, and `--json` returns the structured configuration.
 
 For a graph with one non-composite top-level node, `output GRAPH` reads that
 node's newest settled attempt. For a composite root it reads the declared bounded result and

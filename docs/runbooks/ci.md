@@ -13,16 +13,29 @@ behaviour may still need real host facts.
 
 ## Pipeline
 
-`ci-status` is the single required check (also named in `MAINTAINING.md` and
-`github-workflow.md`). PRs select from the merge-base diff. Main and `land/**`
-pushes always run the full pipeline; missing Git history selects conservatively.
+Read the **Select CI suites** job summary for each suite's state, reason and
+evidence. `covered` means prior green evidence covers its inputs; `deferred`
+means the main-tier suite will run on main. Suites are declared in
+[`config/ci-suites.toml`](../../config/ci-suites.toml).
 
-The workflow and selectors define the jobs and their scope. Pull requests select
-affected crates and reverse dependencies; uncertain selection expands coverage.
-See [`select-affected-crate-tests`](../../scripts/select-affected-crate-tests)
-and [`select-macos-checks`](../../scripts/select-macos-checks). Prose changes
-still run documentation and harness checks. See [test tiers](test-tiers.md)
-for host verification.
+To move a slow Rust test to the main tier, put it in a module named
+`main_tier`; pull requests skip it and `main` and full runs execute it. The
+filter is `main_tests` on the `rust` suite in the manifest. An on-demand test
+that no CI tier runs uses `#[ignore = "reason"]` and is run by hand.
+
+To request every suite, add `ci:full` to the pull request and push a commit, or
+run `gh workflow run ci.yml --ref BRANCH -f tier=full`. When a `ci:red-main`
+issue opens, inspect its failed jobs and comparison, then fix forward. A PR that
+only repairs CI merges once `ci-status` is green.
+
+See the [CI spec](../specs/ci.md), [ADR 0041](../adr/0041-tiered-ci-from-green-evidence.md)
+and [test tiers](test-tiers.md).
+
+## Toolchain updates
+
+Dependabot updates the Rust toolchain pin. Its change requests a full suite run
+and auto-merges on green `ci-status`. New Clippy lints appear in the lint job
+summary; fix them on the Dependabot branch.
 
 ## Required native test inventory
 
@@ -73,8 +86,10 @@ and on PRs labelled `mutants`.
 
 Quarantine a flaky test in `tools/front-door/.config/quarantine.toml` only while
 it has an open issue, an owner and an expiry within 30 days. CI validates entries
-against the union of selected platform `cargo nextest list` inventories, excludes them from blocking partitions and reports
-their result in an advisory step. A Linux-only run cannot resolve a macOS-only entry and fails the inventory gate; run the full pipeline for that case. Remove the entry in the PR that fixes the test.
+against platform `cargo nextest list` inventories, excludes them from blocking
+partitions and reports their result in an advisory step. A PR without the native
+list validates with `--partial-inventory`; main validates strictly against both
+lists. Remove the entry in the PR that fixes the test.
 
 ## Tool downloads
 
