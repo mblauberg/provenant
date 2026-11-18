@@ -1516,6 +1516,7 @@ fn collect_impl(
                         &protected,
                         &mut report,
                         if dry { &preview_walk } else { &apply_walk },
+                        should_stop,
                     )?;
                     row.detail = Some("primary output retention only".into());
                     Ok(())
@@ -1524,6 +1525,11 @@ fn collect_impl(
                     row.detail = Some(error.to_string());
                 }
                 report.candidates.push(row);
+            }
+            if should_stop() || cancel.is_cancelled() {
+                cancel.cancel();
+                report.interrupted_at = Some(lane_index);
+                break;
             }
             continue;
         }
@@ -1652,6 +1658,7 @@ fn collect_impl(
                     &protected,
                     &mut report,
                     if dry { &preview_walk } else { &apply_walk },
+                    should_stop,
                 )?;
             }
             if policy.mode == CollectionMode::Outputs {
@@ -1870,6 +1877,7 @@ fn collect_impl(
                         &protected,
                         &mut report,
                         &preview_walk,
+                        should_stop,
                     )?;
                 }
                 drop(locked);
@@ -1903,6 +1911,7 @@ fn collect_impl(
                         &protected,
                         &mut report,
                         &apply_walk,
+                        should_stop,
                     )?;
                     Ok(())
                 };
@@ -2113,6 +2122,7 @@ fn collect_impl(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_lane_output(
     lane: &Path,
     repo: &VerifiedRepo,
@@ -2121,6 +2131,7 @@ fn collect_lane_output(
     protected: &ProtectedPaths,
     report: &mut WorktreeGcReport,
     preview_walk: &PreviewWalk,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<u64, WorktreeError> {
     let (output_bytes, output_errors) = {
         let output = if (policy.terminal)(lane) {
@@ -2139,6 +2150,7 @@ fn collect_lane_output(
             output,
             0,
             preview_walk,
+            should_stop,
         )?;
 
         let output_bytes = output[output_start..]
@@ -2370,19 +2382,31 @@ fn walk_output(
     report: &mut Vec<OutputEntry>,
     depth: usize,
     preview_walk: &PreviewWalk,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<(), FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: root.join(relative),
+        });
+    }
     preview_walk.step()?;
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
-    for name in entry_names(
+    for name in entry_names_until(
         directory,
         if preview_walk.enabled {
             20_000
         } else {
             100_000
         },
+        should_stop,
     )? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: root.join(relative),
+            });
+        }
         preview_walk.step()?;
         if name == ".git" {
             continue;
@@ -2416,7 +2440,7 @@ fn walk_output(
                     .ancestors()
                     .any(|ancestor| protected.ignored.contains(ancestor))
             {
-                let bytes = prune_output(directory, &name, policy, preview_walk)?;
+                let bytes = prune_output(directory, &name, policy, preview_walk, should_stop)?;
                 Ok(Some(bytes))
             } else {
                 walk_output(
@@ -2429,6 +2453,7 @@ fn walk_output(
                     report,
                     depth + 1,
                     preview_walk,
+                    should_stop,
                 )?;
                 Ok(None)
             }
@@ -2446,6 +2471,7 @@ fn walk_output(
                 .into(),
             }),
             Ok(None) => {}
+            Err(error @ FsError::Cancelled { .. }) => return Err(error),
             Err(error) => report.push(OutputEntry {
                 bytes: 0,
                 path: root.join(path),
@@ -2475,8 +2501,18 @@ fn contains_repository(directory: &Directory) -> Result<bool, FsError> {
 
 // Real time bounds the idle proof; explicit removal needs only repository protection.
 #[allow(clippy::disallowed_methods)]
-fn check_output_before(directory: &Directory, before: i128) -> Result<(), FsError> {
-    check_output_bounded(directory, before, &mut 1_000_000, std::time::Instant::now())
+fn check_output_before(
+    directory: &Directory,
+    before: i128,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<(), FsError> {
+    check_output_bounded(
+        directory,
+        before,
+        &mut 1_000_000,
+        std::time::Instant::now(),
+        should_stop,
+    )
 }
 
 fn check_output_bounded(
@@ -2484,11 +2520,12 @@ fn check_output_bounded(
     before: i128,
     remaining: &mut usize,
     started: std::time::Instant,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<(), FsError> {
     if before == i128::MAX {
-        return protect_repositories(directory, 0);
+        return protect_repositories(directory, 0, should_stop);
     }
-    if newest_bounded(directory, 0, remaining, started)? >= before {
+    if newest_bounded(directory, 0, remaining, started, should_stop)? >= before {
         return Err(FsError::RaceRefused {
             name: "recent output".into(),
         });
@@ -2496,7 +2533,16 @@ fn check_output_bounded(
     Ok(())
 }
 
-fn protect_repositories(directory: &Directory, depth: usize) -> Result<(), FsError> {
+fn protect_repositories(
+    directory: &Directory,
+    depth: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<(), FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: directory.current_path()?,
+        });
+    }
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2505,9 +2551,18 @@ fn protect_repositories(directory: &Directory, depth: usize) -> Result<(), FsErr
             name: ".git".into(),
         });
     }
-    for name in entry_names(directory, 100_000)? {
+    for name in entry_names_until(directory, 100_000, should_stop)? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: directory.current_path()?,
+            });
+        }
         if directory.metadata_at(&name, false)?.kind == FileKind::Directory {
-            protect_repositories(&directory.open_verified_directory(&name)?, depth + 1)?;
+            protect_repositories(
+                &directory.open_verified_directory(&name)?,
+                depth + 1,
+                should_stop,
+            )?;
         }
     }
     Ok(())
@@ -2518,7 +2573,13 @@ fn newest_bounded(
     depth: usize,
     remaining: &mut usize,
     started: std::time::Instant,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<i128, FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: directory.current_path()?,
+        });
+    }
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2528,7 +2589,12 @@ fn newest_bounded(
         });
     }
     let mut time = directory.metadata()?.modified_ns;
-    for name in entry_names(directory, 100_000)? {
+    for name in entry_names_until(directory, 100_000, should_stop)? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: directory.current_path()?,
+            });
+        }
         if *remaining == 0 || started.elapsed() >= std::time::Duration::from_secs(5) {
             return Err(FsError::EntryLimit { limit: 1_000_000 });
         }
@@ -2541,6 +2607,7 @@ fn newest_bounded(
                 depth + 1,
                 remaining,
                 started,
+                should_stop,
             )?);
         }
     }
@@ -2552,6 +2619,7 @@ fn prune_output(
     name: &OsStr,
     policy: &WorktreeGcPolicy<'_>,
     preview_walk: &PreviewWalk,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<u64, FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
@@ -2564,7 +2632,12 @@ fn prune_output(
         }
         return allocated_tree(&directory, 0, preview_walk);
     }
-    check_output_before(&directory, policy.written_before_ns)?;
+    check_output_before(&directory, policy.written_before_ns, should_stop)?;
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: directory.current_path()?,
+        });
+    }
     let staging_name = temporary_name()?;
     parent.mkdir(&staging_name, 0o700)?;
     let staging = parent.open_verified_directory(&staging_name)?;
@@ -2575,15 +2648,20 @@ fn prune_output(
         parent.rmdir(&staging_name)?;
         return Err(error);
     }
-    let removed = || -> Result<u64, FsError> {
+    let mut removed = || -> Result<u64, FsError> {
         let detached = payload.child(OsStr::new("output"))?;
         if !identity.same_identity(&detached.metadata()?) {
             return Err(FsError::RaceRefused { name: name.into() });
         }
-        check_output_before(detached.directory(), policy.written_before_ns)?;
+        check_output_before(detached.directory(), policy.written_before_ns, should_stop)?;
         let bytes = identity
             .allocated
-            .saturating_add(remove_output(&detached, 0)?);
+            .saturating_add(remove_output(&detached, 0, should_stop)?);
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: detached.directory().current_path()?,
+            });
+        }
         payload.rmdir(OsStr::new("output"))?;
         Ok(bytes)
     };
@@ -2615,7 +2693,37 @@ pub(super) fn dispose_archive_tree(tree: &PayloadTree) -> Result<(), FsError> {
     Ok(())
 }
 
-fn remove_output(tree: &PayloadTree, depth: usize) -> Result<u64, FsError> {
+fn entry_names_until(
+    directory: &Directory,
+    limit: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<Vec<OsString>, FsError> {
+    let mut names = Vec::new();
+    for entry in directory.entries()? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: directory.current_path()?,
+            });
+        }
+        let name = entry?;
+        if names.len() == limit {
+            return Err(FsError::EntryLimit { limit });
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn remove_output(
+    tree: &PayloadTree,
+    depth: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<u64, FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: tree.directory().current_path()?,
+        });
+    }
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2626,11 +2734,22 @@ fn remove_output(tree: &PayloadTree, depth: usize) -> Result<u64, FsError> {
     }
     let mut bytes = 0_u64;
     tree.make_writable()?;
-    for name in entry_names(tree.directory(), 100_000)? {
+    for name in entry_names_until(tree.directory(), 100_000, should_stop)? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: tree.directory().current_path()?,
+            });
+        }
         let metadata = tree.metadata_at(&name)?;
         bytes = bytes.saturating_add(metadata.allocated);
         if metadata.kind == FileKind::Directory {
-            bytes = bytes.saturating_add(remove_output(&tree.child(&name)?, depth + 1)?);
+            bytes =
+                bytes.saturating_add(remove_output(&tree.child(&name)?, depth + 1, should_stop)?);
+            if should_stop() {
+                return Err(FsError::Cancelled {
+                    path: tree.directory().current_path()?,
+                });
+            }
             tree.rmdir(&name)?;
         } else {
             tree.unlink(&name)?;
@@ -2694,6 +2813,7 @@ fn prepare_removal_before(
     };
     let mut output = Vec::new();
     let preview_walk = PreviewWalk::new(true);
+    let mut should_stop = || cancel.is_cancelled();
     walk_output(
         repo.root_dir(),
         repo.root_path(),
@@ -2704,6 +2824,7 @@ fn prepare_removal_before(
         &mut output,
         0,
         &preview_walk,
+        &mut should_stop,
     )?;
     if !clean_after_preview(
         context,
@@ -2748,6 +2869,7 @@ fn prepare_removal_before(
         &mut output,
         0,
         &preview_walk,
+        &mut should_stop,
     )?;
     Ok(())
 }

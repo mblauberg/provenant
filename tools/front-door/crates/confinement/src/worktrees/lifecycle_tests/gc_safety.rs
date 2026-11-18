@@ -258,6 +258,78 @@ fn gc_collects_output_from_created_and_primary_worktrees() -> Result<(), Box<dyn
 }
 
 #[test]
+fn gc_stops_output_deletion_and_resumes_remaining_files() -> Result<(), Box<dyn Error>> {
+    fn scenario(primary: bool) -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let lane = if primary {
+            list_for_gc(&context, &cancel())?
+                .into_iter()
+                .find(|lane| lane.primary)
+                .ok_or("primary")?
+        } else {
+            gc_owned_lane(&test, &context, "interrupted-output")?
+        };
+        let target = lane.path.join("target");
+        fs::create_dir(&target)?;
+        for name in ["one", "two"] {
+            fs::write(target.join(name), "regenerable")?;
+        }
+        let policy = WorktreeGcPolicy {
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Outputs,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".into()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+        };
+        let mut stopped = false;
+        let mut should_stop = || {
+            if !target.exists() {
+                stopped |= fs::read_dir(&lane.path).is_ok_and(|entries| {
+                    entries.flatten().any(|entry| {
+                        let output = entry.path().join("output");
+                        output.is_dir()
+                            && (!output.join("one").exists() || !output.join("two").exists())
+                    })
+                });
+            }
+            stopped
+        };
+        let cancelled = cancel();
+        let report = collect_from(
+            &context,
+            std::slice::from_ref(&lane),
+            &policy,
+            &cancelled,
+            0,
+            &mut should_stop,
+        )?;
+        assert_eq!(report.interrupted_at, Some(0));
+        assert!(target.is_dir());
+        assert_ne!(target.join("one").exists(), target.join("two").exists());
+        collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+        assert!(!target.exists());
+        Ok(())
+    }
+    scenario(false)?;
+    scenario(true)
+}
+
+#[test]
 fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn Error>> {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
