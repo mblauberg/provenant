@@ -1962,7 +1962,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             if !sweep_should_continue(&deadline, lease.as_ref()) {
                 let cursor = crate::gc_sweep::Cursor {
                     class: "project_selection".into(),
-                    project: Some(PathBuf::from(&project_key)),
+                    project: Some(PathBuf::from(project_key.as_str())),
                     candidate: None,
                     detail: None,
                 };
@@ -2012,7 +2012,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     if !sweep_should_continue(&deadline, lease.as_ref()) {
                         let cursor = crate::gc_sweep::Cursor {
                             class: "project_selection".into(),
-                            project: Some(PathBuf::from(&project_key)),
+                            project: Some(PathBuf::from(project_key.as_str())),
                             candidate: None,
                             detail: None,
                         };
@@ -2060,7 +2060,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 Err(_) if !sweep_should_continue(&deadline, lease.as_ref()) => {
                     let cursor = crate::gc_sweep::Cursor {
                         class: "project_selection".into(),
-                        project: Some(PathBuf::from(&project_key)),
+                        project: Some(PathBuf::from(project_key.as_str())),
                         candidate: None,
                         detail: None,
                     };
