@@ -36,8 +36,9 @@ and measurement implementations. Preview bounds cache measurement and may omit
 idle candidates whose recent writes could not be checked within the budget.
 Its byte estimates can be partial; a timed-out process census keeps custody unknown.
 Cargo cache previews are bounded and mark incomplete measurements in JSON.
-The preview uses local ref evidence without forge reads. Apply takes a fresh full observation. Measurements do not follow links; APFS clones may share physical blocks, so the change in volume
-free space can differ. Apply removes eligible attempt scratch without a separate
+The preview uses local ref evidence without forge reads. Apply refreshes custody
+before removal. Measurements do not follow links; APFS clones may share physical
+blocks, so the change in volume free space can differ. Apply removes eligible attempt scratch without a separate
 pre-deletion size walk. Partial observations and failed paths remain visible in
 JSON and text. Byte rows come from each adapter; unavailable observations remain
 explicit rather than appearing as zero.
@@ -55,8 +56,8 @@ After a merge, background cleanup targets only that branch's worktree and its
 attempt scratch. It does not scan the run store or collect shared caches. At lane
 launch, free space below `gc.free_floor` starts a best-effort background full
 sweep. Each sweep has an overridable `gc.sweep_budget` (default `5m`; `0`
-checkpoints immediately);
-diagnostics show its value and source, and a stopped sweep records its position
+checkpoints immediately). Diagnostics show its value and source, and a stopped
+sweep records its position
 for the next pass.
 The single-flight guard is released on exit. Dead or over-budget holders are
 detected and takeover is reported as a warning.
@@ -71,7 +72,7 @@ shows measured cache size against that budget; incomplete previews say so.
 Shared targets under `~/Library/Caches/provenant-shared-cargo/` participate in
 both the budget and free-space sweep. Live attempt custody and held Cargo build
 locks always protect a target. Full GC also protects recent writes and the
-newest Cargo seed generation. Private lane caches older than `gc.idle` are
+newest Cargo seed generation for each project. Private lane caches older than `gc.idle` are
 eligible when their owner has settled or disappeared. Unknown custody keeps a cache.
 
 `gc.free_floor` is an advisory collection target. Below it, and below
