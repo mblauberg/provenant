@@ -2152,6 +2152,7 @@ fn remove_contents_until(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_core::Clock;
     use provenant_os::fs::{ForeignLock, LockGuard, LockMode};
     use std::{
         fs,
