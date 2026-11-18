@@ -515,7 +515,7 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     let context = patch::PatchContext {
         library: &library,
         resolvers: &resolvers,
-        scan: &|_| Ok(()),
+
         journal: None,
         limits: &limits,
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,

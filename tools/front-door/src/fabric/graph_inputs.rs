@@ -1,6 +1,6 @@
 //! A graph node's upstream results as read-only files in its own directory.
 //!
-//! Each result is read through the run store's verified, redacted output path,
+//! Each result is read through the run store's verified raw output path,
 //! the one `provenant output --full` uses, never from another attempt's files.
 //! The lane is granted this directory alone.
 use super::{
@@ -65,7 +65,7 @@ fn whole_prefix(bytes: &[u8], max: usize) -> &[u8] {
     }
 }
 
-/// Read the redacted result of `attempt`, at most `max` bytes of it, and its
+/// Read the raw result of `attempt`, at most `max` bytes of it, and its
 /// whole length. Pages stop as soon as `max` is reached.
 fn read_result(
     session: &provenant_cli::run::Session,
@@ -106,7 +106,7 @@ fn read_failure_reason(error: &FacadeError) -> String {
     ))
 }
 
-/// Page through the same verified and redacted peer output used by the CLI.
+/// Page through the same verified raw peer output authorised for graph execution.
 fn read_remote(
     owner: &mut BinaryRunOwner<'_>,
     target: AttemptTarget,
@@ -172,9 +172,7 @@ fn read_remote(
         if bytes.len() == max {
             let length = length
                 .filter(|length| *length > next_offset)
-                .ok_or_else(|| {
-                    FacadeError::io("peer did not report the full redacted result length")
-                })?;
+                .ok_or_else(|| FacadeError::io("peer did not report the full result length"))?;
             return Ok((bytes, length));
         }
         offset = next_offset;

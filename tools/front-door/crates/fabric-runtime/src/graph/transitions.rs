@@ -1324,7 +1324,7 @@ pub(super) fn redraw_quota_alias(
             library: &library,
             resolvers: &resolvers,
             limits,
-            scan: &patch::scan_for_secrets,
+
             journal: None,
             worktree_layout: worktree_layout.clone(),
         },

@@ -4601,18 +4601,20 @@ mod journal_error_tests {
 
 /// Stream the result through the existing authenticated, bounded output API.
 /// The serving host verifies each artifact read; capture remains on the chair.
-/// A peer's handoff is untrusted at this boundary: validate it as any decoded
-/// handoff, then redact it, before a continuation prompt can carry it.
-/// An absent key means no captured handoff; a present key is the peer's sealed
-/// typed outcome, already revalidated by the record decoder. Redact it again
-/// before it reaches the capture.
+/// A peer handoff has already crossed the typed record decoder. Revalidate its
+/// bounds without rewriting authorised execution context.
 fn peer_handoff(
     sealed: Option<&provenant_records::handoff::HandoffResult>,
 ) -> provenant_records::handoff::HandoffResult {
     let Some(sealed) = sealed else {
         return Ok(None);
     };
-    provenant_run::sanitise_handoff_result(sealed.clone())
+    if let Ok(Some(handoff)) = sealed {
+        handoff
+            .validate()
+            .map_err(|reason| provenant_records::handoff::HandoffError::new("$", reason))?;
+    }
+    sealed.clone()
 }
 
 fn remote_graph_result(
@@ -4701,7 +4703,7 @@ mod peer_handoff_tests {
     )]
     use super::*;
     #[test]
-    fn peer_handoff_is_validated_and_redacted_before_it_reaches_the_capture() {
+    fn peer_handoff_is_validated_and_retained_losslessly() {
         let sealed = |note: &str| {
             serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":note,
                 "remaining":[],"decisions":[],"verify":[]}})
@@ -4712,7 +4714,7 @@ mod peer_handoff_tests {
         };
         let clean = peer_handoff(Some(&decode(sealed(&format!("key {token}")))));
         let note = clean.unwrap().unwrap().note;
-        assert!(!note.contains(token));
+        assert_eq!(note, format!("key {token}"));
         // A malformed outcome stays explicit evidence; absence stays absence.
         let error = provenant_records::handoff::HandoffError::new("schema_version", "expected 2");
         assert_eq!(peer_handoff(Some(&Err(error.clone()))), Err(error));

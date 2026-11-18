@@ -4038,7 +4038,7 @@ mod provisioned_writer_submission_tests {
                     &graph::patch::PatchContext {
                         library: &graph::template::TemplateLibrary::bundled(),
                         resolvers: &Default::default(),
-                        scan: &|_| Ok(()),
+
                         journal: None,
                         limits: &Default::default(),
 

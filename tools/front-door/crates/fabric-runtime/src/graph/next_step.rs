@@ -575,7 +575,7 @@ pub(super) fn settle_stop(
         &PatchContext {
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),
-            scan: &patch::scan_for_secrets,
+
             journal: None,
             limits,
             worktree_layout: worktree_layout.clone(),

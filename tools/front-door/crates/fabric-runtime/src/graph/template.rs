@@ -327,7 +327,7 @@ impl ParameterRefusal {
     }
 
     pub(crate) fn redacted(&self) -> Self {
-        let clean = |text: &str| provenant_confinement::redact::bounded_line(text, 4096);
+        let clean = |text: &str| provenant_core::bounded_line(text, 4096);
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
         safe.template = clean(&safe.template);
@@ -2701,7 +2701,7 @@ fn interpolate_prose(value: &Value, parameters: &Map<String, Value>) -> Result<V
             let replacement = interpolate(&Value::String(marker.clone()), parameters)?;
             if let Some(replacement) = replacement.as_str() {
                 rendered = rendered.replace(&marker, replacement);
-                super::patch::scan_for_secrets(&rendered)?;
+                super::patch::warn_for_secrets("graph.template.rendered", &rendered);
             }
         }
     }
@@ -2721,7 +2721,10 @@ pub(super) fn interpolate(value: &Value, parameters: &Map<String, Value>) -> Res
             {
                 return match parameters.get(name) {
                     Some(value) => {
-                        super::patch::scan_for_secrets(&value.to_string())?;
+                        super::patch::warn_for_secrets(
+                            "graph.template.parameter",
+                            &value.to_string(),
+                        );
                         Ok(value.clone())
                     }
                     None if name == ITEM => Ok(value.clone()),
@@ -2752,7 +2755,7 @@ pub(super) fn interpolate(value: &Value, parameters: &Map<String, Value>) -> Res
             }
             rendered.push_str(remaining);
             if rendered != *text {
-                super::patch::scan_for_secrets(&rendered)?;
+                super::patch::warn_for_secrets("graph.template.rendered", &rendered);
             }
             Ok(Value::String(rendered))
         }

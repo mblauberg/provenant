@@ -1667,7 +1667,7 @@ impl Factory {
         let context = PatchContext {
             library: &library,
             resolvers: &resolver,
-            scan: &patch::scan_for_secrets,
+
             journal: None,
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
@@ -1969,13 +1969,10 @@ impl Factory {
             self.context.port_table.worktree_layout.clone(),
         )
         .map_err(graph_patch_error)?;
-        // Patch admission scans nodes and parameters. Graph-wide metadata is
-        // retained separately, so scan the complete bound record before any
-        // preview or publication can expose or persist it.
+        // Graph-wide metadata is retained losslessly. Content inspection is advisory.
         let bound_document =
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        patch::scan_for_secrets(&bound_document)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        patch::warn_for_secrets("graph.bound_document", &bound_document);
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {
@@ -2339,7 +2336,7 @@ impl Factory {
             &PatchContext {
                 library: &library,
                 resolvers: &resolver,
-                scan: &patch::scan_for_secrets,
+
                 journal: None,
                 limits: &self.context.config.graph.limits,
                 worktree_layout: self.context.port_table.worktree_layout.clone(),
@@ -2481,7 +2478,7 @@ impl Factory {
                     &PatchContext {
                         library: &library,
                         resolvers: &resolver,
-                        scan: &patch::scan_for_secrets,
+
                         journal: None,
                         limits: &self.context.config.graph.limits,
                         worktree_layout: self.context.port_table.worktree_layout.clone(),
@@ -5692,55 +5689,31 @@ mod tests {
     }
 
     #[test]
-    fn graph_context_secret_is_rejected_before_preview_publication_or_journal() -> Result {
+    fn graph_context_secret_is_retained_in_authorised_preview() -> Result {
+        // Spec: docs/specs/fabric.md#checkpoint-envelope
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let secret = "sk-abcdefghijklmnopqrstuvwx";
-        // Spec: docs/specs/fabric.md#checkpoint-envelope
-        // Context values are free-form and normalised. Object keys retain
-        // identity, so credentials there must be refused before publication.
-        let document = json!({
-            "schema_version":2, "graph_id":"metadata-secret",
-            "context":{(secret):"retained note"},
-            "nodes":[{"id":"inspect", "prompt":"Inspect code", "access":"read_only", "route":{"alias":"junior"}}]
-        });
-        for explain in [true, false] {
-            let error = factory
-                .graph_document(
-                    json!({
-                        "op":"run", "document":document, "explain":explain
-                    }),
-                    budget,
-                    &cancel,
-                )
-                .err()
-                .ok_or("credential-shaped context key was accepted")?;
-            // The refusal names its cause without echoing the key.
-            assert!(
-                matches!(&error, FacadeError::InvalidInput { detail: Some(_) })
-                    && format!("{error:?}").contains("object key"),
-                "{error:?}"
-            );
-            assert!(!serde_json::to_string(&error)?.contains(secret));
-            assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
-            assert!(!rig.project.join(".provenant/scratch/graphs").exists());
-            assert!(
-                FileJournal::graph_ids(
-                    &factory.context.roots.state,
-                    factory.context.identity.project
-                )?
-                .is_empty()
-            );
-            assert!(
-                FileJournal::event_graph_ids(
-                    &factory.context.roots.state,
-                    factory.context.identity.project
-                )?
-                .is_empty()
-            );
-        }
+        let context = json!({(secret):"retained note"});
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "explain":true,
+                "document":{"graph_id":"metadata-secret", "context":context,
+                    "nodes":[{"id":"inspect", "use":"task", "prompt":"Inspect code"}]}
+            }),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(response["document"]["context"], context);
+        assert!(
+            FileJournal::graph_ids(
+                &factory.context.roots.state,
+                factory.context.identity.project
+            )?
+            .is_empty()
+        );
         Ok(())
     }
 
