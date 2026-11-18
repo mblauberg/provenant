@@ -649,7 +649,6 @@ dependencies = [
  "provenant-core",
  "provenant-os",
  "serde_json",
- "tempfile",
  "thiserror",
 ]
 

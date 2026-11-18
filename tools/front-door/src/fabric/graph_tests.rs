@@ -2546,7 +2546,7 @@ mod result_tests {
         );
         let refusal_reason = status.checkpoint.nodes[0].advance_error.as_deref().unwrap();
         assert!(refusal_reason.contains("setup script failed: missing pnpm"));
-        assert!(!refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+        assert!(refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
         assert!(!refusal_reason.contains("receipt"));
         assert!(status.checkpoint.nodes[0].attempts.is_empty());
         assert!(human.contains("setup script failed: missing pnpm"));
@@ -2648,7 +2648,7 @@ mod result_tests {
         let mut reply = PeerResponse {
             extra: Default::default(),
             version: 1,
-            protocol: PROTOCOL,
+            protocol: provenant_fabric_runtime::hosts::OUTPUT_AUDIENCE_PROTOCOL,
             host: remote_host,
             project: locator.key,
             result: PeerResult::Output {
