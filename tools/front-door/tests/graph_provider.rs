@@ -2152,6 +2152,14 @@ fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
         return Ok(());
     }
     let rig = writer_registry_fixture()?;
+    // Keep this local-lock fixture independent of external publishing and
+    // production backoff pacing, while retaining a real persisted retry.
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[knobs]\n'lanes.publish'=false\n'lanes.launch_retry_first_seconds'=1\n'lanes.launch_retry_max_seconds'=1"
+    )?;
     let _cleanup = rig.process_cleanup();
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -2245,8 +2253,14 @@ fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
                                 .clone(),
                         )?;
                         let waited = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
-                        assert_eq!(code(&waited), 0, "{graph}: {waited:?}");
                         let checkpoint = rig.checkpoint(graph)?;
+                        assert_eq!(
+                            code(&waited),
+                            0,
+                            "{graph}: {}\n{}\n{checkpoint}",
+                            String::from_utf8_lossy(&waited.stdout.bytes),
+                            String::from_utf8_lossy(&waited.stderr.bytes)
+                        );
                         assert_eq!(checkpoint["nodes"][0]["state"], "succeeded", "{checkpoint}");
                         let attempts = checkpoint["nodes"][0]["attempts"]
                             .as_array()

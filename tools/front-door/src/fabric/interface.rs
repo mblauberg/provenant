@@ -3881,9 +3881,12 @@ mod tests {
                     reason: Some("repository contention".into()),
                 });
             }
-            // The graph's indexed wake is derived from node launch wakes.
-            // Keep this hand-built checkpoint valid under the persisted invariant.
-            checkpoint.wake_at = node.launch_retry.as_ref().and_then(|retry| retry.wake_at);
+            // Only Running nodes contribute launch wakes to the graph index.
+            checkpoint.wake_at = if state == NodeState::Running {
+                node.launch_retry.as_ref().and_then(|retry| retry.wake_at)
+            } else {
+                None
+            };
             checkpoint.cancelled = cancelled;
             if multiple {
                 let second = &mut checkpoint.nodes[1];
