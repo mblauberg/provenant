@@ -170,10 +170,13 @@ fn collect_entries(
     let mut report = Report::default();
     let mut entries = entries;
     let mut pending = None;
+    let mut priority_pending = None;
+    let mut priority_path = None;
     let resume_cursor = root_cursor_position(detail).filter(|_| {
         start_at.is_some_and(|start| start.parent() == root.current_path().ok().as_deref())
     });
     if let (Some(start), Some(cursor)) = (start_at, resume_cursor) {
+        let mut resumed_from_cookie = false;
         if RootStamp::from(root.metadata()?) == cursor.root && entries.seek(cursor.position).is_ok()
         {
             let entry_offset = entries.position()?;
@@ -185,26 +188,41 @@ fn collect_entries(
                         .is_ok_and(|metadata| CandidateIdentity::from(metadata) == cursor.candidate)
                 {
                     pending = Some((name, entry_offset));
+                    resumed_from_cookie = true;
                 }
             }
         }
-        if pending.is_none() {
+        if !resumed_from_cookie {
             entries = root.entries()?;
+            if let Some(name) = start.file_name().map(OsStr::to_os_string)
+                && root
+                    .metadata_at(&name, false)
+                    .is_ok_and(|metadata| CandidateIdentity::from(metadata) == cursor.candidate)
+            {
+                priority_path = Some(start.to_owned());
+                priority_pending = Some((name, DirectoryPosition::default()));
+            }
         }
     }
     let resume_path = resume_cursor.and(start_at);
     loop {
-        let (name, entry_offset) = match pending.take() {
-            Some(pending) => pending,
-            None => {
-                let entry_offset = entries.position()?;
-                let Some(name) = entries.next() else {
-                    break;
-                };
-                (name?, entry_offset)
-            }
+        let (name, entry_offset, is_priority) = match priority_pending.take() {
+            Some((name, offset)) => (name, offset, true),
+            None => match pending.take() {
+                Some((name, offset)) => (name, offset, false),
+                None => {
+                    let entry_offset = entries.position()?;
+                    let Some(name) = entries.next() else {
+                        break;
+                    };
+                    (name?, entry_offset, false)
+                }
+            },
         };
         let path = root.current_path()?.join(&name);
+        if !is_priority && priority_path.as_deref() == Some(path.as_path()) {
+            continue;
+        }
         if cancel.is_cancelled() || should_stop() {
             report.interrupted_at = Some(path);
             report.continuation = root_cursor(root, entry_offset, &name)?;
@@ -411,13 +429,25 @@ mod tests {
         assert!(remaining > 0 && remaining < 128);
         std::fs::write(temp.path().join("root-noise"), b"changed parent stamp").unwrap();
 
-        let resumed = collect(
+        let deferred = collect(
             temp.path(),
             before,
             false,
             &CancelToken::new(),
             partial.interrupted_at.as_deref(),
             partial.continuation.as_deref(),
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(deferred.interrupted_at.as_deref(), Some(stage.as_path()));
+
+        let resumed = collect(
+            temp.path(),
+            before,
+            false,
+            &CancelToken::new(),
+            deferred.interrupted_at.as_deref(),
+            deferred.continuation.as_deref(),
             &mut || true,
         )
         .unwrap();

@@ -34,13 +34,23 @@ fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Er
     assert!(remaining > 0 && remaining < 128);
 
     fs::write(root.join("root-noise"), b"changed parent stamp")?;
-    let resumed = super::super::archive::collect_archives(
+    let deferred = super::super::archive::collect_archives(
         &context,
         before,
         false,
         &cancel(),
         partial.interrupted_at.as_deref(),
         partial.continuation.as_deref(),
+        &mut || false,
+    );
+    assert_eq!(deferred.interrupted_at.as_deref(), Some(archive.as_path()));
+    let resumed = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        deferred.interrupted_at.as_deref(),
+        deferred.continuation.as_deref(),
         &mut || true,
     );
     assert!(resumed.interrupted_at.is_none());
