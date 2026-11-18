@@ -42,7 +42,7 @@ No separate lane download store, Cargo home or symlink setup exists.
 The host's own build output supplies target seed generations.
 - Why: Cargo fingerprints dependency source paths; changing the home path defeats reuse even when symlinks reach the same content.
 
-## Cargo target directory and seed
+## Cargo target directory
 
 The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
 - `shared` (default): one target directory per project under the host cache (`~/Library/Caches/provenant-shared-cargo/<project_key>/target`), avoiding cold builds and skipping seed cloning. Lanes for the same repository share the warm target and Cargo serialises concurrent access with its build lock.
@@ -51,6 +51,9 @@ The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
 
 The preamble and `provenant config show` report the resolved target directory and its source, e.g. `(source: default; lanes.cargo_target)` or `(source: host; lanes.cargo_target)`.
 Target seeding and clone machinery are skipped when `shared` or an absolute target is selected; seeding is used only for `private`.
+- Why: lanes run as the same user, so a per-lane target guards no real boundary while it costs a cold build and its own disk per lane.
+
+## Cargo target seed
 
 A target seed store is shared across registered repositories on the host. Each
 generation records a hash of the verified canonical shared Git directory and
