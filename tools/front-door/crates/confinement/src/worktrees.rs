@@ -811,6 +811,7 @@ pub enum RetainReason {
     Changed,
     GitFailure,
     Unregistered,
+    RefAbsent,
     LockedOrPrunable,
     /// Provenant did not create the branch, or cannot observe that it did.
     NotCreated,

@@ -966,7 +966,8 @@ pub(super) fn execute_mutation(
         && name.as_str().starts_with("refs/heads/")
     {
         return match delete_ref_leased(context, name, *expected_old_oid, cancel)? {
-            RefDeletion::Removed | RefDeletion::Absent => Ok(()),
+            RefDeletion::Removed => Ok(()),
+            RefDeletion::Absent => Err(WorktreeError::NotFound),
             RefDeletion::CheckedOut => Err(WorktreeError::CheckedOut),
             RefDeletion::Changed => Err(WorktreeError::MutationFailed {
                 operation: GitMutationOperation::DeleteRef,
@@ -1585,8 +1586,12 @@ pub(super) fn settle_branch(
         .resolve_commit(context, branch.clone(), cancel)
     {
         Ok(current) if current == tip => {}
-        Ok(_) | Err(WorktreeError::NotFound) => {
+        Ok(_) => {
             retain(outcome, branch, RetainReason::Changed);
+            return Ok(None);
+        }
+        Err(WorktreeError::NotFound) => {
+            retain(outcome, branch, RetainReason::RefAbsent);
             return Ok(None);
         }
         Err(error) => {
@@ -1607,20 +1612,31 @@ pub(super) fn settle_branch(
         },
         cancel,
     );
-    if deleted.is_ok() {
-        let short = branch.short_name().to_owned();
-        if discard {
-            outcome.discarded.push(DiscardedRef {
-                branch: short,
-                head: tip,
-            });
-        } else {
-            outcome.pruned_refs.push(short);
+    match deleted {
+        Ok(()) => {
+            let short = branch.short_name().to_owned();
+            if discard {
+                outcome.discarded.push(DiscardedRef {
+                    branch: short,
+                    head: tip,
+                });
+            } else {
+                outcome.pruned_refs.push(short);
+            }
+            Ok(completion)
         }
-        Ok(completion)
-    } else {
-        retain(outcome, branch, RetainReason::Changed);
-        Ok(None)
+        Err(WorktreeError::NotFound) => {
+            retain(outcome, branch, RetainReason::RefAbsent);
+            Ok(None)
+        }
+        Err(WorktreeError::CheckedOut) => {
+            retain(outcome, branch, RetainReason::CheckedOut);
+            Ok(None)
+        }
+        Err(error) => {
+            retain(outcome, branch, retain_reason(&error));
+            Ok(None)
+        }
     }
 }
 

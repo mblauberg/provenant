@@ -670,7 +670,7 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
         fs::create_dir(&path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
-    let prepare = |name: &str| -> TestResult<(PathBuf, Directory, PathBuf)> {
+    let prepare = |name: &str, base: GitOid| -> TestResult<(PathBuf, Directory, PathBuf)> {
         let attempt_path = fixture.root.join(name);
         let scratch = attempt_path.join("tmp/candidate-0");
         fs::create_dir_all(&scratch)?;
@@ -681,13 +681,13 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
             &attempt,
             &scratch,
             "refs/heads/lane",
-            fixture.base,
+            base,
             &shared_root,
         )?;
         Ok((attempt_path, attempt, scratch))
     };
 
-    let (first_path, first_attempt, _) = prepare("shared-attempt-1")?;
+    let (first_path, first_attempt, _) = prepare("shared-attempt-1", fixture.base)?;
     let first_source = super::bound_source(&first_attempt)?.ok_or("first shared source")?;
     super::prepare_budget_objects(&first_source.objects, fixture.worktree.repo())?;
     assert_eq!(
@@ -768,7 +768,7 @@ fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> Test
     drop(first_attempt);
     fs::remove_dir_all(&first_path)?;
 
-    let (second_path, second_attempt, _second_scratch) = prepare("shared-attempt-2")?;
+    let (second_path, second_attempt, _second_scratch) = prepare("shared-attempt-2", first_head)?;
     let second_source = super::bound_source(&second_attempt)?.ok_or("second shared source")?;
     assert_eq!(
         super::private_tip(&second_source, "refs/heads/lane")?,
@@ -3036,5 +3036,155 @@ fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResul
         host_ref
     );
     assert_eq!(fs::read(fixture.lane.join("file"))?, checkout);
+    Ok(())
+}
+
+#[test]
+fn shared_view_reuse_after_base_moved() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
+    let shared_root = fixture.root.join("shared-view-base-moved");
+    fs::create_dir_all(&shared_root)?;
+    for component in ["git-common", "git-objects"] {
+        let path = shared_root.join(component);
+        fs::create_dir(&path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    let prepare = |name: &str, base: GitOid| -> TestResult<(PathBuf, Directory, PathBuf)> {
+        let attempt_path = fixture.root.join(name);
+        let scratch = attempt_path.join("tmp/candidate-0");
+        fs::create_dir_all(&scratch)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        super::prepare_shared_bound(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &attempt,
+            &scratch,
+            "refs/heads/lane",
+            base,
+            &shared_root,
+        )?;
+        Ok((attempt_path, attempt, scratch))
+    };
+
+    let (_first_path, first_attempt, _) = prepare("shared-attempt-1", fixture.base)?;
+    let first_source = super::bound_source(&first_attempt)?.ok_or("first shared source")?;
+    fs::write(fixture.lane.join("file"), "commit 1\n")?;
+    fixture.git_shared(&shared_root, &["add", "file"])?;
+    fixture.git_shared(&shared_root, &["commit", "-qm", "commit 1"])?;
+    let tip1 = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
+    assert_eq!(super::private_tip(&first_source, "refs/heads/lane")?, tip1);
+
+    // Host base moves forward: new commit on base in project repo
+    fs::write(fixture.project.join("upstream-file"), "upstream commit\n")?;
+    let _ = Command::new(&fixture.git)
+        .arg("-C")
+        .arg(&fixture.project)
+        .args(["add", "upstream-file"])
+        .output()?;
+    let output = Command::new(&fixture.git)
+        .arg("-C")
+        .arg(&fixture.project)
+        .args(["commit", "-qm", "upstream commit"])
+        .output()?;
+    assert!(output.status.success());
+    let new_base = oid(Command::new(&fixture.git)
+        .arg("-C")
+        .arg(&fixture.project)
+        .args(["rev-parse", "HEAD"])
+        .output()?)?;
+    assert_ne!(new_base, fixture.base);
+
+    // A moved base must not rewrite a live sibling's shared ref or index.
+    assert!(matches!(
+        prepare("shared-attempt-2", new_base),
+        Err(error) if error.downcast_ref::<crate::RunError>().is_some_and(|e| matches!(e, crate::RunError::SharedViewBaseMismatch))
+    ));
+    assert_eq!(super::private_tip(&first_source, "refs/heads/lane")?, tip1);
+    // A reset back behind the shared tip is also ambiguous and must be refused.
+    assert!(matches!(
+        prepare("shared-attempt-3", fixture.base),
+        Err(error) if error.downcast_ref::<crate::RunError>().is_some_and(|e| matches!(e, crate::RunError::SharedViewBaseMismatch))
+    ));
+    assert_eq!(
+        oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
+        tip1
+    );
+
+    Ok(())
+}
+
+#[test]
+fn host_git_rejects_planted_commondir() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
+    let shared_root = fixture.root.join("shared-context-planted-commondir");
+    fs::create_dir_all(&shared_root)?;
+    fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
+    for name in ["git-common", "git-objects"] {
+        let path = shared_root.join(name);
+        fs::create_dir(&path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    let attempt_path = fixture.root.join("shared-attempt-1");
+    let scratch = attempt_path.join("tmp/candidate-0");
+    fs::create_dir_all(&scratch)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    super::prepare_shared_bound(
+        &fixture.git,
+        fixture.worktree.repo(),
+        &attempt,
+        &scratch,
+        "refs/heads/lane",
+        fixture.base,
+        &shared_root,
+    )?;
+
+    // Plant a commondir file in git-common pointing to a rogue directory
+    let rogue = fixture.root.join("rogue-dir");
+    fs::create_dir_all(&rogue)?;
+    let commondir = shared_root.join("git-common/commondir");
+    fs::write(&commondir, format!("{}\n", rogue.display()))?;
+
+    // Attempting to bind or verify the shared view must fail because commondir is denied
+    let attempt2_path = fixture.root.join("shared-attempt-2");
+    let scratch2 = attempt2_path.join("tmp/candidate-0");
+    fs::create_dir_all(&scratch2)?;
+    let attempt2 = Directory::open_anchor(&attempt2_path)?;
+    assert!(
+        super::prepare_shared_bound(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &attempt2,
+            &scratch2,
+            "refs/heads/lane",
+            fixture.base,
+            &shared_root,
+        )
+        .is_err()
+    );
+
+    // Also verify execute_bounded sets GIT_COMMON_DIR so host Git does not follow commondir
+    let stdout = super::execute_bounded(
+        &fixture.git,
+        &shared_root.join("git-common"),
+        fixture.worktree.repo().root_path(),
+        &[
+            std::ffi::OsString::from("rev-parse"),
+            std::ffi::OsString::from("--git-common-dir"),
+        ],
+        None,
+        super::Execution {
+            common_directory: Some(&shared_root.join("git-common")),
+            ..Default::default()
+        },
+    )?;
+    let common_reported = std::str::from_utf8(&stdout)?.trim();
+    assert_ne!(common_reported, rogue.to_str().unwrap());
+    assert_eq!(
+        Path::new(common_reported).canonicalize()?,
+        shared_root.join("git-common").canonicalize()?
+    );
+
     Ok(())
 }

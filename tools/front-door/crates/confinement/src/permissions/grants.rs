@@ -131,12 +131,16 @@ pub(super) fn worktree_git_state_namespace(
 }
 
 /// Host-maintained Git files stay immutable within the writable data children.
-pub(super) fn worktree_git_state_host_files(container: &PathGrant) -> [PathGrant; 6] {
+pub(super) fn worktree_git_state_host_files(container: &PathGrant) -> [PathGrant; 10] {
     [
         container.path.join("git-common/config"),
         container.path.join("git-common/config.lock"),
         container.path.join("git-common/config.worktree"),
         container.path.join("git-common/config.worktree.lock"),
+        container.path.join("git-common/commondir"),
+        container.path.join("git-common/commondir.lock"),
+        container.path.join("git-common/gitdir"),
+        container.path.join("git-common/gitdir.lock"),
         container.path.join("git-objects/info/alternates"),
         container.path.join("git-objects/info/http-alternates"),
     ]

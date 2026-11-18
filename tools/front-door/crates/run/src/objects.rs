@@ -23,8 +23,8 @@ use view::object_binding;
 #[cfg(any(test, feature = "fixture"))]
 pub(crate) use view::prepare_bound;
 pub(crate) use view::{
-    ObjectSource, bound_source, copy_index, merge_head, merge_objects, prepare_read_only,
-    prepare_shared_bound, private_tip, restore_index, set_private_tip,
+    ObjectSource, bound_source, copy_index, is_shared_binding, merge_head, merge_objects,
+    prepare_read_only, prepare_shared_bound, private_tip, restore_index, update_private_tip,
 };
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
@@ -60,6 +60,7 @@ pub(crate) struct Execution<'a> {
     pub(crate) object_directory: Option<&'a Path>,
     pub(crate) index_file: Option<&'a Path>,
     pub(crate) alternate_directory: Option<&'a Path>,
+    pub(crate) common_directory: Option<&'a Path>,
     pub(crate) timeout: Duration,
     pub(crate) discard: bool,
     pub(crate) input: Option<&'a [u8]>,
@@ -77,6 +78,7 @@ impl Default for Execution<'_> {
             object_directory: None,
             index_file: None,
             alternate_directory: None,
+            common_directory: None,
             timeout: Duration::from_secs(120),
             discard: false,
             input: None,
@@ -124,6 +126,9 @@ pub(crate) fn execute_bounded(
             .unwrap_or_default()
             .into(),
     ));
+    if let Some(common_dir) = settings.common_directory {
+        env.push(("GIT_COMMON_DIR".into(), common_dir.as_os_str().to_owned()));
+    }
     // argv confines GIT_DIR to the sender; receive-pack opens the destination.
     let argv: Vec<OsString> = std::iter::once(git.into())
         .chain([OsString::from("--git-dir"), git_dir.into()])
@@ -704,7 +709,7 @@ fn snapshot_source(
     Ok(())
 }
 
-fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
+fn sanitise_source(source: &Directory, repo: &VerifiedRepo, is_snapshot: bool) -> Result<u64> {
     object_bytes(source, 0)?;
     if let Ok(info) = source.open_verified_directory(OsStr::new("info")) {
         match info.read_stable(OsStr::new("alternates"), 1024 * 1024) {
@@ -722,18 +727,23 @@ fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
         }
         // The exact validated host alternate is also used by live siblings.
         // It is host-maintained and must survive budget and import preparation.
-        for name in ["http-alternates", "commit-graph", "commit-graphs"] {
-            crate::artifacts::remove_entry_tree(&info, OsStr::new(name))?;
+        crate::artifacts::remove_entry_tree(&info, OsStr::new("http-alternates"))?;
+        if is_snapshot {
+            for name in ["commit-graph", "commit-graphs"] {
+                crate::artifacts::remove_entry_tree(&info, OsStr::new(name))?;
+            }
         }
     }
-    for name in ["commit-graph", "multi-pack-index"] {
-        crate::artifacts::remove_entry_tree(source, OsStr::new(name))?;
-    }
-    if let Ok(pack) = source.open_verified_directory(OsStr::new("pack")) {
-        for entry in pack.entries()? {
-            let entry = entry?;
-            if entry.as_encoded_bytes().starts_with(b"multi-pack-index") {
-                crate::artifacts::remove_entry_tree(&pack, &entry)?;
+    if is_snapshot {
+        for name in ["commit-graph", "multi-pack-index"] {
+            crate::artifacts::remove_entry_tree(source, OsStr::new(name))?;
+        }
+        if let Ok(pack) = source.open_verified_directory(OsStr::new("pack")) {
+            for entry in pack.entries()? {
+                let entry = entry?;
+                if entry.as_encoded_bytes().starts_with(b"multi-pack-index") {
+                    crate::artifacts::remove_entry_tree(&pack, &entry)?;
+                }
             }
         }
     }
@@ -746,7 +756,7 @@ pub(crate) fn prepare_budget_objects(
     repo: &VerifiedRepo,
 ) -> Result<std::path::PathBuf> {
     let path = source_path(source, repo)?;
-    sanitise_source(source, repo)?;
+    sanitise_source(source, repo, false)?;
     Ok(path)
 }
 
@@ -963,7 +973,7 @@ pub(crate) fn settle_many(
         let mut remaining = bytes;
         let mut entries = MAX_OBJECT_ENTRIES;
         snapshot_source(source, &snapshot, &mut remaining, &mut entries, 0)?;
-        sanitise_source(&snapshot, repo)?;
+        sanitise_source(&snapshot, repo, true)?;
         let snapshot_path = snapshot.current_path()?;
         let objects = view.open_verified_directory(OsStr::new("objects"))?;
         let info = objects.open_verified_directory(OsStr::new("info"))?;

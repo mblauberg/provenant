@@ -605,6 +605,32 @@ impl WriterLaunch {
         if let Some(source) = crate::objects::bound_source(attempt)? {
             let private = crate::objects::private_tip(&source, self.branch.as_str())?;
             if private != base {
+                let repo = self.worktree.repo();
+                let refs = source.refs.current_path()?;
+                let objects = source.objects.current_path()?;
+                let alternate = repo.common_git_dir().join("objects");
+                let descends = crate::objects::execute_bounded(
+                    &git,
+                    &refs,
+                    repo.root_path(),
+                    &[
+                        "merge-base".into(),
+                        "--is-ancestor".into(),
+                        base.to_string().into(),
+                        private.to_string().into(),
+                    ],
+                    None,
+                    crate::objects::Execution {
+                        object_directory: Some(&objects),
+                        alternate_directory: Some(&alternate),
+                        common_directory: Some(&refs),
+                        ..Default::default()
+                    },
+                )
+                .is_ok();
+                if !descends {
+                    return Err(RunError::SharedViewBaseMismatch);
+                }
                 return Ok((private, false));
             }
         }
@@ -614,7 +640,11 @@ impl WriterLaunch {
 
     /// When a writer lane passes its token budget and stops, commit its
     /// uncommitted work in the lane's worktree so it ends up committed on its branch.
-    fn commit_budget_stop(&self, attempt: &Directory, base: GitOid) -> Result<BudgetCommit> {
+    pub(crate) fn commit_budget_stop(
+        &self,
+        attempt: &Directory,
+        base: GitOid,
+    ) -> Result<BudgetCommit> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let source = crate::objects::bound_source(attempt)?.ok_or(RunError::Validation(
@@ -656,10 +686,14 @@ impl WriterLaunch {
         let index = source.refs.current_path()?.join("index");
         crate::objects::with_clean_view(&git, repo, tip, None, |_, path| {
             let run_git = |args: &[&str]| {
-                let argv = [OsString::from("--work-tree"), repo.root_path().into()]
-                    .into_iter()
-                    .chain(args.iter().map(OsString::from))
-                    .collect::<Vec<_>>();
+                let argv = [
+                    OsString::from("--literal-pathspecs"),
+                    OsString::from("--work-tree"),
+                    repo.root_path().into(),
+                ]
+                .into_iter()
+                .chain(args.iter().map(OsString::from))
+                .collect::<Vec<_>>();
                 crate::objects::execute_bounded(
                     &git,
                     path,
@@ -682,10 +716,48 @@ impl WriterLaunch {
             if status.is_empty() {
                 return Ok(BudgetCommit::note("budget stop: worktree already clean"));
             }
-            let paths = status_paths(&status)?;
-            let message = budget_commit_message(&paths);
-            run_git(&["add", "-A"])?;
-            run_git(&[
+            let paths = status_paths_raw(&status, true)?
+                .into_iter()
+                .map(|path| {
+                    String::from_utf8(path).map_err(|_| {
+                        RunError::Validation("budget stop cannot commit non-UTF-8 paths")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let scope: Vec<String> =
+                crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok())
+                    .map(|req| req.task.profile.write_scope)
+                    .unwrap_or_default();
+            if scope.is_empty() && crate::objects::is_shared_binding(attempt)? {
+                return Ok(BudgetCommit::note(
+                    "budget stop: no owned paths declared; worktree left intact",
+                ));
+            }
+            let owned_paths: Vec<String> = if scope.is_empty() {
+                paths
+            } else {
+                paths
+                    .into_iter()
+                    .filter(|p| {
+                        let path = Path::new(p);
+                        scope.iter().any(|s| {
+                            let prefix = Path::new(s);
+                            prefix == Path::new(".") || path == prefix || path.starts_with(prefix)
+                        })
+                    })
+                    .collect()
+            };
+            if owned_paths.is_empty() {
+                return Ok(BudgetCommit::note("budget stop: worktree already clean"));
+            }
+            let message = budget_commit_message(&owned_paths);
+            let mut add_args = vec!["add", "-A", "--"];
+            add_args.extend(owned_paths.iter().map(String::as_str));
+            run_git(&add_args)?;
+            let mut commit_args = vec![
                 "-c",
                 "user.name=provenant",
                 "-c",
@@ -695,7 +767,10 @@ impl WriterLaunch {
                 "commit",
                 "-m",
                 &message,
-            ])?;
+                "--",
+            ];
+            commit_args.extend(owned_paths.iter().map(String::as_str));
+            run_git(&commit_args)?;
             let bytes = run_git(&["rev-parse", "HEAD"])?;
             let head = GitOid::parse(
                 std::str::from_utf8(&bytes)
@@ -703,13 +778,20 @@ impl WriterLaunch {
                     .trim(),
             )
             .map_err(|_| RunError::Validation("budget commit head"))?;
-            crate::objects::set_private_tip(&source, self.branch.as_str(), head)?;
+            crate::objects::update_private_tip(
+                &git,
+                &source,
+                repo,
+                self.branch.as_str(),
+                head,
+                tip,
+            )?;
             Ok(BudgetCommit {
                 note: "work committed on its branch",
                 committed: Some(BudgetWork {
                     sha: head.to_string().chars().take(SHORT_SHA).collect(),
-                    files: paths.len(),
-                    paths: paths.into_iter().take(BUDGET_PATHS).collect(),
+                    files: owned_paths.len(),
+                    paths: owned_paths.into_iter().take(BUDGET_PATHS).collect(),
                 }),
             })
         })
@@ -756,9 +838,9 @@ pub(crate) const SHORT_SHA: usize = 9;
 pub(crate) const BUDGET_PATHS: usize = 20;
 
 /// What a budget stop did to the lane's branch.
-struct BudgetCommit {
-    note: &'static str,
-    committed: Option<BudgetWork>,
+pub(crate) struct BudgetCommit {
+    pub(crate) note: &'static str,
+    pub(crate) committed: Option<BudgetWork>,
 }
 
 impl BudgetCommit {
@@ -771,10 +853,10 @@ impl BudgetCommit {
 }
 
 /// Work a budget stop committed.
-struct BudgetWork {
-    sha: String,
-    files: usize,
-    paths: Vec<String>,
+pub(crate) struct BudgetWork {
+    pub(crate) sha: String,
+    pub(crate) files: usize,
+    pub(crate) paths: Vec<String>,
 }
 
 /// Path names only, with control characters made visible so a name cannot
@@ -3672,6 +3754,9 @@ impl WriterLaunch {
             );
             if tip == self.base || held != self.base {
                 return Ok(String::new());
+            }
+            if crate::objects::is_shared_binding(attempt)? {
+                return Ok(format!("shared worktree left intact; {location}"));
             }
             let scratch = source.refs.current_path()?;
             let objects = source.objects.current_path()?;

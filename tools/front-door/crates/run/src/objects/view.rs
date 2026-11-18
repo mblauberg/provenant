@@ -325,19 +325,36 @@ pub(crate) fn merge_objects(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
     Ok(objects)
 }
 
-pub(crate) fn set_private_tip(source: &ObjectSource, branch: &str, tip: GitOid) -> Result<()> {
-    let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
-    let mut held = source.refs.try_clone()?;
-    for component in parent.split('/') {
-        held = directory(&held, OsStr::new(component))?;
-    }
-    held.atomic_write(
-        OsStr::new(leaf),
-        ".budget-",
-        format!("{tip}\n").as_bytes(),
-        PublishMode::Replace,
-    )?
-    .require_durable()?;
+pub(crate) fn update_private_tip(
+    git: &Path,
+    source: &ObjectSource,
+    repo: &VerifiedRepo,
+    branch: &str,
+    tip: GitOid,
+    expected_old: GitOid,
+) -> Result<()> {
+    let refs_path = source.refs.current_path()?;
+    let objects_path = source.objects.current_path()?;
+    let alternate = repo.common_git_dir().join("objects");
+    execute_bounded(
+        git,
+        &refs_path,
+        repo.root_path(),
+        &args(&[
+            "update-ref",
+            branch,
+            &tip.to_string(),
+            &expected_old.to_string(),
+        ]),
+        None,
+        Execution {
+            object_directory: Some(&objects_path),
+            alternate_directory: Some(&alternate),
+            common_directory: Some(&refs_path),
+            ..Execution::default()
+        },
+    )
+    .map_err(|_| RunError::Validation("budget commit CAS ref update failed"))?;
     Ok(())
 }
 
@@ -632,6 +649,19 @@ fn verify_shared_view(receipt: &SharedViewReceipt) -> Result<(Directory, Directo
     {
         return Err(invalid());
     }
+    for denied in [
+        "commondir",
+        "commondir.lock",
+        "gitdir",
+        "gitdir.lock",
+        "config.worktree",
+        "config.worktree.lock",
+    ] {
+        match refs.metadata_at(OsStr::new(denied), false) {
+            Err(error) if error.is_not_found() => {}
+            _ => return Err(invalid()),
+        }
+    }
     let info = objects.open_verified_directory(OsStr::new("info"))?;
     match info.metadata_at(OsStr::new("http-alternates"), false) {
         Err(error) if error.is_not_found() => {}
@@ -714,7 +744,14 @@ fn open_or_create_shared_view(
             {
                 return Err(invalid());
             }
-            verify_shared_view(&receipt)?;
+            let (_, refs, objects) = verify_shared_view(&receipt)?;
+            let source = ObjectSource { objects, refs };
+            // A tip ahead of the launch base may be a live sibling commit or
+            // history deliberately dropped by a reset. They are indistinguishable
+            // here, so never adopt or overwrite it as this attempt's work.
+            if private_tip(&source, branch)? != base {
+                return Err(RunError::SharedViewBaseMismatch);
+            }
             return Ok(SharedViewBinding { receipt });
         }
         Err(error) if error.is_not_found() => {}
@@ -884,6 +921,10 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
         return Err(invalid());
     }
     Ok(Some(binding))
+}
+
+pub(crate) fn is_shared_binding(attempt: &Directory) -> Result<bool> {
+    Ok(object_binding(attempt)?.is_some_and(|binding| binding.shared.is_some()))
 }
 
 pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> {

@@ -540,6 +540,10 @@ pub enum RunError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: attempt reservation retained")]
     AttemptReservationRetained,
+    #[error(
+        "shared worktree Git tip differs from launch base; retain and reconcile the shared view before retrying"
+    )]
+    SharedViewBaseMismatch,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
     #[error(transparent)]

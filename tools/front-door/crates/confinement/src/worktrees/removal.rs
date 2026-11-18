@@ -331,9 +331,9 @@ fn delete_ref_leased_when_inner(
     })
 }
 
-/// Check the checked-out branch refs from Git's stable worktree HEAD files.
-/// This runs while `update-ref` holds the target ref lock, so a concurrent
-/// `worktree add` either appears here or loses its ref update to that lock.
+/// Check the checked-out branch refs from Git's stable worktree HEAD files
+/// while `update-ref` is prepared. Any existing worktree registration that has
+/// already recorded this branch is observed, preserving the branch.
 fn branch_registered_as_checked_out(
     repo: &VerifiedRepo,
     branch: &GitRefName,
