@@ -166,25 +166,30 @@ mod tests {
             if row.domains.is_none() || !covered.insert(selected.clone()) {
                 continue;
             }
-            for other in crate::domains::SECTIONS
+            let unrelated = crate::domains::SECTIONS
                 .entries
                 .iter()
                 .filter(|entry| !selected.contains(&entry.name))
-            {
-                std::fs::write(
-                    roots.state.as_path().join("config.toml"),
-                    format!("schema_version=1\n[domains]\n{}='broken'\n", other.name),
-                )
-                .unwrap();
-                let config = read_for(&roots, &command).unwrap_or_else(|error| {
-                    panic!("{command} read unrelated {}: {error}", other.name)
-                });
-                assert!(
-                    config
-                        .warnings
-                        .iter()
-                        .any(|warning| warning.rule == "unused_domain")
-                );
+                .collect::<Vec<_>>();
+            // All unrelated domains are invalid at once: any accidental read
+            // must still refuse, without loading the full config per domain.
+            let mut source = String::from("schema_version=1\n[domains]\n");
+            for other in &unrelated {
+                source.push_str(&format!("{}='broken'\n", other.name));
+            }
+            std::fs::write(roots.state.as_path().join("config.toml"), source).unwrap();
+            let config = read_for(&roots, &command)
+                .unwrap_or_else(|error| panic!("{command} read an unrelated domain: {error}"));
+            assert_eq!(
+                config
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.rule == "unused_domain")
+                    .count(),
+                unrelated.len(),
+                "{command}: every invalid unrelated domain must be reported"
+            );
+            for other in unrelated {
                 let prefix = format!("domains.{}.", other.name);
                 assert!(
                     config

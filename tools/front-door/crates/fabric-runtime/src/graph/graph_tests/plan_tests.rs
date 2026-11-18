@@ -3792,7 +3792,8 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
     let base = compiler
         .compile(&json!({"id":"work", "use":"task", "prompt":"Work"}))
         .unwrap();
-    let brief = "work ".repeat(220_000);
+    let fixture_limit = 4 * 1024 * 1024;
+    let brief = "work ".repeat(50_000);
     let nodes: Vec<_> = (0..8)
         .map(|index| {
             let mut node = base.clone();
@@ -3814,8 +3815,9 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
         provenant_config::PortTable::builtin().worktree_layout,
     )
     .unwrap();
-    assert!(canonical_len(&document) > MAX_CHECKPOINT_BYTES as usize);
+    assert!(canonical_len(&document) > fixture_limit);
     let (plan, _) = validate_plan_with_limits(&document, &limits).unwrap();
+    assert!(envelope::admit_with_limit(&document, &[], &[], &plan, fixture_limit).is_ok());
     assert!(graph_envelope_reason(&document, &[], &[], &plan).is_none());
 }
 

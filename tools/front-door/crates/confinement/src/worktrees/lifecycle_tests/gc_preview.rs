@@ -107,10 +107,11 @@ fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
 #[test]
 fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
     // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let retirement = HostRetirementFixture::new(&test)?;
     for state in ["clean", "untracked", "poisoned-gitlink"] {
-        let fixture = Fixture::new()?;
-        let test = TestContext::new(&fixture)?;
-        let context = test.context();
         let lane = gc_owned_lane(&test, &context, &format!("verdict-{state}"))?;
         let marker = fixture._temp.path().join("verdict-filter-ran");
         let poison = match state {
@@ -125,13 +126,12 @@ fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box
             }
             _ => None,
         };
-        let retirement = HostRetirementFixture::new(&test)?;
         retirement.seed_lane(&context, &lane)?;
         let run = |dry_run: bool| -> Result<WorktreeGcReport, Box<dyn Error>> {
             if let Some(poison) = &poison {
                 poison.arm()?;
             }
-            let lanes = list_for_gc(&context, &cancel())?;
+            let lanes = list_for_gc_matching(&context, &cancel(), |path, _| path == lane.path)?;
             Ok(collect(
                 &context,
                 &lanes,
