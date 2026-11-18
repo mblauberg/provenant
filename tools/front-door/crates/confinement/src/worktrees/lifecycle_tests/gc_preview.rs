@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn gc_preview_keeps_custody_unknown_when_census_times_out() -> Result<(), Box<dyn Error>> {
+    struct TimedOut;
+    impl WorkerObserver for TimedOut {
+        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            panic!("preview must use the bounded census")
+        }
+        fn observe_roots_while(
+            &self,
+            _: &[PathBuf],
+            _: &dyn Fn() -> bool,
+        ) -> Option<WorkerObservations> {
+            None
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let lane = gc_owned_lane(&test, &context, "census-timeout")?;
+    context.workers = &TimedOut;
+    let observed = list_for_gc_preview(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == lane.path)
+        .ok_or("missing lane")?;
+    assert!(matches!(observed.occupancy, Occupancy::Unknown { .. }));
+    Ok(())
+}
+
+#[test]
 fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct RejectConfig<'a> {

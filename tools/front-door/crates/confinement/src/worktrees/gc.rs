@@ -1407,6 +1407,24 @@ fn collect_impl(
         .retirement_feeds
         .map(|feeds| feeds.integration_bases())
         .unwrap_or_default();
+    let cached_retained_refs = if dry {
+        let mut refs = retained_refs(context, None, integration.as_ref(), patterns, cancel)?;
+        for target in &mut refs {
+            let full = target.reference.as_str();
+            if bases.iter().any(|(name, base)| {
+                let names_base = full.strip_prefix("refs/heads/") == Some(name.as_str())
+                    || (full.starts_with("refs/remotes/") && full.ends_with(&format!("/{name}")));
+                names_base
+                    && (*base == target.commit
+                        || is_ancestor(context, *base, target.commit, cancel).unwrap_or(false))
+            }) {
+                target.integration = true;
+            }
+        }
+        Some(refs)
+    } else {
+        None
+    };
     for lane in lanes {
         if lane.primary
             || primary
@@ -1547,26 +1565,36 @@ fn collect_impl(
                 .map(GitRefName::new)
                 .transpose()
                 .map_err(|_| WorktreeError::InvalidOutput)?;
-            let mut refs = retained_refs(
-                context,
-                branch.as_ref(),
-                integration.as_ref(),
-                patterns,
-                cancel,
-            )?;
-            for target in &mut refs {
-                let full = target.reference.as_str();
-                if bases.iter().any(|(name, base)| {
-                    let names_base = full.strip_prefix("refs/heads/") == Some(name.as_str())
-                        || (full.starts_with("refs/remotes/")
-                            && full.ends_with(&format!("/{name}")));
-                    names_base
-                        && (*base == target.commit
-                            || is_ancestor(context, *base, target.commit, cancel).unwrap_or(false))
-                }) {
-                    target.integration = true;
+            let refs: Vec<_> = if let Some(cached) = &cached_retained_refs {
+                cached
+                    .iter()
+                    .filter(|r| branch.as_ref() != Some(&r.reference))
+                    .cloned()
+                    .collect()
+            } else {
+                let mut refs = retained_refs(
+                    context,
+                    branch.as_ref(),
+                    integration.as_ref(),
+                    patterns,
+                    cancel,
+                )?;
+                for target in &mut refs {
+                    let full = target.reference.as_str();
+                    if bases.iter().any(|(name, base)| {
+                        let names_base = full.strip_prefix("refs/heads/") == Some(name.as_str())
+                            || (full.starts_with("refs/remotes/")
+                                && full.ends_with(&format!("/{name}")));
+                        names_base
+                            && (*base == target.commit
+                                || is_ancestor(context, *base, target.commit, cancel)
+                                    .unwrap_or(false))
+                    }) {
+                        target.integration = true;
+                    }
                 }
-            }
+                refs
+            };
             let mut proof = removal_evidence(context, lane.head, &refs, cancel)?;
             if let (Some(evidence), Some(expected_target)) = (policy.proof, policy.upstream)
                 && verify_retirement_landing_evidence(

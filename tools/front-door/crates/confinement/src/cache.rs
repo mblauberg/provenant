@@ -3,7 +3,9 @@
 use crate::permissions::{PermissionError, validate_absolute};
 use crate::worktrees::Occupancy;
 use provenant_config::RetentionIssue;
-use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
+use provenant_os::fs::{
+    Directory, FileKind, ForeignLock, FsError, LockGuard, LockMode, PayloadTree,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,9 +116,9 @@ struct MeasureBudget {
     limited: bool,
 }
 impl MeasureBudget {
-    fn new(_preview: bool) -> Self {
+    fn new(preview: bool) -> Self {
         Self {
-            remaining: usize::MAX,
+            remaining: if preview { 4096 } else { usize::MAX },
             started: None,
             limited: false,
         }
@@ -718,6 +720,14 @@ fn prune_worktree_cache(
     {
         return Ok(());
     }
+    let Some(_cargo_guards) = lock_cargo_profiles(&cache) else {
+        report.kept.push(CacheGcEntry {
+            path: cache_root.join(name),
+            bytes: 0,
+            reason: CacheGcReason::Busy,
+        });
+        return Ok(());
+    };
     let reason = if let Some((device, inode, fingerprint)) = tombstone {
         // Bind retry authority to what GC intended to rename, even if a
         // process stopped before verification or quarantine could complete.
@@ -917,6 +927,46 @@ fn prune_worktree_cache(
         reason,
     });
     Ok(())
+}
+
+fn lock_cargo_profiles(cache: &Directory) -> Option<Vec<LockGuard>> {
+    fn visit(dir: &Directory, depth: usize, guards: &mut Vec<LockGuard>) -> Option<()> {
+        let mut profile = false;
+        for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            match dir.try_flock_foreign(OsStr::new(name), LockMode::Exclusive) {
+                Ok(ForeignLock::Held) | Err(_) => return None,
+                Ok(ForeignLock::Acquired(guard)) => {
+                    profile = true;
+                    guards.push(guard);
+                }
+                Ok(ForeignLock::Absent) => {}
+            }
+        }
+        if profile || depth == 2 {
+            return Some(());
+        }
+        for name in provenant_os::fs::entry_names(dir, 1000).ok()? {
+            let meta = dir.metadata_at(&name, false).ok()?;
+            if meta.kind == FileKind::Directory {
+                visit(&dir.open_verified_directory(&name).ok()?, depth + 1, guards)?;
+            }
+        }
+        Some(())
+    }
+    let mut guards = Vec::new();
+    match cache.try_flock_foreign(OsStr::new(CARGO_CACHE_OWNER), LockMode::Exclusive) {
+        Ok(ForeignLock::Held) | Err(_) => return None,
+        Ok(ForeignLock::Acquired(guard)) => guards.push(guard),
+        Ok(ForeignLock::Absent) => {}
+    }
+    for target_name in ["target", "target-lint"] {
+        match cache.open_verified_directory(OsStr::new(target_name)) {
+            Ok(target) => visit(&target, 0, &mut guards)?,
+            Err(error) if error.is_not_found() => {}
+            Err(_) => return None,
+        }
+    }
+    Some(guards)
 }
 
 fn verify_detached_cache(
@@ -1156,9 +1206,6 @@ fn measure_cache(
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
     }
-    if budget.exhausted() {
-        return Ok((0, i128::MAX));
-    }
     let mut bytes = if depth == 0 {
         directory
             .metadata()
@@ -1171,6 +1218,9 @@ fn measure_cache(
         .metadata()
         .map_err(cache_fs_error("fstat", relative))?
         .modified_ns;
+    if budget.exhausted() {
+        return Ok((bytes, i128::MAX));
+    }
     for entry in
         cache_gc_entries(directory, relative).map_err(cache_fs_error("opendir", relative))?
     {
@@ -2747,6 +2797,58 @@ mod tests {
             caches[3].0.join("artifact").is_file(),
             "recent foreign cache survives"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lane_cache_gc_keeps_held_cargo_and_owner_locks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path();
+        let root = home.join("Library/Caches/provenant-lane-cargo");
+        std::fs::create_dir_all(&root)?;
+        for (digit, lock_path) in [("a", "target/debug/.cargo-lock"), ("b", CARGO_CACHE_OWNER)] {
+            let owner = home.join(format!("gone-{digit}"));
+            std::fs::create_dir(&owner)?;
+            let identity = std::fs::metadata(&owner)?;
+            let cache = root.join(digit.repeat(64));
+            std::fs::create_dir(&cache)?;
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::write(
+                cache.join(CARGO_CACHE_OWNER),
+                encode_cache_owner(&CacheOwner {
+                    path: owner.clone(),
+                    identity: (identity.dev(), identity.ino()),
+                }),
+            )?;
+            let lock = cache.join(lock_path);
+            std::fs::create_dir_all(lock.parent().ok_or("lock parent")?)?;
+            if lock_path != CARGO_CACHE_OWNER {
+                std::fs::write(&lock, b"")?;
+            }
+            std::fs::remove_dir(owner)?;
+            let directory = Directory::open_anchor(lock.parent().ok_or("lock parent")?)?;
+            let ForeignLock::Acquired(guard) = directory
+                .try_flock_foreign(lock.file_name().ok_or("lock name")?, LockMode::Exclusive)?
+            else {
+                return Err("fixture lock unavailable".into());
+            };
+            let policy = CacheGcPolicy {
+                idle_before_ns: Some(i128::MAX),
+                ..Default::default()
+            };
+            let report = gc_worktree_cargo_caches(home, &policy)?;
+            assert!(cache.exists());
+            assert!(
+                report
+                    .kept
+                    .iter()
+                    .any(|entry| entry.path == cache && entry.reason == CacheGcReason::Busy)
+            );
+            drop(guard);
+            let report = gc_worktree_cargo_caches(home, &policy)?;
+            assert!(report.removed.iter().any(|entry| entry.path == cache));
+        }
         Ok(())
     }
 

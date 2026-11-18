@@ -397,9 +397,9 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     // is skipped, and the next oldest goes until the cap is met.
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
     let dirs = &preview["data"]["build_dirs"];
-    // Preview surveys the same candidates without removing them.
-    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
-    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
+    // Preview skips the expensive census and leaves every profile untouched.
+    assert_eq!(dirs["measurement_skipped"], true, "{dirs}");
+    assert!(names(&dirs["removed"]).is_empty(), "{dirs}");
     assert!(stale.join("deps/payload").is_file() && fresh.is_dir());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     let dirs = &applied["data"]["build_dirs"];
