@@ -1,5 +1,5 @@
 //! End-to-end Fabric commands use the isolated binary rig, never real state.
-mod support;
+use crate::support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, call, code};
 

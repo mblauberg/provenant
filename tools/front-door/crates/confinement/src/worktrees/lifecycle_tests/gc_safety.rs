@@ -204,6 +204,13 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         Untracked,
         Lane,
     }
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".gitignore"), "target/\n.env\n")?;
+    fixture.run(&["add", ".gitignore"])?;
+    fixture.run(&["commit", "-m", "output rules"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let created = gc_owned_lane(&test_context, &context, "idle-output")?;
     for case in [
         Case::Idle,
         Case::Recent,
@@ -212,28 +219,26 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         Case::Untracked,
         Case::Lane,
     ] {
-        let fixture = Fixture::new()?;
-        fs::write(
-            fixture.root.join(".gitignore"),
-            if case == Case::Untracked {
-                ".env\n"
-            } else {
-                "target/\n.env\n"
-            },
-        )?;
-        if case == Case::Tracked {
-            fs::create_dir(fixture.root.join("target"))?;
-            fs::write(fixture.root.join("target/source"), "tracked")?;
-            fixture.run(&["add", "-f", "target/source"])?;
+        // The lane is retained in every case. Reset only this fixture's
+        // tracked-rule variants before exercising the next output policy.
+        if case == Case::Untracked {
+            fs::write(created.path.join(".gitignore"), ".env\n")?;
+            run_in_worktree(&fixture, &created.path, &["add", ".gitignore"])?;
+            run_in_worktree(
+                &fixture,
+                &created.path,
+                &["commit", "-m", "untracked output"],
+            )?;
         }
-        fixture.run(&["add", ".gitignore"])?;
-        fixture.run(&["commit", "-m", "output rules"])?;
-        let test_context = TestContext::new(&fixture)?;
-        let context = test_context.context();
-        let created = gc_owned_lane(&test_context, &context, "idle-output")?;
+        if case == Case::Tracked {
+            fs::create_dir(created.path.join("target"))?;
+            fs::write(created.path.join("target/source"), "tracked")?;
+            run_in_worktree(&fixture, &created.path, &["add", "-f", "target/source"])?;
+            run_in_worktree(&fixture, &created.path, &["commit", "-m", "tracked output"])?;
+        }
         fs::create_dir_all(created.path.join("target"))?;
         fs::write(created.path.join("target/cache"), "output")?;
-        let lanes = list(&context, &cancel())?;
+        let lanes = list_for_gc_matching(&context, &cancel(), |path, _| path == created.path)?;
         let state = context
             .project_state
             .open_verified_directory(&state_dir_name(&created.path))?;
@@ -277,6 +282,16 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         assert_eq!(target_removed, case == Case::Idle, "{case:?}");
         assert!(created.path.is_dir());
         drop(lease);
+        if created.path.join("target").exists() {
+            fs::remove_dir_all(created.path.join("target"))?;
+        }
+        if matches!(case, Case::Tracked | Case::Untracked) {
+            run_in_worktree(
+                &fixture,
+                &created.path,
+                &["reset", "--hard", &created.head.to_string()],
+            )?;
+        }
     }
     Ok(())
 }

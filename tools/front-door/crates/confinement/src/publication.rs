@@ -181,7 +181,7 @@ impl Projector {
         // token detection. Unrelated secret-shaped prose must remain lossless.
         secrets.sort();
         secrets.dedup();
-        crate::Redactor::new(secrets.clone()).map_err(|_| ProjectionError::SecretSet)?;
+        provenant_redact::Redactor::new(secrets.clone()).map_err(|_| ProjectionError::SecretSet)?;
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         secrets.dedup();
         Ok(Self { secrets })
@@ -447,7 +447,7 @@ impl Projector {
                 "--body-file" | "--template" | "-T" | "--input"
             ) {
                 let projected = self.project(destination, args[index].as_bytes())?;
-                let masked = crate::redact::known_shapes(projected.bytes())
+                let masked = provenant_redact::known_shapes(projected.bytes())
                     .map_err(|_| ProjectionError::Bound)?;
                 args[index] = String::from_utf8(masked).map_err(|_| ProjectionError::Encoding)?;
                 index += 1;
@@ -752,7 +752,7 @@ fn assignments(text: &str) -> Vec<(usize, usize)> {
             i = docs[doc].1;
         } else if i < limit && quote(bytes[i]) {
             i = quoted_end(&text[..limit], i).unwrap_or(limit);
-        } else if crate::redact::is_line_assignment(&key) {
+        } else if provenant_redact::is_line_assignment(&key) {
             while i < limit && !matches!(bytes[i], b'\n' | b'\r') {
                 i += 1;
             }

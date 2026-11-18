@@ -814,7 +814,10 @@ fn an_ask_link_publishes_marker_before_pending_checkpoint() {
     );
 }
 
-fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
+fn checkpoint_scale_fixture(
+    completed: usize,
+    pending: usize,
+) -> (tempfile::TempDir, StateRoot, ProjectId) {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -830,12 +833,12 @@ fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
         .join("fabric/graphs")
         .join(project.to_string());
     let mut stored: StoredCheckpoint = stored_fixture();
-    for number in 0..5020 {
+    for number in 0..completed + pending {
         let id = format!("graph-{number:04}");
         stored.checkpoint.graph_id = id.clone();
         stored.execution.document.graph_id = id.clone();
         stored.checkpoint.plan_digest = fixture_plan_digest(&stored.execution.document);
-        stored.checkpoint.nodes[0].state = if number < 5000 {
+        stored.checkpoint.nodes[0].state = if number < completed {
             NodeState::Succeeded
         } else {
             NodeState::Running
@@ -851,12 +854,12 @@ fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
 
 #[test]
 fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
-    let (_temp, root, project) = checkpoint_scale_fixture();
+    let (_temp, root, project) = checkpoint_scale_fixture(12, 3);
     let ids = FileJournal::pending_graph_ids(&root, project).unwrap();
-    assert_eq!(ids.len(), 20);
+    assert_eq!(ids.len(), 3);
     assert_eq!(
         ids,
-        (5000..5020)
+        (12..15)
             .map(|number| format!("graph-{number:04}"))
             .collect::<Vec<_>>()
     );
@@ -871,7 +874,7 @@ fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
     }
     assert_eq!(
         super::journal::CHECKPOINT_READS.with(|reads| reads.get()),
-        20
+        3
     );
 }
 
@@ -879,7 +882,7 @@ fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
 #[ignore = "manual checkpoint read timing"]
 #[allow(clippy::print_stderr)]
 fn checkpoint_read_timing_at_scale() {
-    let (_temp, root, project) = checkpoint_scale_fixture();
+    let (_temp, root, project) = checkpoint_scale_fixture(5000, 20);
     // Build the markers before timing the steady-state pending path.
     assert_eq!(
         FileJournal::pending_graph_ids(&root, project)

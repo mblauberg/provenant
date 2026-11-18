@@ -69,15 +69,18 @@ configuration paths for initial launches and background retries alike. Missing
 GitHub tools, failed login lookup or access policy restrictions produce a warning;
 ordinary lane work can continue without publishing credentials.
 
-## Cargo seeding
+## Cargo target and seeding
 
-Keep the lane's Cargo bindings. A host can build a seed for a registered
+Keep the lane's Cargo bindings. Lanes default to a shared warm Cargo target per
+project under the host cache (`lanes.cargo_target = "shared"`), which avoids cold
+builds and skips seed cloning. When configured as `lanes.cargo_target = "private"`,
+a host can build a seed for a registered
 repository with `provenant worktree seed-build`. It builds the configured verify
 base, so uncommitted work is not the seed source. Later writers copy a compatible
 target and Cargo decides which artifacts it can reuse. A `seeded` report proves
 the copy; Cargo's verbose `Fresh` lines prove dependency reuse.
 
-Each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
+When `private` is configured, each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
 limits history per repository; `max_bytes` limits the whole host and can evict a
 repository's only generation. Compiler, host platform and the effective lane
 profile must match. Unsupported compiler, target or build-flag overrides make

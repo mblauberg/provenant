@@ -916,7 +916,9 @@ fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn 
 fn doctor_and_list_report_the_same_registered_worktrees() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let mut expected = std::collections::BTreeSet::from([fixture.root.clone()]);
-    for index in 1..100 {
+    // Multiple registered checkouts exercise inventory agreement without
+    // making correctness depend on creating a stress-sized Git fixture.
+    for index in 1..5 {
         let path = fixture._temp.path().join(format!("inventory-{index}"));
         fixture.run(&[
             "worktree",

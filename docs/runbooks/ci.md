@@ -20,7 +20,9 @@ means the main-tier suite will run on main. Suites are declared in
 
 To move a slow Rust test to the main tier, put it in a module named
 `main_tier`; pull requests skip it and `main` and full runs execute it. The
-filter is `main_tests` on the `rust` suite in the manifest. An on-demand test
+filter is `main_tests` on the `rust` suite in the manifest; native macOS tests
+use `main_tests` on `macos_native`, which names them because the worktree
+driver's tests have no module path. An on-demand test
 that no CI tier runs uses `#[ignore = "reason"]` and is run by hand.
 
 To request every suite, add `ci:full` to the pull request and push a commit, or
@@ -33,8 +35,10 @@ and [test tiers](test-tiers.md).
 
 ## Toolchain updates
 
-Dependabot updates the Rust toolchain pin. Its change requests a full suite run
-and auto-merges on green `ci-status`. New Clippy lints appear in the lint job
+Dependabot updates the Rust toolchain pin, moving the root copy and
+`tools/front-door/rust-toolchain.toml` in one grouped pull request; CI fails if
+they differ. Its change requests a full suite run and auto-merges on green
+`ci-status`. New Clippy lints appear in the lint job
 summary; fix them on the Dependabot branch.
 
 ## Required native test inventory

@@ -1,0 +1,22 @@
+[package]
+name = "provenant-redact"
+version = "2.1.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+fixture = ["provenant-core/fixture", "provenant-os/fixture"]
+
+[dependencies]
+provenant-core = { workspace = true }
+provenant-os = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

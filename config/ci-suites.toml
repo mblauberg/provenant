@@ -122,6 +122,10 @@ tier = "main"
 cost_minutes = 16
 jobs = ["rust-macos-archive", "rust-macos-tests", "rust-macos-inventory"]
 watch = ["skills/legal-writing/references/**"]
+# Real SwiftPM and Cargo compiles inside a lane (33-41 s each, serial in the
+# dispatch group): pull requests skip them, main runs them. The worktree driver
+# has flat test names, so they are listed rather than tagged `main_tier`.
+main_tests = "binary(=worktrees) & (test(=read_only_lane_builds_and_tests_swift_in_scratch) | test(=lane_builds_and_tests_swift_in_a_registered_worktree) | test(=read_only_lane_builds_and_tests_cargo_in_scratch))"
 pr_paths = [
   "tools/front-door/crates/os/**",
   "tools/front-door/crates/confinement/**",

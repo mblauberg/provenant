@@ -859,6 +859,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     None,
                 ),
                 backend: None,
+                cargo_target: Default::default(),
             });
             Ok(prepared)
         }

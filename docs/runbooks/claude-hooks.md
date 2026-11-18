@@ -70,4 +70,4 @@ prints the new worktree's absolute path and nothing else on stdout.
 - If a hook fails, inspect and resolve the reported cause.
 
 Check with `provenant hook claude --help`; the fixture tests are
-`cargo test -p provenant --test hooks_session` from `tools/front-door`.
+`cargo test -p provenant --test integration hooks_session::` from `tools/front-door`.

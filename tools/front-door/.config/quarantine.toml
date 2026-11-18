@@ -2,51 +2,9 @@
 # Expiry is limited to 30 days from the day the CI check runs.
 
 [[test]]
-package = "provenant"
-name = "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "fabric::result_tests::remote_upstream_is_materialised_and_unreachable_peer_is_named"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr::landing::adapters::tests::captured_async_stack_responses_drive_real_forge"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
 package = "provenant-cli"
 name = "run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory"
 issue = "#3300"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "release_checks_legal_private_symlink_and_bounded_evidence"
-issue = "#3304"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "release_reads_packed_objects_native_alternates_and_linked_worktrees"
-issue = "#3304"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "malformed_operations_and_waits_fail_before_state_creation"
-issue = "#3304"
 owner = "chair"
 expires = 2026-12-14
 
@@ -75,48 +33,6 @@ expires = 2026-12-14
 package = "provenant"
 name = "writer_cli_launches_from_worktree_root"
 issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "land_plain_singleton_uses_batch_driver"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "land_refuses_a_rest_merge_405_with_a_next_step"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "land_refuses_a_rest_merge_409_as_head_moved"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr_watch_failure_and_head_changes_report_fail_with_head"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer"
-issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "session_save_warns_once_only_when_disk_is_low"
-issue = "#3305"
 owner = "chair"
 expires = 2026-12-14
 
@@ -166,12 +82,5 @@ expires = 2026-12-14
 package = "provenant"
 name = "lane_prepare_isolates_nested_claude_state"
 issue = "#3299"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant-confinement"
-name = "worktrees::lifecycle_tests::ownership::dozen_writer_worktrees_claim_concurrently_without_registry_exclusion"
-issue = "#3306"
 owner = "chair"
 expires = 2026-12-14

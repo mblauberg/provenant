@@ -1253,7 +1253,7 @@ impl RunStore {
         };
         let refusal_result = provenant_records::wire::lane::LaneRow::state_and_reason(&safe_state)
             .1
-            .map(|text| provenant_confinement::redact::bounded_line(&text, 256))
+            .map(|text| provenant_redact::bounded_line(&text, 256))
             .unwrap_or_default();
         let publication = TerminalPublication {
             handoff: Ok(None),

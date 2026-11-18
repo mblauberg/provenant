@@ -394,6 +394,7 @@ pub fn schema<T: Serialize>(
                 Kind::Enum => "enum",
                 Kind::Int => "int",
                 Kind::Fraction => "fraction",
+                Kind::CargoTarget => "cargo_target",
             },
             min: spec.min,
             max: spec.max,

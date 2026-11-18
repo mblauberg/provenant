@@ -1,6 +1,6 @@
 //! Tick and its scheduled collector share an isolated host state.
 #![allow(clippy::disallowed_methods)] // Bound a real detached process in this integration fixture.
-mod support;
+use crate::support;
 use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
 use provenant_fabric_runtime::graph::{self, FileJournal, GraphExecution};
 use provenant_os::clock::SystemClock;

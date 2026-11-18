@@ -40,6 +40,7 @@ pub(crate) struct Owner<'a> {
     project: PathBuf,
     pulls: RefCell<Option<Result<Vec<Pull>, String>>>,
     observed_merge: Option<LandedEvidence>,
+    dry_run: bool,
 }
 impl<'a> Owner<'a> {
     pub(crate) fn new(roots: &'a Roots, home: &'a Path, project: &Path) -> Self {
@@ -49,7 +50,13 @@ impl<'a> Owner<'a> {
             project: project.to_path_buf(),
             pulls: RefCell::new(None),
             observed_merge: None,
+            dry_run: false,
         }
+    }
+
+    pub(crate) fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
     }
 
     pub(crate) fn with_merge_observation(mut self, evidence: &LandedEvidence) -> Self {
@@ -78,6 +85,9 @@ impl<'a> Owner<'a> {
             .collect())
     }
     fn pulls(&self, fresh: bool) -> Result<Vec<Pull>, String> {
+        if self.dry_run {
+            return Err("forge observation skipped in dry run".into());
+        }
         if fresh {
             self.pulls.borrow_mut().take();
         }

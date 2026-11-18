@@ -1029,6 +1029,7 @@ impl provenant_run::Providers for WriterProvider {
                         None,
                     ),
                     backend: None,
+                    cargo_target: Default::default(),
                 }),
                 observed_head: None,
                 repository: None,
