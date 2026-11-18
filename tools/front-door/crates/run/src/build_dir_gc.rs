@@ -22,7 +22,7 @@ use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, effective_uid
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -292,6 +292,7 @@ enum CacheKind {
 pub struct TargetProtection {
     pub worktrees: BTreeSet<PathBuf>,
     pub shared_projects: BTreeSet<String>,
+    pub unobserved_roots: Vec<PathBuf>,
     pub unobserved: bool,
 }
 
@@ -300,6 +301,8 @@ impl TargetProtection {
         self.worktrees.extend(observed.worktrees.iter().cloned());
         self.shared_projects
             .extend(observed.shared_projects.iter().cloned());
+        self.unobserved_roots
+            .extend(observed.unobserved_roots.iter().cloned());
         self.unobserved |= observed.unobserved;
     }
 }
@@ -346,17 +349,34 @@ pub fn target_protection_for_launch_while(
         &mut keep_going,
     ) {
         Ok(selection) => selection,
-        Err(_) => {
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: project selection failed: {error}; preserving all targets"
+            );
             protection.unobserved = true;
             return protection;
         }
     };
-    if selection.interrupted_at.is_some() || !selection.warnings.is_empty() {
-        protection.unobserved = true;
-        return protection;
+    for warning in &selection.warnings {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: project selection warning: {warning}"
+        );
+    }
+    if let Some(interrupted) = &selection.interrupted_at {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: project selection interrupted at {}; preserving observed projects",
+            interrupted.display()
+        );
     }
     let project_ids = selection.project_ids;
     if project_ids.len() > MAX_PROTECTION_PROJECTS {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: registered projects exceed maximum ({MAX_PROTECTION_PROJECTS}); preserving all targets"
+        );
         protection.unobserved = true;
         return protection;
     }
@@ -391,18 +411,44 @@ pub fn target_protection_for_launch_while(
     let mut records_observed = 0_usize;
     for project_id in project_ids {
         if !keep_going() {
-            protection.unobserved = true;
-            return protection;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: project scan budget expired at project {project_id}; preserving its targets"
+            );
+            protect_fallback_project(&mut protection, roots, project_id);
+            continue;
         }
         let binding = match provenant_config::lookup_gc_project(roots, project_id) {
             Ok(provenant_config::GcProjectStatus::Git(binding)) => binding,
-            Ok(
-                provenant_config::GcProjectStatus::Transient(_)
-                | provenant_config::GcProjectStatus::Excluded,
-            )
-            | Err(_) => {
-                protection.unobserved = true;
-                return protection;
+            Ok(provenant_config::GcProjectStatus::Transient(common_dir)) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: project {project_id} at {} is transient; preserving its targets",
+                    common_dir.display()
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(&common_dir));
+                if let Some(parent) = common_dir.parent() {
+                    protection.unobserved_roots.push(parent.to_path_buf());
+                }
+                continue;
+            }
+            Ok(provenant_config::GcProjectStatus::Excluded) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: project {project_id} registration is excluded; preserving its targets"
+                );
+                protect_fallback_project(&mut protection, roots, project_id);
+                continue;
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: project {project_id} lookup failed: {error}; preserving its targets"
+                );
+                protect_fallback_project(&mut protection, roots, project_id);
+                continue;
             }
         };
         let checkout = binding
@@ -410,8 +456,17 @@ pub fn target_protection_for_launch_while(
             .map(Path::to_path_buf)
             .or_else(|| binding.common_dir().parent().map(Path::to_path_buf));
         let Some(checkout) = checkout else {
-            protection.unobserved = true;
-            return protection;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: project {project_id} has no primary checkout; preserving its targets"
+            );
+            protection
+                .shared_projects
+                .insert(crate::target_seed::project_key(binding.common_dir()));
+            protection
+                .unobserved_roots
+                .push(binding.common_dir().to_path_buf());
+            continue;
         };
         let remaining = PROTECTION_SCAN_BUDGET.saturating_sub(started.elapsed());
         let budget = match provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
@@ -419,30 +474,58 @@ pub fn target_protection_for_launch_while(
         {
             Ok(budget) => budget,
             Err(_) => {
-                protection.unobserved = true;
-                return protection;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: scan budget expired opening project {project_id}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         };
         let repo = match utility.open_repo(&executor, &checkout, budget, &cancel) {
             Ok(repo) if repo.common_git_dir() == binding.common_dir() => repo,
             _ => {
-                protection.unobserved = true;
-                return protection;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: could not open repository for project {project_id}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         };
         let common = match Directory::open_anchor(binding.common_dir()) {
             Ok(common) => common,
             Err(_) => {
-                protection.unobserved = true;
-                return protection;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: could not open common dir for project {project_id}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         };
         if !common
             .metadata()
             .is_ok_and(|metadata| metadata.same_identity(&repo.common_identity()))
         {
-            protection.unobserved = true;
-            return protection;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: common dir identity mismatch for project {project_id}; preserving its targets"
+            );
+            protection
+                .shared_projects
+                .insert(crate::target_seed::project_key(binding.common_dir()));
+            protection.unobserved_roots.push(checkout);
+            continue;
         }
         let project_state_path = roots
             .state
@@ -453,8 +536,15 @@ pub fn target_protection_for_launch_while(
             Ok(directory) => Some(directory),
             Err(error) if error.is_not_found() => None,
             Err(_) => {
-                protection.unobserved = true;
-                return protection;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: could not read project state for project {project_id}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         };
         let registration = project_state.as_ref().map_or(
@@ -467,8 +557,15 @@ pub fn target_protection_for_launch_while(
         {
             Ok(budget) => budget,
             Err(_) => {
-                protection.unobserved = true;
-                return protection;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: scan budget expired for writer occupancy of project {project_id}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         };
         let occupancy = match provenant_confinement::disk::writer_occupancy(
@@ -483,8 +580,15 @@ pub fn target_protection_for_launch_while(
         ) {
             Ok(occupancy) => occupancy,
             Err(_) => {
-                protection.unobserved = true;
-                return protection;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: writer occupancy inspection failed for project {project_id}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         };
         let project_key = crate::target_seed::project_key(binding.common_dir());
@@ -503,19 +607,27 @@ pub fn target_protection_for_launch_while(
         };
         let Some(store) = (match crate::RunStore::open_disk_read_only(&context, &request) {
             Ok(store) => store,
-            Err(_) => {
-                protection.unobserved = true;
-                return protection;
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: could not open run store for project {project_id}: {error}; preserving its targets"
+                );
+                protection
+                    .shared_projects
+                    .insert(crate::target_seed::project_key(binding.common_dir()));
+                protection.unobserved_roots.push(checkout);
+                continue;
             }
         }) else {
             continue;
         };
         let store = store.with_writer_registry(roots.state.as_path());
         let mut after = 0;
+        let mut store_interrupted = false;
         loop {
             if !keep_going() {
-                protection.unobserved = true;
-                return protection;
+                store_interrupted = true;
+                break;
             }
             let page = match store.lanes(
                 &crate::LaneQuery {
@@ -531,24 +643,24 @@ pub fn target_protection_for_launch_while(
             ) {
                 Ok(page) => page,
                 Err(_) => {
-                    protection.unobserved = true;
-                    return protection;
+                    store_interrupted = true;
+                    break;
                 }
             };
             if page.lanes.is_empty() {
                 break;
             }
             if records_observed.saturating_add(page.lanes.len()) > 10_000 {
-                protection.unobserved = true;
-                return protection;
+                store_interrupted = true;
+                break;
             }
             records_observed = records_observed.saturating_add(page.lanes.len());
             for record in page.lanes {
                 let canonical = match store.request_observed(record.attempt_id, &request) {
                     Ok(canonical) => canonical,
                     Err(_) => {
-                        protection.unobserved = true;
-                        return protection;
+                        store_interrupted = true;
+                        break;
                     }
                 };
                 let terminal = matches!(
@@ -558,8 +670,8 @@ pub fn target_protection_for_launch_while(
                 let released = match store.custody_released(&record, &request) {
                     Ok(released) => released,
                     Err(_) => {
-                        protection.unobserved = true;
-                        return protection;
+                        store_interrupted = true;
+                        break;
                     }
                 };
                 let held = !terminal || !released;
@@ -572,24 +684,76 @@ pub fn target_protection_for_launch_while(
                         .insert(crate::target_seed::project_key(binding.common_dir()));
                 }
             }
+            if store_interrupted {
+                break;
+            }
             match page.next {
                 Some(next) if next > after => after = next,
                 _ => break,
             }
         }
+        if store_interrupted {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: lane record scan incomplete for project {project_id}; preserving its targets"
+            );
+            protection
+                .shared_projects
+                .insert(crate::target_seed::project_key(binding.common_dir()));
+            protection.unobserved_roots.push(checkout);
+        }
     }
     protection
 }
 
+fn protect_fallback_project(
+    protection: &mut TargetProtection,
+    roots: &provenant_core::Roots,
+    project_id: provenant_core::ProjectId,
+) {
+    let binding_file = roots
+        .state
+        .as_path()
+        .join("projects")
+        .join(project_id.to_string())
+        .join("record");
+    if let Ok(bytes) = std::fs::read(&binding_file)
+        && let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(common_dir) = record.get("common_dir").and_then(|v| v.as_str())
+    {
+        let common = PathBuf::from(common_dir);
+        protection
+            .shared_projects
+            .insert(crate::target_seed::project_key(&common));
+        if let Some(parent) = common.parent() {
+            protection.unobserved_roots.push(parent.to_path_buf());
+        }
+    }
+}
+
 impl TargetProtection {
     fn protects(&self, kind: CacheKind, key: &OsStr, owner: Option<&Path>) -> bool {
-        self.unobserved
-            || match kind {
-                CacheKind::Lane => owner.is_some_and(|path| self.worktrees.contains(path)),
-                CacheKind::Shared => key
-                    .to_str()
-                    .is_some_and(|key| self.shared_projects.contains(key)),
+        if self.unobserved {
+            return true;
+        }
+        match kind {
+            CacheKind::Lane => {
+                let Some(path) = owner else {
+                    return true;
+                };
+                self.worktrees.contains(path)
+                    || self
+                        .unobserved_roots
+                        .iter()
+                        .any(|root| path.starts_with(root))
             }
+            CacheKind::Shared => {
+                let Some(key_str) = key.to_str() else {
+                    return true;
+                };
+                self.shared_projects.contains(key_str)
+            }
+        }
     }
 }
 
@@ -2333,11 +2497,19 @@ fn measure(
         if budget.preview_limited() {
             return Ok((bytes, i128::MAX));
         }
-        let metadata = directory.metadata_at(&name).map_err(io::Error::other)?;
+        let metadata = match directory.metadata_at(&name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(io::Error::other(error)),
+        };
         bytes = bytes.saturating_add(metadata.allocated);
         newest = newest.max(metadata.modified_ns);
         if metadata.kind == FileKind::Directory {
-            let child = directory.child(&name).map_err(io::Error::other)?;
+            let child = match directory.child(&name) {
+                Ok(child) => child,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(io::Error::other(error)),
+            };
             let (child_bytes, child_newest) = measure(&child, depth + 1, budget)?;
             bytes = bytes.saturating_add(child_bytes);
             newest = newest.max(child_newest);
@@ -2379,6 +2551,20 @@ fn remove(
     {
         return Ok(Outcome::Busy);
     }
+    let name = OsStr::new(&candidate.target);
+    let target_metadata = match cache.metadata_at(name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.is_not_found() => return Ok(Outcome::Busy),
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    if target_metadata.kind != FileKind::Directory
+        || (target_metadata.device, target_metadata.inode) != candidate.identity
+    {
+        return Ok(Outcome::Busy);
+    }
+    if dry_run {
+        return Ok(Outcome::Removed);
+    }
     let interrupted = std::cell::Cell::new(false);
     let guards = {
         let should_stop = std::cell::RefCell::new(&mut *should_stop);
@@ -2399,17 +2585,7 @@ fn remove(
             Outcome::Busy
         });
     };
-    let name = OsStr::new(&candidate.target);
-    let target_metadata = cache.metadata_at(name).map_err(io::Error::other)?;
-    if target_metadata.kind != FileKind::Directory
-        || (target_metadata.device, target_metadata.inode) != candidate.identity
-    {
-        return Ok(Outcome::Busy);
-    }
     let target = cache.child(name).map_err(io::Error::other)?;
-    if dry_run {
-        return Ok(Outcome::Removed);
-    }
     if is_gc_tombstone(&candidate.target) {
         let mut remaining = MAX_ENTRIES;
         if !remove_contents_until(&target, 0, &mut remaining, should_stop)? {

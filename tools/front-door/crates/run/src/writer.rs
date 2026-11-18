@@ -1339,9 +1339,9 @@ impl LaunchConfinement {
         environment: &mut Vec<(OsString, OsString)>,
         attempt_dir: &Directory,
         cancel: &CancelToken,
-    ) {
+    ) -> bool {
         if cancel.is_cancelled() {
-            return;
+            return false;
         }
         let common_git_dir = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
@@ -1413,6 +1413,7 @@ impl LaunchConfinement {
                 "warning: could not record Cargo target setup: {error}"
             );
         }
+        target_outcome.is_seeded()
     }
 
     fn seed_cargo_target(
@@ -1461,13 +1462,17 @@ impl LaunchConfinement {
             &self.home,
             environment,
             cancel,
-            |projected_bytes| {
-                let projected_bytes = projected_bytes.unwrap_or_else(|| {
-                    self.cargo_cache_budget
-                        .as_ref()
-                        .map_or(0, |budget| budget.bytes)
-                });
-                self.enforce_cargo_cache_budget_reserving(projected_bytes);
+            |projected_bytes| match projected_bytes {
+                Some(projected_bytes) => {
+                    self.enforce_cargo_cache_budget_reserving(projected_bytes);
+                }
+                None => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: seed size is unknown; skipping Cargo cache eviction for this launch"
+                    );
+                }
             },
         )
     }

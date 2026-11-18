@@ -46,7 +46,7 @@ owner checks. Busy or unreleased attempts remain protected, and collection
 preserves durable results, handoffs, logs and process records.
 
 `lanes.cargo_cache_max` covers both private lane and shared Cargo targets. It
-accepts bytes or a percentage of the volume and defaults according to host size.
+accepts bytes or a percentage of the volume and defaults to 10% of the cache volume.
 Its effective value and source are observable. Launch and disk-floor collection
 reclaim eligible targets least recently used first; bounded previews report
 partial measurements explicitly. Cargo build locks and live attempt custody

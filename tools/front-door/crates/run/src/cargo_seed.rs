@@ -267,6 +267,9 @@ impl Outcome {
             extra: Default::default(),
         }
     }
+    pub(crate) fn is_seeded(&self) -> bool {
+        self.status == "seeded"
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

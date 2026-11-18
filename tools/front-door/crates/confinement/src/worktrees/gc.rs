@@ -1491,6 +1491,14 @@ fn collect_impl(
                     {
                         return Err(WorktreeError::UnknownWriter);
                     }
+                    if policy
+                        .excluded_paths
+                        .iter()
+                        .any(|pattern| matches_pattern(&lane.path.to_string_lossy(), pattern))
+                    {
+                        row.detail = Some("excluded by gc.projects.keep_paths".into());
+                        return Ok(());
+                    }
                     let _writer = if dry {
                         cache_writer_probe(context.project_state, &lane.path)
                             .map_err(custody_refusal)?
@@ -2412,10 +2420,16 @@ fn walk_output(
             continue;
         }
         let path = relative.join(&name);
+        let full_path = root.join(&path);
+        let excluded_by_keep_paths = policy.excluded_paths.iter().any(|pattern| {
+            matches_pattern(&path.to_string_lossy(), pattern)
+                || matches_pattern(&full_path.to_string_lossy(), pattern)
+        });
         if layout_roots
             .iter()
             .any(|root| path.as_path() == root.as_path())
             || protected.covers(&path)
+            || excluded_by_keep_paths
         {
             continue;
         }
@@ -2430,6 +2444,7 @@ fn walk_output(
             }
             let contains_layout_root = layout_roots.iter().any(|root| root.starts_with(&path));
             if !contains_layout_root
+                && !excluded_by_keep_paths
                 && (policy
                     .regenerable
                     .iter()

@@ -6,6 +6,7 @@ use provenant_os::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     io::{self, Write},
     time::{Duration, Instant},
@@ -60,7 +61,7 @@ mod path_option {
     }
 
     #[cfg(not(unix))]
-    fn encode(path: &PathBuf) -> String {
+    fn encode(path: &Path) -> String {
         format!("utf8:{}", path.to_string_lossy())
     }
 
@@ -91,6 +92,12 @@ struct Progress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
     cursor: Option<Cursor>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    cursors: BTreeMap<String, Cursor>,
+}
+
+fn scope_key(trigger: &str, scope: &str) -> String {
+    format!("{trigger}|{scope}")
 }
 
 pub(crate) struct Lease {
@@ -169,6 +176,12 @@ impl Drop for Deadline {
 
 impl Lease {
     pub fn cursor(&self) -> Option<&Cursor> {
+        if let (Some(trigger), Some(scope)) = (self.trigger(), self.scope()) {
+            let key = scope_key(trigger, scope);
+            if let Some(cursor) = self.progress.cursors.get(&key) {
+                return Some(cursor);
+            }
+        }
         self.progress.cursor.as_ref()
     }
 
@@ -196,12 +209,12 @@ impl Lease {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
             }
-            return Err(io::Error::other(
-                "GC sweep lease was fenced by a newer owner",
-            ));
+            return Ok(());
         }
         self.progress.trigger = Some(trigger.into());
         self.progress.scope = Some(scope.into());
+        let key = scope_key(trigger, scope);
+        self.progress.cursor = self.progress.cursors.get(&key).cloned();
         self.progress.released = false;
         self.write_progress_locked()
     }
@@ -252,9 +265,11 @@ impl Lease {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
             }
-            return Err(io::Error::other(
-                "GC sweep lease was fenced by a newer owner",
-            ));
+            return Ok(());
+        }
+        if let (Some(trigger), Some(scope)) = (self.trigger(), self.scope()) {
+            let key = scope_key(trigger, scope);
+            self.progress.cursors.insert(key, cursor.clone());
         }
         self.progress.cursor = Some(cursor);
         self.progress.released = false;
@@ -270,9 +285,18 @@ impl Lease {
             }
             return Ok(());
         }
-        self.directory
-            .unlink(OsStr::new(PROGRESS_FILE))
-            .map_err(io::Error::other)?;
+        if let (Some(trigger), Some(scope)) = (self.trigger(), self.scope()) {
+            let key = scope_key(trigger, scope);
+            self.progress.cursors.remove(&key);
+        }
+        self.progress.cursor = None;
+        if self.progress.cursors.is_empty() {
+            self.directory
+                .unlink(OsStr::new(PROGRESS_FILE))
+                .map_err(io::Error::other)?;
+        } else {
+            self.write_progress_locked()?;
+        }
         if let Some(watcher) = self.watcher.take() {
             drop(watcher);
         }
@@ -385,6 +409,23 @@ pub(crate) fn acquire(
         }
     });
     let epoch = next_epoch(&directory, old.as_ref().map(|progress| progress.epoch))?;
+    if budget.is_zero() {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "warning: gc.sweep_budget=0 checkpoints immediately without collecting"
+        );
+    }
+    let mut cursors = old
+        .as_ref()
+        .map(|progress| progress.cursors.clone())
+        .unwrap_or_default();
+    if let Some(progress) = &old
+        && cursors.is_empty()
+        && let (Some(trigger), Some(scope), Some(cursor)) =
+            (&progress.trigger, &progress.scope, &progress.cursor)
+    {
+        cursors.insert(scope_key(trigger, scope), cursor.clone());
+    }
     let progress = Progress {
         pid: std::process::id() as i64,
         epoch,
@@ -396,6 +437,7 @@ pub(crate) fn acquire(
         trigger: old.as_ref().and_then(|progress| progress.trigger.clone()),
         scope: old.as_ref().and_then(|progress| progress.scope.clone()),
         cursor: old.and_then(|progress| progress.cursor),
+        cursors,
     };
     let lease = Lease {
         directory,
@@ -446,7 +488,16 @@ fn read_progress(directory: &Directory) -> Result<Option<Progress>, Box<dyn std:
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(Box::new(error)),
     };
-    Ok(Some(serde_json::from_slice(&bytes)?))
+    match serde_json::from_slice::<Progress>(&bytes) {
+        Ok(progress) => Ok(Some(progress)),
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "warning: corrupt {PROGRESS_FILE}: {error}; resetting cursor"
+            );
+            Ok(None)
+        }
+    }
 }
 
 fn progress_has_epoch(directory: &Directory, epoch: u64) -> bool {
@@ -461,7 +512,19 @@ fn next_epoch(
     prior_epoch: Option<u64>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let stored = match directory.read_stable(OsStr::new(EPOCH_FILE), EPOCH_LIMIT) {
-        Ok(bytes) => std::str::from_utf8(&bytes)?.parse::<u64>()?,
+        Ok(bytes) => match std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            Some(epoch) => epoch,
+            None => {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "warning: corrupt {EPOCH_FILE}; resetting epoch counter"
+                );
+                0
+            }
+        },
         Err(error) if error.is_not_found() => 0,
         Err(error) => return Err(Box::new(error)),
     };
@@ -597,6 +660,7 @@ mod tests {
             trigger: None,
             scope: None,
             cursor: None,
+            cursors: BTreeMap::new(),
         };
         assert!(!holder_over_budget(&progress, &clock));
         clock
@@ -683,6 +747,7 @@ mod tests {
                 candidate: None,
                 detail: None,
             }),
+            cursors: BTreeMap::new(),
         };
         next_epoch(&directory, Some(progress.epoch)).unwrap();
         write_progress(&directory, &progress).unwrap();
@@ -730,9 +795,10 @@ mod tests {
     #[test]
     fn saved_cursor_is_bound_to_its_trigger_and_selector_scope() {
         let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
         let clock = test_clock();
         let budget = Duration::from_secs(30);
-        let mut lease = match acquire(temp.path(), budget, &clock).unwrap() {
+        let mut lease = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("new sweep should acquire its lease"),
         };
@@ -746,7 +812,7 @@ mod tests {
         lease.checkpoint(cursor.clone()).unwrap();
         drop(lease);
 
-        let resumed = match acquire(temp.path(), budget, &clock).unwrap() {
+        let mut resumed = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("released sweep should resume"),
         };
@@ -755,6 +821,36 @@ mod tests {
         assert!(resumed.matches_identity("full_gc", "scheduled"));
         assert!(!resumed.matches_identity("pressure", "scheduled"));
         assert!(!resumed.matches_identity("full_gc", "manual:repo-a"));
+
+        // A mismatched request starts fresh without destroying the saved cursor.
+        resumed.set_identity("pressure", "scheduled").unwrap();
+        assert_eq!(resumed.cursor(), None);
+
+        // Switching back or running as full_gc resumes from the saved cursor.
+        resumed.set_identity("full_gc", "scheduled").unwrap();
+        assert_eq!(resumed.cursor(), Some(&cursor));
+    }
+
+    #[test]
+    fn corrupt_progress_or_epoch_file_resets_gracefully() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+
+        // Write corrupt progress and corrupt epoch
+        let tick = root.join("tick");
+        std::fs::create_dir_all(&tick).unwrap();
+        std::fs::write(tick.join(PROGRESS_FILE), b"not valid json").unwrap();
+        std::fs::write(tick.join(EPOCH_FILE), b"not valid epoch number").unwrap();
+
+        // acquire should succeed, warn, and reset
+        let lease = match acquire(&root, budget, &clock).unwrap() {
+            Acquire::Held(lease) => lease,
+            Acquire::Busy(_) => panic!("should acquire despite corrupt files"),
+        };
+        assert_eq!(lease.cursor(), None);
+        assert!(lease.epoch() > 0);
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps

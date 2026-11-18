@@ -709,9 +709,10 @@
     "lanes.cargo_cache_max": {
       "type": "size",
       "default": "10%",
+      "host_only": true,
       "status": "wired",
-      "reader": "tools/front-door/crates/config/src/cache_budget.rs, tools/front-door/crates/run/src/build_dir_gc.rs, tools/front-door/crates/run/src/writer.rs",
-      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs] or per lane with --knob lanes.cargo_cache_max=8G. At launch and during GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them. Effective size and source appear in launch warnings and GC reports.",
+      "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs, tools/front-door/crates/config/src/cache_budget.rs, tools/front-door/crates/run/src/build_dir_gc.rs, tools/front-door/crates/run/src/writer.rs, tools/front-door/src/worktrees.rs",
+      "effect": "Limit allocated bytes across private lane and shared Cargo targets. Accept a byte size or whole-volume percentage; the default is 10% of the cache volume. Set for the host under [knobs]. Per-lane overrides are ignored. At launch and during GC, least-recently-used targets are reclaimed when no live attempt or Cargo build lock holds them. Effective size and source appear in launch warnings and GC reports.",
       "trade_off": "A lower cap reclaims warm build output sooner; locked targets stay protected and the launch proceeds with a warning when the cap cannot be met."
     },
     "lanes.ci_scope": {

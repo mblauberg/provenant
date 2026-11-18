@@ -1826,26 +1826,20 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let identity_mismatch = lease
         .as_ref()
         .is_some_and(|lease| !lease.matches_identity(trigger_identity, &scope_identity));
+    let mut sweep_warning = None;
     if identity_mismatch {
         let warning = lease
             .as_ref()
             .and_then(|lease| lease.warning.clone())
             .map(|takeover| {
                 format!(
-                    "{takeover}; saved GC sweep belongs to a different trigger or project scope; skipped this request and preserved its cursor"
+                    "{takeover}; saved GC sweep belongs to a different trigger or project scope; started fresh and preserved its cursor"
                 )
             })
             .unwrap_or_else(|| {
-                "saved GC sweep belongs to a different trigger or project scope; skipped this request and preserved its cursor".into()
+                "saved GC sweep belongs to a different trigger or project scope; started fresh and preserved its cursor".into()
             });
-        return Ok(GcData {
-            sweep_budget_seconds,
-            sweep_budget_source,
-            sweep_cursor: lease.as_ref().and_then(|lease| lease.cursor().cloned()),
-            sweep_warning: Some(warning.clone()),
-            notice: Some(warning),
-            ..Default::default()
-        });
+        append_sweep_warning(&mut sweep_warning, warning);
     }
     if let Some(lease) = &mut lease {
         lease
@@ -1854,7 +1848,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     }
     let initial_cursor = lease.as_ref().and_then(|lease| lease.cursor().cloned());
     let takeover_warning = lease.as_ref().and_then(|lease| lease.warning.clone());
-    let mut sweep_warning = takeover_warning.clone();
+    if let Some(takeover) = takeover_warning.clone() {
+        append_sweep_warning(&mut sweep_warning, takeover);
+    }
+    if sweep_budget_seconds == 0 {
+        append_sweep_warning(
+            &mut sweep_warning,
+            "gc.sweep_budget=0 checkpoints immediately without collecting".into(),
+        );
+    }
     if initial_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.class == "complete")
@@ -1936,12 +1938,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             append_sweep_warning(&mut sweep_warning, warning);
         }
         if let Some(candidate) = selection.interrupted_at.take() {
-            let cursor = crate::gc_sweep::Cursor {
-                class: "project_registry".into(),
-                project: None,
-                candidate: Some(candidate),
-                detail: selection.continuation.take(),
-            };
+            let cursor =
+                preserved_discovery_cursor(initial_cursor.as_ref(), || crate::gc_sweep::Cursor {
+                    class: "project_registry".into(),
+                    project: None,
+                    candidate: Some(candidate),
+                    detail: selection.continuation.take(),
+                });
             if let Some(lease) = &mut lease {
                 lease
                     .checkpoint(cursor.clone())
@@ -1987,12 +1990,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         for project_id in selection.project_ids.into_iter().skip(project_start) {
             let project_key = project_id.to_string();
             if !sweep_should_continue(&deadline, lease.as_ref()) {
-                let cursor = crate::gc_sweep::Cursor {
-                    class: "project_selection".into(),
-                    project: Some(PathBuf::from(project_key.as_str())),
-                    candidate: None,
-                    detail: None,
-                };
+                let cursor = preserved_discovery_cursor(initial_cursor.as_ref(), || {
+                    crate::gc_sweep::Cursor {
+                        class: "project_selection".into(),
+                        project: Some(PathBuf::from(project_key.as_str())),
+                        candidate: None,
+                        detail: None,
+                    }
+                });
                 if let Some(lease) = &mut lease {
                     lease
                         .checkpoint(cursor.clone())
@@ -2037,12 +2042,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 Ok(layout) => layout,
                 Err(_) => {
                     if !sweep_should_continue(&deadline, lease.as_ref()) {
-                        let cursor = crate::gc_sweep::Cursor {
-                            class: "project_selection".into(),
-                            project: Some(PathBuf::from(project_key.as_str())),
-                            candidate: None,
-                            detail: None,
-                        };
+                        let cursor = preserved_discovery_cursor(initial_cursor.as_ref(), || {
+                            crate::gc_sweep::Cursor {
+                                class: "project_selection".into(),
+                                project: Some(PathBuf::from(project_key.as_str())),
+                                candidate: None,
+                                detail: None,
+                            }
+                        });
                         if let Some(lease) = &mut lease {
                             lease
                                 .checkpoint(cursor.clone())
@@ -2080,12 +2087,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     projects.push(project);
                 }
                 Err(_) if !sweep_should_continue(&deadline, lease.as_ref()) => {
-                    let cursor = crate::gc_sweep::Cursor {
-                        class: "project_selection".into(),
-                        project: Some(PathBuf::from(project_key.as_str())),
-                        candidate: None,
-                        detail: None,
-                    };
+                    let cursor = preserved_discovery_cursor(initial_cursor.as_ref(), || {
+                        crate::gc_sweep::Cursor {
+                            class: "project_selection".into(),
+                            project: Some(PathBuf::from(project_key.as_str())),
+                            candidate: None,
+                            detail: None,
+                        }
+                    });
                     if let Some(lease) = &mut lease {
                         lease
                             .checkpoint(cursor.clone())
@@ -2566,6 +2575,18 @@ fn sweep_should_continue(
         cancel.cancel();
     }
     okay
+}
+
+fn preserved_discovery_cursor(
+    initial: Option<&crate::gc_sweep::Cursor>,
+    fallback: impl FnOnce() -> crate::gc_sweep::Cursor,
+) -> crate::gc_sweep::Cursor {
+    match initial {
+        Some(saved) if saved.class != "project_selection" && saved.class != "project_registry" => {
+            saved.clone()
+        }
+        _ => fallback(),
+    }
 }
 
 fn sweep_utility_budget(deadline: &crate::gc_sweep::Deadline) -> Result<UtilityBudget, Error> {
@@ -3206,8 +3227,18 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let free_floor = self.free_floor;
         let profile = config.dispatch_profile(&[])?;
         let cache_root = provenant_run::build_dir_gc::shared_cache_root(home);
-        let budget = provenant_config::cargo_cache_budget(&profile, &cache_root)
-            .map_err(Error::DiskSpace)?;
+        let budget = match provenant_config::cargo_cache_budget(&profile, &cache_root) {
+            Ok(budget) => budget,
+            Err(error) => {
+                append_sweep_warning(
+                    &mut self.data.sweep_warning,
+                    format!(
+                        "Cargo cache budget could not be resolved ({error}); skipping target cache collection"
+                    ),
+                );
+                return Ok(());
+            }
+        };
         let mut protection = provenant_run::build_dir_gc::TargetProtection::default();
         for project in &self.projects {
             let live = project

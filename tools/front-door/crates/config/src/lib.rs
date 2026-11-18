@@ -14,6 +14,7 @@ mod github_policy;
 mod history;
 mod install_artifacts;
 mod schema;
+pub use cache_budget::resolve as cargo_cache_budget;
 pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub use gc::{
     ByteObservation, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits,
@@ -27,12 +28,6 @@ pub use gc::{
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
-pub fn cargo_cache_budget(
-    profile: &provenant_records::run::HarnessProfile,
-    cache_path: &std::path::Path,
-) -> std::io::Result<CargoCacheBudget> {
-    cache_budget::resolve(profile, cache_path)
-}
 mod harness;
 pub use harness::legacy_harness_selectors;
 mod hooks;
