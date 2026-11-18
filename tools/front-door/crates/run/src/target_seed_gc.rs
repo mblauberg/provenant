@@ -1097,8 +1097,8 @@ mod tests {
     #[test]
     fn budget_stop_resumes_generation_inventory_and_eviction() {
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
         let state = tempfile::tempdir().unwrap();
         let old = generation(state.path(), "001", 3);

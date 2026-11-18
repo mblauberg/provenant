@@ -385,7 +385,7 @@ fn stop(report: &mut Report, path: PathBuf, cursor: Cursor) {
 }
 
 #[cfg(test)]
-#[allow(unused_imports)] // The worktree fixture includes the library without the test harness.
+#[allow(unused_imports, dead_code)] // The worktree driver includes the library without a test harness.
 mod tests {
     use super::*;
     use provenant_core::{OperationId, RootInputs};

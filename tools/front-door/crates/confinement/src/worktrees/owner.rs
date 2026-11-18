@@ -5,6 +5,34 @@ use provenant_core::{AttemptId, HostId, OperationId, WallTime};
 use provenant_records::custody::{RetirementStep, RetirementStepState};
 
 const OWNER: &str = "provenant-owner.json";
+const CREATED: &str = "provenant-created-worktree";
+const CREATED_RECORD: &[u8] = b"provenant-created-worktree-v1\n";
+
+/// Record creation in the verified Git registration, which is removed with it.
+pub(super) fn record_creation(worktree: &VerifiedWorktree) -> Result<(), WorktreeError> {
+    worktree.repo().revalidate()?;
+    worktree
+        .repo()
+        .private_dir()
+        .atomic_write(
+            OsStr::new(CREATED),
+            ".created-",
+            CREATED_RECORD,
+            PublishMode::NoReplace,
+        )?
+        .require_durable()
+        .map_err(|_| WorktreeError::RegistrationUnconfirmed)
+}
+
+pub(super) fn was_created(worktree: &VerifiedWorktree) -> Result<bool, WorktreeError> {
+    worktree.repo().revalidate()?;
+    match read_bounded(worktree.repo().private_dir(), OsStr::new(CREATED), 128) {
+        Ok(bytes) if bytes == CREATED_RECORD => Ok(true),
+        Ok(_) => Err(WorktreeError::InvalidOutput),
+        Err(error) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

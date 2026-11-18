@@ -1389,10 +1389,20 @@ fn collect_impl(
                         && known.origin == RefOrigin::Created
                 })
         });
+    let managed_tree = |tree: &VerifiedWorktree| -> Result<bool, WorktreeError> {
+        let owner = load_owner(tree)?;
+        Ok(owner
+            .as_ref()
+            .is_some_and(|owner| owner.origin == WorktreeOrigin::Lane)
+            || owner::was_created(tree)?)
+    };
+    let managed = |lane: &WorktreeInfo| -> Result<bool, WorktreeError> {
+        managed_tree(&verify_worktree(context.repo, &lane.path)?)
+    };
     let foreign_seen = foreign_branch
         || lanes
             .iter()
-            .any(|lane| !lane.primary && matches!(lane.owner, Ok(None)));
+            .any(|lane| !lane.primary && !managed(lane).unwrap_or(false));
     let first_foreign = matches!(
         policy.mode,
         CollectionMode::Worktrees | CollectionMode::LandingCleanup
@@ -1416,9 +1426,9 @@ fn collect_impl(
         keep: policy.keep.to_vec(),
         ..Default::default()
     };
-    // Both preview and apply use a bounded output walk. Apply rechecks each
-    // candidate under custody, but never spends an unbounded interval proving
-    // tree cleanliness or measuring disposable output.
+    // Preview shares one bounded walk. Apply bounds each walk separately so
+    // time spent on earlier candidates cannot exhaust a later candidate's
+    // proof; the enclosing sweep still has its own deadline.
     let preview_walk = PreviewWalk::new(true);
     let integration =
         policy
@@ -1466,9 +1476,58 @@ fn collect_impl(
                 .as_ref()
                 .is_some_and(|primary| lane.path == *primary)
         {
+            if policy.mode != CollectionMode::LandingCleanup {
+                let mut row = CandidateReport {
+                    path: lane.path.clone(),
+                    class: "primary",
+                    action: "kept",
+                    tip: lane.head,
+                    detail: None,
+                };
+                let result = (|| -> Result<(), WorktreeError> {
+                    if primary.as_deref() != Some(lane.path.as_path())
+                        || context.repo.root_path() != lane.path
+                        || !(policy.no_live_lanes)(&lane.path)
+                    {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
+                    let _writer = if dry {
+                        cache_writer_probe(context.project_state, &lane.path)
+                            .map_err(custody_refusal)?
+                    } else {
+                        Some(claim_writer_guard(context, &lane.path, cancel)?)
+                    };
+                    context.repo.revalidate()?;
+                    if !(policy.no_live_lanes)(&lane.path) {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
+                    census_free(context, &lane.path, !dry)?;
+                    let protected = output_protection(context, context.repo, policy.keep, cancel)?;
+                    let effective = WorktreeGcPolicy {
+                        dry_run: dry,
+                        ..*policy
+                    };
+                    let apply_walk = PreviewWalk::new(true);
+                    collect_lane_output(
+                        &lane.path,
+                        context.repo,
+                        &effective,
+                        &layout_roots,
+                        &protected,
+                        &mut report,
+                        if dry { &preview_walk } else { &apply_walk },
+                    )?;
+                    row.detail = Some("primary output retention only".into());
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    row.detail = Some(error.to_string());
+                }
+                report.candidates.push(row);
+            }
             continue;
         }
-        let class = if matches!(lane.owner, Ok(Some(_))) {
+        let class = if managed(lane).unwrap_or(false) {
             "managed"
         } else {
             "foreign"
@@ -1549,6 +1608,10 @@ fn collect_impl(
                     })?;
             }
             let locked = lock_worktree(context, entry, cancel, dry)?;
+            if !policy.include_foreign && !managed_tree(&locked.verified)? {
+                row.detail = Some("foreign cleanup disabled by repository configuration".into());
+                return Ok(());
+            }
             // A preview shares one census across candidates; applying re-reads.
             census_free(context, &lane.path, !dry)?;
             // Reporting must remain bounded even when apply uses a full proof
@@ -1580,6 +1643,7 @@ fn collect_impl(
                 output_protection(context, locked.verified.repo(), policy.keep, cancel)?;
             let mut output_bytes = 0;
             if policy.mode != CollectionMode::LandingCleanup {
+                let apply_walk = PreviewWalk::new(true);
                 output_bytes = collect_lane_output(
                     &lane.path,
                     locked.verified.repo(),
@@ -1587,7 +1651,7 @@ fn collect_impl(
                     &layout_roots,
                     &protected,
                     &mut report,
-                    &preview_walk,
+                    if dry { &preview_walk } else { &apply_walk },
                 )?;
             }
             if policy.mode == CollectionMode::Outputs {
@@ -1706,8 +1770,9 @@ fn collect_impl(
                         .map_err(|_| WorktreeError::InvalidOutput)?
                         .parse()
                         .map_err(|_| WorktreeError::InvalidOutput)?;
-                    let newest =
-                        preview_walk.newest(locked.verified.repo().root_dir(), 0, false)?;
+                    let apply_walk = PreviewWalk::new(true);
+                    let walk = if dry { &preview_walk } else { &apply_walk };
+                    let newest = walk.newest(locked.verified.repo().root_dir(), 0, false)?;
                     let git_activity = latest_git_activity(
                         locked.verified.repo(),
                         branch.as_ref(),
@@ -1829,6 +1894,7 @@ fn collect_impl(
                     .ok_or(WorktreeError::RegistrationUnconfirmed)?;
                 let mut before_output = |verified: &VerifiedWorktree| {
                     precheck(verified)?;
+                    let apply_walk = PreviewWalk::new(true);
                     output_bytes = collect_lane_output(
                         &lane.path,
                         verified.repo(),
@@ -1836,7 +1902,7 @@ fn collect_impl(
                         &layout_roots,
                         &protected,
                         &mut report,
-                        &preview_walk,
+                        &apply_walk,
                     )?;
                     Ok(())
                 };

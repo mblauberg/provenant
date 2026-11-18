@@ -145,6 +145,7 @@ pub(crate) fn run(numbers: Vec<u64>, repair: bool, globals: &Globals) -> u8 {
     emit(&report, globals, &lines, true)
 }
 
+#[allow(clippy::too_many_arguments)] // Keep sync inputs explicit at the command boundary.
 fn sync_one(
     number: u64,
     repair: bool,
@@ -566,9 +567,8 @@ fn acquire_writer(
     )?;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
+    let clock = provenant_os::clock::SystemClock::new();
+    let now = provenant_core::Clock::wall_now(&clock)?.as_micros();
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut id = [0u8; 16];
     id[..8].copy_from_slice(&(now as u64).to_be_bytes());
@@ -578,7 +578,6 @@ fn acquire_writer(
         attempt: provenant_core::AttemptId::from_bytes(id),
         generation: 1,
     };
-    let clock = provenant_os::clock::SystemClock::new();
     provenant_supervisor::custody::acquire_writer(
         slot,
         scope,

@@ -328,6 +328,7 @@ fn valid_branch(branch: &str) -> bool {
 
 /// Held, verified repository and Git common/private directories.
 pub struct VerifiedRepo {
+    kind: RepoKind,
     root_path: PathBuf,
     private_path: PathBuf,
     common_path: PathBuf,
@@ -337,13 +338,19 @@ pub struct VerifiedRepo {
     root_identity: Metadata,
     private_identity: Metadata,
     common_identity: Metadata,
-    marker_identity: Metadata,
+    marker_identity: Option<Metadata>,
     marker_bytes: Option<Vec<u8>>,
     commondir_bytes: Option<Vec<u8>>,
     gitdir_backlink_bytes: Option<Vec<u8>>,
     probe_data: Option<RepoProbeData>,
     config_digest: Option<ConfigDigest>,
     native_alternates: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepoKind {
+    Checkout,
+    BoundBare,
 }
 
 /// Digest of the repository's own config files, kept apart from the digest of
@@ -467,6 +474,7 @@ impl VerifiedRepo {
         }
 
         Ok(Self {
+            kind: RepoKind::Checkout,
             root_path,
             private_path,
             common_path,
@@ -476,7 +484,7 @@ impl VerifiedRepo {
             root_identity,
             private_identity,
             common_identity,
-            marker_identity,
+            marker_identity: Some(marker_identity),
             marker_bytes,
             commondir_bytes,
             gitdir_backlink_bytes,
@@ -521,8 +529,35 @@ impl VerifiedRepo {
         E: From<RepoError>,
     {
         let mut repo = Self::open_structure(path, native_alternates).map_err(E::from)?;
+        Self::probe_and_pin(&mut repo, probe)?;
+        Ok(repo)
+    }
+
+    /// Open a bare common directory only after its caller has verified a
+    /// persisted project binding and a trusted bare worktree inventory.
+    pub(crate) fn open_bound_bare<E>(
+        common: impl AsRef<Path>,
+        expected_identity: Metadata,
+        probe: impl FnOnce(&VerifiedRepo) -> Result<RepoProbeData, E>,
+    ) -> Result<Self, E>
+    where
+        E: From<RepoError>,
+    {
+        let mut repo =
+            Self::open_bound_bare_structure(common.as_ref(), expected_identity).map_err(E::from)?;
+        Self::probe_and_pin(&mut repo, probe)?;
+        Ok(repo)
+    }
+
+    fn probe_and_pin<E>(
+        repo: &mut Self,
+        probe: impl FnOnce(&VerifiedRepo) -> Result<RepoProbeData, E>,
+    ) -> Result<(), E>
+    where
+        E: From<RepoError>,
+    {
         let config_before = repo.configuration_digest(None).map_err(E::from)?;
-        let data = probe(&repo)?;
+        let data = probe(repo)?;
         repo.probe_data = Some(data);
         // The probe records the digest of the included files it read; the
         // repository's own config files must not have changed meanwhile.
@@ -540,11 +575,96 @@ impl VerifiedRepo {
             return Err(E::from(RepoError::IdentityChanged));
         }
         repo.config_digest = Some(config_after);
-        Ok(repo)
+        Ok(())
+    }
+
+    fn open_bound_bare_structure(
+        common: &Path,
+        expected_identity: Metadata,
+    ) -> Result<Self, RepoError> {
+        let (root_path, root) = open_canonical_anchor(common, false)?;
+        let root_identity = root.metadata()?;
+        if root_identity.kind != FileKind::Directory
+            || root_identity.uid != effective_uid()
+            || root_identity.mode & 0o022 != 0
+        {
+            return Err(RepoError::InvalidRoot);
+        }
+        if !expected_identity.same_identity(&root_identity) {
+            return Err(RepoError::IdentityChanged);
+        }
+        match root.metadata_at(OsStr::new(GIT_MARKER), false) {
+            Err(error) if error.is_not_found() => {}
+            Ok(_) => return Err(RepoError::InvalidGitMarker),
+            Err(error) => return Err(error.into()),
+        }
+
+        // A bare capability has no checkout marker, commondir, or backlink:
+        // its root is the common Git directory itself.
+        let private = Directory::open_anchor(&root_path)?;
+        let common = Directory::open_anchor(&root_path)?;
+        let private_identity = private.metadata()?;
+        let common_identity = common.metadata()?;
+        verify_git_directory(private_identity, root_identity.uid)?;
+        verify_git_directory(common_identity, root_identity.uid)?;
+        if !root_identity.same_identity(&private_identity)
+            || !root_identity.same_identity(&common_identity)
+        {
+            return Err(RepoError::IdentityChanged);
+        }
+        for name in ["config", "HEAD"] {
+            if root.metadata_at(OsStr::new(name), false)?.kind != FileKind::Regular {
+                return Err(RepoError::InvalidGitDirectory);
+            }
+        }
+        for name in ["objects", "refs"] {
+            let directory = root.open_verified_directory(OsStr::new(name))?;
+            verify_git_directory(directory.metadata()?, root_identity.uid)?;
+        }
+        for name in ["commondir", "gitdir"] {
+            match root.metadata_at(OsStr::new(name), false) {
+                Err(error) if error.is_not_found() => {}
+                Ok(_) => return Err(RepoError::InvalidRegistration),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        reject_alternates(&common)?;
+
+        Ok(Self {
+            kind: RepoKind::BoundBare,
+            root_path: root_path.clone(),
+            private_path: root_path.clone(),
+            common_path: root_path,
+            root,
+            private,
+            common,
+            root_identity,
+            private_identity,
+            common_identity,
+            marker_identity: None,
+            marker_bytes: None,
+            commondir_bytes: None,
+            gitdir_backlink_bytes: None,
+            probe_data: None,
+            config_digest: None,
+            native_alternates: false,
+        })
     }
 
     pub fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    /// Whether this handle is an explicit, binding-verified bare common dir.
+    pub fn is_bare(&self) -> bool {
+        self.kind == RepoKind::BoundBare
+    }
+
+    /// Whether this handle names a checkout whose private Git directory is the
+    /// common directory. Bare common directories never count as checkouts.
+    pub fn is_primary_checkout(&self) -> bool {
+        self.kind == RepoKind::Checkout
+            && self.private_identity.same_identity(&self.common_identity)
     }
 
     pub fn private_git_dir(&self) -> &Path {
@@ -669,7 +789,12 @@ impl VerifiedRepo {
     }
 
     fn revalidate_inner(&self) -> Result<(), RepoError> {
-        let mut current = Self::open_structure(&self.root_path, self.native_alternates)?;
+        let mut current = match self.kind {
+            RepoKind::Checkout => Self::open_structure(&self.root_path, self.native_alternates)?,
+            RepoKind::BoundBare => {
+                Self::open_bound_bare_structure(&self.root_path, self.root_identity)?
+            }
+        };
         self.check_identity(&current)?;
         // The included files to digest are the ones this handle was probed on.
         current.probe_data = self.probe_data.clone();
@@ -696,17 +821,23 @@ impl VerifiedRepo {
     }
 
     fn revalidate_identity_inner(&self) -> Result<(), RepoError> {
-        let current = Self::open_structure(&self.root_path, self.native_alternates)?;
+        let current = match self.kind {
+            RepoKind::Checkout => Self::open_structure(&self.root_path, self.native_alternates)?,
+            RepoKind::BoundBare => {
+                Self::open_bound_bare_structure(&self.root_path, self.root_identity)?
+            }
+        };
         self.check_identity(&current)
     }
 
     fn check_identity(&self, current: &Self) -> Result<(), RepoError> {
-        if !self.root_identity.same_identity(&current.root_identity)
+        if self.kind != current.kind
+            || !self.root_identity.same_identity(&current.root_identity)
             || !self
                 .private_identity
                 .same_identity(&current.private_identity)
             || !self.common_identity.same_identity(&current.common_identity)
-            || !self.marker_identity.same_identity(&current.marker_identity)
+            || !same_optional_identity(self.marker_identity, current.marker_identity)
             || self.marker_bytes != current.marker_bytes
             || self.commondir_bytes != current.commondir_bytes
             || self.gitdir_backlink_bytes != current.gitdir_backlink_bytes
@@ -716,6 +847,14 @@ impl VerifiedRepo {
             return Err(RepoError::IdentityChanged);
         }
         Ok(())
+    }
+}
+
+fn same_optional_identity(left: Option<Metadata>, right: Option<Metadata>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.same_identity(&right),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -807,9 +946,8 @@ fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWor
             .parent()
             .filter(|_| common.file_name() == Some(std::ffi::OsStr::new(".git")))
             .filter(|primary| {
-                VerifiedRepo::open_structure_only(primary).is_ok_and(|repo| {
-                    repo.private_git_dir() == common && repo.common_git_dir() == common
-                })
+                VerifiedRepo::open_structure_only(primary)
+                    .is_ok_and(|repo| repo.is_primary_checkout() && repo.common_git_dir() == common)
             })
             .map(Path::to_path_buf)
             .unwrap_or_else(|| common.to_path_buf());
@@ -828,8 +966,9 @@ fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWor
     worktree.probe_data = repo.probe_data.clone();
     worktree.config_digest = Some(worktree.configuration_digest(None)?);
     worktree.revalidate()?;
-    let project_root =
-        (repo.private_git_dir() == repo.common_git_dir()).then(|| repo.root_path().to_path_buf());
+    let project_root = repo
+        .is_primary_checkout()
+        .then(|| repo.root_path().to_path_buf());
     Ok(VerifiedWorktree {
         repo: worktree,
         project_root,

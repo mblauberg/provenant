@@ -685,10 +685,7 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
                 return true;
             }
         }
-        if node["open_asks"].as_array().is_some_and(|a| !a.is_empty()) {
-            return true;
-        }
-        false
+        node["open_asks"].as_array().is_some_and(|a| !a.is_empty())
     };
 
     let is_live = |node: &Value| -> bool {

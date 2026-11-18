@@ -63,7 +63,7 @@ fn commit_unlanded_lane(rig: &TestRig, path: &Path) -> Result<provenant_core::Gi
     Ok(git(rig, &["-C", worktree, "rev-parse", "HEAD"])?.parse()?)
 }
 
-pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
+pub(super) fn gc_refuses_unbound_bare_projects() -> Result {
     for name in ["bare.git", ".git"] {
         let mut rig = repository()?;
         let container = rig.root.join("bare-container");
@@ -150,7 +150,12 @@ pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> R
         );
         rig.project = bare.clone();
         let from_bare = command(&rig, &["gc", "--apply", "--json"])?;
-        assert_ne!(code(&from_bare), 0);
+        assert_ne!(
+            code(&from_bare),
+            0,
+            "{name}: {}",
+            String::from_utf8_lossy(&from_bare.stdout.bytes)
+        );
         assert!(bare.join("HEAD").is_file() && linked.join(".git").is_file());
         assert_eq!(
             git(&rig, &["worktree", "list", "--porcelain"])?,
@@ -181,6 +186,113 @@ pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> R
         ],
     )?;
     ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
+    Ok(())
+}
+
+pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
+    for mode in ["linked", "bare", "scheduled"] {
+        let mut rig = repository()?;
+        let bare = rig.root.join("owner.git");
+        git(
+            &rig,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                rig.project.to_str().ok_or("path")?,
+                bare.to_str().ok_or("path")?,
+            ],
+        )
+        .map_err(|error| format!("clone bare: {error}"))?;
+        let linked = rig.root.join("bare-linked");
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "worktree",
+                "add",
+                "-qb",
+                "bare-linked",
+                linked.to_str().ok_or("path")?,
+            ],
+        )
+        .map_err(|error| format!("add bare checkout: {error}"))?;
+        rig.project = linked;
+        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .map_err(|error| format!("resolve roots: {error}"))?;
+        let location = provenant_config::ProjectLocation::new(&bare)
+            .map_err(|error| format!("bare location: {error}"))?;
+        let binding = provenant_config::bind_project(&roots, location)
+            .map_err(|error| format!("bind bare: {error}"))?;
+        let created = ok(&rig, &["worktree", "create", "gc-bare", "--json"])
+            .map_err(|error| format!("create bare worktree: {error}"))?;
+        let path = bare.join(".worktrees/gc-bare");
+        assert!(path.join(".git").is_file(), "{created}");
+        let head = created["data"]["head"]
+            .as_str()
+            .ok_or("head")?
+            .parse()
+            .map_err(|error| format!("parse created head: {error}; {created}"))?;
+        mark_created_lane_as_managed(&rig, &roots, &path, "gc-bare", head, head)
+            .map_err(|error| format!("mark bare lane managed: {error}"))?;
+        fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n[gc.projects.'{}']\nforeign_worktrees='keep'\n",
+                binding.project_id()
+            ),
+        )?;
+        if mode == "scheduled" {
+            rig.project = rig.home.clone();
+        } else if mode == "bare" {
+            rig.project = bare;
+        }
+        let registration = roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(binding.project_id().to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(&path));
+        let state = provenant_os::fs::Directory::open_anchor(&registration)?;
+        let held = state.try_lock_existing(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let args: &[&str] = if mode == "scheduled" {
+            &["gc", "--scheduled", "--apply", "--idle", "0", "--json"]
+        } else {
+            &["gc", "--apply", "--idle", "0", "--json"]
+        };
+        ok(&rig, args)?;
+        assert!(path.exists(), "held bare worktree removed ({mode})");
+        drop(held);
+        ok(&rig, args)?;
+        assert!(!path.exists(), "bound bare worktree retained ({mode})");
+    }
+    Ok(())
+}
+
+pub(super) fn gc_sweep_budget_stops_then_resumes() -> Result {
+    let rig = repository()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nsweep_budget='0'\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let stopped = command(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert_ne!(code(&stopped), 0);
+    let stopped: Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+    assert_eq!(stopped["data"]["sweep_stopped"], true, "{stopped}");
+    assert!(stopped["data"]["sweep_cursor"].is_object());
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nsweep_budget='5m'\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let resumed = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert_eq!(resumed["data"]["sweep_stopped"], false);
     Ok(())
 }
 
@@ -880,6 +992,19 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         &["worktree", "add", "-qb", "broken", ".worktrees/broken"],
     )?;
     fs::remove_dir_all(rig.project.join(".worktrees/broken"))?;
+    // A checkout made by Git remains foreign even when Provenant-created
+    // worktrees have not yet been assigned to a lane.
+    let foreign = rig.root.join("foreign-gc");
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "foreign-gc",
+            foreign.to_str().ok_or("path")?,
+        ],
+    )?;
     let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
     assert_eq!(dry["data"]["dry_run"], true);
     assert!(merged.is_dir());

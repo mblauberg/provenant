@@ -185,12 +185,13 @@ impl Lease {
     }
 
     pub fn matches_identity(&self, trigger: &str, scope: &str) -> bool {
-        self.trigger().is_none_or(|saved| saved == trigger)
-            && self.scope().is_none_or(|saved| saved == scope)
+        self.cursor().is_none()
+            || (self.trigger().is_none_or(|saved| saved == trigger)
+                && self.scope().is_none_or(|saved| saved == scope))
     }
 
     pub fn set_identity(&mut self, trigger: &str, scope: &str) -> Result<(), io::Error> {
-        let _lock = metadata_lock(&self.directory).map_err(io::Error::other)?;
+        let _lock = metadata_lock_for_release(&self.directory).map_err(io::Error::other)?;
         if !progress_has_epoch(&self.directory, self.progress.epoch) {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
@@ -226,7 +227,10 @@ impl Lease {
                 match receiver.recv_timeout(Duration::from_millis(25)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        if !progress_has_epoch(&directory, epoch) {
+                        if matches!(
+                            fence_observation(&directory, epoch),
+                            Ok(Some(false)) | Err(_)
+                        ) {
                             cancel.cancel();
                             break;
                         }
@@ -243,7 +247,7 @@ impl Lease {
 
     /// Record the next safe restart point under the short metadata mutex.
     pub fn checkpoint(&mut self, cursor: Cursor) -> Result<(), io::Error> {
-        let _lock = metadata_lock(&self.directory).map_err(io::Error::other)?;
+        let _lock = metadata_lock_for_release(&self.directory).map_err(io::Error::other)?;
         if !progress_has_epoch(&self.directory, self.progress.epoch) {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
@@ -259,7 +263,7 @@ impl Lease {
 
     /// Clear progress only after every scheduled class has completed.
     pub fn complete(mut self) -> Result<(), io::Error> {
-        let _lock = metadata_lock(&self.directory).map_err(io::Error::other)?;
+        let _lock = metadata_lock_for_release(&self.directory).map_err(io::Error::other)?;
         if !progress_has_epoch(&self.directory, self.progress.epoch) {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
@@ -409,6 +413,19 @@ fn metadata_lock(directory: &Directory) -> Result<LockGuard, provenant_os::fs::F
     directory.try_lock(OsStr::new(LOCK_FILE), LockMode::Exclusive)
 }
 
+// A checkpoint replaces the progress file under this mutex. A busy mutex is
+// not evidence of takeover; retry rather than cancelling our own sweep.
+fn fence_observation(
+    directory: &Directory,
+    epoch: u64,
+) -> Result<Option<bool>, provenant_os::fs::FsError> {
+    match metadata_lock(directory) {
+        Ok(_guard) => Ok(Some(progress_has_epoch(directory, epoch))),
+        Err(error) if is_lock_timeout(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn metadata_lock_for_release(
     directory: &Directory,
 ) -> Result<LockGuard, provenant_os::fs::FsError> {
@@ -464,6 +481,7 @@ fn next_epoch(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes the library without a test harness.
 fn write_progress(directory: &Directory, progress: &Progress) -> Result<(), io::Error> {
     let bytes = serde_json::to_vec(progress).map_err(io::Error::other)?;
     directory
@@ -505,6 +523,7 @@ fn elapsed_over_budget(elapsed: Duration, budget: Duration) -> bool {
 }
 
 #[cfg(test)]
+#[allow(unused_imports, dead_code)] // The worktree driver includes the library without a test harness.
 mod tests {
     use super::*;
     use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
@@ -514,6 +533,45 @@ mod tests {
             WallTime::from_micros(100_000_000).unwrap(),
             MonoTime::from_micros(10),
         )
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn failed_setup_without_a_cursor_does_not_reserve_a_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let Acquire::Held(mut first) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("new sweep is busy");
+        };
+        first.set_identity("full_gc", "manual:first").unwrap();
+        drop(first);
+        let Acquire::Held(next) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("released sweep is busy");
+        };
+        assert!(next.matches_identity("full_gc", "manual:second"));
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn busy_checkpoint_mutex_is_not_a_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let Acquire::Held(lease) = acquire(&root, Duration::from_secs(30), &clock).unwrap() else {
+            panic!("new sweep is busy");
+        };
+        let guard = metadata_lock(&lease.directory).unwrap();
+        assert_eq!(
+            fence_observation(&lease.directory, lease.epoch()).unwrap(),
+            None
+        );
+        drop(guard);
+        assert_eq!(
+            fence_observation(&lease.directory, lease.epoch()).unwrap(),
+            Some(true)
+        );
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps

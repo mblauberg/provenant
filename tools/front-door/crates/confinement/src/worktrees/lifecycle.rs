@@ -662,6 +662,7 @@ fn create_with_default(
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
     acquire_worktree_subject(verified.repo())?;
+    let creation_record = owner::record_creation(&verified);
     // Release the verified checkout descriptors before allowing a sibling
     // launcher to inspect this newly created worktree.
     drop(verified);
@@ -669,6 +670,11 @@ fn create_with_default(
     // between the ref mutation and its ownership record. A failed record
     // leaves the branch unobserved, which only ever retains it.
     let mut warnings = naming_warnings;
+    if let Err(error) = creation_record {
+        warnings.push(format!(
+            "could not record worktree creation: {error}; it is retained as foreign"
+        ));
+    }
     if create_branch && request.base.is_none() {
         warnings.extend(default.map_or_else(Vec::new, |(_, warnings)| warnings));
     }

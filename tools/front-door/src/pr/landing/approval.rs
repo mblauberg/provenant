@@ -465,16 +465,15 @@ impl Approver<'_, '_> {
                 if approvals
                     .carry_kinds
                     .contains(&provenant_cli::domains::ApprovalCarry::CleanMerge)
-                {
-                    if clean_merge_preserves_diff(
+                    && clean_merge_preserves_diff(
                         self.repo,
                         &classification_head,
                         &base_head,
                         head,
                         self.target,
-                    )? {
-                        kind = "clean_merge";
-                    }
+                    )?
+                {
+                    kind = "clean_merge";
                 }
             } else if !carried.is_empty()
                 && approvals
@@ -586,6 +585,7 @@ fn clean_merge_preserves_diff(
     Ok(approved_diff == merged_diff)
 }
 
+#[allow(clippy::too_many_arguments)] // Evidence inputs and diagnostics belong to this boundary.
 fn approval_evidence_at(
     sources: &[ApprovalSource],
     records: &dyn ReviewRecords,
@@ -803,17 +803,17 @@ fn format_delta_only(
 
 fn formatter_kind(command: &str) -> Option<&'static str> {
     let parts: Vec<_> = command.split_whitespace().collect();
-    if parts.iter().any(|part| *part == "fmt")
+    if parts.contains(&"fmt")
         && parts
             .first()
             .is_some_and(|program| program.rsplit('/').next() == Some("cargo"))
     {
         Some("cargo-fmt")
-    } else if parts.iter().any(|part| *part == "prettier") {
+    } else if parts.contains(&"prettier") {
         Some("prettier")
-    } else if parts.iter().any(|part| *part == "biome") {
+    } else if parts.contains(&"biome") {
         Some("biome")
-    } else if parts.iter().any(|part| *part == "black") {
+    } else if parts.contains(&"black") {
         Some("black")
     } else if parts.windows(2).any(|pair| pair == ["ruff", "format"]) {
         Some("ruff-format")

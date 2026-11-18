@@ -2944,7 +2944,6 @@ mod tests {
         use provenant_core::{CancelToken, GitOid, WaitBudget};
         use provenant_os::exec::SystemExecutor;
         use provenant_os::fs::{Directory, LockMode};
-        use std::process::Command;
 
         let fixture = Fixture::new();
         let temp = tempfile::tempdir()?;
@@ -2961,7 +2960,7 @@ mod tests {
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
         let git = provenant_os::git::git_executable().ok_or("git executable unavailable")?;
         let run_git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-            let output = Command::new(&git)
+            let output = provenant_os::fixture::git_command_at(&git)
                 .env_clear()
                 .envs(provenant_os::fixture::fixture_git_settings())
                 .env("PATH", "/usr/bin:/bin")
@@ -3195,6 +3194,17 @@ mod tests {
                 fs::write(target.join(lock), b"").unwrap();
             }
             fs::write(target.join("deps/payload"), vec![1_u8; 128]).unwrap();
+            let when = fixed_time() - std::time::Duration::from_secs(1000);
+            for path in [
+                target.join("deps/payload"),
+                target.join("deps"),
+                target.clone(),
+                target.join(CARGO_LOCK),
+                target.join(LOCKS[1]),
+                target.join(LOCKS[2]),
+            ] {
+                fs::File::open(path).unwrap().set_modified(when).unwrap();
+            }
             targets.push(target);
         }
         let root_directory = Directory::open_anchor(&root).unwrap();
@@ -3215,7 +3225,7 @@ mod tests {
             refresh_called = true;
             fs::File::open(&payload_a)
                 .unwrap()
-                .set_modified(std::time::SystemTime::now())
+                .set_modified(fixed_time())
                 .unwrap();
             assert_eq!(
                 root_before,

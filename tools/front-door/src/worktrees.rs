@@ -1251,15 +1251,29 @@ struct GcProject {
     path: PathBuf,
 }
 
-fn require_non_bare_gc_repository(bare: Option<bool>) -> Result<(), Error> {
-    match bare {
-        Some(false) => Ok(()),
-        Some(true) => Err(Error::GcObservation(
-            "GC cannot run on a bare repository because it has no primary checkout",
-        )),
-        None => Err(Error::GcObservation(
-            "GC cannot verify whether the repository is bare; a verified primary checkout is required",
-        )),
+/// Open a checkout normally, or a bare common directory only through an
+/// existing binding whose trusted layout is verified by the utility.
+fn open_gc_repo(
+    roots: &provenant_core::Roots,
+    runtime: &UtilityRuntime,
+    executor: &SystemExecutor,
+    path: &Path,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<provenant_confinement::repo::VerifiedRepo, Error> {
+    match runtime.open_repo(executor, path, budget, cancel) {
+        Ok(repo) => Ok(repo),
+        Err(error) => {
+            if let Ok(common) = provenant_os::fs::canonicalize(path)
+                && let Ok(location) = provenant_config::ProjectLocation::new(common)
+                && let Some(binding) = provenant_config::lookup_project(roots, &location)?
+            {
+                return runtime
+                    .open_bound_bare_repo(executor, &binding, budget, cancel)
+                    .map_err(Into::into);
+            }
+            Err(error.into())
+        }
     }
 }
 
@@ -1290,19 +1304,25 @@ fn gc_project(
         workers,
         facts,
         read_only,
+        true,
         Some((binding, layout)),
         cancel,
         |context, cancel| {
-            require_non_bare_gc_repository(facts.bare_setting(
+            let bare = facts.bare_setting(
                 context.repo,
                 context.executor,
                 context.utility,
                 context.utility_budget,
                 cancel,
-            )?)?;
-            if context.layout.project() != Some(context.repo.root_path()) {
+            )?;
+            let valid_owner = match (bare, context.layout.project()) {
+                (Some(false), Some(primary)) => primary == context.repo.root_path(),
+                (Some(true), None) => context.layout.root() == context.repo.common_git_dir(),
+                _ => false,
+            };
+            if !valid_owner {
                 return Err(Error::GcObservation(
-                    "GC requires the verified primary checkout; a linked checkout cannot serve as the GC owner",
+                    "GC requires a verified primary checkout or bound bare owner",
                 ));
             }
             Ok(GcProject {
@@ -1716,13 +1736,19 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         roots::Workspace::Checkout
     };
+    let resolved = match roots::resolve(globals, workspace, roots::Product::Required) {
+        Err(roots::RootError::Checkout) if !command.scheduled => {
+            roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)?
+        }
+        result => result?,
+    };
     let roots::Resolved {
         assets,
         home,
         project,
         roots,
         ..
-    } = roots::resolve(globals, workspace, roots::Product::Required)?;
+    } = resolved;
     let facts = worktrees::RepoFacts::default();
     let mut projects = Vec::new();
     let mut scheduled_project_ids = Vec::new();
@@ -2038,12 +2064,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     continue;
                 }
             };
-            let Some(path) = layout.project().map(Path::to_path_buf) else {
-                // Scheduled worktree GC requires a verified primary checkout;
-                // a bare common directory is an allocation owner, not a checkout.
-                unobserved_projects.push(layout.root().to_owned());
-                continue;
-            };
+            let path = layout.project().unwrap_or(layout.root()).to_path_buf();
             match gc_project(
                 &roots,
                 &home,
@@ -2089,7 +2110,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
         let runtime = UtilityRuntime::read_only(&git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
-        let repo = runtime.open_repo(
+        let repo = open_gc_repo(
+            &roots,
+            &runtime,
             &executor,
             &project,
             sweep_utility_budget(&deadline)?,
@@ -2118,14 +2141,19 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        require_non_bare_gc_repository(facts.bare_setting(
+        let bare = facts.bare_setting(
             &repo,
             &executor,
             &runtime,
             sweep_utility_budget(&deadline)?,
             deadline.cancel(),
-        )?)?;
-        let location = if repo.private_git_dir() == repo.common_git_dir() {
+        )?;
+        if bare.is_none() {
+            return Err(Error::GcObservation(
+                "GC cannot verify whether the repository is bare",
+            ));
+        }
+        let location = if bare == Some(false) && repo.private_git_dir() == repo.common_git_dir() {
             provenant_config::ProjectLocation::from_verified_primary_checkout(
                 repo.common_git_dir(),
                 repo.root_path(),
@@ -2133,9 +2161,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         } else {
             provenant_config::ProjectLocation::new(repo.common_git_dir())?
         };
-        let binding = if command.dry_run {
+        let binding = if command.dry_run || bare == Some(true) {
             provenant_config::lookup_project(&roots, &location)?.ok_or(Error::GcObservation(
-                "GC preview requires an existing project binding",
+                "GC requires an existing project binding for a preview or bare repository",
             ))?
         } else {
             provenant_config::bind_project(&roots, location)?
@@ -2146,12 +2174,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             sweep_utility_budget(&deadline)?,
             deadline.cancel(),
         )?;
-        let primary = layout
-            .project()
-            .map(Path::to_path_buf)
-            .ok_or(Error::GcObservation(
-                "GC requires a verified primary checkout",
-            ))?;
+        let primary = layout.project().unwrap_or(layout.root()).to_path_buf();
 
         let selected = gc_project(
             &roots,
@@ -2279,7 +2302,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .as_ref()
             .filter(|cursor| cursor.class == class_name)
             .and_then(|cursor| cursor.candidate.clone());
-        if !adapters.stop_requested() {
+        if adapters.stop_requested() {
             let cursor = crate::gc_sweep::Cursor {
                 class: class_name.clone(),
                 project: adapters.project_start,
@@ -2314,7 +2337,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 .map_err(|error| Error::RetentionCollection(error.to_string()))?;
         }
         if let Err(error) = class.adapter.collect(&mut adapters) {
-            if !adapters.stop_requested() {
+            if adapters.stop_requested() {
                 let cursor =
                     adapters
                         .stopped_cursor
@@ -2358,7 +2381,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             stopped = true;
             break;
         }
-        if !adapters.stop_requested() {
+        if adapters.stop_requested() {
             let cursor = classes.get(class_index + 1).map_or_else(
                 || crate::gc_sweep::Cursor {
                     class: "complete".into(),
@@ -2645,14 +2668,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let project_start = self.project_start.clone();
         let candidate_start = self.resume_candidate().map(Path::to_path_buf);
         let resume_detail = self.resume_detail().map(str::to_owned);
-        let project_start_index = project_start
-            .as_ref()
-            .and_then(|path| {
-                self.projects
-                    .iter()
-                    .position(|project| project.path.as_path() >= path.as_path())
-            })
-            .unwrap_or(self.projects.len());
+        let project_start_index = project_start.as_ref().map_or(0, |path| {
+            self.projects
+                .iter()
+                .position(|project| project.path.as_path() >= path.as_path())
+                .unwrap_or(self.projects.len())
+        });
 
         for project_index in project_start_index..self.projects.len() {
             let project_path = self.projects[project_index].path.clone();
@@ -2687,7 +2708,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 .project_settings(&project.binding.project_id().to_string(), &project.path);
             let remaining = self.deadline.remaining();
             let stopped_candidate = RefCell::new(None::<PathBuf>);
-            let cleanup = with_context_mode_cancel(
+            let cleanup = with_gc_context_mode_cancel(
                 roots,
                 home,
                 &project.path,
@@ -2720,8 +2741,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     // receipt that is not final. Collect them through the same
                     // owner-bound proof before the path-based pass below. The
                     // subpass requires an exact integration ref for reportable removal.
-                    let mut should_continue =
-                        || sweep_should_continue(sweep_deadline, self.lease.as_ref());
+                    let mut should_stop =
+                        || !sweep_should_continue(sweep_deadline, self.lease.as_ref());
                     let unsettled = if command.apply && !command.dry_run {
                         crate::fabric::gc_cleanup::collect_unsettled(
                             roots,
@@ -2732,7 +2753,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             workers,
                             cancel,
                             project_resume_detail.as_deref(),
-                            &mut should_continue,
+                            &mut should_stop,
                         )
                         .unwrap_or_else(|error| {
                             use std::io::Write;
@@ -2893,7 +2914,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         },
                         cancel,
                         start_candidate,
-                        &mut should_continue,
+                        &mut should_stop,
                     )?;
 
                     if let Some(candidate) = report.interrupted_at {
@@ -2987,14 +3008,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let resume_detail = self.resume_detail().map(str::to_owned);
         let cancel = self.deadline.cancel().clone();
         let sweep_deadline = self.deadline;
-        let project_start_index = project_start
-            .as_ref()
-            .and_then(|path| {
-                self.projects
-                    .iter()
-                    .position(|project| project.path.as_path() >= path.as_path())
-            })
-            .unwrap_or(self.projects.len());
+        let project_start_index = project_start.as_ref().map_or(0, |path| {
+            self.projects
+                .iter()
+                .position(|project| project.path.as_path() >= path.as_path())
+                .unwrap_or(self.projects.len())
+        });
 
         for project_index in project_start_index..self.projects.len() {
             let project_path = self.projects[project_index].path.clone();
@@ -3020,7 +3039,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             }
             let project = &self.projects[project_index];
             let remaining = self.deadline.remaining();
-            let mut archived = with_context_mode_cancel(
+            let mut archived = with_gc_context_mode_cancel(
                 roots,
                 home,
                 &project.path,
@@ -3030,8 +3049,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 command.dry_run,
                 &cancel,
                 |context, cancel| {
-                    let mut should_continue =
-                        || sweep_should_continue(sweep_deadline, self.lease.as_ref());
+                    let mut should_stop =
+                        || !sweep_should_continue(sweep_deadline, self.lease.as_ref());
                     Ok(worktrees::collect_archives(
                         context,
                         now_ns
@@ -3040,7 +3059,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         cancel,
                         candidate_path.as_deref(),
                         candidate_detail.as_deref(),
-                        &mut should_continue,
+                        &mut should_stop,
                     ))
                 },
             )
@@ -3094,7 +3113,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let cancel = self.deadline.cancel().clone();
         let deadline = self.deadline;
         let lease = self.lease.as_ref();
-        let mut should_continue = || sweep_should_continue(deadline, lease);
+        let mut should_stop = || !sweep_should_continue(deadline, lease);
         let report = crate::staging_gc::collect(
             roots.state.as_path(),
             now_ns - i128::from(self.data.idle_seconds) * 1_000_000_000,
@@ -3102,7 +3121,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             &cancel,
             self.resume_candidate(),
             self.resume_detail(),
-            &mut should_continue,
+            &mut should_stop,
         )?;
         self.data.staging_busy = report.busy;
         if let Some(candidate) = report.interrupted_at {
@@ -3234,15 +3253,15 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         };
         let mut report = {
             let lease = self.lease.as_ref();
-            let mut should_continue = || sweep_should_continue(sweep_deadline, lease);
+            let mut should_stop = || !sweep_should_continue(sweep_deadline, lease);
             let unobserved = protection.unobserved;
             let mut refresh_protection = || {
-                let mut keep_going = || sweep_should_continue(sweep_deadline, lease);
+                let mut should_stop = || !sweep_should_continue(sweep_deadline, lease);
                 let mut refreshed = provenant_run::build_dir_gc::target_protection_for_launch_while(
                     roots,
                     None,
                     None,
-                    &mut keep_going,
+                    &mut should_stop,
                 );
                 refreshed.unobserved |= unobserved;
                 refreshed
@@ -3265,7 +3284,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 &protection,
                 resume_detail.as_deref(),
                 &epoch,
-                &mut should_continue,
+                &mut should_stop,
                 &mut refresh_protection,
             )
         }
@@ -3387,7 +3406,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 self.home,
                 self.assets,
                 self.config.retention.payload_cap_bytes,
-                !self.command.pressure && !self.command.dry_run,
+                !self.command.pressure,
                 self.command.dry_run,
                 cancel,
                 &scan,
@@ -3576,7 +3595,24 @@ pub(crate) fn with_context_mode_cancel<T>(
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
     with_context_mode_with_owner_cancel(
-        roots, home, project, mutation, workers, facts, read_only, None, cancel, action,
+        roots, home, project, mutation, workers, facts, read_only, false, None, cancel, action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_gc_context_mode_cancel<T>(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    mutation: Duration,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    read_only: bool,
+    cancel: &CancelToken,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
+    with_context_mode_with_owner_cancel(
+        roots, home, project, mutation, workers, facts, read_only, true, None, cancel, action,
     )
 }
 
@@ -3589,6 +3625,7 @@ fn with_context_mode_with_owner_cancel<T>(
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
     read_only: bool,
+    allow_bare: bool,
     owner: Option<(provenant_config::ProjectBinding, worktrees::ProjectLayout)>,
     cancel: &CancelToken,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
@@ -3647,7 +3684,11 @@ fn with_context_mode_with_owner_cancel<T>(
             .min(Duration::from_secs(5))
             .max(Duration::from_millis(1)),
     )?;
-    let repo = runtime.open_repo(&executor, project, budget, cancel)?;
+    let repo = if allow_bare {
+        open_gc_repo(roots, &runtime, &executor, project, budget, cancel)?
+    } else {
+        runtime.open_repo(&executor, project, budget, cancel)?
+    };
     let (binding, layout) = if let Some((binding, layout)) = owner {
         let common = Directory::open_anchor(binding.common_dir())?;
         if binding.common_dir() != repo.common_git_dir()
@@ -3657,7 +3698,8 @@ fn with_context_mode_with_owner_cancel<T>(
         }
         (binding, layout)
     } else {
-        let location = if repo.private_git_dir() == repo.common_git_dir() {
+        let bare = facts.bare_setting(&repo, &executor, &runtime, budget, cancel)?;
+        let location = if bare != Some(true) && repo.private_git_dir() == repo.common_git_dir() {
             provenant_config::ProjectLocation::from_verified_primary_checkout(
                 repo.common_git_dir(),
                 repo.root_path(),
@@ -3665,7 +3707,7 @@ fn with_context_mode_with_owner_cancel<T>(
         } else {
             provenant_config::ProjectLocation::new(repo.common_git_dir())?
         };
-        let binding = if read_only {
+        let binding = if read_only || bare == Some(true) {
             provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
                 "GC preview requires an existing project binding",
             ))?

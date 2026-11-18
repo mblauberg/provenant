@@ -71,7 +71,8 @@ ordinary lane work can continue without publishing credentials.
 
 Keep the lane's Cargo bindings. Lanes default to a shared warm Cargo target per
 project under the host cache (`lanes.cargo_target = "shared"`), which avoids cold
-builds and skips seed cloning. When configured as `lanes.cargo_target = "private"`,
+builds and skips seed cloning. Concurrent lanes sharing a target can queue on
+Cargo's build-directory lock, reducing parallel build throughput. When configured as `lanes.cargo_target = "private"`,
 a host can build a seed for a registered
 repository with `provenant worktree seed-build`. It builds the configured verify
 base, so uncommitted work is not the seed source. Later writers copy a compatible

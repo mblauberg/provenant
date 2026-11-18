@@ -95,6 +95,13 @@ Foreign worktrees and local branches are included by default. Their first pass
 previews and records that preview for the repository incarnation. Configure
 `gc.projects.<project>.foreign_worktrees = 'keep'` to opt out, `keep_paths` for
 path/ref patterns, and `integration_branches` for integration-ref patterns.
+Worktree creation records distinguish Provenant-created checkouts from foreign
+ones independently of their location. Older checkouts without creation or lane
+custody evidence remain foreign. Declared ignored output in a verified
+primary or managed worktree remains eligible when foreign cleanup is disabled;
+writer custody and the process census still protect live work. A verified bound
+bare repository can collect its managed linked worktrees without a primary
+checkout. An unbound bare repository cannot grant GC authority.
 A process denied observation with EPERM produces one warning rather than
 blocking every candidate when descriptor inspection is complete and no observed
 path is beneath a candidate. Observed cwd or descriptor use beneath a candidate

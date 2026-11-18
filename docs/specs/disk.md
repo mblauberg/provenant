@@ -57,6 +57,11 @@ An EPERM process with complete descriptor evidence and no observed cwd or
 descriptor beneath a candidate produces a warning once rather than making every
 worktree unknown. Positive path evidence protects the affected candidate;
 incomplete descriptor evidence and other unknown custody still prevent removal.
+For worktree output, foreign policy uses verified worktree creation and lane
+custody, not a configured path. A verified primary checkout and managed linked
+worktrees are eligible regardless of foreign cleanup policy. A bound bare Git
+owner may collect its linked worktrees; an unbound bare repository cannot.
+Every output mutation holds writer exclusion and requires a fresh free census.
 - Why: space recovery must retain evidence and live data while collecting idle
   read-only scratch and both forms of Cargo output.
 

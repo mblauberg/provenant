@@ -43,7 +43,9 @@ pub fn is_valid_setting(value: &str) -> bool {
 /// Resolve a byte size or integer percentage of the volume.
 pub fn parse(value: &str, volume_bytes: u64) -> Result<u64, &'static str> {
     if let Some(percent) = value.strip_suffix('%') {
-        let percent = percent.parse::<u64>().map_err(|_| "invalid_cache_percent")?;
+        let percent = percent
+            .parse::<u64>()
+            .map_err(|_| "invalid_cache_percent")?;
         if percent > 100 {
             return Err("invalid_cache_percent");
         }
@@ -61,7 +63,9 @@ fn volume_bytes(path: &Path) -> std::io::Result<u64> {
         match provenant_os::fs::Directory::open_anchor(current) {
             Ok(volume) => return volume.total_bytes().map_err(std::io::Error::other),
             Err(error) if error.is_not_found() => {
-                current = current.parent().ok_or_else(|| std::io::Error::other(error))?;
+                current = current
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other(error))?;
             }
             Err(error) => return Err(std::io::Error::other(error)),
         }

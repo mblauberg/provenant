@@ -406,6 +406,7 @@ fn open_optional(parent: &Directory, name: &OsStr) -> Result<Option<Directory>, 
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // The worktree driver includes the library without a test harness.
 mod tests {
     use super::*;
     use std::cell::Cell;

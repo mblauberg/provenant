@@ -293,7 +293,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
-            "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
+            "gc_sweep_budget_stops_then_resumes",
+            "gc_refuses_unbound_bare_projects",
+            "gc_collects_bound_bare_worktrees",
             "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
@@ -414,7 +416,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::provider_retention::provider_retention_classes_sweep_host_and_refuse_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
-                "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
+                "gc_sweep_budget_stops_then_resumes" => gc_sweep_budget_stops_then_resumes(),
+                "gc_refuses_unbound_bare_projects" => gc_refuses_unbound_bare_projects(),
+                "gc_collects_bound_bare_worktrees" => gc_collects_bound_bare_worktrees(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks()
