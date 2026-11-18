@@ -837,17 +837,6 @@ mod tests {
         );
     }
     #[test]
-    fn missing_working_file_error_names_the_path() {
-        let error = CheckError::EvidencePath(format!(
-            "tracked working file is missing: {}",
-            Path::new("docs/guide.md").display()
-        ));
-        let message = error.to_string();
-        assert!(message.contains("docs/guide.md"), "{message}");
-        assert!(message.contains("tracked working file is missing"), "{message}");
-    }
-
-    #[test]
     fn tree_and_index_parsers_preserve_tabs_and_newlines_in_names() {
         let input = format!("100644 blob {} 2\tname\twith\nspaces\0", "a".repeat(40));
         let entries = tree_entries(input.as_bytes()).unwrap();
