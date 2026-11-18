@@ -670,6 +670,10 @@ impl RunError {
         match self {
             Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
             Self::WriterLineage(_) => B::Authority,
+            Self::DeliveryPrepare {
+                refusal: Some(DeliveryPrepareRefusal::CredentialHelper(safety)),
+                ..
+            } if *safety != HelperSafety::Unavailable => B::Credentials,
             Self::Confinement(error) => error.boundary_class(),
             Self::Plan(error) => error.boundary_class(),
             _ => ErrorKind::from(self).boundary_class(),

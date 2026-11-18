@@ -222,7 +222,7 @@ fn agy_profile_ready(
             Ok(true)
         }
         Err(error) => match error.downcast_ref::<RoutingError>() {
-            Some(RoutingError::NoEligiblePoolMember { exclusions }) => {
+            Some(RoutingError::NoEligiblePoolMember { exclusions, .. }) => {
                 assert_eq!(
                     exclusions,
                     &[format!("{model}: exhausted; earliest known reset 604900")]

@@ -160,7 +160,7 @@ fn pool_excludes_unsupported_effort_but_exact_and_user_pool_allow_it()
     let error = resolve_with_seed(&query, &ctx, "test-seed", 0).unwrap_err();
     assert_eq!(error.code(), "no_eligible_pool_member");
     assert!(
-        matches!(error, RoutingError::NoEligiblePoolMember { exclusions } if !exclusions.is_empty())
+        matches!(error, RoutingError::NoEligiblePoolMember { exclusions, .. } if !exclusions.is_empty())
     );
 
     // Exact request for the model with "high" effort resolves ready

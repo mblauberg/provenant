@@ -101,6 +101,15 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
             &format!("!{} auth git-credential", helper.display()),
         ])?;
         let error = fixture.prepare().expect_err("unsafe helper");
+        // Spec: docs/specs/routing.md#accounts-and-credentials
+        assert_eq!(
+            error.boundary_class(),
+            if safety == HelperSafety::Unavailable {
+                provenant_records::diagnostic::BoundaryClass::None
+            } else {
+                provenant_records::diagnostic::BoundaryClass::Credentials
+            }
+        );
         assert!(matches!(
             error,
             RunError::DeliveryPrepare {

@@ -146,6 +146,10 @@ limit holds the whole account until its reset. One function,
 `Admission::account_block`, decides account blocks for both resolution and
 the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
+A pool cannot draw an unresolved account or a current login-required account,
+even when every other member is unavailable. Dispatch requires a resolved account;
+preview can explain an unprobed model without selecting a launch account.
+An executable-only probe cannot clear recorded sign-out or login-expiry evidence.
 A fresh probe failure (`command_failure` or `probe_timeout`) ranks its account
 below ready or untested accounts during its validity window; if only failed-probe
 accounts remain, launch proceeds with a warning unless the `PROBE_FAILURE`
@@ -196,12 +200,16 @@ HOME is the adapter's local account and needs no registration. Agy's local
 login remains selectable as `account=local` beside isolated registered accounts,
 but is an in-memory identity
 rather than a registered credential root; automatic routing continues to choose
-among registered accounts. A pin does not switch accounts. Credential custody
+among registered accounts. A node-wide account pin does not switch accounts;
+each fallback candidate may declare its own account when the node is unpinned.
+Credential custody
 is owned by [supervision](supervisor.md#native-environment-and-sandbox-tool-stores).
 A registered long-lived lane token is not rotated by the host.
 
 OpenCode models are partitioned by the registered plan, independently of account
-keys and labels. Enumeration keeps one row per registered identity and never
+keys, labels and shared credential directories: `opencode-go/` models use the
+Go plan and `opencode/` models use Zen. Enumeration keeps one row per registered
+identity and never
 invents a Zen identity from Go credentials. Plan declarations also own the quota
 source: missing or unrecognised plans retain unknown quota evidence rather than
 using the Go ledger. Free-model pacing and refusals remain

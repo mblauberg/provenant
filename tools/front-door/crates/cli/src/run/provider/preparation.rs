@@ -824,13 +824,17 @@ impl PrepareError {
                 terminal_note: note,
                 message,
                 skipped_routes: Vec::new(),
-                fallback_outcome: matches!(
-                    cause,
+                fallback_outcome: match cause {
+                    provenant_records::run::TerminalCause::AccountLoginRequired => {
+                        Some(provenant_records::run::PreparationFailure::AuthRequired)
+                    }
                     provenant_records::run::TerminalCause::UnregisteredAccount
-                        | provenant_records::run::TerminalCause::CommandUnavailable
-                        | provenant_records::run::TerminalCause::HostNativeUnconfigured
-                )
-                .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+                    | provenant_records::run::TerminalCause::CommandUnavailable
+                    | provenant_records::run::TerminalCause::HostNativeUnconfigured => {
+                        Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+                    }
+                    _ => None,
+                },
             }),
             Self::SourceView(error) => {
                 let detail = error.to_string();
@@ -1265,7 +1269,25 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
                 TerminalCause::UnknownPacingAccount,
                 "unknown_pacing_account",
             ),
-            EdgeError::Routing(error) => (TerminalCause::RouteResolutionRefused, error.code()),
+            EdgeError::Routing(error) => {
+                let cause = match error {
+                    provenant_routing::RoutingError::NoEligiblePoolMember {
+                        cause: Some(reason),
+                        ..
+                    } => match reason {
+                        provenant_records::RouteExclusionReason::AuthRequired
+                        | provenant_records::RouteExclusionReason::LoginExpired => {
+                            TerminalCause::AccountLoginRequired
+                        }
+                        provenant_records::RouteExclusionReason::UnknownAccount => {
+                            TerminalCause::UnregisteredAccount
+                        }
+                        _ => TerminalCause::RouteResolutionRefused,
+                    },
+                    _ => TerminalCause::RouteResolutionRefused,
+                };
+                (cause, error.code())
+            }
             EdgeError::Unresolved { .. } => {
                 (TerminalCause::RouteResolutionRefused, "unresolved_selector")
             }
@@ -2895,7 +2917,6 @@ pub(super) fn prepare_candidates(
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
-    let mut login_unverified = std::collections::BTreeSet::<(String, String)>::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut reason_boundaries = std::collections::BTreeMap::new();
     let mut reason_resources = std::collections::BTreeMap::new();
@@ -2986,43 +3007,39 @@ pub(super) fn prepare_candidates(
                             )
                         )
                         || persisted_auth_failure;
-                    if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
+                    // A version-only probe cannot clear an authentication refusal.
+                    if auth_failure
+                        && login_check_can_clear(&entry.adapter, mismatch)
+                        && strategy != provenant_records::LoginReprobe::ExecutableOnly
+                    {
                         let executable = Path::new(&record.executable);
-                        if strategy == provenant_records::LoginReprobe::ExecutableOnly {
-                            // The version probe established executable availability,
-                            // not login health. Let the selected launch check auth.
-                            record.fixture_ref =
-                                format!("installed/{}/login-unverified", entry.adapter);
-                            login_unverified.insert((entry.adapter.clone(), entry.key.clone()));
-                        } else {
-                            let healthy = match strategy {
-                                provenant_records::LoginReprobe::Codex => {
-                                    codex_login_is_healthy(entry, executable, &probe)
-                                }
-                                provenant_records::LoginReprobe::Cursor => {
-                                    cursor_login_is_healthy(entry, executable, &probe)
-                                }
-                                provenant_records::LoginReprobe::AccountIdentity => {
-                                    provenant_providers::accounts::detect_for_registration(
-                                        &executor,
-                                        &entry.adapter,
-                                        executable,
-                                        &home,
-                                        &user,
-                                        &entry.directory,
-                                        executor.root(),
-                                    )
-                                    .is_ok_and(|(key, _)| {
-                                        key == entry.key || (!mismatch && entry.key == "local")
-                                    })
-                                }
-                                provenant_records::LoginReprobe::None
-                                | provenant_records::LoginReprobe::ExecutableOnly => false,
-                            };
-                            if healthy {
-                                record.fixture_ref =
-                                    format!("installed/{}/login-status", entry.adapter);
+                        let healthy = match strategy {
+                            provenant_records::LoginReprobe::Codex => {
+                                codex_login_is_healthy(entry, executable, &probe)
                             }
+                            provenant_records::LoginReprobe::Cursor => {
+                                cursor_login_is_healthy(entry, executable, &probe)
+                            }
+                            provenant_records::LoginReprobe::AccountIdentity => {
+                                provenant_providers::accounts::detect_for_registration(
+                                    &executor,
+                                    &entry.adapter,
+                                    executable,
+                                    &home,
+                                    &user,
+                                    &entry.directory,
+                                    executor.root(),
+                                )
+                                .is_ok_and(|(key, _)| {
+                                    key == entry.key || (!mismatch && entry.key == "local")
+                                })
+                            }
+                            provenant_records::LoginReprobe::None
+                            | provenant_records::LoginReprobe::ExecutableOnly => false,
+                        };
+                        if healthy {
+                            record.fixture_ref =
+                                format!("installed/{}/login-status", entry.adapter);
                         }
                     }
                 }
@@ -4420,16 +4437,6 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
-        if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
-            spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
-        }) && route.account_key.as_ref().is_some_and(|account_key| {
-            login_unverified.contains(&(route.adapter.clone(), account_key.clone()))
-        }) {
-            push_launch_warning(
-                &mut route,
-                "OpenCode login status is unverified; the selected launch will check authentication",
-            );
-        }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
         }
@@ -5362,6 +5369,34 @@ mod refusal_cause_tests {
             Some("route resolver classification: unsupported_effort")
         );
         assert!(refusal.skipped_routes.is_empty());
+        // Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+        for (reason, expected) in [
+            (
+                provenant_records::RouteExclusionReason::AuthRequired,
+                provenant_records::run::PreparationFailure::AuthRequired,
+            ),
+            (
+                provenant_records::RouteExclusionReason::LoginExpired,
+                provenant_records::run::PreparationFailure::AuthRequired,
+            ),
+            (
+                provenant_records::RouteExclusionReason::UnknownAccount,
+                provenant_records::run::PreparationFailure::AdapterUnavailable,
+            ),
+        ] {
+            let error = crate::route::DispatchError::from(crate::route::EdgeError::Routing(
+                provenant_routing::RoutingError::NoEligiblePoolMember {
+                    exclusions: vec!["PROVIDER_SECRET_SENTINEL".into()],
+                    cause: Some(reason),
+                },
+            ));
+            assert_eq!(
+                route_resolution_refusal(error)
+                    .into_refusal()
+                    .fallback_outcome,
+                Some(expected)
+            );
+        }
         assert!(
             !refusal
                 .terminal_note

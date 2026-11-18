@@ -150,6 +150,12 @@
                 &[],
             )
         };
+        // Spec: docs/specs/routing.md#unknown-never-means-ready
+        let unresolved = super::resolve_dispatch(
+            &request, &roots, None, ("fixture", 0), &[], &access,
+            "fixture", None, &[],
+        );
+        assert!(unresolved.is_err(), "dispatch needs an account even without a probe record");
         let first = resolve(&[])?;
         let first_id =
             provenant_routing::ModelId::parse(&format!("{}/{}", first.adapter, first.model))?;
@@ -231,6 +237,15 @@
             fallback.readiness,
             provenant_records::RouteReadiness::Ready { .. }
         ));
+        // Missing identity cannot be selected just to preserve a family preference.
+        let missing = super::resolve_dispatch(
+            &request, &roots, None, ("fixture", 0), &availability[..1],
+            &access, "fixture", Some((&["openai".into()], false, &[])), &[],
+        )?;
+        assert_eq!(missing.adapter, "codex");
+        let mut stale = availability.clone();
+        stale[1].observed_unix_seconds = now - 10;
+        stale[1].expires_unix_seconds = now - 1;
         // The unused family remains selected when its availability is stale,
         // instead of silently relaxing to the ready, already-used family.
         let deferred = super::resolve_dispatch(
@@ -238,16 +253,19 @@
             &roots,
             None,
             ("fixture", 0),
-            &availability[..1],
+            &stale,
             &access,
             "fixture",
             Some((&["openai".into()], false, &[])),
             &[],
         )?;
         assert_eq!(deferred.adapter, "claude");
+        assert_eq!(deferred.account_key, stale[1].account_key);
+        // Stale executable evidence warns; it does not erase a known identity.
         assert!(matches!(
             deferred.readiness,
-            provenant_records::RouteReadiness::Unavailable { .. }
+            provenant_records::RouteReadiness::Ready { availability_warning: Some(warning), .. }
+                if warning == format!("{:?}", provenant_records::RouteExclusionReason::StaleAvailability)
         ));
         Ok(())
     }

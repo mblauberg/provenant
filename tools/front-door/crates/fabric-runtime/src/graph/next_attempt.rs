@@ -574,22 +574,6 @@ pub(super) fn next_attempt_transition(
                     || (attempt.outcome == Some(AttemptOutcome::UsageLimited)
                         && progress.quota_redraw_spent > 0))
         });
-    if switching
-        && node
-            .routes
-            .get(route_index - 1)
-            .and_then(|route| route.account.as_ref())
-            .is_some_and(|account| {
-                node.routes
-                    .get(route_index)
-                    .is_some_and(|next| next.account.as_ref() != Some(account))
-            })
-    {
-        return NextAttemptDecision::Ready(NextAttempt::Fail {
-            code: Some("fallback_account_pinned"),
-            message: Some("Route fallback cannot change the pinned account.".into()),
-        });
-    }
     let allowance = progress
         .retry
         .as_ref()

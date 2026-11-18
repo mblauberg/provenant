@@ -510,9 +510,8 @@ pub(super) fn with_context<T>(
                     provenant_records::LoginObservation::Reprobe => {
                         record.fixture_ref == format!("installed/{adapter}/login-status")
                     }
-                    provenant_records::LoginObservation::ExecutableOnly => {
-                        record.fixture_ref == format!("installed/{adapter}/login-unverified")
-                    }
+                    // Executable health does not replace a recorded login failure.
+                    provenant_records::LoginObservation::ExecutableOnly => false,
                     provenant_records::LoginObservation::None => false,
                 };
                 observed.then_some(if spec.login_check_names_account {
@@ -915,7 +914,21 @@ pub(super) fn resolve_dispatch_excluding_family(
                     records,
                     pools: &pools,
                 };
-                let gate = if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
+                // Preview may explain an unprobed model, but dispatch cannot
+                // select it without a resolved account. Redraw through the same
+                // admission path used for other unavailable pool members.
+                let gate = if resolved.account_key.is_none() {
+                    Err(EdgeError::Routing(RoutingError::NoEligiblePoolMember {
+                        cause: Some(provenant_records::RouteExclusionReason::UnknownAccount),
+                        exclusions: vec![format!(
+                            "{}: {}",
+                            model.as_str(),
+                            provenant_records::RouteExclusionReason::UnknownAccount
+                                .diagnostic_parts()
+                                .0,
+                        )],
+                    }))
+                } else if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
                     admission.check(&resolved).map_err(EdgeError::from)
                 } else {
                     Ok(())

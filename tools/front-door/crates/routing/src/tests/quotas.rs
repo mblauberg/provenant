@@ -217,7 +217,7 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
         ) {
             Ok(route) => Ok(!matches!(route.readiness, RouteReadiness::Ready { .. })),
             Err(error) => match error.downcast_ref::<RoutingError>() {
-                Some(RoutingError::NoEligiblePoolMember { exclusions })
+                Some(RoutingError::NoEligiblePoolMember { exclusions, .. })
                     if exclusions.iter().all(|e| e.ends_with(": disabled")) =>
                 {
                     Ok(true)
