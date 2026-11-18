@@ -19,6 +19,12 @@ fn scanner_shape_keeps_local_brief_without_refusal() -> Result {
     let (output, value) = rig.run(&["run", "task", "--brief", shaped, "--explain"])?;
     assert!(output.status.success(), "{value}");
     assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], shaped);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        warning.contains("field=graph.") && warning.contains("rule=known_secret_shape"),
+        "{warning}"
+    );
+    assert!(!warning.contains(shaped), "warning disclosed matched value");
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
@@ -531,10 +537,15 @@ fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
         let output = rig
             .command()
             .args(["run", "--file"])
-            .arg(path)
+            .arg(&path)
             .arg("--explain")
             .output()?;
         let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
+            document,
+            "explain rewrote local source"
+        );
         assert!(
             !value.to_string().contains("credential token"),
             "{source}: {value}"
@@ -547,9 +558,17 @@ fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
         } else {
             assert!(output.status.success(), "{source}: {value}");
             if source == "template" {
-                assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], "Inspect", "{value}");
+                // Explain exposes the lowered expansion. The authored template
+                // key/use remain in the unchanged local source checked above.
+                assert_eq!(
+                    value["data"]["document"]["nodes"][0]["prompt"], "Inspect",
+                    "{value}"
+                );
             } else {
-                assert!(value["data"]["document"].to_string().contains(&shaped), "{source}: {value}");
+                assert!(
+                    value["data"]["document"].to_string().contains(&shaped),
+                    "{source}: {value}"
+                );
             }
         }
         assert!(graph_records(&rig.state())?.is_empty(), "{source}");
