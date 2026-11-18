@@ -2017,8 +2017,22 @@ fn remove(
     {
         return Ok(Outcome::Busy);
     }
-    let Some(_guards) = provenant_confinement::cache::lock_cargo_profiles(cache.directory()) else {
-        return Ok(Outcome::Busy);
+    let interrupted = std::cell::Cell::new(false);
+    let guards = {
+        let should_stop = std::cell::RefCell::new(&mut *should_stop);
+        let keep_going = || {
+            let stop = (*should_stop.borrow_mut())();
+            interrupted.set(interrupted.get() || stop);
+            !interrupted.get()
+        };
+        provenant_confinement::cache::lock_cargo_profiles(cache.directory(), &keep_going)
+    };
+    let Some(_guards) = guards else {
+        return Ok(if interrupted.get() {
+            Outcome::Interrupted(None)
+        } else {
+            Outcome::Busy
+        });
     };
     let name = OsStr::new(&candidate.target);
     let target_metadata = cache.metadata_at(name).map_err(io::Error::other)?;
