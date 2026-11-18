@@ -2988,33 +2988,88 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 protection.worktrees.insert(lane.path.clone());
             }
             if !live.is_empty() {
-                protection.shared_projects.insert(
-                    provenant_run::target_seed::project_key(project.binding.common_dir()),
-                );
+                protection
+                    .shared_projects
+                    .insert(provenant_run::target_seed::project_key(
+                        project.binding.common_dir(),
+                    ));
             }
         }
         protection.unobserved = !self.data.unobserved_projects.is_empty();
-
-        let result = provenant_run::build_dir_gc::collect_with_protection(
-            roots.state.as_path(),
-            home,
-            provenant_run::build_dir_gc::Limits {
-                max_bytes: budget.bytes,
-                free_floor,
-                grace_seconds: config
-                    .domains
-                    .fabric
-                    .lanes
-                    .build_settings()
-                    .build_dir_grace_seconds(),
+        let sweep_deadline = self.deadline;
+        let resume_detail = self.resume_detail().map(str::to_owned);
+        let epoch_number = self.lease.as_ref().map_or_else(
+            || {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                timestamp ^ u64::from(std::process::id()).rotate_left(32)
             },
-            command.dry_run,
-            &budget,
-            &protection,
+            crate::gc_sweep::Lease::epoch,
         );
-
-        self.data.build_dirs =
-            result.map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        let epoch = format!("{epoch_number:016x}");
+        let mut warnings = if self
+            .lease
+            .as_ref()
+            .is_some_and(|lease| sweep_should_continue(sweep_deadline, Some(lease)))
+        {
+            provenant_run::build_dir_gc::prune_stale_survey_snapshots(
+                roots.state.as_path(),
+                resume_detail.as_deref(),
+            )
+        } else {
+            Vec::new()
+        };
+        let mut report = {
+            let lease = self.lease.as_ref();
+            let mut should_continue = || sweep_should_continue(sweep_deadline, lease);
+            let unobserved = protection.unobserved;
+            let mut refresh_protection = || {
+                let mut refreshed =
+                    provenant_run::build_dir_gc::target_protection_for_launch(roots, None, None);
+                refreshed.unobserved |= unobserved;
+                refreshed
+            };
+            provenant_run::build_dir_gc::collect_with_progress(
+                roots.state.as_path(),
+                home,
+                provenant_run::build_dir_gc::Limits {
+                    max_bytes: budget.bytes,
+                    free_floor,
+                    grace_seconds: config
+                        .domains
+                        .fabric
+                        .lanes
+                        .build_settings()
+                        .build_dir_grace_seconds(),
+                },
+                command.dry_run,
+                &budget,
+                &protection,
+                resume_detail.as_deref(),
+                &epoch,
+                &mut should_continue,
+                &mut refresh_protection,
+            )
+        }
+        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        report.warnings.append(&mut warnings);
+        if let Some(candidate) = report.interrupted_at.clone() {
+            self.stop_at(None, Some(candidate), report.cursor_detail.clone())?;
+        } else if self
+            .lease
+            .as_ref()
+            .is_some_and(|lease| sweep_should_continue(sweep_deadline, Some(lease)))
+        {
+            report
+                .warnings
+                .extend(provenant_run::build_dir_gc::prune_stale_survey_snapshots(
+                    roots.state.as_path(),
+                    None,
+                ));
+        }
+        self.data.build_dirs = report;
 
         Ok(())
     }
