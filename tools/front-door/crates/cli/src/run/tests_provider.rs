@@ -955,11 +955,14 @@ fn malformed_replay_frame_reports_evidence_defect_naming_the_line() {
         )
         .unwrap();
 
-    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    assert_eq!(decoded.outcome, run::Outcome::Unsettled);
     assert_eq!(
-        decoded.reason.as_deref(),
-        Some("evidence defect: provider protocol frame on line 2 is malformed")
+        decoded.terminal_cause,
+        Some(run::TerminalCause::ProviderCaptureDefect { line: 2 })
     );
+    let reason = decoded.reason.as_deref().unwrap();
+    assert!(reason.contains("stdout.log line 2"));
+    assert!(reason.contains("provider protocol frame on line 2 is malformed"));
 }
 
 #[test]

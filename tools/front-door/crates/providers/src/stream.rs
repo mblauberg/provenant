@@ -560,10 +560,13 @@ impl StreamState {
                         error,
                         ProviderError::Malformed | ProviderError::IncompleteFrame
                     );
-                    let diagnostic = error.to_string();
-                    if framing_loss {
-                        self.malformed_line = Some(self.line_count + 1);
-                    }
+                    let diagnostic = if framing_loss {
+                        let line = self.line_count + 1;
+                        self.malformed_line = Some(line);
+                        ProviderError::MalformedFrame { line }.to_string()
+                    } else {
+                        error.to_string()
+                    };
                     protocol_error = Some(diagnostic);
                 }
             }
