@@ -16,6 +16,8 @@ Repository CI's `select-macos-checks` selects native work for unknown paths and 
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
 reported, never resolved by guessing; conflicting manifest settings are refused.
+The `TargetGrammar` declaration identifies each target argument, whose attached
+parser must accept and refuse the values of its declared syntax.
 
 - Why: an action must address the intended work.
 
