@@ -1,29 +1,53 @@
 //! Reclaim abandoned state-root publication scratch under its owner locks.
+use provenant_core::CancelToken;
 use provenant_os::fs::{Directory, FileKind, FsError, LockMode, PayloadTree};
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
-fn clear(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
+#[derive(Debug, Default)]
+pub(crate) struct Report {
+    pub(crate) busy: Vec<PathBuf>,
+    pub(crate) interrupted_at: Option<PathBuf>,
+}
+
+fn clear(
+    tree: &PayloadTree,
+    depth: usize,
+    cancel: &CancelToken,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<bool, FsError> {
     if depth > 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
     tree.make_writable()?;
     for name in tree.entries()? {
+        if cancel.is_cancelled() || should_stop() {
+            return Ok(false);
+        }
         let name = name?;
         if tree.metadata_at(&name)?.kind == FileKind::Directory {
             let child = tree.child(&name)?;
-            clear(&child, depth + 1)?;
+            if !clear(&child, depth + 1, cancel, should_stop)? {
+                return Ok(false);
+            }
             tree.rmdir(&name)?;
         } else {
             tree.unlink(&name)?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
-pub(crate) fn collect(state: &Path, before: i128, dry_run: bool) -> Result<Vec<PathBuf>, FsError> {
+pub(crate) fn collect(
+    state: &Path,
+    before: i128,
+    dry_run: bool,
+    cancel: &CancelToken,
+    start_at: Option<&Path>,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<Report, FsError> {
     let root = Directory::open_anchor(state)?;
     let ingest = root
         .try_lock_existing(OsStr::new("ingest.lock"), LockMode::Exclusive)
@@ -40,6 +64,9 @@ pub(crate) fn collect(state: &Path, before: i128, dry_run: bool) -> Result<Vec<P
         dry_run,
         ingest.is_some(),
         install_lock.is_some(),
+        cancel,
+        start_at,
+        should_stop,
     )
 }
 
@@ -50,40 +77,63 @@ fn collect_entries(
     dry_run: bool,
     ingest_locked: bool,
     install_locked: bool,
-) -> Result<Vec<PathBuf>, FsError> {
-    let mut busy = Vec::new();
+    cancel: &CancelToken,
+    start_at: Option<&Path>,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<Report, FsError> {
+    let mut report = Report::default();
+    let mut entries = entries.into_iter().collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
     for name in entries {
-        let name = name?;
         let Some(text) = name.to_str() else { continue };
         let is_ingest = text.starts_with(".ingest-") && ingest_locked;
         let is_staging = text.starts_with(".provenant-staging.") && install_locked;
         if !is_ingest && !is_staging {
             if text.starts_with(".ingest-") || text.starts_with(".provenant-staging.") {
-                busy.push(PathBuf::from(name));
+                report.busy.push(PathBuf::from(name));
             }
             continue;
+        }
+        let path = root.current_path()?.join(&name);
+        if start_at.is_some_and(|start| path.as_path() < start) {
+            continue;
+        }
+        if cancel.is_cancelled() || should_stop() {
+            report.interrupted_at = Some(path);
+            break;
         }
         let metadata = match root.metadata_at(&name, false) {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => continue,
             Err(error) => return Err(error),
         };
-        if metadata.modified_ns >= before {
+        if metadata.modified_ns >= before && start_at != Some(path.as_path()) {
             continue;
         }
         if is_ingest && metadata.kind == FileKind::Regular {
             if !dry_run {
+                if cancel.is_cancelled() || should_stop() {
+                    report.interrupted_at = Some(path);
+                    break;
+                }
                 root.unlink(&name)?;
             }
         } else if is_staging && metadata.kind == FileKind::Directory {
             let tree = PayloadTree::claim(root, &name, &metadata)?;
             if !dry_run {
-                clear(&tree, 0)?;
+                if !clear(&tree, 0, cancel, should_stop)? {
+                    report.interrupted_at = Some(path);
+                    break;
+                }
+                if cancel.is_cancelled() || should_stop() {
+                    report.interrupted_at = Some(path);
+                    break;
+                }
                 root.rmdir(&name)?;
             }
         }
     }
-    Ok(busy)
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -108,6 +158,9 @@ mod tests {
             false,
             true,
             false,
+            &CancelToken::new(),
+            None,
+            &mut || false,
         )
         .unwrap();
         assert!(!temp.path().join(".ingest-survivor").exists());
@@ -120,6 +173,9 @@ mod tests {
             false,
             false,
             false,
+            &CancelToken::new(),
+            None,
+            &mut || false,
         )
         .unwrap();
     }
@@ -145,15 +201,97 @@ mod tests {
         std::fs::write(stage.join("file"), b"data").unwrap();
         let ingest = temp.path().join(".ingest-old");
         std::fs::write(&ingest, b"data").unwrap();
-        collect(temp.path(), i128::MAX, true).unwrap();
+        collect(
+            temp.path(),
+            i128::MAX,
+            true,
+            &CancelToken::new(),
+            None,
+            &mut || false,
+        )
+        .unwrap();
         assert!(ingest.exists() && stage.exists());
-        let busy = collect(temp.path(), i128::MAX, false).unwrap();
-        assert_eq!(busy, vec![PathBuf::from(".provenant-staging.old")]);
+        let busy = collect(
+            temp.path(),
+            i128::MAX,
+            false,
+            &CancelToken::new(),
+            None,
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(busy.busy, vec![PathBuf::from(".provenant-staging.old")]);
         assert!(!ingest.exists() && stage.exists());
         drop(lock);
-        collect(temp.path(), 0, false).unwrap();
+        collect(
+            temp.path(),
+            0,
+            false,
+            &CancelToken::new(),
+            None,
+            &mut || false,
+        )
+        .unwrap();
         assert!(stage.exists());
-        collect(temp.path(), i128::MAX, false).unwrap();
+        collect(
+            temp.path(),
+            i128::MAX,
+            false,
+            &CancelToken::new(),
+            None,
+            &mut || false,
+        )
+        .unwrap();
+        assert!(!stage.exists());
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn interrupted_staging_tree_resumes_from_its_candidate() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = Directory::open_anchor(temp.path()).unwrap();
+        let install_path = temp.path().join("install");
+        std::fs::create_dir(&install_path).unwrap();
+        let install = root.open_directory(OsStr::new("install")).unwrap();
+        let _ingest = root
+            .try_lock(OsStr::new("ingest.lock"), LockMode::Exclusive)
+            .unwrap();
+        let _install = install
+            .try_lock(OsStr::new("install.lock"), LockMode::Exclusive)
+            .unwrap();
+        let stage = temp.path().join(".provenant-staging.large");
+        std::fs::create_dir(&stage).unwrap();
+        for index in 0..128 {
+            std::fs::write(stage.join(format!("payload-{index:03}")), b"data").unwrap();
+        }
+        let mut checked = 0;
+        let partial = collect(
+            temp.path(),
+            i128::MAX,
+            false,
+            &CancelToken::new(),
+            None,
+            &mut || {
+                checked += 1;
+                checked <= 12
+            },
+        )
+        .unwrap();
+        assert_eq!(partial.interrupted_at.as_deref(), Some(stage.as_path()));
+        let remaining = std::fs::read_dir(&stage).unwrap().count();
+        assert!(remaining > 0 && remaining < 128);
+
+        let resumed = collect(
+            temp.path(),
+            i128::MAX,
+            false,
+            &CancelToken::new(),
+            partial.interrupted_at.as_deref(),
+            &mut || true,
+        )
+        .unwrap();
+        assert!(resumed.interrupted_at.is_none());
         assert!(!stage.exists());
     }
 }

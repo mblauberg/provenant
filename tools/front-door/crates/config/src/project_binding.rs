@@ -207,6 +207,9 @@ pub fn registered_gc_project_selection(roots: &Roots) -> Result<GcProjectSelecti
             selection.projects.push(binding);
         }
     }
+    selection
+        .projects
+        .sort_by(|left, right| left.common_dir().cmp(right.common_dir()));
     Ok(selection)
 }
 

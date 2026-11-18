@@ -65,7 +65,8 @@ pub(crate) fn run(
         provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
     inputs.state_dir = Some(settled.roots.state_root.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())
+    let cancel = CancelToken::new();
+    collect_owned_worktree(&settled, &roots, workers, delivery.as_ref(), &cancel)
 }
 
 /// Exact integration ref and pinned tip supplied by an applied GC sweep.
@@ -80,6 +81,8 @@ pub(crate) enum Collection {
 pub(crate) struct UnsettledCollection {
     pub(crate) removed: Vec<PathBuf>,
     pub(crate) removals: Vec<provenant_records::custody::RemovalRecord>,
+    pub(crate) interrupted_at: Option<PathBuf>,
+    pub(crate) continuation: Option<String>,
 }
 
 fn landed_evidence(
@@ -336,13 +339,13 @@ fn release_settled_cache(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
+    cancel: &CancelToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees;
     let clock = SystemClock;
-    let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        cancel: &cancel,
+        cancel,
     };
     let execution = provenant_run::ExecutionContext {
         state_root: roots.state.clone(),
@@ -362,13 +365,15 @@ fn release_settled_cache(
     // Private output belongs to a settled lane, not to the lifetime of its
     // worktree. A continuation can recreate it; shared download links are
     // unlinked without traversing their targets. Busy/unknown is retried by GC.
-    if let Err(error) = crate::worktrees::with_context_using_facts(
+    if let Err(error) = crate::worktrees::with_context_mode_cancel(
         roots,
         &settled.roots.home,
         &writer.project,
         std::time::Duration::from_secs(5),
         workers,
         store.repo_facts(),
+        false,
+        cancel,
         |context, _| {
             provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
                 &settled.roots.home,
@@ -380,13 +385,8 @@ fn release_settled_cache(
                 },
                 |path| {
                     let guard = worktrees::cache_writer_guard(context.project_state, path)?;
-                    let state = crate::gc_support::lane_states(
-                        roots,
-                        &settled.roots.home,
-                        &settled.roots.checkout,
-                        settled.project_id,
-                    )
-                    .map_err(|error| {
+                    let state = crate::gc_support::lane_states(roots, settled.project_id, cancel)
+                        .map_err(|error| {
                         worktrees::Occupancy::custody_unknown(path.to_owned(), error.to_string())
                     })?;
                     if state.get(path) != Some(&true) || !state.no_live_lanes(path) {
@@ -416,13 +416,14 @@ pub(crate) fn collect_owned_worktree(
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
+    cancel: &CancelToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for class in
         provenant_config::retention_schedule(provenant_config::RetentionTrigger::Settlement)
     {
         match class.class {
             provenant_config::RetentionKind::LaneCargoCaches => {
-                release_settled_cache(settled, roots, workers)?
+                release_settled_cache(settled, roots, workers, cancel)?
             }
             provenant_config::RetentionKind::GitWorktrees => collect_owned_worktree_with(
                 settled,
@@ -431,6 +432,7 @@ pub(crate) fn collect_owned_worktree(
                 delivery_override,
                 Collection::Settlement,
                 None,
+                cancel,
             )?,
             _ => {} // Other classes are owned by RunStore's terminal transaction.
         }
@@ -449,12 +451,14 @@ pub(crate) fn collect_unsettled(
     project_id: provenant_core::ProjectId,
     upstream: Option<(String, provenant_core::GitOid)>,
     workers: &dyn WorkerObserver,
+    cancel: &CancelToken,
+    resume: Option<&str>,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<UnsettledCollection, Box<dyn std::error::Error>> {
     let clock = SystemClock;
-    let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        cancel: &cancel,
+        cancel,
     };
     let context = provenant_run::ExecutionContext {
         state_root: roots.state.clone(),
@@ -462,22 +466,39 @@ pub(crate) fn collect_unsettled(
         actor_id: provenant_core::ActorId::from_bytes([0; 16]),
         read_prompts: false,
     };
-    let Some(store) = provenant_run::RunStore::open_disk_read_only(&context, &call)? else {
-        return Ok(UnsettledCollection::default());
-    };
-    let mut pending = Vec::new();
+    let mut collection = UnsettledCollection::default();
     let mut query = provenant_run::LaneQuery {
         targets: Vec::new(),
         all: true,
         limit: 100,
-        after: 0,
+        after: resume
+            .and_then(|value| value.strip_prefix("settled-run-after:"))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
         newest_first: false,
         owner: None,
         unseen_after: None,
     };
     loop {
+        if cancel.is_cancelled() || should_stop() {
+            return Ok(UnsettledCollection {
+                continuation: Some(format!("settled-run-after:{}", query.after)),
+                ..collection
+            });
+        }
+        let Some(store) = provenant_run::RunStore::open_disk_read_only(&context, &call)? else {
+            return Ok(collection);
+        };
         let page = store.lanes(&query, &call)?;
+        let next = page.next;
+        let mut pending = Vec::new();
         for attempt in page.lanes {
+            if cancel.is_cancelled() || should_stop() {
+                return Ok(UnsettledCollection {
+                    continuation: Some(format!("settled-run-after:{}", query.after)),
+                    ..collection
+                });
+            }
             if attempt.superseded_by.is_some()
                 || !matches!(attempt.state, provenant_run::AttemptState::Terminal { .. })
             {
@@ -504,49 +525,60 @@ pub(crate) fn collect_unsettled(
                 pending.push((attempt.attempt_id, actor_id, writer.worktree));
             }
         }
-        match page.next {
+        drop(store);
+        for (attempt_id, actor_id, worktree) in pending {
+            if cancel.is_cancelled() || should_stop() {
+                return Ok(UnsettledCollection {
+                    continuation: Some(format!("settled-run-after:{}", query.after)),
+                    ..collection
+                });
+            }
+            let settled = provenant_run::HolderContext {
+                schema_version: 1,
+                roots: provenant_run::RootSeed {
+                    home: home.to_path_buf(),
+                    checkout: checkout.to_path_buf(),
+                    state_root: roots.state.as_path().to_path_buf(),
+                },
+                project_id,
+                actor_id,
+                attempt_id,
+                host_delivery: None,
+                launch: None,
+                sealed: None,
+            };
+            // A miss keeps its receipt for the next sweep; carry on with the rest.
+            let collected = collect_owned_worktree_with(
+                &settled,
+                roots,
+                workers,
+                None,
+                Collection::Sweep {
+                    upstream: upstream.clone(),
+                },
+                Some(&mut collection.removals),
+                cancel,
+            );
+            if let Err(error) = collected {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: settled lane collection failed for {}: {error}",
+                    worktree.display()
+                );
+            }
+            if cancel.is_cancelled() || should_stop() {
+                collection.interrupted_at = Some(worktree.clone());
+                collection.continuation = Some(format!("settled-run-after:{}", query.after));
+                return Ok(collection);
+            }
+            if std::fs::symlink_metadata(&worktree).is_err() {
+                collection.removed.push(worktree);
+            }
+        }
+        match next {
             Some(next) => query.after = next,
             None => break,
-        }
-    }
-    drop(store);
-    let mut collection = UnsettledCollection::default();
-    for (attempt_id, actor_id, worktree) in pending {
-        let settled = provenant_run::HolderContext {
-            schema_version: 1,
-            roots: provenant_run::RootSeed {
-                home: home.to_path_buf(),
-                checkout: checkout.to_path_buf(),
-                state_root: roots.state.as_path().to_path_buf(),
-            },
-            project_id,
-            actor_id,
-            attempt_id,
-            host_delivery: None,
-            launch: None,
-            sealed: None,
-        };
-        // A miss keeps its receipt for the next sweep; carry on with the rest.
-        let collected = collect_owned_worktree_with(
-            &settled,
-            roots,
-            workers,
-            None,
-            Collection::Sweep {
-                upstream: upstream.clone(),
-            },
-            Some(&mut collection.removals),
-        );
-        if let Err(error) = collected {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: settled lane collection failed for {}: {error}",
-                worktree.display()
-            );
-        }
-        if std::fs::symlink_metadata(&worktree).is_err() {
-            collection.removed.push(worktree);
         }
     }
     Ok(collection)
@@ -559,13 +591,13 @@ fn collect_owned_worktree_with(
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
     collection: Collection,
     mut removal_records: Option<&mut Vec<provenant_records::custody::RemovalRecord>>,
+    cancel: &CancelToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
-    let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        cancel: &cancel,
+        cancel,
     };
     let context = provenant_run::ExecutionContext {
         state_root: roots.state.clone(),
@@ -608,7 +640,7 @@ fn collect_owned_worktree_with(
         settled.project_id,
         chair.clone(),
         &clock,
-        &cancel,
+        cancel,
     )?;
     // Recover an interrupted prune before classifying an absent worktree.
     let prior = store.worktree_settlement(record.attempt_id, &call)?;
@@ -659,13 +691,15 @@ fn collect_owned_worktree_with(
     // Explicit worktrees have no owner record, so use their verified HEAD.
     let mut tracking_ref_warning = None;
     let mut lane_owned = false;
-    let _ = crate::worktrees::with_context_using_facts(
+    let _ = crate::worktrees::with_context_mode_cancel(
         roots,
         &settled.roots.home,
         &writer.project,
         std::time::Duration::from_secs(15),
         workers,
         facts,
+        false,
+        cancel,
         |context, _| {
             use std::io::Read;
             let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
@@ -737,13 +771,15 @@ fn collect_owned_worktree_with(
             .get(&settled.project_id.to_string())
             .cloned()
             .unwrap_or_default();
-        Ok(crate::worktrees::with_context_using_facts(
+        Ok(crate::worktrees::with_context_mode_cancel(
             roots,
             &settled.roots.home,
             &writer.project,
             std::time::Duration::from_secs(120),
             workers,
             facts,
+            false,
+            cancel,
             |context, cancel| {
                 (|| -> Result<_, Box<dyn std::error::Error>> {
                 if let Some(replayed_receipt) = replayed.as_mut() {
@@ -818,9 +854,8 @@ fn collect_owned_worktree_with(
                 let states = || {
                     crate::gc_support::lane_states(
                         roots,
-                        &settled.roots.home,
-                        &settled.roots.checkout,
                         settled.project_id,
+                        cancel,
                     )
                     .ok()
                 };
@@ -1145,13 +1180,15 @@ fn collect_owned_worktree_with(
                 .project_settings(&settled.project_id.to_string(), &writer.project);
             let sweep =
                 crate::lane_cleanup::Sweep::new(false).with_retention(&retention_owner, &settings);
-            let outcomes = crate::worktrees::with_context_using_facts(
+            let outcomes = crate::worktrees::with_context_mode_cancel(
                 roots,
                 &settled.roots.home,
                 &writer.project,
                 std::time::Duration::from_secs(60),
                 workers,
                 facts,
+                false,
+                cancel,
                 |context, cancel| {
                     Ok(crate::lane_cleanup::settle_integrated(
                         context,

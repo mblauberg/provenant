@@ -27,6 +27,8 @@ pub struct ArchiveReport {
     pub busy: Vec<PathBuf>,
     pub bytes: u64,
     pub errors: Vec<RetentionIssue>,
+    #[serde(skip)]
+    pub interrupted_at: Option<PathBuf>,
 }
 
 fn failure(operation: &'static str, path: &Path, cause: impl std::fmt::Display) -> ArchiveError {
@@ -350,6 +352,9 @@ pub fn collect_archives(
     context: &WorktreeContext<'_>,
     before_ns: i128,
     dry_run: bool,
+    cancel: &CancelToken,
+    start_at: Option<&Path>,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> ArchiveReport {
     let project_state = context.project_state;
     let mut report = ArchiveReport::default();
@@ -378,17 +383,28 @@ pub fn collect_archives(
         }
     };
     let collect = (|| -> Result<(), FsError> {
-        for entry in root.entries()? {
-            let name = entry?;
+        let mut entries = root.entries()?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort();
+        for name in entries {
             if !name.as_bytes().starts_with(b"archive-") && !name.as_bytes().starts_with(b".stage-")
             {
                 continue;
             }
             let metadata = root.metadata_at(&name, false)?;
-            if metadata.kind != FileKind::Directory || metadata.modified_ns >= before_ns {
+            if metadata.kind != FileKind::Directory {
                 continue;
             }
             let path = root.current_path()?.join(&name);
+            if start_at.is_some_and(|start| path.as_path() < start) {
+                continue;
+            }
+            if metadata.modified_ns >= before_ns && start_at != Some(path.as_path()) {
+                continue;
+            }
+            if cancel.is_cancelled() || should_stop() {
+                report.interrupted_at = Some(path);
+                break;
+            }
             let tree = PayloadTree::claim(&root, &name, &metadata)?;
             let _lease = match tree.directory().try_lock_existing(
                 OsStr::new("archive.lock"),
@@ -430,17 +446,24 @@ pub fn collect_archives(
                         });
                         continue;
                     };
-                    let cancel = CancelToken::new();
-                    match super::ref_tip(context, &reference, &cancel) {
+                    if cancel.is_cancelled() || should_stop() {
+                        report.interrupted_at = Some(path);
+                        break;
+                    }
+                    match super::ref_tip(context, &reference, cancel) {
                         Ok(None) => {}
                         Ok(Some(actual)) if actual == tip => {
+                            if cancel.is_cancelled() || should_stop() {
+                                report.interrupted_at = Some(path);
+                                break;
+                            }
                             if let Err(error) = execute_mutation(
                                 context,
                                 GitMutation::DeleteRef {
                                     name: reference,
                                     expected_old_oid: tip,
                                 },
-                                &cancel,
+                                cancel,
                             ) {
                                 report.errors.push(RetentionIssue {
                                     path: path.clone(),
@@ -464,24 +487,51 @@ pub fn collect_archives(
                 }
             }
 
-            fn visit(tree: &PayloadTree, dry: bool) -> Result<u64, FsError> {
+            fn visit(
+                tree: &PayloadTree,
+                dry: bool,
+                cancel: &CancelToken,
+                should_stop: &mut dyn FnMut() -> bool,
+            ) -> Result<Option<u64>, FsError> {
                 let mut bytes = 0_u64;
                 for name in tree.entries()? {
+                    if cancel.is_cancelled() || should_stop() {
+                        return Ok(None);
+                    }
                     let name = name?;
                     let metadata = tree.metadata_at(&name)?;
                     bytes = bytes.saturating_add(metadata.allocated);
                     if metadata.kind == FileKind::Directory {
-                        bytes = bytes.saturating_add(visit(&tree.child(&name)?, dry)?);
+                        let Some(child_bytes) =
+                            visit(&tree.child(&name)?, dry, cancel, should_stop)?
+                        else {
+                            return Ok(None);
+                        };
+                        bytes = bytes.saturating_add(child_bytes);
                         if !dry {
+                            if cancel.is_cancelled() || should_stop() {
+                                return Ok(None);
+                            }
                             tree.rmdir(&name)?;
                         }
                     } else if !dry {
+                        if cancel.is_cancelled() || should_stop() {
+                            return Ok(None);
+                        }
                         tree.unlink(&name)?;
                     }
                 }
-                Ok(bytes)
+                Ok(Some(bytes))
             }
-            let bytes = metadata.allocated.saturating_add(visit(&tree, dry_run)?);
+            let Some(visited_bytes) = visit(&tree, dry_run, cancel, should_stop)? else {
+                report.interrupted_at = Some(path);
+                break;
+            };
+            let bytes = metadata.allocated.saturating_add(visited_bytes);
+            if cancel.is_cancelled() || should_stop() {
+                report.interrupted_at = Some(path);
+                break;
+            }
             if !dry_run {
                 root.rmdir(&name)?;
                 root.sync()?;

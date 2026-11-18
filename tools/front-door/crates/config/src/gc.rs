@@ -717,6 +717,8 @@ impl StoreSettings {
 pub struct GcSettings {
     pub schedule: bool,
     pub idle: String,
+    /// Maximum wall time for one host-wide collection pass.
+    pub sweep_budget: String,
     pub graph_checkpoint_days: u64,
     pub discard_archive_days: u64,
     pub free_floor: Option<String>,
@@ -733,6 +735,7 @@ impl Default for GcSettings {
         Self {
             schedule: true,
             idle: "6h".into(),
+            sweep_budget: "5m".into(),
             graph_checkpoint_days: 90,
             discard_archive_days: 90,
             free_floor: None,
@@ -837,6 +840,15 @@ impl GcSettings {
         parse_gc_idle_duration(&self.idle)
     }
 
+    /// Resolve the bounded duration for one host-wide sweep.
+    pub fn sweep_budget_seconds(&self) -> Result<u64, &'static str> {
+        let seconds = parse_gc_idle_duration(&self.sweep_budget)?;
+        if seconds == 0 {
+            return Err("sweep_budget_positive");
+        }
+        Ok(seconds)
+    }
+
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
         Ok(DiskLimits {
@@ -908,6 +920,7 @@ impl GcSettings {
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         self.idle_seconds()?;
+        self.sweep_budget_seconds()?;
         if !(1..=3650).contains(&self.discard_archive_days) {
             return Err("discard_archive_days_range");
         }
@@ -1083,6 +1096,22 @@ mod tests {
         for input in ["", "-1", "1x", "18446744073709551615w"] {
             assert!(super::parse_gc_idle_duration(input).is_err(), "{input}");
         }
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn sweep_budget_is_positive_and_uses_duration_units() {
+        let mut settings = GcSettings::default();
+        assert_eq!(settings.sweep_budget_seconds(), Ok(300));
+        settings.sweep_budget = "2m".into();
+        assert_eq!(settings.sweep_budget_seconds(), Ok(120));
+        assert_eq!(settings.validate(), Ok(()));
+        settings.sweep_budget = "0".into();
+        assert_eq!(
+            settings.sweep_budget_seconds(),
+            Err("sweep_budget_positive")
+        );
+        assert_eq!(settings.validate(), Err("sweep_budget_positive"));
     }
 
     #[test]

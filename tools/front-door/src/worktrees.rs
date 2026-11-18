@@ -8,7 +8,7 @@ use provenant_confinement::{
         WorktreeRemove,
     },
 };
-use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
+use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
@@ -432,6 +432,11 @@ struct GcData {
     report: provenant_confinement::cache::CacheGcReport,
     idle_seconds: u64,
     provider_state: provenant_run::ProviderStateGc,
+    sweep_budget_seconds: u64,
+    sweep_budget_source: String,
+    sweep_cursor: Option<crate::gc_sweep::Cursor>,
+    sweep_warning: Option<String>,
+    sweep_stopped: bool,
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
@@ -670,8 +675,13 @@ pub(crate) fn scheduled_gc(
         || !data.port_receipts.errors.is_empty()
         || !data.retention_errors.is_empty()
         || !data.provider_state.payload.errors.is_empty()
+        || data.sweep_stopped
     {
-        return Err("retention incomplete; next: provenant gc --apply".into());
+        return Err(if data.sweep_stopped {
+            "retention sweep reached gc.sweep_budget and saved its cursor; it resumes on the next sweep".into()
+        } else {
+            "retention incomplete; next: provenant gc --apply".into()
+        });
     }
     let upstream_failures = data
         .worktree_cleanup
@@ -707,51 +717,6 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         }
         return crate::provider_retention::run_branch_scratch(globals, branch);
     }
-    // Tick and every host-wide sweep share one single-flight lock. Busy is a
-    // skipped best-effort collection, never a dispatch or landing failure.
-    let _sweep = if !command.dry_run {
-        let lock = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let resolved =
-                roots::resolve(globals, roots::Workspace::Home, roots::Product::Required)?;
-            let directory = provenant_config::private_directory(
-                &resolved.roots.state.as_path().join("tick"),
-                true,
-            )?;
-            Ok(directory.try_lock(
-                OsStr::new("gc-worker.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-            )?)
-        })();
-        match lock {
-            Ok(lock) => Some(lock),
-            Err(error)
-                if matches!(
-                    error.downcast_ref::<FsError>(),
-                    Some(FsError::LockTimeout { .. })
-                ) =>
-            {
-                let data = GcData {
-                    notice: Some("sweep already running; skipped".into()),
-                    ..Default::default()
-                };
-                let result =
-                    CommandResult::new("gc", Outcome::Ok, gc_result_data(&data, globals.json));
-                return emit(&result, globals, "sweep already running; skipped", false);
-            }
-            Err(error) => {
-                return crate::fail_with_repair(
-                    "gc",
-                    Outcome::Error,
-                    "GC",
-                    &error.to_string(),
-                    Some(GC_REPAIR),
-                    globals,
-                );
-            }
-        }
-    } else {
-        None
-    };
     match gc(&command, globals, workers) {
         Ok(data) => {
             let human = gc_compact_summary(&data);
@@ -760,7 +725,8 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 || !data.discard_archives.errors.is_empty()
                 || !data.port_receipts.errors.is_empty()
                 || !data.retention_errors.is_empty()
-                || !data.provider_state.payload.errors.is_empty();
+                || !data.provider_state.payload.errors.is_empty()
+                || data.sweep_stopped;
             let result = if failed {
                 gc_failure(&data, "retention incomplete", globals.json)
             } else {
@@ -781,6 +747,11 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let data = GcData {
                 report: *error.report,
                 idle_seconds: command.idle.unwrap_or(6 * 3600),
+                sweep_budget_seconds: 0,
+                sweep_budget_source: "unavailable".into(),
+                sweep_cursor: None,
+                sweep_warning: None,
+                sweep_stopped: false,
                 unobserved_projects,
                 skipped_transient,
                 provider_state: *provider_state,
@@ -821,7 +792,7 @@ fn gc_compact_summary(data: &GcData) -> String {
         .map(|entry| entry.worktrees.removed.len())
         .sum();
     let mut summary = format!(
-        "{}: {trees} worktrees, {} attempt scratch directories, {} cache/scratch bytes; {} retention errors\n",
+        "{}: {trees} worktrees, {} attempt scratch directories, {} cache/scratch bytes; {} retention errors\nGC sweep budget: {}s (source: {})\n",
         if data.report.dry_run {
             "would collect"
         } else {
@@ -829,10 +800,23 @@ fn gc_compact_summary(data: &GcData) -> String {
         },
         data.provider_state.attempt_tmp.len(),
         gc_cache_bytes(data).saturating_add(scratch_bytes),
-        data.retention_errors.len() + data.provider_state.errors.len()
+        data.retention_errors.len() + data.provider_state.errors.len(),
+        data.sweep_budget_seconds,
+        data.sweep_budget_source
     );
     if let Some(notice) = &data.notice {
         summary.push_str(notice);
+        summary.push('\n');
+    }
+    if data.sweep_stopped {
+        summary.push_str(&format!(
+            "sweep stopped at gc.sweep_budget={}s (source: {}); cursor saved for the next sweep\n",
+            data.sweep_budget_seconds, data.sweep_budget_source
+        ));
+    }
+    if let Some(warning) = &data.sweep_warning {
+        summary.push_str("warning: ");
+        summary.push_str(warning);
         summary.push('\n');
     }
     for alert in &data.alerts {
@@ -1147,6 +1131,11 @@ enum GcOutput<'a> {
         build_dir_bytes: u64,
         build_dir_measurement_skipped: bool,
         graph_checkpoints_removed: usize,
+        sweep_budget_seconds: u64,
+        sweep_budget_source: &'a str,
+        sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
+        sweep_warning: &'a Option<String>,
+        sweep_stopped: bool,
         port_receipts: &'a crate::port_receipt_retention::Report,
         retention_errors: &'a [provenant_config::RetentionIssue],
         payload_errors: &'a [provenant_run::ProviderStateIssue],
@@ -1203,6 +1192,11 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dir_bytes: data.build_dirs.cache_bytes,
         build_dir_measurement_skipped: data.build_dirs.measurement_skipped,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
+        sweep_budget_seconds: data.sweep_budget_seconds,
+        sweep_budget_source: &data.sweep_budget_source,
+        sweep_cursor: &data.sweep_cursor,
+        sweep_warning: &data.sweep_warning,
+        sweep_stopped: data.sweep_stopped,
         port_receipts: &data.port_receipts,
         retention_errors: &data.retention_errors,
         payload_errors: &data.provider_state.payload.errors,
@@ -1210,6 +1204,17 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
         notice: &data.notice,
+    }
+}
+
+fn gc_origin_source(origin: &provenant_config::Origin) -> String {
+    match origin {
+        provenant_config::Origin::Compiled { profile } => {
+            format!("compiled {} profile", profile.as_str())
+        }
+        provenant_config::Origin::User { path } => {
+            path.as_path_text().unwrap_or("config.toml").to_owned()
+        }
     }
 }
 
@@ -1240,9 +1245,10 @@ fn gc_project(
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
     read_only: bool,
+    cancel: &CancelToken,
 ) -> Result<GcProject, Error> {
     let (binding, layout) = owner;
-    with_context_mode_with_owner(
+    with_context_mode_with_owner_cancel(
         roots,
         home,
         project,
@@ -1255,6 +1261,7 @@ fn gc_project(
         facts,
         read_only,
         Some((binding, layout)),
+        cancel,
         |context, cancel| {
             require_non_bare_gc_repository(facts.bare_setting(
                 context.repo,
@@ -1692,6 +1699,16 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let mut unobserved_projects = Vec::new();
     let mut skipped_transient = Vec::new();
     let config = provenant_cli::config_reads::read_for(&roots, "gc")?;
+    let sweep_budget_seconds = config
+        .gc
+        .sweep_budget_seconds()
+        .map_err(|_| Error::GcObservation("invalid gc.sweep_budget"))?;
+    let sweep_budget = Duration::from_secs(sweep_budget_seconds);
+    let sweep_budget_source = config
+        .origins
+        .get("gc.sweep_budget")
+        .map(gc_origin_source)
+        .unwrap_or_else(|| "compiled default".into());
     if (command.scheduled || command.pressure) && !config.gc.schedule {
         return Ok(GcData {
             report: provenant_confinement::cache::CacheGcReport {
@@ -1699,12 +1716,63 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             },
             idle_seconds: command.idle.unwrap_or(6 * 3600),
+            sweep_budget_seconds,
+            sweep_budget_source,
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
             notice: command
                 .pressure
                 .then(|| "pressure collection skipped: gc.schedule=false".into()),
+            ..Default::default()
+        });
+    }
+    let clock = SystemClock::new();
+    let mut lease = if command.dry_run {
+        None
+    } else {
+        match crate::gc_sweep::acquire(roots.state.as_path(), sweep_budget, &clock)
+            .map_err(|error| Error::RetentionCollection(error.to_string()))?
+        {
+            crate::gc_sweep::Acquire::Held(lease) => Some(lease),
+            crate::gc_sweep::Acquire::Busy(warning) => {
+                return Ok(GcData {
+                    sweep_budget_seconds,
+                    sweep_budget_source,
+                    sweep_warning: warning.clone(),
+                    notice: Some(
+                        warning.unwrap_or_else(|| "sweep already running; skipped".into()),
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+    };
+    let deadline = crate::gc_sweep::Deadline::start(sweep_budget);
+    if let Some(lease) = &mut lease {
+        lease
+            .watch_fence(deadline.cancel().clone())
+            .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+    }
+    let initial_cursor = lease.as_ref().and_then(|lease| lease.cursor().cloned());
+    let takeover_warning = lease.as_ref().and_then(|lease| lease.warning.clone());
+    if initial_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.class == "complete")
+    {
+        if let Some(lease) = lease.take() {
+            lease
+                .complete()
+                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        }
+        return Ok(GcData {
+            sweep_budget_seconds,
+            sweep_budget_source,
+            sweep_warning: takeover_warning,
+            notice: Some(
+                "all retention classes had completed before the prior sweep reached its budget"
+                    .into(),
+            ),
             ..Default::default()
         });
     }
@@ -1718,11 +1786,25 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             .map_err(Error::DiskSpace)?
             >= floor
         {
+            if initial_cursor.is_none() {
+                if let Some(lease) = lease.take() {
+                    lease
+                        .complete()
+                        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+                }
+            } else {
+                // A paused sweep stays resumable until its recorded classes
+                // finish; low pressure only defers the next collection pass.
+                drop(lease.take());
+            }
             return Ok(GcData {
                 report: provenant_confinement::cache::CacheGcReport {
                     dry_run: command.dry_run,
                     ..Default::default()
                 },
+                sweep_budget_seconds,
+                sweep_budget_source,
+                sweep_cursor: initial_cursor,
                 notice: Some("background sweep skipped: free space is above gc.free_floor".into()),
                 ..Default::default()
             });
@@ -1735,19 +1817,79 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         );
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
-        let cancel = CancelToken::new();
-        for binding in selection.projects {
+        let cancel = deadline.cancel().clone();
+        let project_resume = initial_cursor
+            .as_ref()
+            .filter(|cursor| cursor.class == "project_selection")
+            .and_then(|cursor| cursor.project.as_deref());
+        let project_start = project_resume.map_or(0, |path| {
+            selection
+                .projects
+                .iter()
+                .position(|binding| binding.common_dir() >= path)
+                .unwrap_or(selection.projects.len())
+        });
+        for binding in selection.projects.into_iter().skip(project_start) {
             let common = binding.common_dir();
+            if !sweep_should_continue(&deadline, lease.as_ref()) {
+                let cursor = crate::gc_sweep::Cursor {
+                    class: "project_selection".into(),
+                    project: Some(common.to_owned()),
+                    candidate: None,
+                    detail: None,
+                };
+                if let Some(lease) = &mut lease {
+                    lease
+                        .checkpoint(cursor.clone())
+                        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+                }
+                return Ok(GcData {
+                    sweep_budget_seconds,
+                    sweep_budget_source,
+                    sweep_cursor: Some(cursor),
+                    sweep_warning: takeover_warning,
+                    sweep_stopped: true,
+                    unobserved_projects,
+                    skipped_transient,
+                    notice: Some("sweep stopped at gc.sweep_budget during project discovery; next run resumes from the saved cursor".into()),
+                    ..Default::default()
+                });
+            }
             // The utility owns bound layout resolution, including trusted
             // local bare provenance for a checkout-less common directory.
-            let layout =
-                match runtime.project_layout_for_binding(&executor, &binding, budget, &cancel) {
-                    Ok(layout) => layout,
-                    Err(_) => {
-                        unobserved_projects.push(common.to_owned());
-                        continue;
+            let layout = match runtime
+                .project_layout_for_binding(&executor, &binding, budget, &cancel)
+            {
+                Ok(layout) => layout,
+                Err(_) => {
+                    if !sweep_should_continue(&deadline, lease.as_ref()) {
+                        let cursor = crate::gc_sweep::Cursor {
+                            class: "project_selection".into(),
+                            project: Some(common.to_owned()),
+                            candidate: None,
+                            detail: None,
+                        };
+                        if let Some(lease) = &mut lease {
+                            lease
+                                .checkpoint(cursor.clone())
+                                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+                        }
+                        return Ok(GcData {
+                                sweep_budget_seconds,
+                                sweep_budget_source,
+                                sweep_cursor: Some(cursor),
+                                sweep_warning: takeover_warning,
+                                sweep_stopped: true,
+                                unobserved_projects,
+                                skipped_transient,
+                                notice: Some("sweep stopped at gc.sweep_budget during project discovery; next run resumes from the saved cursor".into()),
+                                ..Default::default()
+                            });
                     }
-                };
+                    unobserved_projects.push(common.to_owned());
+                    continue;
+                }
+            };
             let Some(path) = layout.project().map(Path::to_path_buf) else {
                 // Scheduled worktree GC requires a verified primary checkout;
                 // a bare common directory is an allocation owner, not a checkout.
@@ -1762,10 +1904,35 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 workers,
                 &facts,
                 command.dry_run,
+                deadline.cancel(),
             ) {
                 Ok(project) => {
                     project_ids.push(project.binding.project_id());
                     projects.push(project);
+                }
+                Err(_) if !sweep_should_continue(&deadline, lease.as_ref()) => {
+                    let cursor = crate::gc_sweep::Cursor {
+                        class: "project_selection".into(),
+                        project: Some(common.to_owned()),
+                        candidate: None,
+                        detail: None,
+                    };
+                    if let Some(lease) = &mut lease {
+                        lease
+                            .checkpoint(cursor.clone())
+                            .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+                    }
+                    return Ok(GcData {
+                        sweep_budget_seconds,
+                        sweep_budget_source,
+                        sweep_cursor: Some(cursor),
+                        sweep_warning: takeover_warning,
+                        sweep_stopped: true,
+                        unobserved_projects,
+                        skipped_transient,
+                        notice: Some("sweep stopped at gc.sweep_budget during project discovery; next run resumes from the saved cursor".into()),
+                        ..Default::default()
+                    });
                 }
                 Err(_) => unobserved_projects.push(path.to_owned()),
             }
@@ -1778,17 +1945,24 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &executor,
             &project,
             UtilityBudget::bounded(Duration::from_secs(5))?,
-            &CancelToken::new(),
+            deadline.cancel(),
         )?;
         let common = repo.common_git_dir().to_owned();
         if provenant_config::transient_location(&roots, &common) {
             skipped_transient.push(common);
+            if let Some(lease) = lease.take() {
+                lease
+                    .complete()
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
             return Ok(GcData {
                 report: provenant_confinement::cache::CacheGcReport {
                     dry_run: command.dry_run,
                     ..Default::default()
                 },
                 idle_seconds: command.idle.unwrap_or(6 * 3600),
+                sweep_budget_seconds,
+                sweep_budget_source,
                 skipped_transient,
                 notice: command
                     .pressure
@@ -1801,7 +1975,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &executor,
             &runtime,
             UtilityBudget::bounded(Duration::from_secs(5))?,
-            &CancelToken::new(),
+            deadline.cancel(),
         )?)?;
         let location = if repo.private_git_dir() == repo.common_git_dir() {
             provenant_config::ProjectLocation::from_verified_primary_checkout(
@@ -1822,7 +1996,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &executor,
             &binding,
             UtilityBudget::bounded(Duration::from_secs(5))?,
-            &CancelToken::new(),
+            deadline.cancel(),
         )?;
         let primary = layout
             .project()
@@ -1839,11 +2013,17 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             workers,
             &facts,
             command.dry_run,
+            deadline.cancel(),
         )?;
 
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
+    projects.sort_by(|left, right| left.path.cmp(&right.path));
+    project_ids = projects
+        .iter()
+        .map(|project| project.binding.project_id())
+        .collect();
     let free_floor = command
         .free_floor
         .map(Ok)
@@ -1903,8 +2083,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         output_idle_seconds,
         free_floor,
         cache_error: None,
+        lease: lease.take(),
+        deadline: &deadline,
+        resume_cursor: initial_cursor.filter(|cursor| cursor.class != "project_selection"),
+        active_class: String::new(),
+        project_start: None,
+        candidate_start: None,
+        stopped_cursor: None,
         data: GcData {
             idle_seconds,
+            sweep_budget_seconds,
+            sweep_budget_source: sweep_budget_source.clone(),
+            sweep_warning: takeover_warning,
             unobserved_projects,
             skipped_transient,
             ..Default::default()
@@ -1915,8 +2105,90 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         provenant_config::RetentionTrigger::FullGc
     };
-    for class in provenant_config::retention_schedule(trigger) {
+    let classes = provenant_config::retention_schedule(trigger);
+    let resume_index = adapters.resume_cursor.as_ref().and_then(|cursor| {
+        if cursor.class == "complete" {
+            Some(classes.len())
+        } else {
+            classes
+                .iter()
+                .position(|class| format!("{:?}", class.class) == cursor.class)
+        }
+    });
+    let first_index = resume_index.unwrap_or(0);
+    let mut stopped = false;
+    for (class_index, class) in classes.iter().enumerate().skip(first_index) {
+        let class_name = format!("{:?}", class.class);
+        adapters.active_class = class_name.clone();
+        adapters.project_start = adapters
+            .resume_cursor
+            .as_ref()
+            .filter(|cursor| cursor.class == class_name)
+            .and_then(|cursor| cursor.project.clone());
+        adapters.candidate_start = adapters
+            .resume_cursor
+            .as_ref()
+            .filter(|cursor| cursor.class == class_name)
+            .and_then(|cursor| cursor.candidate.clone());
+        if !adapters.stop_requested() {
+            let cursor = crate::gc_sweep::Cursor {
+                class: class_name.clone(),
+                project: adapters.project_start,
+                candidate: adapters.candidate_start,
+                detail: adapters
+                    .resume_cursor
+                    .as_ref()
+                    .filter(|cursor| cursor.class == class_name)
+                    .and_then(|cursor| cursor.detail.clone()),
+            };
+            if let Some(lease) = &mut adapters.lease {
+                lease
+                    .checkpoint(cursor.clone())
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
+            adapters.data.sweep_cursor = Some(cursor);
+            stopped = true;
+            break;
+        }
+        if let Some(lease) = &mut adapters.lease {
+            lease
+                .checkpoint(crate::gc_sweep::Cursor {
+                    class: class_name.clone(),
+                    project: adapters.project_start.clone(),
+                    candidate: adapters.candidate_start.clone(),
+                    detail: adapters
+                        .resume_cursor
+                        .as_ref()
+                        .filter(|cursor| cursor.class == class_name)
+                        .and_then(|cursor| cursor.detail.clone()),
+                })
+                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        }
         if let Err(error) = class.adapter.collect(&mut adapters) {
+            if !adapters.stop_requested() {
+                let cursor =
+                    adapters
+                        .stopped_cursor
+                        .take()
+                        .unwrap_or_else(|| crate::gc_sweep::Cursor {
+                            class: class_name.clone(),
+                            project: adapters.project_start.clone(),
+                            candidate: adapters.candidate_start.clone(),
+                            detail: adapters
+                                .resume_cursor
+                                .as_ref()
+                                .filter(|cursor| cursor.class == class_name)
+                                .and_then(|cursor| cursor.detail.clone()),
+                        });
+                if let Some(lease) = &mut adapters.lease {
+                    lease
+                        .checkpoint(cursor.clone())
+                        .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+                }
+                adapters.data.sweep_cursor = Some(cursor);
+                stopped = true;
+                break;
+            }
             adapters.data.failed_classes.push(class.class);
             adapters
                 .data
@@ -1926,6 +2198,48 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     operation: format!("collect {:?}", class.class),
                     cause: error.to_string(),
                 });
+        }
+        if let Some(cursor) = adapters.stopped_cursor.take() {
+            if let Some(lease) = &mut adapters.lease {
+                lease
+                    .checkpoint(cursor.clone())
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
+            adapters.data.sweep_cursor = Some(cursor);
+            stopped = true;
+            break;
+        }
+        if !adapters.stop_requested() {
+            let cursor = classes.get(class_index + 1).map_or_else(
+                || crate::gc_sweep::Cursor {
+                    class: "complete".into(),
+                    project: None,
+                    candidate: None,
+                    detail: None,
+                },
+                |next| crate::gc_sweep::Cursor {
+                    class: format!("{:?}", next.class),
+                    project: None,
+                    candidate: None,
+                    detail: None,
+                },
+            );
+            if let Some(lease) = &mut adapters.lease {
+                lease
+                    .checkpoint(cursor.clone())
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
+            adapters.data.sweep_cursor = Some(cursor);
+            stopped = true;
+            break;
+        }
+    }
+    adapters.data.sweep_stopped = stopped;
+    if !stopped {
+        if let Some(lease) = adapters.lease.take() {
+            lease
+                .complete()
+                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
         }
     }
     adapters.data.observe_retention(trigger);
@@ -1944,7 +2258,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         ));
     }
     let mut data = adapters.data;
-    let notice = if command.dry_run {
+    let notice = if data.sweep_stopped {
+        Some(
+            "sweep reached gc.sweep_budget; the saved retention cursor resumes on the next pass"
+                .into(),
+        )
+    } else if command.dry_run {
         Some("Allocated bytes are measured without following links; APFS clones may share physical blocks. Upstream evidence uses last fetched refs in previews.".into())
     } else {
         (command.pressure
@@ -1981,11 +2300,96 @@ struct GcAdapters<'a> {
     output_idle_seconds: u64,
     free_floor: u64,
     cache_error: Option<provenant_confinement::cache::CacheGcError>,
+    lease: Option<crate::gc_sweep::Lease>,
+    deadline: &'a crate::gc_sweep::Deadline,
+    resume_cursor: Option<crate::gc_sweep::Cursor>,
+    active_class: String,
+    project_start: Option<PathBuf>,
+    candidate_start: Option<PathBuf>,
+    stopped_cursor: Option<crate::gc_sweep::Cursor>,
     data: GcData,
 }
+
+impl GcAdapters<'_> {
+    fn resume_candidate(&self) -> Option<&Path> {
+        self.resume_cursor
+            .as_ref()
+            .filter(|cursor| cursor.class == self.active_class)
+            .and_then(|cursor| cursor.candidate.as_deref())
+    }
+
+    fn resume_detail(&self) -> Option<&str> {
+        self.resume_cursor
+            .as_ref()
+            .filter(|cursor| cursor.class == self.active_class)
+            .and_then(|cursor| cursor.detail.as_deref())
+    }
+
+    fn stop_at(
+        &mut self,
+        project: Option<PathBuf>,
+        candidate: Option<PathBuf>,
+        detail: Option<String>,
+    ) -> Result<(), Error> {
+        let cursor = crate::gc_sweep::Cursor {
+            class: self.active_class.clone(),
+            project,
+            candidate,
+            detail,
+        };
+        if let Some(lease) = &mut self.lease {
+            lease
+                .checkpoint(cursor.clone())
+                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        }
+        self.stopped_cursor = Some(cursor);
+        Ok(())
+    }
+
+    fn stop_requested(&self) -> bool {
+        !sweep_should_continue(self.deadline, self.lease.as_ref())
+    }
+
+    fn stop_at_resume(&mut self) -> Result<bool, Error> {
+        if !self.stop_requested() {
+            return Ok(false);
+        }
+        let cursor = crate::gc_sweep::Cursor {
+            class: self.active_class.clone(),
+            project: self.project_start.clone(),
+            candidate: self.candidate_start.clone(),
+            detail: self.resume_detail().map(str::to_owned),
+        };
+        if let Some(lease) = &mut self.lease {
+            lease
+                .checkpoint(cursor.clone())
+                .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+        }
+        self.stopped_cursor = Some(cursor);
+        Ok(true)
+    }
+}
+
+fn sweep_should_continue(
+    deadline: &crate::gc_sweep::Deadline,
+    lease: Option<&crate::gc_sweep::Lease>,
+) -> bool {
+    let cancel = deadline.cancel();
+    let okay = !deadline.expired()
+        && !cancel.is_cancelled()
+        && lease.is_none_or(|lease| lease.check_fence(cancel));
+    if !okay {
+        cancel.cancel();
+    }
+    okay
+}
+
 impl provenant_config::RetentionCollector for GcAdapters<'_> {
     type Error = Error;
     fn lane_cargo_caches(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let home = self.home;
 
         let result = provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
@@ -2019,6 +2423,9 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         Ok(())
     }
     fn git_worktrees(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let command = self.command;
         let roots = self.roots;
         let home = self.home;
@@ -2027,12 +2434,55 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let workers = self.workers;
         let facts = self.facts;
         let output_idle_seconds = self.output_idle_seconds;
+        let cancel = self.deadline.cancel().clone();
+        let sweep_deadline = self.deadline;
+        let sweep_lease = self.lease.as_ref();
+        let project_start = self.project_start;
+        let candidate_start = self.resume_candidate().map(Path::to_path_buf);
+        let resume_detail = self.resume_detail().map(str::to_owned);
+        let project_start_index = project_start
+            .as_ref()
+            .and_then(|path| {
+                self.projects
+                    .iter()
+                    .position(|project| project.path.as_path() >= path.as_path())
+            })
+            .unwrap_or(self.projects.len());
 
-        for project in &mut self.projects {
+        for project_index in project_start_index..self.projects.len() {
+            let project_path = self.projects[project_index].path.clone();
+            let candidate_path = (project_start.as_ref() == Some(&project_path))
+                .then(|| candidate_start.clone())
+                .flatten();
+            let project_resume_detail = (project_start.as_ref() == Some(&project_path))
+                .then(|| resume_detail.clone())
+                .flatten();
+            let stopped_detail = RefCell::new(None::<String>);
+            if self.stop_requested() || cancel.is_cancelled() {
+                self.stop_at(
+                    Some(project_path.clone()),
+                    candidate_path.clone(),
+                    project_resume_detail,
+                )?;
+                break;
+            }
+            if let Some(lease) = &mut self.lease {
+                lease
+                    .checkpoint(crate::gc_sweep::Cursor {
+                        class: self.active_class.clone(),
+                        project: Some(project_path.clone()),
+                        candidate: candidate_path.clone(),
+                        detail: project_resume_detail.clone(),
+                    })
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
+            let project = &mut self.projects[project_index];
             let settings = config
                 .gc
                 .project_settings(&project.binding.project_id().to_string(), &project.path);
-            let cleanup = with_context_mode(
+            let remaining = self.deadline.remaining();
+            let stopped_candidate = RefCell::new(None::<PathBuf>);
+            let cleanup = with_context_mode_cancel(
                 roots,
                 home,
                 &project.path,
@@ -2040,10 +2490,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     Duration::from_secs(2)
                 } else {
                     MUTATION_TIMEOUT
-                },
+                }
+                .min(remaining.max(Duration::from_millis(1))),
                 workers,
                 facts,
                 command.dry_run,
+                &cancel,
                 |context, cancel| {
                     // When the fetch fails, there is no origin, or the sweep is a
                     // pressure sweep, upstream is None: the path-based pass below
@@ -2063,6 +2515,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     // receipt that is not final. Collect them through the same
                     // owner-bound proof before the path-based pass below. The
                     // subpass requires an exact integration ref for reportable removal.
+                    let mut should_continue = || sweep_should_continue(sweep_deadline, sweep_lease);
                     let unsettled = if command.apply && !command.dry_run {
                         crate::fabric::gc_cleanup::collect_unsettled(
                             roots,
@@ -2071,6 +2524,9 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             project.binding.project_id(),
                             upstream.clone(),
                             workers,
+                            cancel,
+                            project_resume_detail.as_deref(),
+                            &mut should_continue,
                         )
                         .unwrap_or_else(|error| {
                             use std::io::Write;
@@ -2084,12 +2540,28 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     } else {
                         crate::fabric::gc_cleanup::UnsettledCollection::default()
                     };
-                    let lanes: Vec<_> = project
+                    if unsettled.interrupted_at.is_some() {
+                        *stopped_candidate.borrow_mut() = unsettled.interrupted_at.clone();
+                    }
+                    if unsettled.continuation.is_some() {
+                        *stopped_detail.borrow_mut() = unsettled.continuation.clone();
+                    }
+                    let mut lanes: Vec<_> = project
                         .lanes
                         .iter()
                         .filter(|lane| !unsettled.removed.contains(&lane.path))
                         .cloned()
                         .collect();
+                    lanes.sort_by(|left, right| left.path.cmp(&right.path));
+                    let start_candidate = candidate_path
+                        .as_ref()
+                        .map(|path| {
+                            lanes
+                                .iter()
+                                .position(|lane| lane.path.as_path() >= path.as_path())
+                                .unwrap_or(lanes.len())
+                        })
+                        .unwrap_or(0);
                     // Fetch can take a while, so begin the single sweep snapshot
                     // only after it completes. A stale snapshot is refreshed by
                     // the callbacks below, which collect() invokes under the
@@ -2099,6 +2571,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             roots,
                             project.binding.project_id(),
                             command.dry_run,
+                            cancel,
                         )
                         .ok(),
                     );
@@ -2112,11 +2585,11 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             &rescan_failed,
                             |snapshot| snapshot.is_current(),
                             || {
-                                crate::gc_support::lane_states(
+                                crate::gc_support::lane_states_with_observation(
                                     roots,
-                                    home,
-                                    assets,
                                     project.binding.project_id(),
+                                    false,
+                                    cancel,
                                 )
                                 .ok()
                             },
@@ -2189,7 +2662,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         })
                         .ok_or(Error::GcObservation("retirement reader unavailable"))?;
 
-                    let mut report = worktrees::collect(
+                    let mut report = worktrees::collect_from(
                         context,
                         &lanes,
                         &worktrees::WorktreeGcPolicy {
@@ -2213,7 +2686,14 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             dry_run: command.dry_run || !command.apply,
                         },
                         cancel,
+                        start_candidate,
+                        &mut should_continue,
                     )?;
+
+                    if let Some(candidate) = report.interrupted_at {
+                        *stopped_candidate.borrow_mut() =
+                            lanes.get(candidate).map(|lane| lane.path.clone());
+                    }
 
                     if !report.dry_run {
                         let writer = retirement_writer.as_ref().ok_or(Error::GcObservation(
@@ -2259,13 +2739,36 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             );
             match cleanup {
                 Ok(cleanup) => self.data.worktree_cleanup.push(cleanup),
-                Err(_) => self.data.unobserved_projects.push(project.path.clone()),
+                Err(_) => {
+                    self.data.unobserved_projects.push(project.path.clone());
+                    if self.stop_requested() || cancel.is_cancelled() {
+                        self.stop_at(
+                            Some(project_path.clone()),
+                            candidate_path.clone(),
+                            stopped_detail
+                                .into_inner()
+                                .or(project_resume_detail.clone()),
+                        )?;
+                        break;
+                    }
+                }
+            }
+            let candidate = stopped_candidate.into_inner();
+            let detail = stopped_detail.into_inner();
+            if candidate.is_some() || detail.is_some() {
+                self.stop_at(Some(project_path), candidate, detail)?;
+            }
+            if self.stopped_cursor.is_some() {
+                break;
             }
         }
 
         Ok(())
     }
     fn discard_archives(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let command = self.command;
         let roots = self.roots;
         let home = self.home;
@@ -2273,21 +2776,60 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let workers = self.workers;
         let facts = self.facts;
         let now_ns = self.now_ns;
+        let project_start = self.project_start.clone();
+        let candidate_start = self.resume_candidate().map(Path::to_path_buf);
+        let cancel = self.deadline.cancel().clone();
+        let sweep_deadline = self.deadline;
+        let sweep_lease = self.lease.as_ref();
+        let project_start_index = project_start
+            .as_ref()
+            .and_then(|path| {
+                self.projects
+                    .iter()
+                    .position(|project| project.path.as_path() >= path.as_path())
+            })
+            .unwrap_or(self.projects.len());
 
-        for project in &self.projects {
-            let mut archived = with_context_using_facts(
+        for project_index in project_start_index..self.projects.len() {
+            let project_path = self.projects[project_index].path.clone();
+            let candidate_path = (project_start.as_ref() == Some(&project_path))
+                .then(|| candidate_start.clone())
+                .flatten();
+            if self.stop_requested() || cancel.is_cancelled() {
+                self.stop_at(Some(project_path), candidate_path, None)?;
+                break;
+            }
+            if let Some(lease) = &mut self.lease {
+                lease
+                    .checkpoint(crate::gc_sweep::Cursor {
+                        class: self.active_class.clone(),
+                        project: Some(project_path.clone()),
+                        candidate: candidate_path.clone(),
+                        detail: None,
+                    })
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+            }
+            let project = &self.projects[project_index];
+            let remaining = self.deadline.remaining();
+            let mut archived = with_context_mode_cancel(
                 roots,
                 home,
                 &project.path,
-                MUTATION_TIMEOUT,
+                MUTATION_TIMEOUT.min(remaining.max(Duration::from_millis(1))),
                 workers,
                 facts,
-                |context, _| {
+                command.dry_run,
+                &cancel,
+                |context, cancel| {
+                    let mut should_continue = || sweep_should_continue(sweep_deadline, sweep_lease);
                     Ok(worktrees::collect_archives(
                         context,
                         now_ns
                             - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000,
                         command.dry_run,
+                        cancel,
+                        candidate_path.as_deref(),
+                        &mut should_continue,
                     ))
                 },
             )
@@ -2299,6 +2841,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 }],
                 ..Default::default()
             });
+            let stopped_candidate = archived.interrupted_at.take();
             self.data.discard_archives.bytes = self
                 .data
                 .discard_archives
@@ -2317,24 +2860,48 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 .discard_archives
                 .errors
                 .append(&mut archived.errors);
+            if let Some(candidate) = stopped_candidate {
+                self.stop_at(Some(project_path), Some(candidate), None)?;
+                break;
+            }
+            if self.stop_requested() || cancel.is_cancelled() {
+                self.stop_at(Some(project_path), candidate_path, None)?;
+                break;
+            }
         }
 
         Ok(())
     }
     fn staging(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let command = self.command;
         let roots = self.roots;
         let now_ns = self.now_ns;
-
-        self.data.staging_busy = crate::staging_gc::collect(
+        let cancel = self.deadline.cancel().clone();
+        let deadline = self.deadline;
+        let lease = self.lease.as_ref();
+        let mut should_continue = || sweep_should_continue(deadline, lease);
+        let report = crate::staging_gc::collect(
             roots.state.as_path(),
             now_ns - i128::from(self.data.idle_seconds) * 1_000_000_000,
             command.dry_run,
+            &cancel,
+            self.resume_candidate(),
+            &mut should_continue,
         )?;
+        self.data.staging_busy = report.busy;
+        if let Some(candidate) = report.interrupted_at {
+            self.stop_at(None, Some(candidate), None)?;
+        }
 
         Ok(())
     }
     fn chair_logs(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let command = self.command;
         let roots = self.roots;
         let config = self.config;
@@ -2355,6 +2922,9 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         Ok(())
     }
     fn target_seeds(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let command = self.command;
         let roots = self.roots;
         let config = self.config;
@@ -2372,6 +2942,9 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         Ok(())
     }
     fn build_directories(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         let command = self.command;
         let roots = self.roots;
         let home = self.home;
@@ -2401,29 +2974,68 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
     }
 
     fn provider_state(&mut self) -> Result<(), Error> {
-        self.data.provider_state = crate::provider_retention::collect_provider_state(
-            self.roots,
-            self.home,
-            self.assets,
-            self.config.retention.provider_state_days,
-            self.config.retention.logs_days,
-            self.command.dry_run,
-            &provenant_core::CancelToken::new(),
-            &provenant_run::RetentionScan::default(),
-        );
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
+        let report = {
+            let deadline = self.deadline;
+            let cancel = deadline.cancel();
+            let lease = self.lease.as_ref();
+            let keep_going = || sweep_should_continue(deadline, lease);
+            let scan = provenant_run::RetentionScan {
+                start_at: self
+                    .resume_candidate()
+                    .and_then(|path| path.file_name()?.to_str()?.parse().ok()),
+                detail: self.resume_detail(),
+                keep_going: Some(&keep_going),
+            };
+            crate::provider_retention::collect_provider_state(
+                self.roots,
+                self.home,
+                self.assets,
+                self.config.retention.provider_state_days,
+                self.config.retention.logs_days,
+                self.command.dry_run,
+                cancel,
+                &scan,
+            )
+        };
+        if let Some(candidate) = report.interrupted_at.clone() {
+            self.stop_at(None, Some(candidate), report.continuation.clone())?;
+        }
+        self.data.provider_state = report;
         Ok(())
     }
     fn attempt_scratch(&mut self) -> Result<(), Error> {
-        let mut report = crate::provider_retention::collect_attempt_scratch(
-            self.roots,
-            self.home,
-            self.assets,
-            self.data.idle_seconds,
-            (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
-            self.command.dry_run,
-            &provenant_core::CancelToken::new(),
-            &provenant_run::RetentionScan::default(),
-        );
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
+        let mut report = {
+            let deadline = self.deadline;
+            let cancel = deadline.cancel();
+            let lease = self.lease.as_ref();
+            let keep_going = || sweep_should_continue(deadline, lease);
+            let scan = provenant_run::RetentionScan {
+                start_at: self
+                    .resume_candidate()
+                    .and_then(|path| path.file_name()?.to_str()?.parse().ok()),
+                detail: self.resume_detail(),
+                keep_going: Some(&keep_going),
+            };
+            crate::provider_retention::collect_attempt_scratch(
+                self.roots,
+                self.home,
+                self.assets,
+                self.data.idle_seconds,
+                (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
+                self.command.dry_run,
+                cancel,
+                &scan,
+            )
+        };
+        if let Some(candidate) = report.interrupted_at.clone() {
+            self.stop_at(None, Some(candidate), report.continuation.clone())?;
+        }
         self.data
             .provider_state
             .attempt_tmp
@@ -2437,22 +3049,44 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         Ok(())
     }
     fn payload_cap(&mut self) -> Result<(), Error> {
-        let mut report = crate::provider_retention::collect_payload_cap(
-            (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
-            self.roots,
-            self.home,
-            self.assets,
-            self.config.retention.payload_cap_bytes,
-            !self.command.pressure && !self.command.dry_run,
-            self.command.dry_run,
-            &provenant_core::CancelToken::new(),
-            &provenant_run::RetentionScan::default(),
-        );
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
+        let mut report = {
+            let deadline = self.deadline;
+            let cancel = deadline.cancel();
+            let lease = self.lease.as_ref();
+            let keep_going = || sweep_should_continue(deadline, lease);
+            let scan = provenant_run::RetentionScan {
+                start_at: self
+                    .resume_candidate()
+                    .and_then(|path| path.file_name()?.to_str()?.parse().ok()),
+                detail: self.resume_detail(),
+                keep_going: Some(&keep_going),
+            };
+            crate::provider_retention::collect_payload_cap(
+                (self.command.pressure && !self.command.scheduled).then_some(self.project_ids),
+                self.roots,
+                self.home,
+                self.assets,
+                self.config.retention.payload_cap_bytes,
+                !self.command.pressure && !self.command.dry_run,
+                self.command.dry_run,
+                cancel,
+                &scan,
+            )
+        };
+        if let Some(candidate) = report.interrupted_at.clone() {
+            self.stop_at(None, Some(candidate), report.continuation.clone())?;
+        }
         self.data.provider_state.payload = report.payload;
         self.data.provider_state.errors.append(&mut report.errors);
         Ok(())
     }
     fn graph_checkpoints(&mut self) -> Result<(), Error> {
+        if self.stop_at_resume()? {
+            return Ok(());
+        }
         // Graph state survives an unavailable checkout. Scheduled collection
         // must not depend on observing that checkout's Git/worktree state.
         let projects = if self.command.scheduled {
@@ -2557,8 +3191,26 @@ fn with_context_mode<T>(
     read_only: bool,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
+    let cancel = CancelToken::new();
+    with_context_mode_cancel(
+        roots, home, project, mutation, workers, facts, read_only, &cancel, action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn with_context_mode_cancel<T>(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    mutation: Duration,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    read_only: bool,
+    cancel: &CancelToken,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
     with_context_mode_with_owner(
-        roots, home, project, mutation, workers, facts, read_only, None, action,
+        roots, home, project, mutation, workers, facts, read_only, None, cancel, action,
     )
 }
 
@@ -2572,6 +3224,25 @@ fn with_context_mode_with_owner<T>(
     facts: &worktrees::RepoFacts,
     read_only: bool,
     owner: Option<(provenant_config::ProjectBinding, worktrees::ProjectLayout)>,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let cancel = CancelToken::new();
+    with_context_mode_with_owner_cancel(
+        roots, home, project, mutation, workers, facts, read_only, owner, &cancel, action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_context_mode_with_owner_cancel<T>(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    mutation: Duration,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    read_only: bool,
+    owner: Option<(provenant_config::ProjectBinding, worktrees::ProjectLayout)>,
+    cancel: &CancelToken,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
     // Preview only existing custody; an unbound project cannot grant mutation
@@ -2623,8 +3294,11 @@ fn with_context_mode_with_owner<T>(
         roots.state.as_path(),
     ));
     let executor = SystemExecutor::new(1)?;
-    let cancel = CancelToken::new();
-    let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+    let budget = UtilityBudget::bounded(
+        mutation
+            .min(Duration::from_secs(5))
+            .max(Duration::from_millis(1)),
+    )?;
     let repo = runtime.open_repo(&executor, project, budget, &cancel)?;
     let (binding, layout) = if let Some((binding, layout)) = owner {
         let common = Directory::open_anchor(binding.common_dir())?;
@@ -2691,7 +3365,16 @@ fn with_context_mode_with_owner<T>(
         clock: &clock,
         utility_budget: budget,
         mutation_budget: UtilityBudget::bounded(mutation)?,
-        lock_budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?,
+        lock_budget: WaitBudget::up_to(
+            clock.mono_now(),
+            DurationMicros::from_micros(
+                mutation
+                    .as_micros()
+                    .min(5_000_000)
+                    .try_into()
+                    .unwrap_or(5_000_000),
+            ),
+        ),
     };
     let result = action(&context, &cancel);
     drop(utility_home);

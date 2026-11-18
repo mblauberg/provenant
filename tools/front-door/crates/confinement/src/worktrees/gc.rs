@@ -166,6 +166,9 @@ pub struct WorktreeGcReport {
     pub caches: Vec<crate::cache::CacheGcEntry>,
     pub byte_errors: Vec<RetentionIssue>,
     pub cache_errors: Vec<RetentionIssue>,
+    /// In-memory restart point when the caller's sweep deadline expires.
+    #[serde(skip)]
+    pub interrupted_at: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -983,7 +986,28 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, true, cancel)
+    let mut should_stop = || cancel.is_cancelled();
+    collect_impl(context, lanes, policy, true, cancel, 0, &mut should_stop)
+}
+
+/// Resume a collection from the lane index saved by its host-wide sweep.
+pub fn collect_from(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+    start_index: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(
+        context,
+        lanes,
+        policy,
+        true,
+        cancel,
+        start_index,
+        should_stop,
+    )
 }
 
 /// Collect lanes the caller named for removal, such as the branch a landing
@@ -995,7 +1019,8 @@ pub fn collect_selected(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, false, cancel)
+    let mut should_stop = || cancel.is_cancelled();
+    collect_impl(context, lanes, policy, false, cancel, 0, &mut should_stop)
 }
 
 /// Revalidate a caller-supplied landing proof against the exact live worktree
@@ -1329,6 +1354,8 @@ fn collect_impl(
     policy: &WorktreeGcPolicy<'_>,
     preview_foreign: bool,
     cancel: &CancelToken,
+    start_index: usize,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     // A preview describes the command's inventory snapshot; applied cleanup
@@ -1389,7 +1416,10 @@ fn collect_impl(
         keep: policy.keep.to_vec(),
         ..Default::default()
     };
-    let preview_walk = PreviewWalk::new(dry);
+    // Both preview and apply use a bounded output walk. Apply rechecks each
+    // candidate under custody, but never spends an unbounded interval proving
+    // tree cleanliness or measuring disposable output.
+    let preview_walk = PreviewWalk::new(true);
     let integration =
         policy
             .upstream
@@ -1425,7 +1455,12 @@ fn collect_impl(
     } else {
         None
     };
-    for lane in lanes {
+    for (lane_index, lane) in lanes.iter().enumerate().skip(start_index) {
+        if should_stop() || cancel.is_cancelled() {
+            cancel.cancel();
+            report.interrupted_at = Some(lane_index);
+            break;
+        }
         if lane.primary
             || primary
                 .as_ref()
@@ -1998,8 +2033,15 @@ fn collect_impl(
             }
         }
         report.candidates.push(row);
+        if should_stop() || cancel.is_cancelled() {
+            cancel.cancel();
+            // A cancelled candidate may have stopped before its durable
+            // retirement completed; retry it from its start on the next pass.
+            report.interrupted_at = Some(lane_index);
+            break;
+        }
     }
-    if first_foreign && !policy.dry_run {
+    if first_foreign && !policy.dry_run && report.interrupted_at.is_none() {
         acknowledge_foreign_preview(context)?;
     }
     Ok(report)
@@ -2585,7 +2627,7 @@ fn prepare_removal_before(
         excluded_paths: &[],
     };
     let mut output = Vec::new();
-    let preview_walk = PreviewWalk::new(preview_only);
+    let preview_walk = PreviewWalk::new(true);
     walk_output(
         repo.root_dir(),
         repo.root_path(),

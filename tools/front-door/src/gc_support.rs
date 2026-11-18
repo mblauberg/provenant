@@ -5,7 +5,7 @@ use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots};
 use provenant_os::{
     clock::SystemClock,
     exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
-    fs::{Directory, LockMode, Metadata, PublishMode, entry_names},
+    fs::{Directory, LockMode, Metadata, PublishMode},
 };
 use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
 use std::{
@@ -31,6 +31,17 @@ pub(crate) fn host_git_with_stderr(
     args: &[&str],
     timeout: Duration,
     capture_stderr: bool,
+) -> Result<ExecOutcome, Error> {
+    host_git_with_cancel(repo, executor, args, timeout, capture_stderr, None)
+}
+
+fn host_git_with_cancel(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[&str],
+    timeout: Duration,
+    capture_stderr: bool,
+    cancel: Option<&CancelToken>,
 ) -> Result<ExecOutcome, Error> {
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     let environment: Vec<(OsString, OsString)> = [
@@ -97,6 +108,7 @@ pub(crate) fn host_git_with_stderr(
     } else {
         StreamPolicy::Discard
     };
+    options.cancel = cancel;
     options.stop_on_output_limit = true;
     let output = executor.execute(options)?;
     if output.timed_out
@@ -173,7 +185,14 @@ pub(crate) fn fetch_default(
     cancel: &CancelToken,
 ) -> Result<Option<(String, GitOid)>, Error> {
     let run = |args: &[&str], timeout: Duration| {
-        host_git(context.repo.root_path(), context.executor, args, timeout)
+        host_git_with_cancel(
+            context.repo.root_path(),
+            context.executor,
+            args,
+            timeout,
+            false,
+            Some(cancel),
+        )
     };
     let remote = run(
         &["config", "--get", "remote.origin.url"],
@@ -349,17 +368,17 @@ fn terminal_after_worktree_creation(finished_at: i64, created_at: Option<i128>) 
 /// `home` and `assets` as their parent.
 pub(crate) fn lane_states(
     roots: &Roots,
-    _home: &Path,
-    _assets: &Path,
     project: provenant_core::ProjectId,
+    cancel: &CancelToken,
 ) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
-    lane_states_with_observation(roots, project, false)
+    lane_states_with_observation(roots, project, false, cancel)
 }
 
 pub(crate) fn lane_states_with_observation(
     roots: &Roots,
     project: provenant_core::ProjectId,
     preview: bool,
+    cancel: &CancelToken,
 ) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
     let context = ExecutionContext {
         state_root: roots.state.clone(),
@@ -373,8 +392,17 @@ pub(crate) fn lane_states_with_observation(
         stores: Vec::new(),
         stale: std::cell::Cell::new(false),
     };
-    scan_terminal(&context, roots.state.as_path(), &mut snapshot, preview)?;
+    scan_terminal(
+        &context,
+        roots.state.as_path(),
+        &mut snapshot,
+        preview,
+        cancel,
+    )?;
     for (path, terminal) in &mut snapshot.states {
+        if cancel.is_cancelled() {
+            return Err("retention snapshot cancelled".into());
+        }
         if *terminal {
             *terminal = snapshot.terminal_times.get(path).is_some_and(|finished| {
                 terminal_after_worktree_creation(*finished, worktree_created_at_micros(path))
@@ -389,13 +417,16 @@ fn scan_terminal(
     host_state: &Path,
     snapshot: &mut LaneSnapshot,
     preview: bool,
+    cancel: &CancelToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let clock = SystemClock;
-    let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        cancel: &cancel,
+        cancel,
     };
+    if cancel.is_cancelled() {
+        return Err("retention snapshot cancelled".into());
+    }
     let root = Directory::open_anchor(context.state_root.as_path())?;
     let database_before = optional_metadata(&root, OsStr::new("run.sqlite3"))?;
     let store = RunStore::open_disk_read_only(context, &call)?
@@ -419,8 +450,14 @@ fn scan_terminal(
             unseen_after: None,
         };
         loop {
+            if cancel.is_cancelled() {
+                return Err("retention snapshot cancelled".into());
+            }
             let page = store.lanes(&query, &call)?;
             for attempt in page.lanes {
+                if cancel.is_cancelled() {
+                    return Err("retention snapshot cancelled".into());
+                }
                 let request = if preview {
                     store.request_observed(attempt.attempt_id, &call)?
                 } else {
@@ -428,6 +465,9 @@ fn scan_terminal(
                 };
                 let task = &request.task;
                 if let Some(writer) = &task.writer {
+                    if cancel.is_cancelled() {
+                        return Err("retention snapshot cancelled".into());
+                    }
                     if !writer.worktree.is_absolute() {
                         return Err("unknown writer path".into());
                     }
@@ -457,10 +497,11 @@ fn scan_terminal(
             return Err("unobservable run store".into());
         }
         match root.open_verified_directory(OsStr::new("attempts")) {
-            Ok(runs) if !entry_names(&runs, 10_000)?.is_empty() => {
-                return Err("unindexed run records".into());
-            }
-            Ok(_) => {}
+            Ok(runs) => match runs.entries()?.next() {
+                Some(Ok(_)) => return Err("unindexed run records".into()),
+                Some(Err(error)) => return Err(error.into()),
+                None => {}
+            },
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }

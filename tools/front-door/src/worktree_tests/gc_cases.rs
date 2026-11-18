@@ -1025,12 +1025,10 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     store.cancel(attempt, "fixture ended", &call)?;
-    let before_child =
-        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
+    let before_child = crate::gc_support::lane_states(&roots, context.project_id, &cancel)?;
     assert!(before_child.is_current());
     assert_eq!(
-        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?
-            .get(&path),
+        crate::gc_support::lane_states(&roots, context.project_id, &cancel)?.get(&path),
         Some(&true)
     );
     // A queued child in the host graph also blocks output pruning.
@@ -1039,14 +1037,13 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     child_store.create(&child_run, &call)?;
     assert!(!before_child.is_current());
     assert!(
-        !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
+        !crate::gc_support::lane_states(&roots, context.project_id, &cancel)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     child_store.cancel(child_run.attempt_id, "child ended", &call)?;
-    let snapshot =
-        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
+    let snapshot = crate::gc_support::lane_states(&roots, context.project_id, &cancel)?;
     assert!(snapshot.is_current());
     let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
     let later = writer_run(writer, "gc-later", 112, "queued after snapshot")?;
@@ -1082,7 +1079,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let sealed = fs::read(&request)?;
     fs::write(&request, b"broken")?;
     assert!(
-        !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
+        !crate::gc_support::lane_states(&roots, context.project_id, &cancel)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
     let corrupt = command(&rig, &["gc", "--apply", "--json"])?;

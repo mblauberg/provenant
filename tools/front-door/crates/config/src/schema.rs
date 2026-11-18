@@ -46,6 +46,7 @@ pub struct Schema {
 const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("schedule", "bool"),
     FieldMetadata::new("idle", "string"),
+    FieldMetadata::new("sweep_budget", "string"),
     FieldMetadata::int("graph_checkpoint_days", 1, 3650),
     FieldMetadata::int("discard_archive_days", 1, 3650),
     FieldMetadata::new("free_floor", "string"),
