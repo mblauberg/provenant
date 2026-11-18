@@ -2422,6 +2422,33 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+        if target.node.is_none()
+            && !brief_given
+            && (checkpoint.nodes.iter().any(|node| {
+                matches!(
+                    node.state,
+                    provenant_fabric_runtime::graph::NodeState::Failed
+                        | provenant_fabric_runtime::graph::NodeState::Blocked
+                )
+            }) || (extend.is_empty()
+                && checkpoint.nodes.iter().all(|node| node.state.settled())))
+        {
+            let node = checkpoint
+                .nodes
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.state,
+                        provenant_fabric_runtime::graph::NodeState::Failed
+                            | provenant_fabric_runtime::graph::NodeState::Blocked
+                    )
+                })
+                .or_else(|| checkpoint.nodes.first());
+            return Err(FacadeError::invalid(InvalidInputDetail::RetryNode {
+                graph: id.clone(),
+                node: node.map_or_else(|| "NODE".into(), |node| node.id.clone()),
+            }));
+        }
         if target.node.is_some() || brief_given {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.

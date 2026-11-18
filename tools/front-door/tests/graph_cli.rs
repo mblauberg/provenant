@@ -1698,6 +1698,22 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
     Ok(id.to_owned())
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn settled_graph_retry_requires_a_node() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    let (output, refusal) = rig.run(&["retry", &id])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("provenant retry {id}/task"))),
+        "{refusal}"
+    );
+    Ok(())
+}
+
 #[test]
 fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
     for qualified in [true, false] {

@@ -372,6 +372,10 @@ pub(crate) fn exclusion_rules(
 /// The exclusions a task carries: the standing `routing.exclude` list from the
 /// configuration, the dispatch's `--exclude` flags and the graph's list, as a
 /// union. Each rule keeps the source it came from.
+#[allow(
+    clippy::print_stderr,
+    reason = "report a discarded carried routing preference"
+)]
 pub(crate) fn task_exclusion_rules(
     profile: &provenant_records::run::HarnessProfile,
     roots: &Roots,
@@ -412,7 +416,21 @@ pub(crate) fn task_exclusion_rules(
             provenant_routing::ExclusionSource::Graph,
         ),
     ] {
-        for rule in exclusion_rules(&texts(knob), source, roots)? {
+        let mut parsed = Vec::new();
+        for selector in texts(knob) {
+            match exclusion_rules(std::slice::from_ref(&selector), source, roots) {
+                Ok(rules) => parsed.extend(rules),
+                Err(EdgeError::Routing(RoutingError::UnknownExclusion { .. }))
+                    if source == provenant_routing::ExclusionSource::Graph =>
+                {
+                    eprintln!(
+                        "warning: dropping unrecognised carried graph exclusion {selector:?}"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        for rule in parsed {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }

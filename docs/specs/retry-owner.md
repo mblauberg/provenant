@@ -29,4 +29,9 @@ Preparation fallback requires evidence that custody was released before launch.
 A writer continuation retains predecessor work and the original review diff
 base. Budgets survive resumption; terminal receipts remain immutable. Recovery
 reopens selected consumers without restarting unrelated work.
+Graph-wide retry with failed or blocked nodes, or with no work left to resume,
+must select a node or refuse with the node retry command. Prior model exclusions
+use `adapter/id`; a carried graph exclusion that no longer resolves is dropped
+with a warning. Explicit flag and standing configuration errors remain visible
+to their author.
 - Why: a retry must neither discard useful work nor erase the cost of failure.
