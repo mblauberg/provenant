@@ -910,7 +910,9 @@ impl BoundGraphOwner<'_> {
             if let Some(model) = owner
                 .snapshot(target, self.budget, self.cancel)?
                 .applied_route
-                .and_then(|route| route.model)
+                .and_then(|route| {
+                    canonical_prior_model(route.provider.as_deref(), route.model.as_deref())
+                })
             {
                 models.push(model);
             }
@@ -3062,6 +3064,15 @@ impl BoundGraphOwner<'_> {
                 }
             }
             let exclude = self.route_exclusions(route, node.prior_attempts, accepted);
+            if !accepted {
+                for warning in provenant_cli::route::discarded_graph_exclusion_warnings(
+                    &exclude,
+                    &self.factory.context.roots,
+                ) {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                    self.launch_warnings.push(warning);
+                }
+            }
             let base = if accepted {
                 let operation = operation.as_ref().ok_or(FacadeError::StateCorrupt)?;
                 let admitted = store
@@ -3869,6 +3880,24 @@ pub(crate) fn exact_model(adapter: Option<&str>, model: &str) -> String {
         Some(adapter) if !model.contains('/') => format!("{adapter}/{model}"),
         _ => model.to_owned(),
     }
+}
+
+fn canonical_prior_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
+    model.map(|model| exact_model(adapter, model))
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn retry_prior_model_uses_canonical_adapter_id() {
+    assert_eq!(
+        canonical_prior_model(Some("claude"), Some("claude-sonnet-5-5")).as_deref(),
+        Some("claude/claude-sonnet-5-5")
+    );
+    assert_eq!(
+        canonical_prior_model(Some("claude"), Some("claude/claude-sonnet-5-5")).as_deref(),
+        Some("claude/claude-sonnet-5-5")
+    );
+    assert_eq!(canonical_prior_model(None, None), None);
 }
 
 /// Whether required family separation refuses an exact route before launch.
