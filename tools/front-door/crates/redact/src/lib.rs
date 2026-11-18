@@ -2045,8 +2045,8 @@ mod tests {
 
     #[test]
     fn publication_preserves_raw_escape_literal_matching() {
-        let secret = br"\u0042";
-        let source = br"literal=\u0042";
+        let secret = br"\u0042-escape-3391";
+        let source = br"literal=\u0042-escape-3391";
         let expected = b"literal=[REDACTED]";
         assert_eq!(
             publication_text(source, [secret.to_vec()]).unwrap(),
