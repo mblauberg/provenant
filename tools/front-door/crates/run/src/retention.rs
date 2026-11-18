@@ -2500,14 +2500,27 @@ mod tests {
             }
             Ok(())
         })?;
-        let original = store.events(0, 1000, Some(input.attempt_id), &observer)?;
+        let read_events = || -> Result<Vec<crate::RunEvent>, RunError> {
+            let mut result = Vec::new();
+            loop {
+                let after = result
+                    .last()
+                    .map_or(0, |event: &crate::RunEvent| event.sequence);
+                let page = store.events(after, 64, Some(input.attempt_id), &observer)?;
+                if page.is_empty() {
+                    return Ok(result);
+                }
+                result.extend(page);
+            }
+        };
+        let original = read_events()?;
         let newest = original.last().ok_or("latest event")?.sequence;
         let budget_clock = std::sync::Mutex::new(clock.clone());
         let deadline = clock
             .mono_now()
             .checked_add(DurationMicros::from_micros(1))?;
         let keep_going = || {
-            let Ok(events) = store.events(0, 1000, Some(input.attempt_id), &observer) else {
+            let Ok(events) = read_events() else {
                 return false;
             };
             let mut clock = budget_clock
@@ -2533,7 +2546,7 @@ mod tests {
             },
         )?;
         assert!(partial.interrupted_at.is_some());
-        let remaining = store.events(0, 1000, Some(input.attempt_id), &observer)?;
+        let remaining = read_events()?;
         assert!(remaining.len() > 1 && remaining.len() < original.len());
         let resumed = store.gc_provider_state_with_logs(
             &root,
@@ -2548,7 +2561,7 @@ mod tests {
             },
         )?;
         assert!(resumed.interrupted_at.is_none());
-        let retained = store.events(0, 1000, Some(input.attempt_id), &observer)?;
+        let retained = read_events()?;
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].sequence, newest);
         assert_eq!(
