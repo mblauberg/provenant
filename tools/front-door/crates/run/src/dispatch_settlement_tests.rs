@@ -97,6 +97,10 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
             "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
             "credential [REDACTED]",
         ),
+        (
+            "unregistered sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"",
+            "unregistered [REDACTED] password=\"[REDACTED]\"",
+        ),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());

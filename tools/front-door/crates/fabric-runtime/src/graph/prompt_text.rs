@@ -173,8 +173,10 @@ pub(super) fn validate_identities(
     context: Context,
 ) -> Result<(), &'static str> {
     let scan = |text: &str| {
-        provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
-            .map_err(|_| "credential in structured output identity or object key")
+        match provenant_confinement::redact::known_shapes(text.as_bytes()) {
+            Ok(safe) if safe == text.as_bytes() => Ok(()),
+            _ => Err("credential in structured output identity or object key"),
+        }
     };
     match value {
         serde_json::Value::String(text)
@@ -440,6 +442,52 @@ mod tests {
             assert!(!serde_json::to_string(&outputs).unwrap().contains(secret));
             assert_eq!(value, original, "refusal must not rewrite identities");
         }
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn captured_identity_fields_refuse_credentials_without_rewriting() {
+        let base = serde_json::json!({
+            "review_base": "base", "integration_branch": "branch",
+            "nodes": [{"id": "work", "worktree": "/tmp/work", "review_base": "base",
+                "route": {"alias": "senior", "model": "model", "account": "account"}}]
+        });
+        let registered = "registered-identity-3391";
+        let _scope = provenant_confinement::redact::publication_scope([
+            registered.as_bytes().to_vec(),
+        ])
+        .unwrap();
+        for secret in ["AKIAIOSFODNN7EXAMPLE", registered] {
+            for pointer in [
+                "/review_base",
+                "/integration_branch",
+                "/nodes/0/id",
+                "/nodes/0/worktree",
+                "/nodes/0/review_base",
+                "/nodes/0/route/alias",
+                "/nodes/0/route/model",
+                "/nodes/0/route/account",
+            ] {
+                let mut value = base.clone();
+                *value.pointer_mut(pointer).unwrap() = secret.into();
+                let original = value.clone();
+                assert!(normalise_capture(&value, Context::Document).is_err());
+                assert_eq!(value, original);
+            }
+            let value = serde_json::json!({"branch": secret});
+            assert!(normalise_capture(&value, Context::Outputs).is_err());
+            let keyed = serde_json::json!({secret: "extension"});
+            assert!(normalise_capture(&keyed, Context::Content).is_err());
+        }
+        assert_eq!(normalise_capture(&base, Context::Document).unwrap(), base);
+        let extensions = serde_json::json!({"nodes": [{
+            "id": "work", "route": {"alias": "senior", "comment": "AKIAIOSFODNN7EXAMPLE"},
+            "source": {"type": "node", "node": "work", "comment": "password=\"value\""}
+        }]});
+        let safe = normalise_capture(&extensions, Context::Document).unwrap();
+        assert_eq!(safe["nodes"][0]["route"]["alias"], "senior");
+        assert_eq!(safe["nodes"][0]["route"]["comment"], "[REDACTED]");
+        assert_eq!(safe["nodes"][0]["source"]["comment"], "password=\"[REDACTED]\"");
     }
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]

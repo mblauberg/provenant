@@ -213,11 +213,11 @@ fn walk_handoff_value(
         }
         serde_json::Value::Object(fields) => {
             for (key, mut value) in std::mem::take(fields) {
-                let key = transform(&key)?;
-                walk_handoff_value(&mut value, transform)?;
-                if fields.insert(key, value).is_some() {
-                    return Err(RunError::Validation("handoff field collision"));
+                if transform(&key)? != key {
+                    return Err(RunError::Validation("credential in handoff object key"));
                 }
+                walk_handoff_value(&mut value, transform)?;
+                fields.insert(key, value);
             }
         }
         _ => {}
@@ -225,8 +225,8 @@ fn walk_handoff_value(
     Ok(())
 }
 
-/// Transform decoded values and object keys, including nested forward fields,
-/// then revalidate both field and total bounds after any replacement growth.
+/// Transform decoded values, including nested forward fields, refusing keys
+/// that would change, then revalidate bounds after any replacement growth.
 pub(crate) fn transform_handoff(
     handoff: &Handoff,
     mut transform: impl FnMut(&str) -> Result<String>,
@@ -263,8 +263,8 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
     .transpose()
 }
 
-/// Errors and retained fields are provider output too: redact their keys and
-/// values before persistence or disclosure, just as for a complete handoff.
+/// Errors and retained fields are provider output too: refuse credential keys
+/// and redact values before persistence or disclosure, as for a complete handoff.
 pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
     match handoff {
         Ok(Some(handoff)) => sanitise_handoff(&handoff)
@@ -731,6 +731,26 @@ mod tests {
         );
         Ok(())
     }
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn captured_handoff_credential_keys_refuse_without_rewriting() -> TestResult {
+        let registered = "registered-handoff-key-3391";
+        let _scope = provenant_confinement::redact::publication_scope([
+            registered.as_bytes().to_vec(),
+        ])?;
+        for key in ["AKIAIOSFODNN7EXAMPLE", registered] {
+            let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
+            value["future"] = serde_json::json!({"nested": {key: "value"}});
+            let handoff: Handoff = serde_json::from_value(value)?;
+            let before = handoff.clone();
+            assert!(sanitise_handoff(&handoff).is_err());
+            assert_eq!(handoff, before);
+            let error = sanitise_handoff_result(Ok(Some(handoff))).unwrap_err();
+            assert!(!serde_json::to_string(&error)?.contains(key));
+        }
+        Ok(())
+    }
+
     #[test]
     fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {

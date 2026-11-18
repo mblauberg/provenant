@@ -3409,10 +3409,10 @@ fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
         )
         .unwrap()
     });
-    prompt_text::assert_once(&calls, prompt);
-    prompt_text::assert_once(&calls, doc);
+    prompt_text::assert_once_captured(&calls, prompt);
+    prompt_text::assert_once_captured(&calls, doc);
     let stored = run.checkpoint.nodes[0].fragment.as_ref().unwrap().clone();
-    assert!(stored.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"));
     let (replayed, calls) = prompt_text::trace(|| {
         resume_with_budget(
             &document,
@@ -3876,6 +3876,10 @@ fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() 
     for payload in [
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
         json!({"schema_version":secret, "nodes":[{"id":"child", "use":"task"}]}),
+        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "worktree":secret}]}),
+        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "review_base":secret}]}),
+        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task", "route":{"model":secret}}]}),
+        json!({"schema_version":1, "templates":{"unused":{"brief":"work", "parameters":{secret:{"type":"string"}}}}, "nodes":[]}),
     ] {
         let mut document = planner(8);
         document.nodes[0].plan = None;

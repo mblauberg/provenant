@@ -420,8 +420,13 @@ fn block<'a>(
 /// New captured patches enter as structured JSON so identities survive. A
 /// saved fragment is already admitted text and bypasses this function on replay.
 fn normalise_fragment(json: &str) -> Result<String, String> {
+    let raw: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| "patch JSON is invalid".to_owned())?;
+    prompt_text::validate_identities(&raw, prompt_text::Context::Patch)
+        .map_err(str::to_owned)?;
     let value = super::patch::Patch::from_fragment(json)?;
-    let value = prompt_text::normalise(&value).map_err(str::to_owned)?;
+    let value = prompt_text::normalise_capture(&value, prompt_text::Context::Patch)
+        .map_err(str::to_owned)?;
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 

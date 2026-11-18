@@ -1336,7 +1336,7 @@ fn parse_hex4(bytes: &[u8]) -> Option<u16> {
     })
 }
 
-/// Stateful filter used directly by supervisor capture. Values are never
+/// Stateful filter for publication and artifact disclosure. Values are never
 /// serialized or printed; malformed bounds make construction fail closed.
 pub struct Redactor {
     literal_values: Vec<Vec<u8>>,
@@ -1362,7 +1362,7 @@ impl Redactor {
         Ok(Self::with_secrets(secrets, false))
     }
 
-    /// Capture filter for published text. Masks registered typed and ambient
+    /// Filter for authored input. Masks registered typed and ambient
     /// literal values, including JSON-escaped spellings, without rewriting
     /// merely secret-shaped examples.
     pub fn for_publication(

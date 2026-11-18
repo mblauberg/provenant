@@ -495,9 +495,7 @@ projection is normalised once before becoming graph outputs. Stored fragments ar
 replayed without rewriting their digested bytes. Typed handoffs are normalised at capture
 before any consumer retains them. Checkpoints persist the normalised form. Compaction
 retains parsed, normalised findings as typed values in content-addressed storage. Resume
-never fills templates or rewrites a digest.
-values in content-addressed storage. Resume never fills templates or rewrites a
-sealed submission. A resume path or document hash selects the retained graph
+never fills templates or rewrites a sealed submission. A resume path or document hash selects the retained graph
 identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
 another normalisation pass. Every strict read and every digest check verifies the
 stored bytes as stored and never normalises again. Normalising is idempotent.

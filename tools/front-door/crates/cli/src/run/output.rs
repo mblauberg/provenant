@@ -1213,6 +1213,20 @@ mod tests {
         assert_eq!(fallback_reason_for_graph(&checkpoint), None);
     }
 
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn provider_errors_mask_unregistered_shapes_assignments_and_registered_values() {
+        let secret = b"descriptor-credential-3391";
+        let _scope = provenant_confinement::redact::publication_scope([secret.to_vec()]).unwrap();
+        let text = b"provider failed: descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
+        for reason in [provider_error_from_result(text), provider_error_from_stderr(text)] {
+            assert_eq!(
+                reason.as_deref(),
+                Some("provider failed: [REDACTED] [REDACTED] password=\"[REDACTED]\"")
+            );
+        }
+    }
+
     #[test]
     fn provider_error_from_result_keeps_the_whole_multiline_message() {
         let message = provider_error_from_result(
