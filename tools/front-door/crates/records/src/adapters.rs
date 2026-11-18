@@ -52,6 +52,15 @@ macro_rules! adapter_specs {
     };
 }
 
+/// Wire format of a provider CLI model listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelListingFormat {
+    CodexJson,
+    AgyText,
+    OpencodeText,
+    CursorText,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProbeKind {
     None,
@@ -522,6 +531,8 @@ const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
 pub struct AdapterSpec {
     pub id: Harness,
     pub name: &'static str,
+    /// Format of a supported CLI model listing.
+    pub model_listing: Option<ModelListingFormat>,
     /// Provider family used by declared route constraints.
     pub family: &'static str,
     pub binary: &'static str,
@@ -809,6 +820,7 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
 adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
+        model_listing: None,
         family: "anthropic",
         binary: "claude",
         install: Some(HarnessInstall {
@@ -908,6 +920,7 @@ adapter_specs! { $;
     },
     Codex [] (codex: 0) {
         name: "codex",
+        model_listing: Some(ModelListingFormat::CodexJson),
         family: "openai",
         binary: "codex",
         install: Some(HarnessInstall {
@@ -1014,6 +1027,7 @@ adapter_specs! { $;
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
+        model_listing: Some(ModelListingFormat::CursorText),
         family: "cursor",
         binary: "cursor-agent",
         install: Some(HarnessInstall {
@@ -1125,6 +1139,7 @@ adapter_specs! { $;
     },
     Agy [] (agy: 3) {
         name: "agy",
+        model_listing: Some(ModelListingFormat::AgyText),
         family: "google",
         binary: "agy",
         install: Some(HarnessInstall {
@@ -1237,6 +1252,7 @@ adapter_specs! { $;
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
+        model_listing: Some(ModelListingFormat::OpencodeText),
         family: "opencode",
         binary: "opencode",
         install: Some(HarnessInstall {
@@ -1347,6 +1363,7 @@ adapter_specs! { $;
     },
     Command [] (command: 5) {
         name: "command",
+        model_listing: None,
         family: "command",
         binary: "",
         install: None,
@@ -1429,6 +1446,7 @@ adapter_specs! { $;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
+        model_listing: None,
         family: "host-native",
         binary: "",
         install: None,
@@ -1510,6 +1528,7 @@ adapter_specs! { $;
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
+        model_listing: None,
         family: "fixture",
         binary: "fixture-provider",
         install: None,

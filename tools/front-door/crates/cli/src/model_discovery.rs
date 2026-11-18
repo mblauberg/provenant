@@ -1,15 +1,16 @@
 //! Explicit provider refresh and read-only access to the last successful listing.
 use provenant_core::Roots;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+use provenant_records::{Harness, ModelListingFormat};
 use provenant_routing::{Catalogue, DiscoverySnapshot, RoutingError};
 use std::{ffi::OsString, time::Duration};
 
 const LIMIT: u64 = 4 * 1024 * 1024;
-const PROVIDERS: &[(&str, &str, &[&str])] = &[
-    ("codex", "codex", &["debug", "models"]),
-    ("agy", "agy", &["models"]),
-    ("opencode", "opencode", &["models"]),
-    ("cursor", "cursor-agent", &["models"]),
+const PROVIDERS: &[(Harness, &[&str])] = &[
+    (Harness::Codex, &["debug", "models"]),
+    (Harness::Agy, &["models"]),
+    (Harness::Opencode, &["models"]),
+    (Harness::Cursor, &["models"]),
 ];
 
 fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
@@ -40,7 +41,7 @@ fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
 pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
     let snapshots: Vec<_> = PROVIDERS
         .iter()
-        .filter_map(|(adapter, _, _)| read(roots, adapter))
+        .filter_map(|(adapter, _)| read(roots, adapter.spec().name))
         .collect();
     let bundled = Catalogue::bundled()?;
     match bundled.clone().with_discovery(&snapshots) {
@@ -91,18 +92,19 @@ fn refresh_with(
     probe: impl Fn(&str, &[&str]) -> Option<Vec<u8>>,
 ) -> Vec<String> {
     let mut messages = Vec::new();
-    for (adapter, binary, args) in PROVIDERS {
-        if filter.is_some_and(|filter| filter != *adapter) {
+    for (harness, args) in PROVIDERS {
+        let adapter = harness.spec().name;
+        let binary = harness.spec().binary;
+        if filter.is_some_and(|filter| filter != adapter) {
             continue;
         }
-        let snapshot = probe(binary, args).and_then(|bytes| {
-            if *adapter == "codex" {
+        let snapshot = probe(binary, args).and_then(|bytes| match harness.spec().model_listing {
+            Some(ModelListingFormat::CodexJson) => {
                 provenant_routing::parse_codex_models(&bytes, now).ok()
-            } else {
-                std::str::from_utf8(&bytes)
-                    .ok()
-                    .and_then(|text| provenant_routing::parse_text_models(adapter, text, now).ok())
             }
+            _ => std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| provenant_routing::parse_text_models(adapter, text, now).ok()),
         });
         let Some(snapshot) = snapshot else {
             messages.push(format!(
@@ -146,7 +148,7 @@ fn refresh_with(
                 None => bundled
                     .models()
                     .iter()
-                    .filter(|row| row.model.adapter() == *adapter)
+                    .filter(|row| row.model.adapter() == adapter)
                     .map(|row| row.model.as_str().to_owned())
                     .collect(),
             };

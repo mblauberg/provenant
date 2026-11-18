@@ -2493,7 +2493,9 @@ pub fn run(
         _ => execute(&command, roots, registry, effects).and_then(|report| {
             let mut human = quota_human(&report);
             let mut data = serde_json::to_value(&report)?;
-            if let Quota::Tick { adapter, .. } = &command {
+            if let Quota::Tick { adapter, power, .. } = &command
+                && !matches!(power, Power::Low)
+            {
                 let changes = crate::model_discovery::refresh(
                     roots,
                     adapter.adapter.as_deref(),

@@ -36,6 +36,7 @@ fn fabric_and_quota_load_one_domain_config() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/routing.md#provider-model-discovery
 fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let rig = quota_rig()?;
     let shown = rig.command(&["quota", "show", "--json"])?;
@@ -68,7 +69,16 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     }
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
-    assert_eq!(disk, tick["data"]);
+    let mut published = tick["data"].clone();
+    assert!(
+        published
+            .as_object_mut()
+            .unwrap()
+            .remove("model_discovery")
+            .unwrap()
+            .is_array()
+    );
+    assert_eq!(disk, published);
     rig.assert_v1_root_untouched()
 }
 
@@ -216,6 +226,7 @@ fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/routing.md#provider-model-discovery
 fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = quota_rig()?;
@@ -255,7 +266,14 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     }
     fs::write(&config, text)?;
     for tool in [
-        "curl", "security", "claude", "codex", "cursor", "agy", "opencode",
+        "curl",
+        "security",
+        "claude",
+        "codex",
+        "cursor",
+        "cursor-agent",
+        "agy",
+        "opencode",
     ] {
         let path = bin.join(tool);
         fs::write(
@@ -1071,7 +1089,16 @@ fn show_carries_display_blocks_and_display_command_persists() -> Result {
     let tick = json(&rig.command(&["quota", "tick", "--json"])?)?;
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
-    assert_eq!(disk, tick["data"]);
+    let mut published = tick["data"].clone();
+    assert!(
+        published
+            .as_object_mut()
+            .unwrap()
+            .remove("model_discovery")
+            .unwrap()
+            .is_array()
+    );
+    assert_eq!(disk, published);
     assert_eq!(disk["accounts"][0]["display"]["name"], "Work");
     rig.assert_v1_root_untouched()
 }

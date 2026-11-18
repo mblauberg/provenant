@@ -49,7 +49,11 @@ pub fn parse_codex_models(
     let listing: Listing = serde_json::from_slice(bytes).map_err(|_| RoutingError::Catalogue)?;
     let mut models = Vec::new();
     for row in listing.models {
-        let model = ModelId::parse(&format!("codex/{}", row.slug))?;
+        let model = ModelId::parse(&format!(
+            "{}/{}",
+            provenant_records::Harness::Codex.spec().name,
+            row.slug
+        ))?;
         let efforts: Vec<_> = row
             .supported_reasoning_levels
             .into_iter()
@@ -79,7 +83,7 @@ pub fn parse_codex_models(
         return Err(RoutingError::Catalogue);
     }
     Ok(DiscoverySnapshot {
-        adapter: "codex".into(),
+        adapter: provenant_records::Harness::Codex.spec().name.into(),
         observed_at,
         models,
     })
@@ -92,16 +96,20 @@ pub fn parse_text_models(
     text: &str,
     observed_at: i64,
 ) -> Result<DiscoverySnapshot, RoutingError> {
-    if !matches!(adapter, "agy" | "opencode" | "cursor") {
-        return Err(RoutingError::UnknownAdapter);
-    }
+    let (cursor_format, effort_suffixes) =
+        match provenant_records::AdapterSpec::get(adapter).and_then(|spec| spec.model_listing) {
+            Some(provenant_records::ModelListingFormat::CursorText) => (true, true),
+            Some(provenant_records::ModelListingFormat::AgyText) => (false, true),
+            Some(provenant_records::ModelListingFormat::OpencodeText) => (false, false),
+            _ => return Err(RoutingError::UnknownAdapter),
+        };
     let mut models = std::collections::BTreeMap::<ModelId, DiscoveredModel>::new();
     let mut raw_ids = std::collections::BTreeSet::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        if adapter == "cursor" && line.trim() == "Available models" {
+        if cursor_format && line.trim() == "Available models" {
             continue;
         }
-        let id = if adapter == "cursor" {
+        let id = if cursor_format {
             line.split(" - ").next()
         } else {
             line.split('\t').next()
@@ -121,7 +129,7 @@ pub fn parse_text_models(
                 effort_suffix: false,
                 service_tiers: Vec::new(),
             });
-        if matches!(adapter, "agy" | "cursor")
+        if effort_suffixes
             && let Some((base, effort)) = id.rsplit_once('-')
             && matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
         {
@@ -132,11 +140,11 @@ pub fn parse_text_models(
                     model: canonical,
                     efforts: Vec::new(),
                     controls_known: true,
-                    effort_suffix: adapter == "cursor",
+                    effort_suffix: cursor_format,
                     service_tiers: Vec::new(),
                 });
             entry.controls_known = true;
-            entry.effort_suffix = adapter == "cursor";
+            entry.effort_suffix = cursor_format;
             if !entry.efforts.iter().any(|value| value == effort) {
                 entry.efforts.push(effort.into());
             }
