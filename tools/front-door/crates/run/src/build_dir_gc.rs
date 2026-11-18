@@ -337,14 +337,13 @@ pub fn target_protection_for_launch_while(
 
     let started = Instant::now();
     let stop = std::cell::RefCell::new(should_stop);
-    let keep_going = || !stop.borrow_mut()() && started.elapsed() < PROTECTION_SCAN_BUDGET;
-    let mut selection_keep_going = || keep_going();
+    let mut keep_going = || !stop.borrow_mut()() && started.elapsed() < PROTECTION_SCAN_BUDGET;
     let selection = match provenant_config::registered_gc_project_selection_with_progress(
         roots,
         None,
         "0000000000000000",
         false,
-        &mut selection_keep_going,
+        &mut keep_going,
     ) {
         Ok(selection) => selection,
         Err(_) => {
