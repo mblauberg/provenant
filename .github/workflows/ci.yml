@@ -671,6 +671,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       QUARANTINE_FILTER: ${{ needs.quarantine-filter.outputs.filter }}
+      # Main-tier native tests (config/ci-suites.toml `main_tests`); run-native-test-group excludes them.
+      DEFERRED_TESTS: ${{ fromJSON(needs.scope.outputs.deferred_tests).macos_native }}
     permissions:
       contents: read
     steps:
@@ -694,6 +696,10 @@ jobs:
           path: ${{ runner.temp }}
       - name: Install tools for native confinement smokes
         env:
+          # Skip Homebrew's index update and dependant checks: they cost most of
+          # this step on a fresh runner, and the pinned formulae need neither.
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
           NATIVE_GROUP: ${{ matrix.group }}
         run: |
