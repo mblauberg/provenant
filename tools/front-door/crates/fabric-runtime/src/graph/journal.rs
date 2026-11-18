@@ -187,6 +187,80 @@ pub struct FileJournal {
     pub(super) _lock: LockGuard,
 }
 
+/// Result of one budgeted graph checkpoint collection pass.
+#[derive(Default)]
+pub struct GraphCollectionReport {
+    pub removed: usize,
+    pub interrupted_at: Option<std::path::PathBuf>,
+    pub continuation: Option<String>,
+}
+
+struct GraphCollectionCursor {
+    phase: String,
+    id: Option<String>,
+    cookie: i64,
+}
+
+impl GraphCollectionCursor {
+    fn checkpoints(cookie: i64) -> Self {
+        Self {
+            phase: "checkpoints".into(),
+            id: None,
+            cookie,
+        }
+    }
+    fn cleanup(id: &str, cookie: i64) -> Self {
+        Self {
+            phase: "cleanup".into(),
+            id: Some(id.into()),
+            cookie,
+        }
+    }
+    fn orphans(cookie: i64) -> Self {
+        Self {
+            phase: "orphans".into(),
+            id: None,
+            cookie,
+        }
+    }
+    fn encode(&self) -> String {
+        format!(
+            "graph-collection-v1|{}|{}|{}",
+            self.phase,
+            self.id.as_deref().unwrap_or("-"),
+            self.cookie
+        )
+    }
+    fn parse(value: Option<&str>) -> Option<Self> {
+        let mut fields = value?.split('|');
+        if fields.next()? != "graph-collection-v1" {
+            return None;
+        }
+        let phase = fields.next()?.to_owned();
+        if !matches!(phase.as_str(), "checkpoints" | "cleanup" | "orphans") {
+            return None;
+        }
+        let id = match fields.next()? {
+            "-" => None,
+            id => Some(id.to_owned()),
+        };
+        let cookie = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some(Self { phase, id, cookie })
+    }
+}
+
+fn interrupt_graph_collection(
+    report: &mut GraphCollectionReport,
+    path: std::path::PathBuf,
+    cursor: GraphCollectionCursor,
+) {
+    report.interrupted_at = Some(path);
+    report.continuation = Some(cursor.encode());
+}
+
 /// One graph or node cancellation scope and its optional reason.
 #[derive(Clone, Copy, Debug)]
 pub struct CancellationTarget<'a> {
@@ -658,11 +732,97 @@ impl FileJournal {
         root: &StateRoot,
         project: ProjectId,
         before_ns: i128,
-        cancel: &CancelToken,
+        control: &provenant_core::SweepControl<'_>,
         clock: &dyn Clock,
-    ) -> Result<usize, JournalError> {
-        let mut removed = 0;
-        for id in Self::graph_ids(root, project)? {
+    ) -> Result<GraphCollectionReport, JournalError> {
+        let mut report = GraphCollectionReport::default();
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(report),
+            Err(error) => return Err(error.into()),
+        };
+        let cursor = GraphCollectionCursor::parse(control.detail);
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.phase == "orphans")
+        {
+            if !control.should_continue() {
+                report.interrupted_at = Some(directory.anchored_path());
+                report.continuation = Some(GraphCollectionCursor::orphans(0).encode());
+                return Ok(report);
+            }
+            report.removed =
+                Self::collect_unreferenced_artifacts(root, project, &control.cancel, clock)?;
+        }
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.phase == "cleanup")
+        {
+            // A prior pass removed a checkpoint and was interrupted while
+            // retiring its derived files. The journal owner rechecks its
+            // durable reservation and checkpoint before orphan cleanup.
+            report.removed = report
+                .removed
+                .saturating_add(Self::collect_unreferenced_artifacts(
+                    root,
+                    project,
+                    &control.cancel,
+                    clock,
+                )?);
+        }
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.phase == "orphans")
+        {
+            return Ok(report);
+        }
+        let mut entries = directory.entries()?;
+        if let Some(cursor) = cursor
+            .as_ref()
+            .filter(|cursor| cursor.phase == "checkpoints")
+        {
+            let _ = entries.seek(cursor.cookie);
+        }
+        let mut resume_target = cursor
+            .as_ref()
+            .filter(|cursor| cursor.phase == "checkpoints")
+            .and(control.start_at);
+        loop {
+            let before = entries.position().unwrap_or(0);
+            let Some(entry) = entries.next() else { break };
+            let entry = entry?;
+            let path = directory.anchored_path().join(&entry);
+            if let Some(target) = resume_target {
+                if target != path {
+                    if !control.should_continue() {
+                        interrupt_graph_collection(
+                            &mut report,
+                            path,
+                            GraphCollectionCursor::checkpoints(before),
+                        );
+                        return Ok(report);
+                    }
+                    continue;
+                }
+                resume_target = None;
+            }
+            if !control.should_continue() {
+                interrupt_graph_collection(
+                    &mut report,
+                    path,
+                    GraphCollectionCursor::checkpoints(before),
+                );
+                return Ok(report);
+            }
+            let Some(id) = entry
+                .to_str()
+                .and_then(|name| name.strip_prefix("graph-"))
+                .and_then(|name| name.strip_suffix(".json"))
+                .filter(|id| valid_identifier(id))
+            else {
+                continue;
+            };
+            let cancel = &control.cancel;
             let journal = match Self::open(
                 root,
                 project,
@@ -699,6 +859,14 @@ impl FileJournal {
             if metadata.modified_ns >= before_ns {
                 continue;
             }
+            if !control.should_continue() {
+                interrupt_graph_collection(
+                    &mut report,
+                    path,
+                    GraphCollectionCursor::cleanup(id, before),
+                );
+                return Ok(report);
+            }
             (|| -> Result<(), JournalError> {
                 collect_scratch_documents(&stored.execution)?;
                 journal.reserve_name()?;
@@ -724,10 +892,37 @@ impl FileJournal {
                 Ok(())
             })()
             .map_err(|error| error.for_graph(&id))?;
-            removed += 1;
+            report.removed += 1;
         }
-        removed += Self::collect_unreferenced_artifacts(root, project, cancel, clock)?;
-        Ok(removed)
+        if resume_target.is_some() {
+            // The saved item was removed by another collector. Orphan cleanup
+            // revalidates the reservation and retries any incomplete suffix.
+            report.removed = report
+                .removed
+                .saturating_add(Self::collect_unreferenced_artifacts(
+                    root,
+                    project,
+                    &control.cancel,
+                    clock,
+                )?);
+        }
+        if !control.should_continue() {
+            interrupt_graph_collection(
+                &mut report,
+                directory.anchored_path(),
+                GraphCollectionCursor::orphans(0),
+            );
+            return Ok(report);
+        }
+        report.removed = report
+            .removed
+            .saturating_add(Self::collect_unreferenced_artifacts(
+                root,
+                project,
+                &control.cancel,
+                clock,
+            )?);
+        Ok(report)
     }
 
     /// Resume cleanup when an earlier collection removed the checkpoint but

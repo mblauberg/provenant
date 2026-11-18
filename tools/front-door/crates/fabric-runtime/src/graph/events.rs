@@ -590,7 +590,18 @@ mod tests {
         let before = FileJournal::read_events(&root, project, "g-test").unwrap();
         assert!(!before.is_empty());
         assert_eq!(
-            FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+            FileJournal::collect_terminal(
+                &root,
+                project,
+                i128::MAX,
+                &provenant_core::SweepControl {
+                    cancel: cancel.clone(),
+                    ..Default::default()
+                },
+                &clock,
+            )
+            .unwrap()
+            .removed,
             1
         );
         assert_eq!(

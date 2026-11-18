@@ -946,7 +946,10 @@ printf 'private-output\n'
         "security/linux|security/linux\n"
     );
 
-    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    let inventory = provenant_config::port_command_receipts(
+        &rig.state,
+        &provenant_core::SweepControl::default(),
+    )?;
     assert!(inventory.complete, "{:?}", inventory.issues);
     let receipt = &inventory
         .entries
@@ -1011,7 +1014,10 @@ printf 'executed\n' > verify-call.txt
     assert_eq!(result["data"]["backend"], "none");
     assert_eq!(result["error"]["code"], "VERIFY_UNAVAILABLE");
     assert!(!marker.exists());
-    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    let inventory = provenant_config::port_command_receipts(
+        &rig.state,
+        &provenant_core::SweepControl::default(),
+    )?;
     assert!(inventory.complete, "{:?}", inventory.issues);
     assert!(
         inventory

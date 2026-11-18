@@ -4,6 +4,26 @@ use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
+fn collect_terminal(
+    root: &StateRoot,
+    project: ProjectId,
+    before_ns: i128,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<usize, JournalError> {
+    FileJournal::collect_terminal(
+        root,
+        project,
+        before_ns,
+        &provenant_core::SweepControl {
+            cancel: cancel.clone(),
+            ..Default::default()
+        },
+        clock,
+    )
+    .map(|report| report.removed)
+}
+
 fn stored_fixture() -> StoredCheckpoint {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -579,7 +599,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     std::fs::remove_file(directory.join("graph-g-test.json")).unwrap();
 
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     assert_eq!(prompt_blobs(), 0);
@@ -587,7 +607,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     assert!(!pending.join("g-test.pending").exists());
     assert!(directory.join("graph-g-test.reserved").exists());
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
 }
@@ -942,14 +962,14 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
     journal.save(&fixture.checkpoint).unwrap();
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     fixture.checkpoint.asks.push(
@@ -961,7 +981,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     // Bind the delivery document to its own journal: a resumed journal keeps
@@ -986,7 +1006,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&delivery_checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     let mut journal =
@@ -995,7 +1015,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&delivery_checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     fixture.checkpoint.asks.clear();
@@ -1003,11 +1023,11 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
         0
     );
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     assert!(
@@ -1076,7 +1096,7 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     assert!(generated.exists());
@@ -1085,12 +1105,12 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
         0
     );
     assert!(generated.exists());
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     assert!(!generated.exists());

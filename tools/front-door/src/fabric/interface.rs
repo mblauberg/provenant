@@ -6772,9 +6772,13 @@ mod tests {
                 &factory.context.roots.state,
                 factory.context.identity.project,
                 i128::MAX,
-                &cancel,
+                &provenant_core::SweepControl {
+                    cancel: cancel.clone(),
+                    ..Default::default()
+                },
                 &factory.clock
-            )?,
+            )?
+            .removed,
             1
         );
         let retained = factory.graph_document(
