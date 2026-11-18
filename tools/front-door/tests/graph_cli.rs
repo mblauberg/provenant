@@ -511,7 +511,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
 fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     // Explain is a host-local read, not publication. Token shape alone must
-    // neither rewrite identities nor bypass normal route/template validation.
+    // neither rewrite identities nor bypass graph-handle validation.
     let shaped = format!("ghp_{}", "a1".repeat(18));
     for source in ["graph_id", "node_id", "route", "context_key", "template"] {
         let rig = GraphProject::new()?;
@@ -550,10 +550,10 @@ fn graph_shaped_identities_keep_local_bytes_and_schema_validation() -> Result {
             !value.to_string().contains("credential token"),
             "{source}: {value}"
         );
-        if matches!(source, "route" | "graph_id") {
+        if source == "graph_id" {
             // A ghp_ value is not a valid graph handle (underscores are
-            // forbidden), and the fixture alias has no registered route.
-            // These schema checks remain mandatory, independently of shape.
+            // forbidden). This schema check remains mandatory, independently
+            // of shape. Explain retains aliases for later route resolution.
             assert!(
                 !output.status.success(),
                 "schema validation must still fail: {source}: {value}"
