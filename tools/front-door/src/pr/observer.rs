@@ -42,6 +42,11 @@ const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
 const REPOSITORY_CONTEXT_PATH: &str = "repos/{owner}/{repo}";
 const RECENT_CACHE_LIMIT: usize = 64;
 const RUN_HISTORY_LIMIT: usize = 512;
+/// GitHub computes mergeability asynchronously; a reread settles UNKNOWN. The
+/// bound keeps a conflicting head from being diagnosed as "no checks" forever.
+const MERGEABLE_UNKNOWN_RETRIES: u8 = 3;
+/// Pause between bounded UNKNOWN mergeability rereads.
+const MERGEABLE_UNKNOWN_PAUSE: Duration = Duration::from_millis(50);
 
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +75,81 @@ pub(crate) enum ObserveError {
     Expired,
     #[error("{0}")]
     Unavailable(String),
+}
+
+/// What GitHub reports about a pull request's ability to merge. UNKNOWN is a
+/// real reading: GitHub has not finished computing mergeability for the head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergeState {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+impl MergeState {
+    /// A waiting reader's diagnosis of a head that reported no checks: its
+    /// cause code and the next step an operator should take. A conflicting head
+    /// never starts `pull_request` workflows, so the trigger advice is wrong
+    /// for it; a mergeable head keeps that advice.
+    pub(crate) fn no_checks_cause(self, base: Option<&str>) -> PrCause {
+        if self == Self::Conflicting {
+            let next = match base.filter(|base| !base.is_empty()) {
+                Some(base) => format!(
+                    "merge the base into the branch: git merge origin/{base} then push the merge"
+                ),
+                None => "merge the base into the branch: git merge origin/BASE then push the merge"
+                    .to_owned(),
+            };
+            PrCause {
+                code: "merge_conflict",
+                next,
+            }
+        } else {
+            PrCause {
+                code: "not_scheduled",
+                next: "check the workflow triggers or push an empty commit to start CI".to_owned(),
+            }
+        }
+    }
+}
+
+/// A cause code and its next step, surfaced by `wait --pr` and `pr status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PrCause {
+    pub code: &'static str,
+    pub next: String,
+}
+
+/// Read mergeability from one PR resource. GraphQL `mergeable` and
+/// `mergeStateStatus`, and the REST `mergeable`/`mergeable_state` pair, all name
+/// the same two settled states; anything else stays UNKNOWN for a bounded reread.
+fn merge_state(value: &Value) -> MergeState {
+    let conflicting = matches!(value["mergeable"].as_str(), Some("CONFLICTING"))
+        || matches!(value["mergeable"].as_bool(), Some(false))
+        || matches!(
+            value["mergeStateStatus"].as_str(),
+            Some("DIRTY" | "CONFLICTING")
+        )
+        || value["mergeable_state"]
+            .as_str()
+            .is_some_and(|state| state.eq_ignore_ascii_case("dirty"));
+    if conflicting {
+        return MergeState::Conflicting;
+    }
+    let known = matches!(value["mergeable"].as_str(), Some("MERGEABLE"))
+        || matches!(value["mergeable"].as_bool(), Some(true))
+        || matches!(
+            value["mergeStateStatus"].as_str(),
+            Some("CLEAN" | "MERGEABLE" | "BLOCKED" | "BEHIND" | "HAS_HOOKS")
+        )
+        || value["mergeable_state"]
+            .as_str()
+            .is_some_and(|state| !state.eq_ignore_ascii_case("unknown"));
+    if known {
+        MergeState::Mergeable
+    } else {
+        MergeState::Unknown
+    }
 }
 
 /// Wall time shared with other processes, and the pause between reads.
@@ -513,6 +593,35 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 ObserveError::Unavailable(format!("cannot record repository resource: {error}"))
             })?;
         Ok(entry.page.body)
+    }
+
+    /// Read a pull request's mergeability before diagnosing its missing checks.
+    /// `first` is the resource the caller already read; only an UNKNOWN result
+    /// rereads, at most [`MERGEABLE_UNKNOWN_RETRIES`] times, within the caller's
+    /// request. A still-UNKNOWN result stays UNKNOWN rather than being mistaken
+    /// for a mergeable head.
+    pub(crate) fn pull_merge_state(
+        &mut self,
+        number: u64,
+        first: Value,
+        request: &Request,
+    ) -> Result<(MergeState, Value), ObserveError> {
+        let path = format!("pulls/{number}");
+        let mut value = first;
+        let mut retries = 0_u8;
+        loop {
+            let state = merge_state(&value);
+            if state != MergeState::Unknown
+                || retries >= MERGEABLE_UNKNOWN_RETRIES
+                || request.remaining().is_zero()
+                || request.is_cancelled()
+            {
+                return Ok((state, value));
+            }
+            retries = retries.saturating_add(1);
+            self.clock.sleep(MERGEABLE_UNKNOWN_PAUSE);
+            value = self.resource(&path, Duration::ZERO, request)?;
+        }
     }
 
     /// Every check reported for `commit`. A zero `max_age` forces a fresh read;
@@ -1054,7 +1163,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, VecDeque},
         hash::{Hash, Hasher},
         io,
         sync::{Arc, Condvar, Mutex},
@@ -1079,6 +1188,9 @@ mod tests {
         /// The next request is limited with a reset already past.
         past_limit: bool,
         delay: Duration,
+        /// Successive bodies served for a pull resource, so a test can model
+        /// GitHub settling an UNKNOWN mergeability into a real reading.
+        pull_replies: VecDeque<Value>,
     }
     /// Holds a forge read open until enough waiters have entered `checks`.
     #[derive(Default)]
@@ -1117,6 +1229,9 @@ mod tests {
         }
         fn requests(&self) -> usize {
             self.with(|world| world.requests.len())
+        }
+        fn queue_pull(&self, replies: impl IntoIterator<Item = Value>) {
+            self.with(|world| world.pull_replies.extend(replies));
         }
         fn observer(&self, state: &Path) -> Observer<Shared, Shared> {
             Observer::with(state, "Owner/Repo", self.clone(), self.clone()).expect("observer")
@@ -1182,7 +1297,9 @@ mod tests {
                         .nth(1)
                         .and_then(|rest| rest.split('/').next())
                         .unwrap_or_default();
-                    let body = if !path.contains("/commits/") {
+                    let body = if path.contains("/pulls/") && !world.pull_replies.is_empty() {
+                        world.pull_replies.pop_front()
+                    } else if !path.contains("/commits/") {
                         world.resources.get(path).cloned()
                     } else if path.contains("/check-runs?") {
                         world.runs.get(commit).cloned()
@@ -1434,13 +1551,104 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         assert_eq!(shared.requests(), read);
     }
 
+    fn pull_resource(mergeable: &str, status: &str, base: &str) -> Value {
+        json!({
+            "number": 7,
+            "state": "open",
+            "head": {"sha": HEAD},
+            "base": {"ref": base},
+            "mergeable": mergeable,
+            "mergeStateStatus": status,
+            "mergeable_state": match status {
+                "DIRTY" => "dirty",
+                "UNKNOWN" => "unknown",
+                _ => "clean",
+            },
+            "html_url": "https://github.com/Owner/Repo/pull/7"
+        })
+    }
+
+    #[test]
+    fn mergeability_unknown_is_reread_only_a_bounded_number_of_times() {
+        let shared = Shared::new();
+        shared.queue_pull([
+            json!({"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}),
+            json!({"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}),
+            json!({"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}),
+        ]);
+        let dir = state();
+        let mut observer = shared.observer(dir.path());
+        let request = Request::within(Duration::from_secs(60));
+        let first = observer
+            .resource("pulls/7", Duration::ZERO, &request)
+            .unwrap();
+        let (state, _) = observer.pull_merge_state(7, first, &request).unwrap();
+        assert_eq!(state, MergeState::Conflicting);
+        assert_eq!(shared.requests(), 3, "first read plus two rereads");
+        assert_eq!(state.no_checks_cause(Some("main")).code, "merge_conflict");
+
+        let shared = Shared::new();
+        shared.queue_pull(vec![json!({"mergeable":"UNKNOWN"}); 8]);
+        let mut observer = shared.observer(dir.path());
+        let first = observer
+            .resource("pulls/7", Duration::ZERO, &request)
+            .unwrap();
+        let (state, _) = observer.pull_merge_state(7, first, &request).unwrap();
+        assert_eq!(state, MergeState::Unknown);
+        assert_eq!(
+            shared.requests(),
+            usize::from(MERGEABLE_UNKNOWN_RETRIES) + 1,
+            "UNKNOWN stops at the configured bound"
+        );
+    }
+
+    fn no_checks_diagnosis(mergeable: &str, status: &str) -> (String, String) {
+        let shared = Shared::new();
+        shared.with(|world| {
+            world.resources.insert(
+                "repos/Owner/Repo/pulls/7".into(),
+                pull_resource(mergeable, status, "main"),
+            );
+            // One readable check-run page that reports no runs.
+            world.runs.insert(HEAD.into(), page(vec![]));
+        });
+        let dir = state();
+        let mut observer = shared.observer(dir.path());
+        let request = Request::within(Duration::from_secs(60));
+        let (line, checks) =
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+                .unwrap();
+        assert!(checks.is_empty(), "fake forge reports no checks");
+        assert!(line.cause_suffix().contains(line.cause.as_deref().unwrap()));
+        (line.cause.expect("cause"), line.next.expect("next step"))
+    }
+
+    #[test]
+    fn conflicting_head_with_no_checks_diagnoses_a_merge() {
+        let (cause, next) = no_checks_diagnosis("CONFLICTING", "DIRTY");
+        assert_eq!(cause, "merge_conflict");
+        assert!(next.contains("git merge origin/main"), "{next}");
+        assert!(next.contains("push"), "{next}");
+        assert!(!next.contains("empty commit"), "{next}");
+    }
+
+    #[test]
+    fn mergeable_head_with_no_checks_keeps_the_trigger_diagnosis() {
+        for (mergeable, status) in [("MERGEABLE", "CLEAN"), ("UNKNOWN", "UNKNOWN")] {
+            let (cause, next) = no_checks_diagnosis(mergeable, status);
+            assert_eq!(cause, "not_scheduled", "{mergeable}");
+            assert!(next.contains("push an empty commit"), "{next}");
+            assert!(!next.contains("merge_conflict"), "{next}");
+        }
+    }
+
     // Spec: docs/specs/lane-contracts.md#observation-events
     #[test]
     fn host_poller_revalidates_metadata_and_checks_with_304() {
         let shared = Shared::new();
         shared.with(|world| {
             world.resources.insert("repos/Owner/Repo/pulls/7".into(), json!({
-                "state":"open", "head":{"sha":HEAD}, "html_url":"https://github.com/Owner/Repo/pull/7"
+                "state":"open", "head":{"sha":HEAD}, "mergeable":true, "html_url":"https://github.com/Owner/Repo/pull/7"
             }));
             world.runs.insert(HEAD.into(), page(vec![run("build", "completed", Some("success"))]));
         });
