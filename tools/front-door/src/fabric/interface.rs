@@ -2548,6 +2548,16 @@ impl Factory {
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), FacadeError> {
+        if let Some(brief) = input.get("brief").and_then(Value::as_str) {
+            match provenant_redact::matches_credential_value(brief.as_bytes()) {
+                Ok(true) | Err(_) => {
+                    return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue,
+                    )));
+                }
+                Ok(false) => {}
+            }
+        }
         let id = target.graph.clone();
         let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
         // Keep the no-op guard under the retry journal lock, alongside the
@@ -3829,6 +3839,19 @@ mod tests {
                 assert!(
                     !projection.contains("sk-abcdefghijklmnopqrstuvwx"),
                     "{path_name}: {projection}"
+                );
+            }
+            if path_name == "retry" {
+                assert!(
+                    matches!(
+                        error,
+                        FacadeError::InvalidInput {
+                            detail: Some(InvalidInputDetail::GraphRelayCause(
+                                provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue
+                            ))
+                        }
+                    ),
+                    "unexpected retry refusal cause: {error:?}"
                 );
             }
             if path_name == "extension" {

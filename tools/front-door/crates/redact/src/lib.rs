@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";
+/// Short values are too ambiguous for document-wide substring replacement or refusal.
+pub const MIN_EXACT_BYTES: usize = 8;
 const MAX_SECRETS: usize = 128;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_SECRET_LENGTH: usize = 16 * 1024;
@@ -1752,18 +1754,34 @@ pub fn launch_values(
     publication_secrets(values)
 }
 
-/// Return non-empty values from ambient variables whose names end in one of
-/// the credential assignment keys understood by the streaming redactor.
+/// Return non-empty values of at least `MIN_EXACT_BYTES` bytes from ambient variables
+/// whose names end in one of the credential assignment keys understood by the streaming redactor,
+/// excluding placeholder values like `[REDACTED]`.
 /// This deliberately reads process environment only; it never opens stores.
 pub fn ambient_values() -> Result<Vec<Vec<u8>>, RedactorError> {
     let values = std::env::vars_os()
         .filter_map(|(name, value)| {
             (credential_variable_name(name.as_encoded_bytes())
-                && !value.as_encoded_bytes().is_empty())
-            .then(|| value.into_encoded_bytes())
+                && value.len() >= MIN_EXACT_BYTES
+                && value.as_encoded_bytes() != REDACTED)
+                .then(|| value.into_encoded_bytes())
         })
         .collect::<Vec<_>>();
     validate_secrets(values)
+}
+
+/// Validate whether text contains an exact known credential value (ambient or scoped)
+/// of at least `MIN_EXACT_BYTES` bytes, excluding placeholder values like `[REDACTED]`.
+/// Returns `Ok(false)` if safe, or `Ok(true)` if text matches a credential value.
+pub fn matches_credential_value(bytes: &[u8]) -> Result<bool, RedactorError> {
+    let mut secrets = ambient_values()?;
+    secrets.extend(scoped_values());
+    secrets.retain(|s| s.len() >= MIN_EXACT_BYTES && s.as_slice() != REDACTED);
+    if secrets.is_empty() {
+        return Ok(false);
+    }
+    let safe = known_values(bytes, publication_secrets(secrets)?)?;
+    Ok(safe != bytes)
 }
 
 /// Mask typed and ambient credential values in text that is about to be
@@ -1970,6 +1988,22 @@ mod tests {
             assert_eq!(publication_text(secret, []).unwrap(), REDACTED);
         }
         assert_eq!(publication_text(secret, []).unwrap(), secret);
+    }
+
+    #[test]
+    fn matches_credential_value_ignores_short_or_placeholder_values() {
+        // Short values (< 8 bytes) and placeholder '[REDACTED]' are ignored.
+        let _scope = publication_scope([
+            b"ollama".to_vec(),
+            b"EMPTY".to_vec(),
+            b"[REDACTED]".to_vec(),
+            b"exact-credential-3391".to_vec(),
+        ])
+        .unwrap();
+
+        assert!(!matches_credential_value(b"plain retry brief with ollama and EMPTY").unwrap());
+        assert!(!matches_credential_value(b"brief with [REDACTED] placeholder").unwrap());
+        assert!(matches_credential_value(b"brief with exact-credential-3391 embedded").unwrap());
     }
 
     #[test]

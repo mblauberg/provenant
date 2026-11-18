@@ -537,16 +537,6 @@ fn retry_node_scope(
     reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
-    if let Some(brief) = brief {
-        let safe = provenant_redact::publication_text(brief.as_bytes(), [])
-            .map_err(|_| PatchError::invalid("retry brief credential check failed"))?;
-        if safe != brief.as_bytes() {
-            return Err(PatchError::new(
-                "credential_value",
-                "retry brief matches a declared credential value",
-            ));
-        }
-    }
     let normalised_brief = brief
         .map(prompt_text::normalise_prompt_text)
         .transpose()

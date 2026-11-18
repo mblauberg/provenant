@@ -128,18 +128,32 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
             .iter()
             .any(|p| p.to_string_lossy().ends_with(".events.jsonl"))
     );
-    let mut masked = false;
-    for path in records {
-        let bytes = std::fs::read(&path)?;
+    let mut retained_raw = false;
+    let projector =
+        provenant_confinement::publication::Projector::new([credential.as_bytes().to_vec()])?;
+    let mut published_has_mask = false;
+    for path in &records {
+        let bytes = std::fs::read(path)?;
         let text = String::from_utf8_lossy(&bytes);
-        assert!(
-            !text.contains(credential),
-            "credential in {}",
-            path.display()
-        );
-        masked |= text.contains("[REDACTED]");
+        retained_raw |= text.contains(credential);
+        if let Ok(exported) = projector.project(
+            provenant_confinement::publication::Destination::ArtifactExport,
+            &bytes,
+        ) {
+            let exported_text = String::from_utf8_lossy(exported.bytes());
+            assert!(
+                !exported_text.contains(credential),
+                "publication disclosed credential in {}",
+                path.display()
+            );
+            published_has_mask |= exported_text.contains("[REDACTED]");
+        }
     }
-    assert!(masked, "checkpoint/prompt store retains the masked brief");
+    assert!(retained_raw, "local graph records keep the exact bytes");
+    assert!(
+        published_has_mask,
+        "what leaves through a publication or peer/disclosure output is masked"
+    );
     Ok(())
 }
 
@@ -2197,6 +2211,83 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
         snapshot()?,
         after_shape,
         "invalid extension refusal is atomic"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomically() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    fn snapshot_tree(
+        root: &Path,
+        output: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                snapshot_tree(&entry.path(), output)?;
+            } else {
+                output.insert(entry.path(), std::fs::read(entry.path())?);
+            }
+        }
+        Ok(())
+    }
+    let snapshot = || -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+        let mut output = std::collections::BTreeMap::new();
+        snapshot_tree(&rig.state().join("fabric/graphs"), &mut output)?;
+        Ok(output)
+    };
+    let before = snapshot()?;
+
+    // Short placeholder and ambient values (e.g. ollama, EMPTY, [REDACTED])
+    // must not refuse an ordinary retry brief containing those words.
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", "ollama")
+        .env("OPENAI_API_KEY", "[REDACTED]")
+        .env("X_AUTH", "EMPTY")
+        .args([
+            "retry",
+            &id,
+            "--brief",
+            "retry with ollama model and EMPTY list",
+        ])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        output.status.success(),
+        "short placeholder ambient credentials must not refuse: {reply}"
+    );
+    let after_placeholder = snapshot()?;
+    assert_ne!(
+        after_placeholder, before,
+        "the placeholder admitted retry changes the checkpoint"
+    );
+
+    let credential = "plain-registered-retry-3391";
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args(["retry", &id, "--brief", credential])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        !output.status.success(),
+        "exact credential must refuse: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("declared credential value rule")),
+        "operator receives the typed credential cause: {reply}"
+    );
+    assert!(!reply.to_string().contains(credential));
+    assert_eq!(
+        snapshot()?,
+        after_placeholder,
+        "exact-value refusal is atomic"
     );
     Ok(())
 }
