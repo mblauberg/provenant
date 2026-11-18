@@ -1645,6 +1645,11 @@ fn prune_with_progress(
             }
             Ok(Outcome::Interrupted(rechecking)) => {
                 if let Some(snapshot) = snapshot.as_deref_mut() {
+                    if rechecking.is_none() {
+                        // A target may now live under its deletion tombstone.
+                        // Revisit the root before trusting the saved inventory.
+                        snapshot.root_cursor = None;
+                    }
                     snapshot.rechecking = rechecking;
                     snapshot.prune_cursor = Some(prune_cursor(&candidate));
                 }
@@ -2135,8 +2140,8 @@ mod tests {
         )
         .unwrap();
         assert!(!report.measurement_skipped);
-        assert!(report.removed.is_empty());
-        assert!(report.cache_bytes >= 4096);
+        assert_eq!(report.removed, vec![profile.clone()]);
+        assert!(report.bytes >= 4096);
         assert_eq!(report.budget_bytes, 1024);
         assert_eq!(report.budget_setting, "1K");
         assert_eq!(report.budget_source, "default");
@@ -2207,7 +2212,13 @@ mod tests {
             .clone()
             .expect("published continuation");
         assert!(target.exists());
-        assert!(state.path().join("tick").join(detail).is_file());
+        assert!(
+            state
+                .path()
+                .join("tick/gc-cache-surveys")
+                .join(detail)
+                .is_file()
+        );
 
         let mut continue_scan = || false;
         let mut refresh = TargetProtection::default;
@@ -3072,10 +3083,11 @@ mod tests {
             .filter(|candidate| candidate.display == idle_a || candidate.display == idle_b)
             .map(|candidate| candidate.bytes)
             .sum();
-        // The cap would fit the busy pair's neighbours but not the busy pair.
+        // Held targets alone exceed the cap, so every idle neighbour is reclaimed.
+        let cap = (survey.total - idle_bytes).saturating_sub(1);
         let report = sweep(
             fixture.home.path(),
-            limits(survey.total - idle_bytes, 0),
+            limits(cap, 0),
             false,
             now(),
             &mut plenty,
@@ -3083,10 +3095,7 @@ mod tests {
         assert_eq!(report.removed, vec![idle_a.clone(), idle_b.clone()]);
         assert_eq!(report.busy, vec![busy_a.clone(), busy_b.clone()]);
         assert!(busy_a.exists() && busy_b.exists());
-        assert!(
-            report.cache_bytes > survey.total - idle_bytes,
-            "stays over the cap"
-        );
+        assert!(report.cache_bytes > cap, "stays over the cap");
     }
 
     #[test]
