@@ -1908,8 +1908,23 @@ fn verify_smoke(
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let runner = runner_for_verify(targets)?;
-    let project =
-        SmokeProject(std::env::temp_dir().join(format!("{}-project", verify_graph_name())));
+    verify_smoke_with(
+        &runner,
+        &targets.bin_dir.join("provenant"),
+        targets.roots.state.as_path(),
+        &std::env::temp_dir(),
+        args,
+    )
+}
+
+fn verify_smoke_with(
+    runner: &UpgradeRunner,
+    program: &Path,
+    state_dir: &Path,
+    scratch: &Path,
+    args: &cli::Upgrade,
+) -> Result<String, String> {
+    let project = SmokeProject(scratch.join(format!("{}-project", verify_graph_name())));
     std::fs::create_dir(&project.0).map_err(|error| error.to_string())?;
     std::fs::write(project.0.join("fixture.txt"), "smoke fixture\n")
         .map_err(|error| error.to_string())?;
@@ -1934,25 +1949,30 @@ fn verify_smoke(
         argv.extend(args.iter().map(std::ffi::OsString::from));
         runner.execute_at(&argv, &project.0, None, 65_536, 30)?;
     }
-    let program = targets.bin_dir.join("provenant").into_os_string();
+    let program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
-    let branch = format!("smoke/{}", graph.trim_start_matches("smoke-verify-"));
     let mut run = vec![
         program.clone(),
         "--project".into(),
         project.0.as_os_str().to_owned(),
         "--state-dir".into(),
-        targets.roots.state.as_path().as_os_str().to_owned(),
+        state_dir.as_os_str().to_owned(),
         "--json".into(),
         "run".into(),
         "smoke".into(),
         "--name".into(),
         graph.clone().into(),
-        "--branch".into(),
-        branch.into(),
-        "--base".into(),
-        "HEAD".into(),
     ];
+    let remote = args
+        .host
+        .as_deref()
+        .is_some_and(|host| !matches!(host, "" | "local" | "localhost"));
+    if !remote {
+        run.extend([
+            "--set".into(),
+            format!("worktree={}", project.0.display()).into(),
+        ]);
+    }
     if let Some(host) = &args.host {
         run.extend(["--host".into(), host.into()]);
     }
@@ -1960,6 +1980,9 @@ fn verify_smoke(
         run.extend(["--route".into(), route.into()]);
     }
     for setting in &args.set {
+        if setting.starts_with("worktree=") {
+            continue;
+        }
         run.extend(["--set".into(), setting.into()]);
     }
     let launched = runner.execute(&run, None, 1_048_576, 3600)?;
@@ -1967,7 +1990,7 @@ fn verify_smoke(
         &[
             program.clone(),
             "--state-dir".into(),
-            targets.roots.state.as_path().as_os_str().to_owned(),
+            state_dir.as_os_str().to_owned(),
             "--json".into(),
             "wait".into(),
             graph.clone().into(),
@@ -1982,7 +2005,7 @@ fn verify_smoke(
         &[
             program,
             "--state-dir".into(),
-            targets.roots.state.as_path().as_os_str().to_owned(),
+            state_dir.as_os_str().to_owned(),
             "--json".into(),
             "status".into(),
             graph.into(),
@@ -2010,6 +2033,33 @@ fn verify_smoke(
             String::from_utf8_lossy(&launched)
         )),
     }
+}
+
+fn preview_smoke(
+    runner: &UpgradeRunner,
+    program: &Path,
+    state_dir: &Path,
+    args: &cli::Upgrade,
+) -> Result<Vec<u8>, String> {
+    let mut argv = vec![
+        program.as_os_str().to_owned(),
+        "--state-dir".into(),
+        state_dir.as_os_str().to_owned(),
+        "--json".into(),
+        "run".into(),
+        "smoke".into(),
+        "--explain".into(),
+    ];
+    if let Some(host) = &args.host {
+        argv.extend(["--host".into(), host.into()]);
+    }
+    if let Some(route) = &args.route {
+        argv.extend(["--route".into(), route.into()]);
+    }
+    for setting in &args.set {
+        argv.extend(["--set".into(), setting.into()]);
+    }
+    runner.execute(&argv, None, 1_048_576, 60)
 }
 
 impl UpgradeRunner {
@@ -2081,22 +2131,8 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 return super::fail("upgrade", Outcome::Error, "UPGRADE_VERIFY", &error, globals);
             }
         };
-        let output = runner.execute(
-            &[
-                std::env::current_exe()
-                    .unwrap_or_else(|_| PathBuf::from("provenant"))
-                    .into_os_string(),
-                "--state-dir".into(),
-                targets.roots.state.as_path().as_os_str().to_owned(),
-                "--json".into(),
-                "run".into(),
-                "smoke".into(),
-                "--explain".into(),
-            ],
-            None,
-            1_048_576,
-            60,
-        );
+        let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("provenant"));
+        let output = preview_smoke(&runner, &program, targets.roots.state.as_path(), &args);
         return match output {
             Ok(bytes) => {
                 let human = format!(
@@ -2426,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_smoke_launcher_reports_the_failed_node() -> Result<(), Box<dyn std::error::Error>> {
+    fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
@@ -2434,7 +2470,7 @@ mod tests {
         let launcher = tmp.path().join("provenant");
         std::fs::write(
             &launcher,
-            "#!/bin/sh\nprintf '%s\\n' '{\"node\":\"write\",\"state\":\"failed\"}'\nexit 1\n",
+            "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
         )?;
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
         let runner = UpgradeRunner {
@@ -2442,12 +2478,77 @@ mod tests {
             environment: std::env::vars_os().collect(),
             cwd: tmp.path().to_owned(),
         };
-        let error = match runner.execute(&[launcher.into_os_string()], None, 65_536, 30) {
+        let error = match verify_smoke_with(
+            &runner,
+            &launcher,
+            tmp.path(),
+            tmp.path(),
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                dry_run: false,
+                host: None,
+                route: None,
+                set: Vec::new(),
+            },
+        ) {
             Err(error) => error,
-            Ok(_) => return Err(std::io::Error::other("fake launcher unexpectedly succeeded").into()),
+            Ok(_) => {
+                return Err(
+                    std::io::Error::other("failed smoke node unexpectedly succeeded").into(),
+                );
+            }
         };
-        assert!(error.contains("\"node\":\"write\""));
+        assert!(error.contains("\"node\":\"smoke/write\""));
         assert!(error.contains("failed"));
+        Ok(())
+    }
+
+    #[test]
+    fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let launcher = tmp.path().join("provenant");
+        let calls = tmp.path().join("calls");
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';; *) exit 77;; esac\n",
+                calls.display()
+            ),
+        )?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            cwd: tmp.path().to_owned(),
+        };
+        let output = preview_smoke(
+            &runner,
+            &launcher,
+            tmp.path(),
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                dry_run: true,
+                host: None,
+                route: None,
+                set: Vec::new(),
+            },
+        )?;
+        let output = String::from_utf8(output)?;
+        assert!(output.contains("\"read\""));
+        assert!(output.contains("\"review\""));
+        assert!(output.contains("\"write\""));
+        let calls = std::fs::read_to_string(calls)?;
+        assert_eq!(calls.lines().count(), 1, "{calls}");
+        assert!(calls.contains("run smoke --explain"), "{calls}");
         Ok(())
     }
 

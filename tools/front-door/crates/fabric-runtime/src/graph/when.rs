@@ -35,7 +35,7 @@ pub fn review_stages(frame: bool, verify: bool, synthesis: bool) -> [(String, Ve
     .map(|(name, on)| (name.to_owned(), vec![on.to_string()]))
 }
 
-pub(super) fn holds(terms: &[WhenTerm]) -> bool {
+pub fn holds(terms: &[WhenTerm]) -> bool {
     terms.iter().all(WhenTerm::holds)
 }
 

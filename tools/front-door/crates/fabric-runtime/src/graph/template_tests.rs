@@ -921,24 +921,34 @@ fn every_bundled_template_compiles_with_required_bindings() {
 }
 
 #[test]
-fn smoke_template_compiles_the_read_review_write_and_retry_nodes() {
+fn smoke_template_compiles_the_read_review_and_write_nodes() {
     let library = library();
     let node = Compiler::new(&library)
         .compile(&json!({"id":"smoke", "use":"smoke"}))
         .unwrap();
-    let children = node.composite.unwrap().nodes;
+    let composite = node.composite.unwrap();
+    assert_eq!(composite.exports.len(), 1);
+    assert_eq!(composite.exports[0].node, "review");
+    let children = composite.nodes;
     let by_id = |id: &str| children.iter().find(|node| node.id == id).unwrap();
     assert_eq!(
         children
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["read", "review", "write", "retry-fixture"]
+        ["read", "review", "write"]
     );
     assert_eq!(by_id("read").access, AccessMode::ReadOnly);
     assert_eq!(by_id("review").access, AccessMode::ReadOnly);
     assert_eq!(by_id("write").access, AccessMode::WorktreeWrite);
-    assert_eq!(by_id("retry-fixture").access, AccessMode::ReadOnly);
+
+    let node = Compiler::new(&library)
+        .compile(&json!({
+            "id":"smoke", "use":"smoke",
+            "with":{"worktree":"/fixture/writer", "smoke-write":true}
+        }))
+        .unwrap();
+    assert_eq!(node.composite.unwrap().exports[0].node, "write");
 }
 
 #[test]
