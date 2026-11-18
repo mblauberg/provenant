@@ -15,33 +15,6 @@ const LIMIT: usize = 16 * 1024 * 1024;
 const MASK: &str = "[REDACTED]";
 // Short values are too ambiguous for document-wide substring replacement.
 const MIN_EXACT_BYTES: usize = 8;
-const VALUE_FLAGS: &[&str] = &[
-    "--body",
-    "-b",
-    "--title",
-    "-t",
-    "--body-file",
-    "--template",
-    "-T",
-    "--input",
-    "--header",
-    "-H",
-    "--field",
-    "--raw-field",
-    "-f",
-    "-F",
-    "--label",
-    "-l",
-    "--reviewer",
-    "-r",
-    "--jq",
-    "-q",
-    "--milestone",
-    "-m",
-    "--head",
-    "-X",
-    "--method",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -410,16 +383,12 @@ impl Projector {
         project: &Path,
         destination: Destination,
     ) -> Result<(Vec<OsString>, Option<Vec<u8>>), ProjectionError> {
-        let mut args = Vec::new();
-        let mut in_value = false;
-        for arg in arguments {
-            let arg = arg.into_string().map_err(|_| ProjectionError::Encoding)?;
-            if in_value {
-                args.push(arg);
-                in_value = false;
-                continue;
-            }
-            if [
+        let args: Vec<String> = arguments
+            .into_iter()
+            .map(|arg| arg.into_string().map_err(|_| ProjectionError::Encoding))
+            .collect::<Result<_, _>>()?;
+        if args.iter().any(|arg| {
+            [
                 "--editor",
                 "--web",
                 "--recover",
@@ -428,29 +397,9 @@ impl Projector {
                 "--fill-verbose",
             ]
             .iter()
-            .any(|flag| arg == *flag || arg.starts_with(&format!("{flag}=")))
-            {
-                // These ask gh to obtain content outside the snapshot. The
-                // caller must supply the body explicitly for publication.
-                return Err(ProjectionError::Operation);
-            }
-            if arg.len() > 2
-                && ["-b", "-t", "-f", "-F"]
-                    .iter()
-                    .any(|flag| arg.starts_with(flag))
-                && !arg.starts_with("--")
-            {
-                args.push(arg[..2].to_owned());
-                args.push(arg[2..].to_owned());
-            } else {
-                let (flag, inline) = arg
-                    .split_once('=')
-                    .map_or((arg.as_str(), None), |(flag, value)| (flag, Some(value)));
-                if inline.is_none() && Self::argument_takes_value(flag) {
-                    in_value = true;
-                }
-                args.push(arg);
-            }
+            .any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))
+        }) {
+            return Err(ProjectionError::Operation);
         }
         // Learn typed values across title/body/fields before projecting each
         // argument, so copies in another field are also protected.
@@ -458,45 +407,12 @@ impl Projector {
         for arg in &args {
             visit_documents(arg, &mut |value| collect(value, &mut secrets));
         }
-        let mut index = 0;
-        while index < args.len() {
-            let (flag, inline) = args[index]
-                .split_once('=')
-                .map_or((args[index].as_str(), None), |(flag, value)| {
-                    (flag, Some(value))
-                });
-            let value = inline.or_else(|| args.get(index + 1).map(String::as_str));
-            if Self::field_flag(flag)
-                && let Some((key, value)) = value.and_then(|value| value.split_once('='))
-                && secret_field(key)
-            {
-                secrets.push(value.as_bytes().to_vec());
-            }
-            // A value that happens to spell a flag is still content, not a declaration.
-            index += if inline.is_none() && Self::argument_takes_value(flag) {
-                2
-            } else {
-                1
-            };
-        }
         if let Some(bytes) = &input {
             let text = std::str::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
             visit_documents(text, &mut |value| collect(value, &mut secrets));
         }
         let projector = Self::new(secrets)?;
         projector.project_arguments(args, input, project, destination)
-    }
-
-    fn field_flag(flag: &str) -> bool {
-        matches!(flag, "--field" | "--raw-field" | "-f" | "-F")
-    }
-
-    fn header_flag(flag: &str) -> bool {
-        matches!(flag, "-H" | "--header")
-    }
-
-    fn argument_takes_value(flag: &str) -> bool {
-        VALUE_FLAGS.contains(&flag)
     }
 
     fn project_arguments(
@@ -526,17 +442,14 @@ impl Projector {
                 .split_once('=')
                 .map_or((args[index].as_str(), None), |(k, v)| (k, Some(v)));
             let flag = flag.to_owned();
-            let takes_value = Self::argument_takes_value(&flag);
-            if !takes_value {
-                if Self::header_flag(&flag) {
-                    if args.get(index + 1).is_none() {
-                        return Err(ProjectionError::Operation);
-                    }
-                    index += 2;
-                    continue;
-                }
-                args[index] = String::from_utf8(self.exact(args[index].as_bytes()))
-                    .map_err(|_| ProjectionError::Encoding)?;
+            if !matches!(
+                flag.as_str(),
+                "--body-file" | "--template" | "-T" | "--input"
+            ) {
+                let projected = self.project(destination, args[index].as_bytes())?;
+                let masked = crate::redact::known_shapes(projected.bytes())
+                    .map_err(|_| ProjectionError::Bound)?;
+                args[index] = String::from_utf8(masked).map_err(|_| ProjectionError::Encoding)?;
                 index += 1;
                 continue;
             }
@@ -561,37 +474,9 @@ impl Projector {
                     input = Some(projection.into_bytes());
                     "-".to_owned()
                 }
-                field if Self::field_flag(field) => {
-                    let (key, val) = value.split_once('=').ok_or(ProjectionError::Operation)?;
-                    let bytes = if matches!(flag.as_str(), "-F" | "--field") && val.starts_with('@')
-                    {
-                        if val == "@-" {
-                            input.take().ok_or(ProjectionError::Input)?
-                        } else {
-                            read_input(project, &val[1..])?
-                        }
-                    } else {
-                        val.as_bytes().to_vec()
-                    };
-                    let projected = if secret_field(key) {
-                        MASK.as_bytes().to_vec()
-                    } else {
-                        self.project(destination, &bytes)?.into_bytes()
-                    };
-                    format!(
-                        "{key}={}",
-                        String::from_utf8(projected).map_err(|_| ProjectionError::Encoding)?
-                    )
-                }
-                _ => String::from_utf8(self.project(destination, value.as_bytes())?.into_bytes())
-                    .map_err(|_| ProjectionError::Encoding)?,
+                _ => unreachable!(),
             };
-            // -F/--field values beginning @ are interpreted as file references
-            // by gh. Convert to raw fields after snapshotting, even if the
-            // projected content itself begins with @.
-            let output_flag = if matches!(flag.as_str(), "-F" | "--field") {
-                "--raw-field"
-            } else if matches!(flag.as_str(), "--template" | "-T") {
+            let output_flag = if matches!(flag.as_str(), "--template" | "-T") {
                 "--body-file"
             } else {
                 &flag
@@ -929,45 +814,6 @@ mod tests {
         assert_eq!(value["token"], MASK);
         assert_eq!(value["it"], "it");
         assert_eq!(value["message"], "token: [REDACTED]; it stays here");
-        // CLI field flags are typed declarations too, including joined forms.
-        for field in [
-            vec!["--raw-field", "token=hidden-value"],
-            vec!["--field=token=hidden-value"],
-            vec!["-ftoken=hidden-value"],
-            vec!["-Ftoken=hidden-value"],
-        ] {
-            let arguments = [
-                vec!["api", "endpoint"],
-                field,
-                vec![
-                    "--title",
-                    "ordinary",
-                    "--body",
-                    "copy hidden-value; token: ordinary; ordinary stays",
-                ],
-            ]
-            .concat()
-            .into_iter()
-            .map(OsString::from)
-            .collect();
-            let operation = Projector::new([])
-                .unwrap()
-                .forge(
-                    ForgeOperation::Cli {
-                        arguments,
-                        input: None,
-                    },
-                    Path::new("."),
-                )
-                .unwrap();
-            let ForgeOperation::Cli { arguments, .. } = operation else {
-                unreachable!()
-            };
-            let arguments: Vec<_> = arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
-            assert!(arguments.iter().any(|arg| arg.contains("token=[REDACTED]")));
-            assert!(arguments.contains(&"ordinary"));
-            assert!(arguments.contains(&"copy [REDACTED]; token: [REDACTED]; ordinary stays"));
-        }
         let temp = tempfile::tempdir().unwrap();
         let content = br#"{"ordinary":"ordinary"}"#;
         std::fs::write(temp.path().join("--field"), content).unwrap();
@@ -1196,41 +1042,21 @@ mod tests {
     }
 
     #[test]
-    fn joined_flags_only_split_in_flag_position() {
-        let projector = Projector::new([]).unwrap();
-        let arguments = ["pr", "create", "--body", "-fix typo", "-tMy Title"]
-            .into_iter()
-            .map(OsString::from)
-            .collect();
-        let operation = projector
-            .forge(
-                ForgeOperation::Cli {
-                    arguments,
-                    input: None,
-                },
-                Path::new("."),
-            )
-            .unwrap();
-        let ForgeOperation::Cli { arguments, .. } = operation else {
-            panic!("expected CLI operation");
-        };
-        let arguments: Vec<_> = arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
-        assert_eq!(
-            arguments,
-            vec!["pr", "create", "--body", "-fix typo", "-t", "My Title"]
-        );
-    }
-
-    #[test]
-    fn value_flags_protect_joined_flag_values() {
-        let projector = Projector::new([]).unwrap();
+    fn cli_arguments_are_projected_without_splitting() {
+        let token = "ghp_abcdefghijklmnopqrst";
         let arguments = [
-            "pr", "create", "--title", "Title", "--body", "Body", "--label", "-bug",
+            "pr",
+            "review",
+            "-r",
+            "--body",
+            token,
+            "--subject",
+            "-bump deps",
         ]
-        .into_iter()
         .map(OsString::from)
-        .collect();
-        let operation = projector
+        .into();
+        let ForgeOperation::Cli { arguments, .. } = Projector::new([])
+            .unwrap()
             .forge(
                 ForgeOperation::Cli {
                     arguments,
@@ -1238,15 +1064,21 @@ mod tests {
                 },
                 Path::new("."),
             )
-            .unwrap();
-        let ForgeOperation::Cli { arguments, .. } = operation else {
-            panic!("expected CLI operation");
+            .unwrap()
+        else {
+            panic!("expected CLI operation")
         };
         let arguments: Vec<_> = arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
         assert_eq!(
             arguments,
-            vec![
-                "pr", "create", "--title", "Title", "--body", "Body", "--label", "-bug"
+            [
+                "pr",
+                "review",
+                "-r",
+                "--body",
+                "[REDACTED]",
+                "--subject",
+                "-bump deps"
             ]
         );
     }
