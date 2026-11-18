@@ -86,16 +86,28 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     # An unrelated green SHA must not replace an older ancestor.
     git('checkout', '-q', '--detach', base); unrelated = commit('other.rs', 'other')
     run(code, normal, state_override={'main': [mainrun(unrelated, 3), mainrun(base)]}, check=lambda s: s['evidence']['main'] == base or (_ for _ in ()).throw(AssertionError(s)))
+    # A pull-request run tests GitHub's merge of the base tip and the head.
+    def merge(tip, head):
+        tree = git('merge-tree', '--write-tree', tip, head).split('\n')[0]
+        return git('commit-tree', tree, '-p', tip, '-p', head, '-m', 'merge'), tree
+    def pr(tip, head):
+        return {'TESTED_SHA': merge(tip, head)[0], 'PR_HEAD_SHA': head}
     git('checkout', '-q', '--detach', code); doc_after = commit('more.md', 'more')
     prrun = {'id': 4, 'head_sha': code, 'status': 'completed', 'conclusion': 'success', 'pull_requests': [{'number': 1}]}
-    artifact = {'schema_version': 1, 'head': code, 'pr_number': 1, 'suites': {n: 'run' for n in names}}
+    artifact = {'schema_version': 1, 'head': code, 'pr_number': 1, 'base': base, 'tree': merge(base, code)[1], 'suites': {n: 'run' for n in names}}
     pstate = {'main': [mainrun(base)], 'pr': [prrun], 'artifact': artifact}
     sync = {'PR_ACTION': 'synchronize', 'PR_BEFORE': code}
-    run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, sync, state_override=pstate)
+    first = run(code, normal, pr(base, code))
+    assert (first['base'], first['tree']) == (artifact['base'], artifact['tree']), first
+    run(doc_after, {n: ('run' if n == 'checks' else 'covered') for n in names}, {**sync, **pr(base, doc_after)}, state_override=pstate)
     code_after = commit('another.rs', 'new')
-    run(code_after, normal, sync, state_override=pstate)
-    run(doc_after, normal, sync, state_override={'main': [mainrun(base)], 'pr': [prrun]})
-    run(doc_after, normal, sync, state_override={**pstate, 'artifact': {**artifact, 'head': base}})
+    run(code_after, normal, {**sync, **pr(base, code_after)}, state_override=pstate)
+    run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={'main': [mainrun(base)], 'pr': [prrun]})
+    run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={**pstate, 'artifact': {**artifact, 'head': base}})
+    run(doc_after, normal, {**sync, **pr(base, doc_after)}, state_override={**pstate, 'artifact': {**artifact, 'tree': artifact['tree'][::-1]}})
+    # Base code that entered the merge since the green PR run is not covered by it.
+    git('checkout', '-q', '--detach', base); moved = commit('tools/front-door/crates/workflow/src/main_only.rs', 'main')
+    run(doc_after, normal, {**sync, **pr(moved, doc_after)}, state_override=pstate)
     # Spec: docs/specs/ci.md#unknown-paths-are-inputs
     for mode in ('executable', 'symlink'):
         git('checkout', '-q', '--detach', base)

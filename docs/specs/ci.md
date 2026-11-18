@@ -48,8 +48,10 @@ Owner: repository CI.
 A pull-request run selects from the tree delta between the newest `main`
 commit with a green `ci-status` push run that is an ancestor of the tested
 commit, and the tested commit. A suite is covered only when that delta, or the
-head delta since the same pull request's previous green head where the suite
-ran or was covered, changes none of the suite's inputs. Missing evidence,
+delta from the tree tested by the same pull request's previous green run
+where the suite ran or was covered, changes none of the suite's inputs. That
+earlier tree must be rebuilt from its recorded base and head and match its
+recorded hash, so a moved base is never hidden. Missing evidence,
 unreadable history, a selector failure, a pipeline change or a full request
 runs every suite.
 

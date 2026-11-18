@@ -13,7 +13,7 @@ names = [s['name'] for s in config['suite']]
 jobs = config['jobs']['always'] + [j for s in config['suite'] for j in s['jobs']]
 sha = 'a' * 40
 selection = {'schema_version': 1, 'tested': sha, 'head': sha, 'pr_number': 1, 'event': 'pull_request', 'full': False, 'full_reason': None,
-             'evidence': {'main': sha, 'pr': None}, 'rust_base': sha,
+             'evidence': {'main': sha, 'pr': None}, 'rust_base': sha, 'base': 'b' * 40, 'tree': 'c' * 40,
              'suites': {n: {'state': 'run', 'reason': 'changed', 'evidence': None} for n in names}}
 needs = {j: {'result': 'success'} for j in jobs}
 with tempfile.TemporaryDirectory() as tmp:
@@ -25,7 +25,9 @@ with tempfile.TemporaryDirectory() as tmp:
         assert (result.returncode == 0) == ok, result.stderr
         assert evidence.exists() == ok
         if ok:
-            assert json.loads(evidence.read_text())['suites'] == {k: v['state'] for k, v in s['suites'].items()}
+            written = json.loads(evidence.read_text())
+            assert written['suites'] == {k: v['state'] for k, v in s['suites'].items()}
+            assert (written['base'], written['tree']) == (s['base'], s['tree'])
         else:
             assert 'Blocking job results:' in result.stderr
     # Spec: docs/specs/ci.md#one-required-check

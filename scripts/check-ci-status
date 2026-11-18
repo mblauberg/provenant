@@ -14,7 +14,7 @@ loader.exec_module(selector)
 
 
 def evaluate(config, needs, selection):
-    required = {'schema_version', 'tested', 'head', 'event', 'pr_number', 'full', 'full_reason', 'evidence', 'rust_base', 'suites'}
+    required = {'schema_version', 'tested', 'head', 'event', 'pr_number', 'full', 'full_reason', 'evidence', 'rust_base', 'base', 'tree', 'suites'}
     if not isinstance(needs, dict) or not isinstance(selection, dict) or not required <= selection.keys() or selection.get('schema_version') != 1:
         raise ValueError('invalid needs or selection')
     if (not isinstance(selection.get('event'), str) or not selection['event']
@@ -23,9 +23,9 @@ def evaluate(config, needs, selection):
             or (selection['full'] and not selection.get('full_reason'))
             or not isinstance(selection.get('evidence'), dict)
             or set(selection['evidence']) != {'main', 'pr'}
-            or not isinstance(selection.get('rust_base'), str)):
+            or any(not isinstance(selection.get(k), str) for k in ('rust_base', 'base', 'tree'))):
         raise ValueError('invalid selection metadata')
-    for value in [*selection['evidence'].values(), selection['rust_base'] or None]:
+    for value in [*selection['evidence'].values(), *(selection[k] or None for k in ('rust_base', 'base', 'tree'))]:
         if value is not None and (not isinstance(value, str) or not selector.SHA.fullmatch(value)):
             raise ValueError('invalid selection evidence')
     suites = selection.get('suites')
@@ -80,7 +80,7 @@ def main():
         if errors:
             print('Blocking job results: ' + ', '.join(errors), file=sys.stderr); return 1
         if os.environ.get('CI_EVIDENCE_FILE'):
-            evidence = {k: selection[k] for k in ('schema_version', 'tested', 'head', 'pr_number')}
+            evidence = {k: selection[k] for k in ('schema_version', 'tested', 'head', 'pr_number', 'base', 'tree')}
             evidence['suites'] = {name: entry['state'] for name, entry in selection['suites'].items()}
             Path(os.environ['CI_EVIDENCE_FILE']).write_text(json.dumps(evidence, separators=(',', ':')) + '\n')
         print('All required jobs succeeded or were explicitly unselected.')
