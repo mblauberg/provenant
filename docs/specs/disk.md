@@ -51,9 +51,10 @@ partial measurements explicitly. Cargo build locks and live attempt custody
 protect targets independently of size pressure. The newest seed generation and
 recent writes retain their existing protection.
 
-An EPERM process with no observed cwd or descriptor beneath a candidate produces
-a warning once rather than making every worktree unknown. Positive path evidence
-protects the affected candidate; other unknown custody still prevents removal.
+An EPERM process with complete descriptor evidence and no observed cwd or
+descriptor beneath a candidate produces a warning once rather than making every
+worktree unknown. Positive path evidence protects the affected candidate;
+incomplete descriptor evidence and other unknown custody still prevent removal.
 - Why: space recovery must retain evidence and live data while collecting idle
   read-only scratch and both forms of Cargo output.
 

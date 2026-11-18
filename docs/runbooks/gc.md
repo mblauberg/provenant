@@ -93,9 +93,11 @@ Foreign worktrees and local branches are included by default. Their first pass
 previews and records that preview for the repository incarnation. Configure
 `gc.projects.<project>.foreign_worktrees = 'keep'` to opt out, `keep_paths` for
 path/ref patterns, and `integration_branches` for integration-ref patterns.
-An unrelated process denied observation with EPERM produces one warning rather
-than blocking every candidate. Observed cwd or descriptor use beneath a
-candidate protects that candidate. Other unknown custody remains protective.
+A process denied observation with EPERM produces one warning rather than
+blocking every candidate when descriptor inspection is complete and no observed
+path is beneath a candidate. Observed cwd or descriptor use beneath a candidate
+protects that candidate. Incomplete descriptor evidence and other unknown custody
+remain protective.
 Idle clean worktrees with no PR, or a closed unmerged PR at exactly the current
 tip, retire without deleting their branch. Unknown custody, run, forge or census
 feeds keep the affected item. Initialised submodules are checked recursively. Removal requires clean working
