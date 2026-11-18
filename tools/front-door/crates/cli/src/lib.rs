@@ -39,7 +39,6 @@ pub mod telemetry_args;
 pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-pub use provenant_config::removed::{REMOVED, Removed};
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
@@ -247,48 +246,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     }
 }
 
-/// The removed spelling `argv` uses, read from its command words and options.
-fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
-    let model = expanded_model();
-    let mut words = Vec::new();
-    let mut flags = Vec::new();
-    let mut args = argv.iter().skip(1);
-    while let Some(arg) = args.next() {
-        let word = arg.to_str()?;
-        if word == "--" {
-            break;
-        }
-        if let Some(option) = word.strip_prefix("--") {
-            let (name, joined) = option
-                .split_once('=')
-                .map_or((option, false), |(name, _)| (name, true));
-            // Skip the value of a global option, which is never a command word.
-            if !joined
-                && model.get_arguments().any(|arg| {
-                    arg.get_long() == Some(name)
-                        && arg.get_num_args().map_or_else(
-                            || arg.get_action().takes_values(),
-                            |range| range.min_values() > 0,
-                        )
-                })
-            {
-                args.next();
-            }
-            flags.push(name);
-        } else if !word.starts_with('-') {
-            words.push(word);
-        }
-    }
-    REMOVED.iter().find(|removed| {
-        words.len() >= removed.words.len()
-            && words
-                .iter()
-                .zip(removed.words)
-                .all(|(word, path)| word == path)
-            && removed.flag.is_none_or(|flag| flags.contains(&flag))
-    })
-}
-
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
     // Clap normally includes the rejected value. Fence tokens are secrets,
     // including malformed tokens, so redact them before either renderer.
@@ -318,14 +275,6 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
                 }
             }
         }
-    }
-
-    if let Some(removed) = removed_spelling(argv) {
-        return CliError::Invalid {
-            // The message names the replacement, so the error stays one line.
-            message: removed.message(),
-            repair: None,
-        };
     }
 
     if matches!(
@@ -367,7 +316,9 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         .split("\n  [subcommands:")
         .next()
         .unwrap_or(&text)
-        .trim();
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let example = usage_example(argv);
     let message = message.strip_prefix("error: ").unwrap_or(message);
     let mut message = match &example {
@@ -375,7 +326,7 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         None => message.into(),
     };
     if let Some(suggestion) = suggestion {
-        message.push_str(&format!("\ndid you mean `{suggestion}`?"));
+        message.push_str(&format!(" did you mean `{suggestion}`?"));
     }
     CliError::Invalid {
         message,
@@ -2271,135 +2222,26 @@ mod tests {
         assert_eq!(error.repair(), Some("provenant config show"));
     }
 
-    /// The words that spell `removed`, with a value after a removed flag so
-    /// that a flag which took a value is still refused.
-    fn removed_words(removed: &Removed) -> Vec<String> {
-        let mut words: Vec<String> = removed.words.iter().map(|w| (*w).into()).collect();
-        if let Some(flag) = removed.flag {
-            words.push(format!("--{flag}"));
-            words.push("fix-login".into());
-        }
-        words
-    }
-
     #[test]
-    fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
-        for removed in REMOVED {
-            let words = removed_words(removed);
-            let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
-            else {
-                panic!("{words:?} still parses");
+    fn unknown_commands_and_flags_use_generic_invalid_invocation_errors() {
+        for (words, field) in [
+            (vec!["stats"], "subcommand"),
+            (vec!["gc", "--idle-days", "2"], "--idle-days"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("expected generic invalid invocation for {words:?}");
             };
-            // Invalid input exits 2, and with no repair the error is one line.
-            assert!(matches!(error, CliError::Invalid { .. }), "{words:?}");
-            let text = error.to_string();
-            assert_eq!(text.lines().count(), 1, "{words:?}: {text}");
-            assert!(text.contains(removed.replacement), "{words:?}: {text}");
-            assert_eq!(error.repair(), None, "{words:?}");
+            let message = error.to_string();
+            assert_eq!(message.lines().count(), 1, "{words:?}: {message}");
+            assert!(
+                message.contains(field),
+                "{words:?}: expected field {field:?}, got {message:?}"
+            );
         }
-    }
-
-    #[test]
-    fn every_absent_v1_11_1_clap_member_has_a_refusal_row() {
-        fn command_at<'a>(command: &'a clap::Command, path: &[&str]) -> Option<&'a clap::Command> {
-            let (head, tail) = path.split_first()?;
-            let next = command.get_subcommands().find(|child| {
-                child.get_name() == *head || child.get_all_aliases().any(|alias| alias == *head)
-            })?;
-            if tail.is_empty() {
-                Some(next)
-            } else {
-                command_at(next, tail)
-            }
-        }
-        fn retired_command(path: &[&str]) -> bool {
-            REMOVED.iter().any(|removed| {
-                removed.flag.is_none()
-                    && removed.words.len() <= path.len()
-                    && path
-                        .iter()
-                        .zip(removed.words)
-                        .all(|(word, removed)| *word == *removed)
-            })
-        }
-        fn has_option(command: &clap::Command, root: &clap::Command, name: &str) -> bool {
-            command.get_arguments().any(|argument| {
-                argument.get_long() == Some(name)
-                    || argument
-                        .get_all_aliases()
-                        .is_some_and(|aliases| aliases.contains(&name))
-            }) || root.get_arguments().any(|argument| {
-                argument.get_long() == Some(name)
-                    || argument
-                        .get_all_aliases()
-                        .is_some_and(|aliases| aliases.contains(&name))
-            })
-        }
-
-        let model = expanded_model();
-        let fixture = include_str!("removed-cli-1.11.1.txt");
-        let mut rows = 0;
-        let mut missing = Vec::new();
-        for line in fixture
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        {
-            rows += 1;
-            let columns: Vec<_> = line.splitn(3, '\t').collect();
-            assert_eq!(columns.len(), 3, "malformed historical clap row: {line}");
-            let path: Vec<_> = if columns[0] == "." {
-                Vec::new()
-            } else {
-                columns[0].split_whitespace().collect()
-            };
-            let current = if path.is_empty() {
-                Some(&model)
-            } else {
-                command_at(&model, &path)
-            };
-            if !path.is_empty() && current.is_none() {
-                // Under an external-subcommand command (provider hook events)
-                // the words are dispatched by declaration, not clap members.
-                let dispatched = (1..path.len()).any(|end| {
-                    command_at(&model, &path[..end])
-                        .is_some_and(clap::Command::is_allow_external_subcommands_set)
-                });
-                if !retired_command(&path) && !dispatched {
-                    missing.push(format!("command {}", path.join(" ")));
-                }
-                continue;
-            }
-            let current = current.expect("root command exists");
-            for child in columns[1].split_whitespace() {
-                let mut child_path = path.clone();
-                child_path.push(child);
-                if !current.is_allow_external_subcommands_set()
-                    && !current.get_subcommands().any(|command| {
-                        command.get_name() == child
-                            || command.get_all_aliases().any(|alias| alias == child)
-                    })
-                    && !retired_command(&child_path)
-                {
-                    missing.push(format!("command {}", child_path.join(" ")));
-                }
-            }
-            for option in columns[2].split_whitespace() {
-                let name = option
-                    .strip_prefix("--")
-                    .expect("fixture options use long spellings");
-                let exact = REMOVED
-                    .iter()
-                    .any(|removed| removed.flag == Some(name) && removed.words == path);
-                if !has_option(current, &model, name) && !exact && !retired_command(&path) {
-                    missing.push(format!("option {option} at {}", path.join(" ")));
-                }
-            }
-        }
-        assert!(rows > 0, "the 1.11.1 clap fixture must not be empty");
-        assert!(
-            missing.is_empty(),
-            "unrefused historical members: {missing:?}"
+        assert_eq!(
+            crate::exit_status(&provenant_records::Outcome::Invalid),
+            2,
+            "the exit-code table assigns invalid invocations status 2"
         );
     }
 
