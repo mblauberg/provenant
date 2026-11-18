@@ -983,6 +983,21 @@ impl PrepareError {
                 PlanCheckError::Permission(error).into_refusal()
             }
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
+            Self::Run(run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+                ref path,
+                ..
+            })) if path.file_name()
+                == Some(std::ffi::OsStr::new(
+                    provenant_confinement::worktrees::REPOSITORY_LOCK,
+                )) =>
+            {
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    "repository lock busy; retry after the current repository operation finishes",
+                );
+                refusal.terminal_note = Some("repository lock busy; run `provenant retry TARGET` after the current repository operation finishes".into());
+                refusal
+            }
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
@@ -1093,6 +1108,22 @@ impl PrepareError {
             ),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
+fn repository_lock_refusal_identifies_cause_and_retry() {
+    let error = run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+        path: std::path::PathBuf::from("/private/repo")
+            .join(provenant_confinement::worktrees::REPOSITORY_LOCK),
+        timeout: std::time::Duration::ZERO,
+    });
+    let refusal = PrepareError::Run(error).into_refusal();
+    let note = refusal.terminal_note.as_deref().unwrap_or_default();
+    assert!(note.contains("repository lock busy"));
+    assert!(note.contains("provenant retry"));
+    assert!(!note.contains("/private"));
 }
 
 #[cfg(test)]

@@ -11,6 +11,27 @@ use std::{
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
 #[test]
+// Spec: docs/specs/cli.md#results
+fn scanner_refusal_names_rule_without_echoing_brief() -> Result {
+    let rig = GraphProject::new()?;
+    prepare_state(&rig)?;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (output, value) = rig.run(&["run", "task", "--brief", secret, "--explain"])?;
+    let wire = value.to_string();
+    assert!(!wire.contains(secret), "credential reached output");
+    if output.status.success() {
+        assert_eq!(
+            value["data"]["document"]["nodes"][0]["prompt"],
+            "[REDACTED]"
+        );
+    } else {
+        assert!(wire.contains("brief"), "missing field in refusal");
+        assert!(wire.contains("credential token"), "missing rule in refusal");
+    }
+    Ok(())
+}
+
+#[test]
 fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     use std::io::Write;
     let rig = GraphProject::new()?;
@@ -1452,6 +1473,31 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
     }
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    checkpoint.nodes[0].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+    checkpoint.nodes[0].attempts[0].outcome =
+        Some(provenant_fabric_runtime::graph::AttemptOutcome::Succeeded);
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        "steer-ambiguous",
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (output, value) =
+        rig.run(&["steer", "steer-ambiguous/accept", "--brief", "amended work"])?;
+    assert!(!output.status.success(), "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("settled"), "{message}");
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|next| next.contains("retry steer-ambiguous/accept --brief-file")),
+        "{value}"
+    );
     Ok(())
 }
 

@@ -1650,6 +1650,28 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/cli.md#targets
+    fn ergonomics_accepts_duration_and_result_targets() {
+        for (input, expected) in [("0", 0), ("6h", 21_600), ("2d", 172_800)] {
+            let Command::Gc(gc) = valid(&["gc", "--idle", input]).command else {
+                panic!("gc")
+            };
+            assert_eq!(gc.idle, expected);
+        }
+        valid(&["result", "fix/task"]);
+        invalid(&["gc", "--idle", "wrong"]);
+        for words in [
+            vec!["run", "task", "work", "--name", "Fix_Login"],
+            vec!["result", "Fix_Login/task"],
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("expected invalid name")
+            };
+            assert!(error.to_string().contains("fix-login"), "{error}");
+        }
+    }
+
+    #[test]
     fn graph_run_and_template_controls_parse() {
         let Command::Run(request) = valid(&[
             "run",

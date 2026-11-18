@@ -316,13 +316,14 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     assert!(value["data"]["domains"]["quota"].is_object());
     let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
-    let text = String::from_utf8_lossy(&human.stdout.bytes);
-    for field in ["profile=balanced", "schema_version=1"] {
-        assert!(
-            text.split_whitespace().any(|value| value == field),
-            "{text}"
-        );
-    }
+    let full: serde_json::Value = serde_json::from_slice(&human.stdout.bytes)?;
+    assert_eq!(full["profile"], "balanced");
+    assert_eq!(full["schema_version"], 1);
+    let compact = rig.command(&["config", "show"])?;
+    assert_eq!(code(&compact), 0);
+    let text = String::from_utf8_lossy(&compact.stdout.bytes);
+    assert!(text.contains("--full"));
+    assert!(text.lines().all(|line| line.len() <= 200), "{text}");
     let removed = rig.command(&["config", "show", "--task-class", "mechanical", "--json"])?;
     assert_eq!(code(&removed), 2);
     assert!(!rig.state.exists());

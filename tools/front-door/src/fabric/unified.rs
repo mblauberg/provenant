@@ -1376,12 +1376,16 @@ pub(crate) fn unified_graph_steer(
         Queued(Value),
         Pending(Value),
         Refused(&'static str),
+        Settled,
         Unsupported(provenant_records::control::ControlReceipt),
     }
     let result = (|| -> Result<SteerResult, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
-        let (resolved, _checkpoint) =
+        let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
+        if super::steer::selected_is_settled(&resolved, &checkpoint) {
+            return Ok(SteerResult::Settled);
+        }
         let project = factory.context.identity.project;
         let work_key = resolved
             .work_key(project)
@@ -1469,6 +1473,7 @@ pub(crate) fn unified_graph_steer(
                 BoundFacade { factory }.inbox_owner(input, Some(host.into()), budget, &cancel)
             };
         match super::steer::verified_target(&factory, &resolved, &current, budget, &cancel) {
+            super::steer::TargetProof::Settled => return Ok(SteerResult::Settled),
             super::steer::TargetProof::Conflict => {
                 return Ok(SteerResult::Refused(
                     "steering requires one verified, accepted, current live attempt",
@@ -1572,6 +1577,20 @@ pub(crate) fn unified_graph_steer(
             globals,
             "steering queued; owner verification will retry\n",
             false,
+        ),
+        Ok(SteerResult::Settled) => crate::fail_with_repair(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_target_refused",
+            &format!(
+                "{} has settled; start a follow-up or retry with an amended brief",
+                args.target
+            ),
+            Some(&format!(
+                "provenant retry {} --brief-file FILE",
+                args.target
+            )),
+            globals,
         ),
         Ok(SteerResult::Refused(message)) => crate::fail(
             "steer",
@@ -2041,6 +2060,109 @@ fn add_cache_share(data: &mut Value) {
             }
         }
     }
+}
+
+/// Summarise the latest retained evidence through the same identity-checked status reader.
+#[allow(clippy::disallowed_methods, reason = "bound the CLI read deadline")]
+pub(crate) fn unified_graph_result(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+) -> provenant_cli::run::Reply {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
+    let rows = match read_status_rows(target, edge, &mut None, deadline, &CancelToken::new()) {
+        Ok(rows) => rows,
+        Err(error) => return output_error(error.as_ref()),
+    };
+    result_reply(target, &rows)
+}
+
+fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli::run::Reply {
+    let selected: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row["kind"] == "node"
+                || (row["kind"] == "attempt"
+                    && (target.attempt.is_some() || row["latest_attempt"] == true))
+        })
+        .cloned()
+        .collect();
+    let mut human = String::new();
+    for row in &selected {
+        let id = row["id"].as_str().unwrap_or("unknown");
+        let state = row["state"].as_str().unwrap_or("unknown");
+        human.push_str(&format!("{id}: {state}\n"));
+        for (label, value) in [
+            ("branch", &row["branch"]),
+            ("head", &row["head"]),
+            ("result", &row["result_summary"]),
+        ] {
+            if !value.is_null() {
+                human.push_str(&format!(
+                    "  {label}: {}\n",
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string())
+                ));
+            }
+        }
+        let handoff = row["handoff"].get("Ok").unwrap_or(&row["handoff"]);
+        for field in ["status", "note"] {
+            if let Some(text) = handoff[field].as_str() {
+                human.push_str(&format!(
+                    "  {field}: {}\n",
+                    provenant_fabric_runtime::hosts::plain_text(text, 4096)
+                ));
+            }
+        }
+        for field in ["verify", "remaining", "decisions"] {
+            if let Some(items) = handoff[field].as_array() {
+                for item in items.iter().filter_map(Value::as_str) {
+                    human.push_str(&format!(
+                        "  {field}: {}\n",
+                        provenant_fabric_runtime::hosts::plain_text(item, 4096)
+                    ));
+                }
+            }
+        }
+        if let Some(concerns) = handoff["spec_concerns"].as_array() {
+            for concern in concerns {
+                human.push_str(&format!("  spec concern: {concern}\n"));
+            }
+        }
+    }
+    if selected.is_empty() {
+        human.push_str("no lane result yet\n");
+    }
+    provenant_cli::run::Reply {
+        result: provenant_records::CommandResult::new(
+            "result",
+            provenant_records::Outcome::Ok,
+            json!({"rows": selected}),
+        ),
+        human,
+        summary: None,
+        read_only: true,
+    }
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/cli.md#output-references-and-bounded-tails
+fn result_reports_latest_handoff_branch_head_and_checks() -> Result<(), Box<dyn std::error::Error>>
+{
+    let target = "work/task".parse()?;
+    let rows = vec![
+        json!({"kind":"node", "id":"work/task", "state":"succeeded", "branch":"feat/work"}),
+        json!({"kind":"attempt", "id":"work/task#1", "latest_attempt":false, "state":"failed"}),
+        json!({"kind":"attempt", "id":"work/task#2", "latest_attempt":true, "state":"succeeded", "head":"abc123", "handoff":{"Ok":{"status":"done", "note":"finished", "verify":["focused tests passed"]}}}),
+    ];
+    let reply = result_reply(&target, &rows);
+    for text in ["feat/work", "abc123", "finished", "focused tests passed"] {
+        assert!(reply.human.contains(text), "{}", reply.human);
+    }
+    assert!(!reply.human.contains("work/task#1"));
+    Ok(())
 }
 
 /// Read one attempt's output. Inside a lane the host reads it, so no journal

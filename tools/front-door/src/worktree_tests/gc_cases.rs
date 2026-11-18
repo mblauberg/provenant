@@ -450,7 +450,7 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
         rig.state.join("config.toml"),
         b"schema_version=1\n[gc]\nfree_floor='1B'\nschedule=false\n",
     )?;
-    let disabled = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
+    let disabled = ok(&rig, &["gc", "--scheduled", "--idle", "1d", "--json"])?;
     assert!(
         disabled["data"]["removed"]
             .as_array()
@@ -465,8 +465,8 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
             "--scheduled",
             "--pressure",
             "--apply",
-            "--idle-days",
-            "1",
+            "--idle",
+            "1d",
             "--json",
         ],
     )?;
@@ -485,7 +485,7 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
         std::ffi::OsStr::new("writer.lock"),
         provenant_os::fs::LockMode::Exclusive,
     )?;
-    let reserved = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
+    let reserved = ok(&rig, &["gc", "--scheduled", "--idle", "1d", "--json"])?;
     assert!(
         reserved["data"]["removed"]
             .as_array()
@@ -496,14 +496,7 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
     drop(held);
     let dry = ok(
         &rig,
-        &[
-            "gc",
-            "--scheduled",
-            "--idle-days",
-            "1",
-            "--dry-run",
-            "--json",
-        ],
+        &["gc", "--scheduled", "--idle", "1d", "--dry-run", "--json"],
     )?;
     assert_eq!(dry["data"]["removed"][0]["reason"], "idle");
     assert!(cache.is_dir());
@@ -513,8 +506,8 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
         &[
             "gc",
             "--scheduled",
-            "--idle-days",
-            "1",
+            "--idle",
+            "1d",
             "--free-floor",
             "18446744073709551615B",
             "--json",
@@ -649,7 +642,7 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
             }
         );
         for dry_run in [true, false] {
-            let mut args = vec!["gc", "--idle-days", "1", "--json"];
+            let mut args = vec!["gc", "--idle", "1d", "--json"];
             if dry_run {
                 args.push("--dry-run");
             }

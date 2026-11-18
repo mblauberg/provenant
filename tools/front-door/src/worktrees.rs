@@ -430,7 +430,7 @@ fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
 struct GcData {
     #[serde(flatten)]
     report: provenant_confinement::cache::CacheGcReport,
-    idle_days: u64,
+    idle_seconds: u64,
     provider_state: provenant_run::ProviderStateGc,
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
@@ -665,7 +665,7 @@ pub(crate) fn scheduled_gc(
         free_floor: None,
         dry_run: false,
         apply: true,
-        idle_days,
+        idle: idle_days.saturating_mul(86_400),
     };
     let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty()
@@ -726,7 +726,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let failure = error.to_string();
             let data = GcData {
                 report: *error.report,
-                idle_days: command.idle_days,
+                idle_seconds: command.idle,
                 unobserved_projects,
                 skipped_transient,
                 provider_state: *provider_state,
@@ -1521,7 +1521,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 dry_run: command.dry_run,
                 ..Default::default()
             },
-            idle_days: command.idle_days,
+            idle_seconds: command.idle,
             provider_state: Default::default(),
             unobserved_projects,
             skipped_transient,
@@ -1593,7 +1593,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     dry_run: command.dry_run,
                     ..Default::default()
                 },
-                idle_days: command.idle_days,
+                idle_seconds: command.idle,
                 skipped_transient,
                 notice: command
                     .pressure
@@ -1652,14 +1652,14 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map(Ok)
         .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
         .map_err(Error::DiskSpace)?;
-    let output_idle_days = if Directory::open_anchor(roots.state.as_path())?
+    let output_idle_seconds = if Directory::open_anchor(roots.state.as_path())?
         .available_bytes()
         .map_err(Error::DiskSpace)?
         < free_floor
     {
-        1
+        86_400
     } else {
-        command.idle_days
+        command.idle
     };
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
@@ -1667,7 +1667,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map(|now| i128::from(now.as_micros()) * 1_000)
         .map_err(|_| Error::Budget)?;
     let policy = CacheGcPolicy {
-        idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
+        idle_before_ns: Some(now_ns - i128::from(command.idle) * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
         max_total_bytes: Some(
             config
@@ -1705,11 +1705,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_ids: &project_ids,
         policy,
         now_ns,
-        output_idle_days,
+        output_idle_seconds,
         free_floor,
         cache_error: None,
         data: GcData {
-            idle_days: command.idle_days,
+            idle_seconds: command.idle,
             unobserved_projects,
             skipped_transient,
             ..Default::default()
@@ -1782,7 +1782,7 @@ struct GcAdapters<'a> {
     project_ids: &'a [provenant_core::ProjectId],
     policy: provenant_confinement::cache::CacheGcPolicy,
     now_ns: i128,
-    output_idle_days: u64,
+    output_idle_seconds: u64,
     free_floor: u64,
     cache_error: Option<provenant_confinement::cache::CacheGcError>,
     data: GcData,
@@ -1830,7 +1830,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let config = self.config;
         let workers = self.workers;
         let facts = self.facts;
-        let output_idle_days = self.output_idle_days;
+        let output_idle_seconds = self.output_idle_seconds;
 
         for project in &mut self.projects {
             let settings = config
@@ -2002,7 +2002,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                             regenerable: &settings.regenerable,
                             keep: &settings.keep,
                             written_before_ns: now_ns
-                                - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
+                                - i128::from(output_idle_seconds) * 1_000_000_000,
                             include_foreign: !command.pressure
                                 && settings.foreign_worktrees
                                     == provenant_config::ForeignWorktrees::Collect,
@@ -2126,7 +2126,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
 
         self.data.staging_busy = crate::staging_gc::collect(
             roots.state.as_path(),
-            now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
+            now_ns - i128::from(command.idle) * 1_000_000_000,
             command.dry_run,
         )?;
 

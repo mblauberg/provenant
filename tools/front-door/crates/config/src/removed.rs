@@ -30,6 +30,7 @@ pub const fn flag(
 /// Every removed CLI spelling exits 2 with one line naming its replacement;
 /// there are no aliases.
 pub const REMOVED: &[Removed] = &[
+    flag(&["gc"], "idle-days", "provenant gc --idle 2d"),
     flag(
         &["dispatch"],
         "prompt-file",

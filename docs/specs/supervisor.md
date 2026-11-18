@@ -292,7 +292,7 @@ The sample is periodic observation, not an atomic census or a memory limit.
 (1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
-available from `provenant config show`.
+available from `provenant config show --full`.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
 - Owner: `crates/supervisor/src/process_tree.rs`, `src/process_tree.rs`

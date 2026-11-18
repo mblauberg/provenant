@@ -180,8 +180,7 @@ fn emit_summarised<T: Serialize>(
     }
 }
 
-/// A policy explanation is a structured result. Its compact transport projects
-/// complete policy facts rather than cutting the owner's pretty JSON mid-field.
+/// A policy explanation is a structured result; compact output names omitted rows.
 fn land_explanation(
     data: &serde_json::Value,
     globals: &provenant_cli::Globals,
@@ -217,7 +216,8 @@ fn land_explanation(
         rows.push(format!("CI patience: {patience}s ({source})"));
     }
     if let Some(warnings) = data["warnings"].as_array() {
-        rows.extend(
+        rows.splice(
+            0..0,
             warnings
                 .iter()
                 .filter_map(serde_json::Value::as_str)
@@ -237,7 +237,7 @@ fn land_explanation(
         }
     }
     detail.push_str(" land --explain --json");
-    Some(provenant_cli::Summary::complete(
+    Some(provenant_cli::Summary::new(
         "Landing policy",
         rows,
         Some(detail),
@@ -747,12 +747,39 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
         })
     })();
     match result {
-        Ok(value) => emit(
-            &CommandResult::new(command, Outcome::Ok, value.clone()),
-            globals,
-            &provenant_cli::terse(&value),
-            true,
-        ),
+        Ok(value) => {
+            let human = if command == "config show" {
+                if globals.full {
+                    serde_json::to_string_pretty(&value).unwrap_or_default() + "\n"
+                } else {
+                    let sections = value
+                        .as_object()
+                        .map(|object| {
+                            object
+                                .keys()
+                                .filter(|key| !matches!(key.as_str(), "origins" | "policy_render"))
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let profile = value["profile"].as_str().unwrap_or("unknown");
+                    let revision = value["revision"].as_str().unwrap_or("unknown");
+                    let warnings = value["warnings"].as_array().map_or(0, Vec::len);
+                    format!(
+                        "effective configuration: profile={profile} revision={revision} warnings={warnings}\nsections: {sections}\nUse `provenant config show --full` for values and sources, or `--json` for structured data.\n"
+                    )
+                }
+            } else {
+                provenant_cli::terse(&value)
+            };
+            emit(
+                &CommandResult::new(command, Outcome::Ok, value),
+                globals,
+                &human,
+                true,
+            )
+        }
         Err(error) => {
             let status = match error.downcast_ref::<provenant_config::ConfigError>() {
                 Some(
@@ -1408,6 +1435,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         ),
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
             fabric::unified_graph_output(&cmd, edge, globals, process.workers())
+        }),
+        Command::Result { target } => run_edge(&inv.leaf, globals, |edge| {
+            fabric::unified_graph_result(&target, edge)
         }),
         Command::Stop(cmd) if provenant_cli::fabric::in_lane() => {
             run_edge(&inv.leaf, globals, |_| {

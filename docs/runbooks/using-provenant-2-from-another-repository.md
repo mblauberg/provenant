@@ -118,7 +118,7 @@ it does not list with the `worktree_layout` port (`default` and `roots` in
 
 ```sh
 provenant config ports
-provenant config show
+provenant config show --full
 ```
 
 ## Opt into ports

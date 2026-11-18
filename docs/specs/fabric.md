@@ -364,7 +364,7 @@ uses `pr_slow_interval_ms` while checks run and returns to `pr_interval_ms`
 within `pr_near_end_window_ms` of the median duration for that check name,
 learned from the latest 64 cached commit pages in the repository observer.
 These settings change request cadence only; they do not change a gate verdict.
-Their sources are shown by `provenant config show`.
+Their sources are shown by `provenant config show --full`.
 - Why: deterministic decisions need durable evidence without a launch.
 
 ### Bounded loops

@@ -117,7 +117,22 @@ impl CatalogueArg for Arg {
         self.required_unless_present(id).add(conditions)
     }
     fn catalog_graph_target(self) -> Self {
-        self.add(TargetGrammar(TargetSyntax::Graph))
+        self.value_parser(|text: &str| -> Result<crate::target::Target, String> {
+            crate::target::Target::parse(text).map_err(|error| {
+                let (name, suffix) = text
+                    .split_once('/')
+                    .map_or((text, ""), |(name, _)| (name, &text[name.len()..]));
+                let suggestion =
+                    provenant_fabric_runtime::graph::template::default_graph_base(name);
+                let candidate = format!("{suggestion}{suffix}");
+                if suggestion != name && crate::target::Target::parse(&candidate).is_ok() {
+                    format!("{error}; try `{candidate}`")
+                } else {
+                    error.to_string()
+                }
+            })
+        })
+        .add(TargetGrammar(TargetSyntax::Graph))
     }
     fn catalog_graph_name(self) -> Self {
         self.add(TargetGrammar(TargetSyntax::GraphName))

@@ -161,6 +161,16 @@ Transfer to a named session is deferred.
 
 ### Output references and bounded tails
 
+`result NAME[/NODE[#N]]` reads the current lane evidence in one call: state,
+branch, recorded head, handoff status and note, and verification reported in the
+handoff. `--json` retains the structured evidence and `--full` shows the complete
+human view. Missing or unavailable evidence is not proof of a check.
+`retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
+`gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
+idle age; scheduled GC continues to use the configured `gc.idle_days`.
+`config show` summarises the effective configuration; `--full` shows its values
+and sources, and `--json` returns the structured configuration.
+
 For a graph with one non-composite top-level node, `output GRAPH` reads that
 node's newest settled attempt. For a composite root it reads the declared bounded result and
 returns its typed exports, without inventing an attempt identity. A bare graph
