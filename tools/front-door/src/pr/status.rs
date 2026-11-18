@@ -27,6 +27,8 @@ struct RestWaitPull {
     state: String,
     head: RestWaitHead,
     #[serde(default)]
+    base: Option<RestWaitBase>,
+    #[serde(default)]
     merged_at: Option<String>,
     #[serde(default)]
     mergeable_state: Option<String>,
@@ -37,6 +39,11 @@ struct RestWaitPull {
 #[derive(Deserialize)]
 struct RestWaitHead {
     sha: String,
+}
+#[derive(Deserialize)]
+struct RestWaitBase {
+    #[serde(rename = "ref", default)]
+    branch: String,
 }
 #[derive(Deserialize)]
 struct Check {
@@ -60,6 +67,13 @@ pub(crate) struct Line {
     failing_checks: Vec<String>,
     merge: String,
     review: String,
+    /// Why no check was reported for this head, when that is known: either
+    /// `merge_conflict` or `not_scheduled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cause: Option<String>,
+    /// The action that unblocks the head, paired with `cause`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) next: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -132,7 +146,15 @@ impl Line {
         if self.draft {
             line.push_str(" draft");
         }
+        line.push_str(&self.cause_suffix());
         line
+    }
+    /// The diagnosis a waiter prints for a head whose checks never started.
+    pub(crate) fn cause_suffix(&self) -> String {
+        match (&self.cause, &self.next) {
+            (Some(cause), Some(next)) => format!(" cause={cause} next: {next}"),
+            _ => String::new(),
+        }
     }
 }
 
@@ -585,12 +607,14 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         std::time::Duration::ZERO,
         request,
     )?;
+    let (merge_state, value) = observer.pull_merge_state(number, value, request)?;
     let pull: RestWaitPull = serde_json::from_value(value)?;
     let state = if pull.merged_at.is_some() {
         "MERGED".to_owned()
     } else {
         pull.state.to_ascii_uppercase()
     };
+    let base = pull.base.as_ref().map(|base| base.branch.clone());
     let view = View {
         state,
         head: pull.head.sha,
@@ -602,7 +626,12 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         url: pull.html_url,
     };
     let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
-    let line = status_line(number, view, Some(&checks));
+    let mut line = status_line(number, view, Some(&checks));
+    if checks.is_empty() {
+        let cause = merge_state.no_checks_cause(base.as_deref());
+        line.cause = Some(cause.code.to_owned());
+        line.next = Some(cause.next);
+    }
     Ok((line, checks))
 }
 
@@ -685,6 +714,8 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         state: view.state,
         head: view.head,
         draft: view.draft,
+        cause: None,
+        next: None,
         error: None,
     }
 }
@@ -782,6 +813,8 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 failing_checks: Vec::new(),
                 merge: "unknown".into(),
                 review: "unknown".into(),
+                cause: None,
+                next: None,
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
             }
         }
@@ -917,6 +950,8 @@ mod tests {
             failing_checks: Vec::new(),
             merge: "clean".into(),
             review: "approved".into(),
+            cause: None,
+            next: None,
             error: error.map(str::to_owned),
         }
     }
