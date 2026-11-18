@@ -217,7 +217,9 @@ pub(super) fn collect(
     };
     let mut entries = directory.entries()?;
     if let Some(position) = resume {
-        entries.seek(position)?;
+        if entries.seek(position).is_err() {
+            entries = directory.entries()?;
+        }
     }
     loop {
         let before = entries.position()?;
@@ -225,6 +227,11 @@ pub(super) fn collect(
         let name = entry?;
         let path = directory.anchored_path().join(&name);
         if !control.should_continue() {
+            if report.removed {
+                directory
+                    .sync()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+            }
             report.interrupted_at = Some(path);
             report.continuation = Some(before);
             return Ok(report);
@@ -235,6 +242,11 @@ pub(super) fn collect(
             })
         }) {
             if !control.should_continue() {
+                if report.removed {
+                    directory
+                        .sync()
+                        .map_err(JournalError::DurabilityUnconfirmed)?;
+                }
                 report.interrupted_at = Some(path);
                 report.continuation = Some(before);
                 return Ok(report);

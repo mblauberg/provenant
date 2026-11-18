@@ -613,6 +613,105 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
 }
 
 #[test]
+fn orphan_prompt_cleanup_resumes_from_the_saved_directory_cookie() {
+    use std::cell::Cell;
+
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let fixture: StoredCheckpoint = stored_fixture();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+
+    let directory = graph_directory(&root, project).unwrap();
+    let mut prompts = serde_json::json!({
+        "nodes": (0..128)
+            .map(|index| serde_json::json!({"prompt": format!("orphan prompt {index}")}))
+            .collect::<Vec<_>>()
+    });
+    prompt_store::externalise(&directory, "g-test", &mut prompts).unwrap();
+    let checkpoint = directory.anchored_path().join("graph-g-test.json");
+    std::fs::remove_file(checkpoint).unwrap();
+    std::fs::write(
+        directory.anchored_path().join("graph-g-test.advance-error"),
+        b"stale",
+    )
+    .unwrap();
+    let metadata = directory.metadata().unwrap();
+    let detail = format!(
+        "graph-collection-v1|orphans|-|0|0|0|0|{}|{}|{}|0|0|0",
+        metadata.device, metadata.inode, metadata.modified_ns
+    );
+    let candidate_root = directory.anchored_path();
+    let entries = directory.entries().unwrap().count();
+    let checks = Cell::new(0usize);
+    let keep_going = || {
+        let count = checks.get() + 1;
+        checks.set(count);
+        count <= entries + 1
+    };
+    let first = FileJournal::collect_terminal(
+        &root,
+        project,
+        i128::MAX,
+        &provenant_core::SweepControl {
+            start_at: Some(&candidate_root),
+            detail: Some(&detail),
+            cancel: cancel.clone(),
+            keep_going: Some(&keep_going),
+        },
+        &clock,
+    )
+    .unwrap();
+    assert!(first.interrupted_at.is_some());
+    let candidate = first.interrupted_at.unwrap();
+    let continuation = first.continuation.unwrap();
+    assert!(continuation.contains("|orphan-prompts|"), "{continuation}");
+
+    let resumed = FileJournal::collect_terminal(
+        &root,
+        project,
+        i128::MAX,
+        &provenant_core::SweepControl {
+            start_at: Some(&candidate),
+            detail: Some(&continuation),
+            cancel,
+            ..Default::default()
+        },
+        &clock,
+    )
+    .unwrap();
+    assert!(resumed.interrupted_at.is_none());
+    let remaining_prompts = directory
+        .entries()
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.to_string_lossy().contains(".prompt-"))
+        .count();
+    assert_eq!(remaining_prompts, 0);
+    assert!(
+        !directory
+            .anchored_path()
+            .join("graph-g-test.advance-error")
+            .exists()
+    );
+    assert!(
+        directory
+            .anchored_path()
+            .join("graph-g-test.reserved")
+            .exists()
+    );
+}
+
+#[test]
 fn interrupted_marker_and_sentinel_publications_converge() {
     use super::journal::{CRASH_POINT, CrashPoint};
     use std::panic::{AssertUnwindSafe, catch_unwind};

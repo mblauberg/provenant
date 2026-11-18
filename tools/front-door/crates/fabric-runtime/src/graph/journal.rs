@@ -195,34 +195,69 @@ pub struct GraphCollectionReport {
     pub continuation: Option<String>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct GraphDirectoryStamp {
+    device: u64,
+    inode: u64,
+    modified_ns: i128,
+}
+
+impl GraphDirectoryStamp {
+    fn read(directory: &Directory) -> Self {
+        directory.metadata().map_or_else(
+            |_| Self::default(),
+            |metadata| Self {
+                device: metadata.device,
+                inode: metadata.inode,
+                modified_ns: metadata.modified_ns,
+            },
+        )
+    }
+
+    fn matches(self, directory: &Directory) -> bool {
+        self == Self::read(directory) && self.device != 0 && self.inode != 0
+    }
+}
+
 struct GraphCollectionCursor {
     phase: String,
     id: Option<String>,
     cookie: provenant_os::fs::DirectoryPosition,
     nested: provenant_os::fs::DirectoryPosition,
+    directory: GraphDirectoryStamp,
+    nested_directory: GraphDirectoryStamp,
 }
 
 impl GraphCollectionCursor {
-    fn checkpoints(cookie: provenant_os::fs::DirectoryPosition) -> Self {
+    fn checkpoints(cookie: provenant_os::fs::DirectoryPosition, directory: &Directory) -> Self {
         Self {
             phase: "checkpoints".into(),
             id: None,
             cookie,
             nested: Default::default(),
+            directory: GraphDirectoryStamp::read(directory),
+            nested_directory: GraphDirectoryStamp::default(),
         }
     }
-    fn cleanup(id: &str, cookie: provenant_os::fs::DirectoryPosition) -> Self {
+    fn cleanup(
+        id: &str,
+        cookie: provenant_os::fs::DirectoryPosition,
+        directory: &Directory,
+    ) -> Self {
         Self {
             phase: "cleanup".into(),
             id: Some(id.into()),
             cookie,
             nested: Default::default(),
+            directory: GraphDirectoryStamp::read(directory),
+            nested_directory: GraphDirectoryStamp::default(),
         }
     }
     fn orphan_cleanup(
         id: &str,
         cookie: provenant_os::fs::DirectoryPosition,
         pending: bool,
+        directory: &Directory,
     ) -> Self {
         Self {
             phase: if pending {
@@ -233,22 +268,28 @@ impl GraphCollectionCursor {
             id: Some(id.into()),
             cookie,
             nested: Default::default(),
+            directory: GraphDirectoryStamp::read(directory),
+            nested_directory: GraphDirectoryStamp::default(),
         }
     }
-    fn orphans(cookie: provenant_os::fs::DirectoryPosition) -> Self {
+    fn orphans(cookie: provenant_os::fs::DirectoryPosition, directory: &Directory) -> Self {
         Self {
             phase: "orphans".into(),
             id: None,
             cookie,
             nested: Default::default(),
+            directory: GraphDirectoryStamp::read(directory),
+            nested_directory: GraphDirectoryStamp::default(),
         }
     }
-    fn pending(cookie: provenant_os::fs::DirectoryPosition) -> Self {
+    fn pending(cookie: provenant_os::fs::DirectoryPosition, directory: &Directory) -> Self {
         Self {
             phase: "pending".into(),
             id: None,
             cookie,
             nested: Default::default(),
+            directory: GraphDirectoryStamp::read(directory),
+            nested_directory: GraphDirectoryStamp::default(),
         }
     }
     fn nested(
@@ -256,23 +297,33 @@ impl GraphCollectionCursor {
         id: &str,
         cookie: provenant_os::fs::DirectoryPosition,
         nested: provenant_os::fs::DirectoryPosition,
+        directory: &Directory,
+        nested_directory: GraphDirectoryStamp,
     ) -> Self {
         Self {
             phase: phase.into(),
             id: Some(id.into()),
             cookie,
             nested,
+            directory: GraphDirectoryStamp::read(directory),
+            nested_directory,
         }
     }
     fn encode(&self) -> String {
         format!(
-            "graph-collection-v1|{}|{}|{}|{}|{}|{}",
+            "graph-collection-v1|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.phase,
             self.id.as_deref().unwrap_or("-"),
             self.cookie.block,
             self.cookie.offset,
             self.nested.block,
             self.nested.offset,
+            self.directory.device,
+            self.directory.inode,
+            self.directory.modified_ns,
+            self.nested_directory.device,
+            self.nested_directory.inode,
+            self.nested_directory.modified_ns,
         )
     }
     fn parse(value: Option<&str>) -> Option<Self> {
@@ -304,6 +355,16 @@ impl GraphCollectionCursor {
         let offset = fields.next()?.parse().ok()?;
         let nested_block = fields.next()?.parse().ok()?;
         let nested_offset = fields.next()?.parse().ok()?;
+        let directory = GraphDirectoryStamp {
+            device: fields.next()?.parse().ok()?,
+            inode: fields.next()?.parse().ok()?,
+            modified_ns: fields.next()?.parse().ok()?,
+        };
+        let nested_directory = GraphDirectoryStamp {
+            device: fields.next()?.parse().ok()?,
+            inode: fields.next()?.parse().ok()?,
+            modified_ns: fields.next()?.parse().ok()?,
+        };
         if fields.next().is_some() {
             return None;
         }
@@ -315,6 +376,8 @@ impl GraphCollectionCursor {
                 block: nested_block,
                 offset: nested_offset,
             },
+            directory,
+            nested_directory,
         })
     }
 }
@@ -839,20 +902,33 @@ impl FileJournal {
                     &candidate,
                     control,
                     clock,
-                    Some(cursor.as_ref().unwrap().nested),
+                    cursor
+                        .as_ref()
+                        .unwrap()
+                        .nested_directory
+                        .matches(&directory)
+                        .then_some(cursor.as_ref().unwrap().nested),
                 )?;
                 report.removed = report
                     .removed
                     .saturating_add(usize::from(cleaned.recovered));
                 if let Some(path) = cleaned.interrupted_at {
                     let next = cleaned.prompt_cookie.map_or_else(
-                        || GraphCollectionCursor::cleanup(id, cursor.as_ref().unwrap().cookie),
+                        || {
+                            GraphCollectionCursor::cleanup(
+                                id,
+                                cursor.as_ref().unwrap().cookie,
+                                &directory,
+                            )
+                        },
                         |nested| {
                             GraphCollectionCursor::nested(
                                 "checkpoint-prompts",
                                 id,
                                 cursor.as_ref().unwrap().cookie,
                                 nested,
+                                &directory,
+                                GraphDirectoryStamp::read(&directory),
                             )
                         },
                     );
@@ -868,7 +944,11 @@ impl FileJournal {
                 "checkpoints" | "cleanup" | "checkpoint-scratch" | "checkpoint-prompts"
             )
         }) {
-            entries.seek(cursor.cookie)?;
+            if cursor.directory.matches(&directory) && entries.seek(cursor.cookie).is_err() {
+                entries = directory.entries()?;
+            } else if !cursor.directory.matches(&directory) {
+                entries = directory.entries()?;
+            }
         }
         loop {
             let before = entries.position()?;
@@ -879,7 +959,7 @@ impl FileJournal {
                 interrupt_graph_collection(
                     &mut report,
                     path,
-                    GraphCollectionCursor::checkpoints(before),
+                    GraphCollectionCursor::checkpoints(before, &directory),
                 );
                 return Ok(report);
             }
@@ -932,7 +1012,7 @@ impl FileJournal {
                 interrupt_graph_collection(
                     &mut report,
                     path,
-                    GraphCollectionCursor::cleanup(id, before),
+                    GraphCollectionCursor::cleanup(id, before, &directory),
                 );
                 return Ok(report);
             }
@@ -941,7 +1021,7 @@ impl FileJournal {
                 .filter(|cursor| {
                     cursor.phase == "checkpoint-scratch" && cursor.id.as_deref() == Some(id)
                 })
-                .map(|cursor| cursor.nested);
+                .map(|cursor| (cursor.nested, cursor.nested_directory));
             let scratch = collect_scratch_documents(&stored.execution, control, scratch_resume)?;
             if scratch.interrupted {
                 interrupt_graph_collection(
@@ -952,6 +1032,8 @@ impl FileJournal {
                         id,
                         before,
                         scratch.cookie.unwrap_or_default(),
+                        &directory,
+                        scratch.directory,
                     ),
                 );
                 return Ok(report);
@@ -960,7 +1042,7 @@ impl FileJournal {
                 interrupt_graph_collection(
                     &mut report,
                     path,
-                    GraphCollectionCursor::cleanup(id, before),
+                    GraphCollectionCursor::cleanup(id, before, &directory),
                 );
                 return Ok(report);
             }
@@ -970,7 +1052,7 @@ impl FileJournal {
                     interrupt_graph_collection(
                         &mut report,
                         path.clone(),
-                        GraphCollectionCursor::cleanup(id, before),
+                        GraphCollectionCursor::cleanup(id, before, &directory),
                     );
                     return Ok(());
                 }
@@ -986,6 +1068,8 @@ impl FileJournal {
                             &id,
                             before,
                             prompts.continuation.unwrap_or_default(),
+                            &directory,
+                            GraphDirectoryStamp::read(&directory),
                         ),
                     );
                     return Ok(());
@@ -995,7 +1079,7 @@ impl FileJournal {
                         interrupt_graph_collection(
                             &mut report,
                             path.clone(),
-                            GraphCollectionCursor::orphan_cleanup(&id, before, false),
+                            GraphCollectionCursor::orphan_cleanup(&id, before, false, &directory),
                         );
                         return Ok(());
                     }
@@ -1010,7 +1094,7 @@ impl FileJournal {
                     interrupt_graph_collection(
                         &mut report,
                         path.clone(),
-                        GraphCollectionCursor::orphan_cleanup(&id, before, false),
+                        GraphCollectionCursor::orphan_cleanup(&id, before, false, &directory),
                     );
                     return Ok(());
                 }
@@ -1024,7 +1108,7 @@ impl FileJournal {
                     interrupt_graph_collection(
                         &mut report,
                         path.clone(),
-                        GraphCollectionCursor::orphan_cleanup(&id, before, false),
+                        GraphCollectionCursor::orphan_cleanup(&id, before, false, &directory),
                     );
                     return Ok(());
                 }
@@ -1074,6 +1158,14 @@ impl FileJournal {
             .as_ref()
             .map_or("orphans", |cursor| cursor.phase.as_str());
         let pending_phase = matches!(phase, "pending" | "pending-cleanup" | "pending-prompts");
+        let marker_directory = if pending_phase {
+            directory
+                .open_verified_directory(OsStr::new("pending"))
+                .ok()
+        } else {
+            None
+        };
+        let cursor_directory = marker_directory.as_ref().unwrap_or(&directory);
 
         if matches!(
             phase,
@@ -1085,7 +1177,14 @@ impl FileJournal {
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| directory.anchored_path().join(format!("graph-{id}.lock")));
                 let prompt_resume = matches!(phase, "orphan-prompts" | "pending-prompts")
-                    .then(|| cursor.as_ref().expect("cursor exists").nested);
+                    .then(|| {
+                        let cursor = cursor.as_ref().expect("cursor exists");
+                        cursor
+                            .nested_directory
+                            .matches(&directory)
+                            .then_some(cursor.nested)
+                    })
+                    .flatten();
                 let cleaned = Self::collect_unreferenced_id(
                     root,
                     project,
@@ -1106,6 +1205,7 @@ impl FileJournal {
                                 id,
                                 cursor.as_ref().unwrap().cookie,
                                 pending_phase,
+                                cursor_directory,
                             )
                         },
                         |nested| {
@@ -1118,6 +1218,8 @@ impl FileJournal {
                                 id,
                                 cursor.as_ref().unwrap().cookie,
                                 nested,
+                                cursor_directory,
+                                GraphDirectoryStamp::read(&directory),
                             )
                         },
                     );
@@ -1129,8 +1231,15 @@ impl FileJournal {
 
         if !pending_phase {
             let mut entries = directory.entries()?;
-            if let Some(cursor) = cursor.as_ref().filter(|_| phase.starts_with("orphan")) {
-                entries.seek(cursor.cookie)?;
+            if let Some(cursor) = cursor.as_ref().filter(|_| phase.starts_with("orphan"))
+                && cursor.directory.matches(&directory)
+                && entries.seek(cursor.cookie).is_err()
+            {
+                entries = directory.entries()?;
+            } else if cursor.as_ref().is_some_and(|cursor| {
+                phase.starts_with("orphan") && !cursor.directory.matches(&directory)
+            }) {
+                entries = directory.entries()?;
             }
             loop {
                 let before = entries.position()?;
@@ -1141,7 +1250,7 @@ impl FileJournal {
                     interrupt_graph_collection(
                         &mut report,
                         path,
-                        GraphCollectionCursor::orphans(before),
+                        GraphCollectionCursor::orphans(before, &directory),
                     );
                     return Ok(report);
                 }
@@ -1156,34 +1265,52 @@ impl FileJournal {
                     .saturating_add(usize::from(cleaned.recovered));
                 if let Some(path) = cleaned.interrupted_at {
                     let next = cleaned.prompt_cookie.map_or_else(
-                        || GraphCollectionCursor::orphan_cleanup(id, before, false),
+                        || GraphCollectionCursor::orphan_cleanup(id, before, false, &directory),
                         |nested| {
-                            GraphCollectionCursor::nested("orphan-prompts", id, before, nested)
+                            GraphCollectionCursor::nested(
+                                "orphan-prompts",
+                                id,
+                                before,
+                                nested,
+                                &directory,
+                                GraphDirectoryStamp::read(&directory),
+                            )
                         },
                     );
                     interrupt_graph_collection(&mut report, path, next);
                     return Ok(report);
                 }
             }
-            if !control.should_continue() {
-                interrupt_graph_collection(
-                    &mut report,
-                    directory.anchored_path().join("pending"),
-                    GraphCollectionCursor::pending(Default::default()),
-                );
-                return Ok(report);
-            }
         }
 
-        let markers = match directory.open_verified_directory(OsStr::new("pending")) {
-            Ok(markers) => markers,
-            Err(error) if error.is_not_found() => return Ok(report),
-            Err(error) => return Err(error.into()),
+        let markers = match marker_directory {
+            Some(markers) => markers,
+            None => match directory.open_verified_directory(OsStr::new("pending")) {
+                Ok(markers) => markers,
+                Err(error) if error.is_not_found() => return Ok(report),
+                Err(error) => return Err(error.into()),
+            },
         };
+        if !pending_phase && !control.should_continue() {
+            interrupt_graph_collection(
+                &mut report,
+                markers.anchored_path(),
+                GraphCollectionCursor::pending(Default::default(), &markers),
+            );
+            return Ok(report);
+        }
         let mut entries = markers.entries()?;
         if pending_phase {
-            if let Some(cursor) = cursor.as_ref() {
-                entries.seek(cursor.cookie)?;
+            if let Some(cursor) = cursor.as_ref()
+                && cursor.directory.matches(&markers)
+                && entries.seek(cursor.cookie).is_err()
+            {
+                entries = markers.entries()?;
+            } else if cursor
+                .as_ref()
+                .is_some_and(|cursor| !cursor.directory.matches(&markers))
+            {
+                entries = markers.entries()?;
             }
         }
         loop {
@@ -1195,7 +1322,7 @@ impl FileJournal {
                 interrupt_graph_collection(
                     &mut report,
                     path,
-                    GraphCollectionCursor::pending(before),
+                    GraphCollectionCursor::pending(before, &markers),
                 );
                 return Ok(report);
             }
@@ -1214,8 +1341,17 @@ impl FileJournal {
                 .saturating_add(usize::from(cleaned.recovered));
             if let Some(path) = cleaned.interrupted_at {
                 let next = cleaned.prompt_cookie.map_or_else(
-                    || GraphCollectionCursor::orphan_cleanup(id, before, true),
-                    |nested| GraphCollectionCursor::nested("pending-prompts", id, before, nested),
+                    || GraphCollectionCursor::orphan_cleanup(id, before, true, &markers),
+                    |nested| {
+                        GraphCollectionCursor::nested(
+                            "pending-prompts",
+                            id,
+                            before,
+                            nested,
+                            &markers,
+                            GraphDirectoryStamp::read(&directory),
+                        )
+                    },
                 );
                 interrupt_graph_collection(&mut report, path, next);
                 return Ok(report);
@@ -1929,6 +2065,7 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
 struct ScratchCollection {
     interrupted: bool,
     cookie: Option<provenant_os::fs::DirectoryPosition>,
+    directory: GraphDirectoryStamp,
 }
 
 impl Default for ScratchCollection {
@@ -1936,6 +2073,7 @@ impl Default for ScratchCollection {
         Self {
             interrupted: false,
             cookie: None,
+            directory: GraphDirectoryStamp::default(),
         }
     }
 }
@@ -1943,7 +2081,7 @@ impl Default for ScratchCollection {
 fn collect_scratch_documents(
     execution: &GraphExecution,
     control: &provenant_core::SweepControl<'_>,
-    resume: Option<provenant_os::fs::DirectoryPosition>,
+    resume: Option<(provenant_os::fs::DirectoryPosition, GraphDirectoryStamp)>,
 ) -> Result<ScratchCollection, JournalError> {
     let directory = match Directory::open_anchor(&execution.directory) {
         Ok(directory) => directory,
@@ -1960,6 +2098,13 @@ fn collect_scratch_documents(
     }
     let mut metadata = directory.metadata()?;
     if metadata.uid == provenant_os::fs::effective_uid() && metadata.mode & 0o077 != 0 {
+        if !control.should_continue() {
+            return Ok(ScratchCollection {
+                interrupted: true,
+                cookie: Some(Default::default()),
+                directory: GraphDirectoryStamp::read(&directory),
+            });
+        }
         directory.make_private()?;
         metadata = directory.metadata()?;
     }
@@ -1968,8 +2113,10 @@ fn collect_scratch_documents(
     }
     let mut removed = false;
     let mut entries = directory.entries()?;
-    if let Some(position) = resume {
-        entries.seek(position)?;
+    if let Some((position, _stamp)) = resume.filter(|(_, stamp)| stamp.matches(&directory))
+        && entries.seek(position).is_err()
+    {
+        entries = directory.entries()?;
     }
     let mut report = ScratchCollection::default();
     loop {
@@ -1987,12 +2134,22 @@ fn collect_scratch_documents(
         if metadata.uid != provenant_os::fs::effective_uid() || metadata.links != 1 {
             continue;
         }
+        if !control.should_continue() {
+            report.interrupted = true;
+            report.cookie = Some(before);
+            break;
+        }
         let Ok(bytes) = directory.read_stable(
             &name,
             crate::config::GraphLimits::document_bytes_bound().maximum_u64(),
         ) else {
             continue;
         };
+        if !control.should_continue() {
+            report.interrupted = true;
+            report.cookie = Some(before);
+            break;
+        }
         if serde_json::from_slice::<GraphDocument>(&bytes)
             .ok()
             .as_ref()
@@ -2022,6 +2179,7 @@ fn collect_scratch_documents(
             .sync()
             .map_err(JournalError::DurabilityUnconfirmed)?;
     }
+    report.directory = GraphDirectoryStamp::read(&directory);
     Ok(report)
 }
 

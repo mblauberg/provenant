@@ -206,13 +206,16 @@ fn walk_directory(
     if cursor.is_some_and(|cursor| !cursor.matches(directory, phase)) {
         return Ok(Walk::Stale);
     }
+    let initial_metadata = directory.metadata().map_err(|error| error.to_string())?;
     let mut entries = directory.entries().map_err(|error| error.to_string())?;
     if let Some(cursor) = cursor {
-        let _ = entries.seek(cursor.cookie);
+        if entries.seek(cursor.cookie).is_err() {
+            return Ok(Walk::Stale);
+        }
     }
     let mut target = cursor.and(start_at);
     loop {
-        let before = entries.position().unwrap_or_default();
+        let before = entries.position().map_err(|error| error.to_string())?;
         let Some(item) = entries.next() else { break };
         let item = item.map_err(|error| error.to_string())?;
         let path = display_root.join(&item);
@@ -244,6 +247,13 @@ fn walk_directory(
         );
     }
     if target.is_some() {
+        return Ok(Walk::Stale);
+    }
+    let final_metadata = directory.metadata().map_err(|error| error.to_string())?;
+    if initial_metadata.device != final_metadata.device
+        || initial_metadata.inode != final_metadata.inode
+        || initial_metadata.modified_ns != final_metadata.modified_ns
+    {
         return Ok(Walk::Stale);
     }
     Ok(Walk::Complete(bytes))
@@ -331,6 +341,7 @@ struct MeasureCursor {
     phase: String,
     device: u64,
     inode: u64,
+    modified_ns: i128,
     cookie: DirectoryPosition,
     bytes: u64,
 }
@@ -342,6 +353,7 @@ impl MeasureCursor {
             phase: phase.into(),
             device: metadata.map_or(0, |metadata| metadata.device),
             inode: metadata.map_or(0, |metadata| metadata.inode),
+            modified_ns: metadata.map_or(0, |metadata| metadata.modified_ns),
             cookie,
             bytes,
         }
@@ -349,13 +361,21 @@ impl MeasureCursor {
     fn matches(&self, directory: &Directory, phase: &str) -> bool {
         self.phase == phase
             && directory.metadata().is_ok_and(|metadata| {
-                metadata.device == self.device && metadata.inode == self.inode
+                metadata.device == self.device
+                    && metadata.inode == self.inode
+                    && metadata.modified_ns == self.modified_ns
             })
     }
     fn encode(&self) -> String {
         format!(
-            "graph-measure-v1|{}|{}|{}|{}|{}|{}",
-            self.phase, self.device, self.inode, self.cookie.block, self.cookie.offset, self.bytes
+            "graph-measure-v1|{}|{}|{}|{}|{}|{}|{}",
+            self.phase,
+            self.device,
+            self.inode,
+            self.modified_ns,
+            self.cookie.block,
+            self.cookie.offset,
+            self.bytes
         )
     }
     fn parse(value: Option<&str>) -> Option<Self> {
@@ -367,6 +387,7 @@ impl MeasureCursor {
             phase: fields.next()?.into(),
             device: fields.next()?.parse().ok()?,
             inode: fields.next()?.parse().ok()?,
+            modified_ns: fields.next()?.parse().ok()?,
             cookie: DirectoryPosition {
                 block: fields.next()?.parse().ok()?,
                 offset: fields.next()?.parse().ok()?,
