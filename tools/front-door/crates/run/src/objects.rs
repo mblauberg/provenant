@@ -456,7 +456,10 @@ pub(crate) fn publish_branch(
         let preserve = target != current && !is_ancestor(git, repo, current, target);
         let transaction = if preserve {
             let retain = match resolve_ref(git, repo, &recovery) {
-                Ok(existing) if existing == current => format!("verify {recovery} {current}"),
+                // --no-deref replaces a symbolic ref itself with a direct pin.
+                Ok(existing) if existing == current => {
+                    format!("update {recovery} {current} {current}")
+                }
                 Ok(_) => return Err(invalid()),
                 Err(_) => format!("create {recovery} {current}"),
             };

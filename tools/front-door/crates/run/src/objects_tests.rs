@@ -1893,6 +1893,140 @@ fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResul
     Ok(())
 }
 
+#[test]
+// Spec: docs/specs/run-settlement.md#settlement
+fn publication_pins_symbolic_recovery_ref_through_collection() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let prior = child_of(&fixture, fixture.base, "displaced work")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+    )?)?;
+    let recovery = format!("refs/provenant/recovery/{prior}");
+    let target = "refs/heads/recovery-target";
+    let pin = "refs/provenant/lane-base/test";
+    for reference in ["refs/heads/lane", target, pin] {
+        update_ref(&fixture, reference, prior)?;
+    }
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["symbolic-ref", &recovery, target],
+    )?;
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        prior,
+        None,
+        orphan,
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), target)?,
+        prior
+    );
+    update_ref(&fixture, target, orphan)?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", "-d", pin],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["reflog", "expire", "--expire=now", "--all"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["gc", "--prune=now"],
+    )?;
+    let refs = git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["for-each-ref", "--format=%(symref)", &recovery],
+    )?;
+    assert_eq!(refs.stdout, b"\n");
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), &recovery)?,
+        prior
+    );
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["cat-file", "-e", &format!("{prior}^{{commit}}")],
+    )?;
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-settlement.md#settlement
+fn publication_refuses_conflicting_recovery_ref_atomically() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let prior = child_of(&fixture, fixture.base, "displaced work")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+    )?)?;
+    let recovery = format!("refs/provenant/recovery/{prior}");
+    update_ref(&fixture, "refs/heads/lane", prior)?;
+    update_ref(&fixture, &recovery, fixture.base)?;
+    assert!(
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            prior,
+            None,
+            orphan,
+            &provenant_records::policy::Policy::default()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        prior
+    );
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), &recovery)?,
+        fixture.base
+    );
+    Ok(())
+}
+
 // Child of `parent` with the base tree, so a rebase needs no checkout.
 fn child_of(fixture: &Fixture, parent: GitOid, message: &str) -> TestResult<GitOid> {
     let tree = oid(git(
