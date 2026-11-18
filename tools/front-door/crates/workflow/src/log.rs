@@ -1,6 +1,8 @@
 //! Durable per-session chair updates.
 use crate::{persistence, session::HostSessionId};
-use provenant_core::{CancelToken, Clock, OperationId, ProjectId, StateRoot, WaitBudget};
+use provenant_core::{
+    CancelToken, Clock, OperationId, ProjectId, StateRoot, SweepControl, WaitBudget,
+};
 use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, LockMode};
 use provenant_records::{CanonicalV1, ExtraFields, Limits, decode_v1};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -76,6 +78,12 @@ pub struct Page {
     pub next_cursor: Option<u64>,
     pub total_appended: u64,
     pub total_pruned: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GcProgress {
+    pub pruned: u64,
+    pub interrupted: bool,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -312,34 +320,167 @@ impl LogStore {
         )?;
         Ok(removed as u64)
     }
-    /// Apply all payload limits and prune expired receipts. Dry-run does not write or create files.
-    pub fn gc(&self, retention: Retention, now: i64, dry_run: bool) -> Result<u64, Error> {
+    fn prune_for_gc(
+        db: &mut Connection,
+        retention: Retention,
+        now: i64,
+        control: &SweepControl<'_>,
+    ) -> Result<GcProgress, Error> {
+        let mut progress = GcProgress::default();
+        if !control.should_continue() {
+            progress.interrupted = true;
+            return Ok(progress);
+        }
+        let cutoff = Self::cutoff(now, retention.replay_horizon_seconds);
+        {
+            let tx = db.transaction()?;
+            tx.execute(
+                "UPDATE meta SET expiry_cutoff=max(expiry_cutoff, ?1) WHERE id=1",
+                [cutoff],
+            )?;
+            tx.commit()?;
+        }
+        loop {
+            if !control.should_continue() {
+                progress.interrupted = true;
+                return Ok(progress);
+            }
+            let tx = db.transaction()?;
+            let removed = tx.execute(
+                "DELETE FROM receipts WHERE operation_id IN (
+                    SELECT operation_id FROM receipts
+                    WHERE issued_at < (SELECT expiry_cutoff FROM meta WHERE id=1)
+                    ORDER BY issued_at LIMIT 64
+                 )",
+                [],
+            )?;
+            tx.commit()?;
+            if removed == 0 {
+                break;
+            }
+        }
+        if !control.should_continue() {
+            progress.interrupted = true;
+            return Ok(progress);
+        }
+        let cancel = control.cancel.clone();
+        db.progress_handler(100, Some(move || cancel.is_cancelled()))?;
+        let retention = Self::retention_view(db, retention, now);
+        db.progress_handler(0, None::<fn() -> bool>)?;
+        let (first, _) = match retention {
+            Ok(view) => view,
+            Err(_) if !control.should_continue() => {
+                progress.interrupted = true;
+                return Ok(progress);
+            }
+            Err(error) => return Err(error),
+        };
+        let age_cutoff = Self::cutoff(now, retention.max_age_seconds);
+        loop {
+            if !control.should_continue() {
+                progress.interrupted = true;
+                return Ok(progress);
+            }
+            let tx = db.transaction()?;
+            let removed = tx.execute(
+                "DELETE FROM entries WHERE sequence IN (
+                    SELECT sequence FROM entries
+                    WHERE created_at < ?1 OR ?2 IS NULL OR sequence < ?2
+                    ORDER BY sequence LIMIT 64
+                 )",
+                params![age_cutoff, first],
+            )?;
+            if removed > 0 {
+                tx.execute(
+                    "UPDATE meta SET total_pruned=total_pruned+?1 WHERE id=1",
+                    [removed as i64],
+                )?;
+            }
+            tx.commit()?;
+            if removed == 0 {
+                break;
+            }
+            progress.pruned = progress.pruned.saturating_add(removed as u64);
+        }
+        Ok(progress)
+    }
+
+    /// Apply all payload limits and prune expired receipts in bounded batches.
+    /// Dry-run does not write or create files.
+    pub fn gc(
+        &self,
+        retention: Retention,
+        now: i64,
+        dry_run: bool,
+        control: &SweepControl<'_>,
+    ) -> Result<GcProgress, Error> {
         Self::check_retention(retention)?;
+        if !control.should_continue() {
+            return Ok(GcProgress {
+                interrupted: true,
+                ..GcProgress::default()
+            });
+        }
         let dir = match self.dir(false) {
             Ok(dir) => dir,
-            Err(e) if e.is_not_found() => return Ok(0),
+            Err(e) if e.is_not_found() => return Ok(GcProgress::default()),
             Err(e) => return Err(e.into()),
         };
-        let _lock = Self::lock(&dir, !dry_run)?;
+        let _lock = if dry_run {
+            match dir.try_lock_existing(OsStr::new("log.lock"), LockMode::Shared) {
+                Ok(lock) => Some(lock),
+                Err(error) if error.is_not_found() => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            Some(dir.try_lock(OsStr::new("log.lock"), LockMode::Exclusive)?)
+        };
         if _lock.is_none() {
-            return Ok(0);
+            return Ok(GcProgress::default());
         }
         let Some(mut db) = self.open(&dir, !dry_run)? else {
-            return Ok(0);
+            return Ok(GcProgress::default());
         };
-        if dry_run {
-            return Ok(Self::retention_view(&db, retention, now)?.1);
+        if !control.should_continue() {
+            return Ok(GcProgress {
+                interrupted: true,
+                ..GcProgress::default()
+            });
         }
-        let tx = db.transaction()?;
-        let count = Self::prune(&tx, retention, now)?;
-        tx.commit()?;
-        if count > 0 {
+        if dry_run {
+            if !control.should_continue() {
+                return Ok(GcProgress {
+                    interrupted: true,
+                    ..GcProgress::default()
+                });
+            }
+            let cancel = control.cancel.clone();
+            db.progress_handler(100, Some(move || cancel.is_cancelled()))?;
+            let result = Self::retention_view(&db, retention, now);
+            db.progress_handler(0, None::<fn() -> bool>)?;
+            let count = match result {
+                Ok(view) => view.1,
+                Err(_) if !control.should_continue() => {
+                    return Ok(GcProgress {
+                        interrupted: true,
+                        ..GcProgress::default()
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            return Ok(GcProgress {
+                pruned: count,
+                interrupted: !control.should_continue(),
+            });
+        }
+        let progress = Self::prune_for_gc(&mut db, retention, now, control)?;
+        if progress.pruned > 0 {
             provenant_os::changes::hint(
                 self.root.as_path(),
                 &[provenant_core::changes::Scope::Chair],
             );
         }
-        Ok(count)
+        Ok(progress)
     }
     pub fn append(&self, input: Append, retention: Retention, now: i64) -> Result<LogEntry, Error> {
         let encoded = serde_json::to_vec(&input)?;
@@ -768,8 +909,20 @@ mod tests {
         assert_eq!((page.total_appended, page.total_pruned), (3, 1));
         let restarted = LogStore::new(store.root.clone(), store.project, store.session.clone());
         assert_eq!(restarted.append(first, retention, 5).unwrap().sequence, 1);
-        assert_eq!(store.gc(retention, 105, true).unwrap(), 2);
-        assert_eq!(store.gc(retention, 105, false).unwrap(), 2);
+        assert_eq!(
+            store
+                .gc(retention, 105, true, &SweepControl::default())
+                .unwrap()
+                .pruned,
+            2
+        );
+        assert_eq!(
+            store
+                .gc(retention, 105, false, &SweepControl::default())
+                .unwrap()
+                .pruned,
+            2
+        );
         let page = store.page(None, 100, retention, 105).unwrap();
         assert!(page.entries.is_empty());
         assert_eq!((page.total_appended, page.total_pruned), (3, 3));
@@ -932,13 +1085,13 @@ mod tests {
             });
             ready_rx.recv().unwrap();
             let page = store.page(None, 10, policy, 1);
-            let gc_count = store.gc(policy, 1, true);
+            let gc_count = store.gc(policy, 1, true, &SweepControl::default());
             resume_tx.send(()).unwrap();
             writer.join().unwrap();
             let page = page.unwrap();
             assert_eq!(page.total_appended, 0);
             assert!(page.entries.is_empty());
-            assert_eq!(gc_count.unwrap(), 0);
+            assert_eq!(gc_count.unwrap().pruned, 0);
         });
     }
     #[test]
@@ -975,7 +1128,13 @@ mod tests {
                 store.page(Some(4), 10, policy, 5).unwrap().entries[0].sequence,
                 5
             );
-            assert_eq!(store.gc(policy, 5, true).unwrap(), 2);
+            assert_eq!(
+                store
+                    .gc(policy, 5, true, &SweepControl::default())
+                    .unwrap()
+                    .pruned,
+                2
+            );
             let dir = store.dir(false).unwrap();
             let db = store.open(&dir, false).unwrap().unwrap();
             assert_eq!(
@@ -984,8 +1143,20 @@ mod tests {
                 5
             );
             drop(db);
-            assert_eq!(store.gc(policy, 5, false).unwrap(), 2);
-            assert_eq!(store.gc(policy, 5, false).unwrap(), 0);
+            assert_eq!(
+                store
+                    .gc(policy, 5, false, &SweepControl::default())
+                    .unwrap()
+                    .pruned,
+                2
+            );
+            assert_eq!(
+                store
+                    .gc(policy, 5, false, &SweepControl::default())
+                    .unwrap()
+                    .pruned,
+                0
+            );
             let page = store.page(None, 10, policy, 5).unwrap();
             assert_eq!(
                 (page.total_appended, page.total_pruned, page.entries.len()),
@@ -1011,9 +1182,61 @@ mod tests {
             vec![3]
         );
         assert_eq!(page.total_pruned, 2);
-        assert_eq!(store.gc(policy, 10, false).unwrap(), 2);
+        assert_eq!(
+            store
+                .gc(policy, 10, false, &SweepControl::default())
+                .unwrap()
+                .pruned,
+            2
+        );
         assert_eq!(store.page(None, 10, policy, 10).unwrap().total_pruned, 2);
     }
+
+    /// Spec: docs/specs/workflow.md#chair-logs
+    #[test]
+    fn gc_stops_between_bounded_batches_and_resumes_remaining_entries() {
+        let (_tmp, store) = fixture();
+        let policy = Retention {
+            max_age_seconds: 10,
+            max_entries: 1_000,
+            max_bytes: 1_000_000,
+            replay_horizon_seconds: 10,
+        };
+        for index in 0..130 {
+            store
+                .append(update(&format!("op-{index}"), 1, "payload"), policy, 1)
+                .unwrap();
+        }
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = checks.clone();
+        let keep_going = move || observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8;
+        let first = store
+            .gc(
+                policy,
+                100,
+                false,
+                &SweepControl {
+                    keep_going: Some(&keep_going),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(first.interrupted);
+        assert_eq!(first.pruned, 64);
+        let resumed = store
+            .gc(policy, 100, false, &SweepControl::default())
+            .unwrap();
+        assert!(!resumed.interrupted);
+        assert_eq!(resumed.pruned, 66);
+        assert!(
+            store
+                .page(None, 200, policy, 100)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
+
     #[test]
     fn replay_after_pruning_preserves_original_host() {
         let (_tmp, store) = fixture();
