@@ -558,9 +558,6 @@ pub fn target_protection_for_launch_while(
                     protection
                         .shared_projects
                         .insert(crate::target_seed::project_key(binding.common_dir()));
-                    if let Some(writer) = canonical.task.writer {
-                        protection.worktrees.insert(writer.worktree);
-                    }
                 }
             }
             match page.next {
