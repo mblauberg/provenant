@@ -754,17 +754,23 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         "/usr/bin/git".into(),
     );
     host.credential_roots = vec![
-        provenant_core::CredentialRoot {
-            path: root.join("relocated-xdg/opencode"),
-            scope: provenant_core::CredentialScope::Subtree,
-            source: "fixture XDG_DATA_HOME".into(),
-            kind: provenant_core::CredentialKind::Store,
+        provenant_core::CredentialDeclaration {
+            inventory: provenant_core::CredentialInventory::Unknown,
+            root: provenant_core::CredentialRoot {
+                path: root.join("relocated-xdg/opencode"),
+                scope: provenant_core::CredentialScope::Subtree,
+                source: "fixture XDG_DATA_HOME".into(),
+                kind: provenant_core::CredentialKind::Store,
+            },
         },
-        provenant_core::CredentialRoot {
-            path: root.join("agent/socket"),
-            scope: provenant_core::CredentialScope::Exact,
-            source: "fixture SSH_AUTH_SOCK".into(),
-            kind: provenant_core::CredentialKind::Store,
+        provenant_core::CredentialDeclaration {
+            inventory: provenant_core::CredentialInventory::Unknown,
+            root: provenant_core::CredentialRoot {
+                path: root.join("agent/socket"),
+                scope: provenant_core::CredentialScope::Exact,
+                source: "fixture SSH_AUTH_SOCK".into(),
+                kind: provenant_core::CredentialKind::Store,
+            },
         },
     ];
     host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
@@ -780,7 +786,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         host: Some(&host),
         ..Default::default()
     };
-    let inventory = credential_roots(&registry, &home, &settings)?;
+    let inventory = credential_roots(&registry, &home, &settings, &[])?;
     assert!(inventory.entries().iter().any(|entry| {
         entry.path == root.join("agent/socket")
             && entry.scope == provenant_core::CredentialScope::Exact
@@ -821,15 +827,25 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         &[],
     )?;
     for path in [sibling, sibling_target, root.join("other-claude.json")] {
-        assert!(mandatory.credentials().contains(&PathGrant {
-            path,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            mandatory.credentials().contains(
+                &(PathGrant {
+                    path,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
     }
-    assert!(mandatory.credentials().contains(&PathGrant {
-        path: root.join("agent/socket"),
-        scope: PathScope::Exact,
-    }));
+    assert!(
+        mandatory.credentials().contains(
+            &(PathGrant {
+                path: root.join("agent/socket"),
+                scope: PathScope::Exact,
+            })
+            .into()
+        )
+    );
     // A path-shaped provider directory is protected only when declared.
     assert!(
         !mandatory
@@ -1192,10 +1208,14 @@ fn launch_inventory_protects_each_registered_project_allocation_root()
         &protected,
     )?;
     for allocation in allocations {
-        assert!(!allocation.exists(), "protection precedes the first checkout");
         assert!(
-            protected.iter().any(|grant| grant.path == allocation
-                && grant.scope == PathScope::Subtree),
+            !allocation.exists(),
+            "protection precedes the first checkout"
+        );
+        assert!(
+            protected
+                .iter()
+                .any(|grant| grant.path == allocation && grant.scope == PathScope::Subtree),
             "{} is not protected",
             allocation.display()
         );
@@ -2042,7 +2062,7 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         }
     }
 
-    let protected = home.join(".ssh/worktree");
+    let protected = home.join(".ssh");
     std::fs::create_dir_all(protected.parent().ok_or("credential parent")?)?;
     let argv: Vec<std::ffi::OsString> = [
         git.clone().into_os_string(),

@@ -17,6 +17,8 @@ mod work;
 pub use work::*;
 mod paths;
 pub use paths::*;
+mod credential_declarations;
+pub use credential_declarations::*;
 mod roots;
 pub use roots::*;
 pub mod retry;

@@ -425,6 +425,42 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn shared_store_symlink_outside_lane_is_not_staged() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let store = home.join("shared");
+        let lane = store.join("lane");
+        let source = home.join("skills");
+        std::fs::create_dir_all(&lane)?;
+        std::fs::create_dir_all(&source)?;
+        let secret = store.join("unlisted-secret");
+        std::fs::write(&secret, b"secret-sentinel")?;
+        symlink(&secret, source.join("resource"))?;
+        let mut roots = provenant_core::CredentialRoots::default();
+        roots.add(
+            &store,
+            provenant_core::CredentialScope::Subtree,
+            "shared account",
+            provenant_core::CredentialKind::Store,
+        );
+        let roots = roots.with_lane_roots(vec![lane]);
+        let staged = capture(&source, &home.join("stage"), &home, &roots, 1024);
+        assert_eq!(staged.file_count, 0);
+        assert!(
+            staged
+                .warnings
+                .iter()
+                .any(|warning| warning.path == Path::new("resource")
+                    && warning.reason == "credential_root")
+        );
+        assert!(!staged.setup.iter().any(
+            |step| matches!(step, SetupStep::WriteFile { bytes, .. } if bytes == b"secret-sentinel")
+        ));
+        Ok(())
+    }
+
     #[test]
     fn linked_source_inside_credential_root_is_skipped() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
