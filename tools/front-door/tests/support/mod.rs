@@ -64,7 +64,7 @@ pub fn call_with_stdin(
 }
 
 pub fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let program = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
     let output = rig.execute(&program, args, None)?;
     if code(&output) != 0 {
         return Err(format!(
@@ -406,7 +406,7 @@ impl TestRig {
             "schema_version=1\n[gc]\nfree_floor='1B'\n",
         )?;
         let git = fs::canonicalize(
-            provenant_os::git::git_executable().ok_or("Git executable unavailable")?,
+            provenant_os::git::resolve_git_executable(None).ok_or("Git executable unavailable")?,
         )?;
         let mut env: Vec<(OsString, OsString)> = [
             ("HOME", home.clone()),

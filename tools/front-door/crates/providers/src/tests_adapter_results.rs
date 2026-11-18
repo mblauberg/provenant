@@ -173,7 +173,7 @@ fn command_credentials_stay_denied_in_every_network_mode() {
     use provenant_confinement::permissions::{NetworkAccess, PathGrant, PathScope};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
-    let base = read_only_plan("/fixture", None);
+    let base = fixture_access_plan(Access::ReadOnly, None, false);
     let mut route = route("command", "");
     route.account_key = None;
     let prompt = Prompt::new("check".into());
@@ -261,7 +261,7 @@ fn command_credentials_stay_denied_in_every_network_mode() {
 
 #[test]
 fn command_runtimes_grant_exact_execution_only() {
-    let base = read_only_plan("/fixture", None);
+    let base = fixture_access_plan(Access::ReadOnly, None, false);
     let mut route = route("command", "");
     route.account_key = None;
     let prompt = Prompt::new("check".into());

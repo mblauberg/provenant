@@ -499,6 +499,54 @@ pub(super) fn refuses_credential_grant<'a>(
     )
 }
 
+/// Sandbox-only admission. Its input is a rendered path grant; it is private
+/// to confinement and cannot be used to admit materialised host inputs.
+pub(super) struct SandboxReadAdmission<'a>(&'a CredentialRoots);
+
+impl<'a> SandboxReadAdmission<'a> {
+    pub(super) fn new(roots: &'a CredentialRoots) -> Self {
+        Self(roots)
+    }
+
+    pub(super) fn permits_carve_out(
+        &self,
+        root: &provenant_core::CredentialRoot,
+        grant: &PathGrant,
+    ) -> bool {
+        root.scope == CredentialScope::Subtree
+            && self.0.lane_exceptions(root).next().is_some()
+            && grant.path != root.path
+            && grant.path.starts_with(&root.path)
+            && !self.0.entries().iter().any(|endpoint| {
+                endpoint.path == grant.path
+                    || (grant.scope == PathScope::Subtree
+                        && endpoint.scope == CredentialScope::Subtree
+                        && endpoint.path.starts_with(&grant.path))
+            })
+    }
+
+    fn refusal(&self, grant: &PathGrant) -> Option<&'a provenant_core::CredentialRoot> {
+        self.0.select_refusal(&grant.path, |root| {
+            if root.path == grant.path
+                || (grant.scope == PathScope::Subtree
+                    && root.scope == CredentialScope::Subtree
+                    && root.path.starts_with(&grant.path))
+            {
+                return true;
+            }
+            if self.permits_carve_out(root, grant) {
+                return false;
+            }
+            if root.kind == provenant_core::CredentialKind::CodexHome
+                && self.0.is_codex_standalone_package(&grant.path)
+            {
+                return false;
+            }
+            root.scope == CredentialScope::Subtree && grant.path.starts_with(&root.path)
+        })
+    }
+}
+
 /// Validates a grant that confers only read and exec. It is the one place the
 /// Codex standalone package exception applies: writes, scratch, protected
 /// roots and private state keep the strict credential-root check.
@@ -507,7 +555,7 @@ pub(crate) fn validate_read_exec_grant(
     credentials: &CredentialRoots,
 ) -> Result<(), PermissionError> {
     grant.validate()?;
-    if let Some(root) = refuses_credential_grant(grant, true, credentials) {
+    if let Some(root) = SandboxReadAdmission::new(credentials).refusal(grant) {
         return Err(PermissionError::credential_store(&grant.path, root));
     }
     Ok(())
