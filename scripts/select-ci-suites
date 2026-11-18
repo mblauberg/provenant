@@ -169,7 +169,8 @@ def select(config, env):
         repo = env['GITHUB_REPOSITORY']
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not SHA.fullmatch(tested) or not SHA.fullmatch(head):
             raise ValueError('invalid repository or commit SHA')
-        labels = json.loads(env.get('PR_LABELS') or '[]')
+        # toJSON of an absent pull request's labels renders null on push and dispatch.
+        labels = json.loads(env.get('PR_LABELS') or 'null') or []
         if not isinstance(labels, list) or any(not isinstance(x, str) for x in labels):
             raise ValueError('invalid PR labels')
         prefix = f'repos/{repo}/actions'

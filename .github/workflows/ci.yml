@@ -1,6 +1,9 @@
 name: CI
 
-# Triggers, selection and concurrency follow config/ci-suites.toml and docs/specs/ci.md.
+# Triggers (#3273): pull requests, main and landing candidates only; pushes to
+# lane branches start nothing. `land/**` is the landing owner's candidate ref.
+# Suite selection is declared in config/ci-suites.toml (docs/specs/ci.md); no
+# `labeled` trigger, for the reason in ADR 0041.
 on:
   push:
     branches: [main, 'land/**']
@@ -26,7 +29,9 @@ env:
   # Cargo.toml owns the uniform fixture feature and common dev/test profile.
   RUST_DEVELOPMENT_CACHE: dev-test-fixture-v1
 
-# Keep main runs; cancel superseded runs on other refs.
+# PR runs cancel their superseded predecessor on the same ref. Main runs never
+# cancel: GitHub keeps the active run and only the newest pending push, and a
+# cancelled ci-status on a landed tip reads as a failure to post-merge checks.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && format('ci-{0}-main', github.workflow) || format('ci-{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}

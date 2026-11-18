@@ -76,6 +76,9 @@ else: print(json.dumps({'workflow_runs': s.get('main', [])}))
     run(os_change, {**normal, 'macos_native': 'run'})
     run(code, all_run, {'PR_LABELS': '["ci:full"]'})
     run(code, all_run, {'DISPATCH_TIER': 'full'})
+    # A dispatch renders absent labels as null; auto tier still selects from evidence.
+    run(code, all_run, {'EVENT_NAME': 'workflow_dispatch', 'REF': 'refs/heads/topic', 'PR_LABELS': 'null', 'DISPATCH_TIER': 'auto', 'PR_NUMBER': ''},
+        check=lambda s: (not s['full'] and s['rust_base'] == '') or (_ for _ in ()).throw(AssertionError(s)))
     full = commit('rust-toolchain.toml', 'full')
     run(full, all_run)
     run(code, all_run, state_override={'main': []})

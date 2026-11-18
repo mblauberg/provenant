@@ -62,7 +62,8 @@ Owner: repository CI.
 
 A changed path is inert for a suite only when the manifest declares it inert
 for that suite and its old and new modes are both absent or regular
-non-executable files. Every other path, and any mode change, is an input.
+non-executable files. Every other path is an input, including any executable,
+symbolic link or submodule on either side of the change.
 
 Why: a name proves nothing about what a file does; only a declared exception
 skips work.
@@ -78,6 +79,21 @@ commit and the reason.
 
 Why: speed on pull requests must never read as coverage that did not happen;
 `main` runs deferred suites after merge.
+
+Owner: repository CI.
+
+## Native evidence and quarantine
+
+Anchor: `scripts/check-native-inventory`; `scripts/flaky-quarantine`
+
+Whenever native macOS tests run, every declared native test must have passed
+and every quarantine entry must resolve against both platform test lists. A
+run that did not build the native list only warns on an entry it cannot
+resolve; `main` always builds both lists, and a change to quarantine entries
+pulls the native suite into its pull request.
+
+Why: a quarantine entry must name a real test, but a pull request that defers
+native tests cannot see the native list.
 
 Owner: repository CI.
 
