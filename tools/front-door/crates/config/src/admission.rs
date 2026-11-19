@@ -78,7 +78,7 @@ pub struct ResolvedAdmissionClass {
 impl ResolvedAdmissionClass {
     /// Resolves the effective class configuration by layering:
     /// 1. Shipped defaults (`build` derives slots from cores/RAM; custom classes default to 1 slot)
-    /// 2. Host `<state>/config.toml` (under `[admission.<class>]`, or, for `build`, the `domains.fabric.lanes.max_concurrent_builds` knob, which `[admission.build].slots` overrides)
+    /// 2. Host `<state>/config.toml` (under `[admission.<class>]`)
     /// 3. Project `<project>/.provenant/config.toml` (under `[admission.<class>]`)
     pub fn resolve(class: &str, state: &Path, project: Option<&Path>) -> Self {
         let is_build = class == DEFAULT_CLASS;
@@ -89,17 +89,10 @@ impl ResolvedAdmissionClass {
             provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
 
         let (mut slots, mut slots_source) = if is_build {
-            if host_build_settings.max_concurrent_builds.is_some() {
-                (
-                    host_build_settings.build_limit(total_ram),
-                    AdmissionSource::Host,
-                )
-            } else {
-                (
-                    host_build_settings.build_limit(total_ram),
-                    AdmissionSource::Default,
-                )
-            }
+            (
+                host_build_settings.automatic_build_limit(total_ram),
+                AdmissionSource::Default,
+            )
         } else {
             (1, AdmissionSource::Default)
         };
@@ -305,7 +298,7 @@ wait_seconds = 10
     }
 
     #[test]
-    fn legacy_max_concurrent_builds_provides_host_build_slots() {
+    fn retired_build_cap_key_does_not_override_the_build_class() {
         let temp = tempfile::tempdir().unwrap();
         let config_toml = r#"
 schema_version = 1
@@ -314,7 +307,9 @@ max_concurrent_builds = 3
 "#;
         std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
         let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
-        assert_eq!(resolved.slots, 3);
-        assert_eq!(resolved.slots_source, AdmissionSource::Host);
+        let defaults_dir = tempfile::tempdir().unwrap();
+        let defaults = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, defaults_dir.path(), None);
+        assert_eq!(resolved.slots, defaults.slots);
+        assert_eq!(resolved.slots_source, AdmissionSource::Default);
     }
 }

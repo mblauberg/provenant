@@ -1474,22 +1474,19 @@ fn host_lane_build_settings_read_and_validate() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=2\ncargo_build_jobs=5\n",
+        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=5\n",
     )
     .unwrap();
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert_eq!(settings.max_concurrent_builds, Some(2));
     assert_eq!(settings.cargo_build_jobs, Some(5));
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=0\n",
+        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=0\n",
     )
     .unwrap();
-    // Zero is the disable switch, not an invalid value.
+    // Zero remains invalid for per-build compiler jobs.
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert!(settings.invalid_keys().is_empty());
-    assert_eq!(settings.max_concurrent_builds, Some(0));
-    assert_eq!(settings.build_limit(u64::MAX), 0);
+    assert_eq!(settings.cargo_build_jobs, None);
     std::fs::write(
         temp.path().join("config.toml"),
         "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=-2\n",

@@ -36,11 +36,6 @@ pub enum AdmissionError {
 
 /// Slot directory below the host state root.
 pub const DIRECTORY: [&str; 1] = ["admission"];
-/// Per-lane advisory signal held shared while an operation waits for admission.
-pub const WAIT_FILE: &str = "admission-wait.lock";
-pub const WAIT_INFO_FILE: &str = "admission-wait.json";
-pub const HELD_FILE: &str = "admission-held.lock";
-pub const HELD_INFO_FILE: &str = "admission-held.json";
 pub const SHIM_DIRECTORY: &str = "cargo-bin";
 
 pub fn validate_class_name(class: &str) -> std::result::Result<(), AdmissionError> {
@@ -82,25 +77,10 @@ fn now_unix_seconds() -> u64 {
 }
 
 pub struct WaitGuard {
-    _lock: LockGuard,
-    path: PathBuf,
+    _guard: HostWaitGuard,
 }
-
-impl Drop for WaitGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 pub struct HeldGuard {
-    _lock: LockGuard,
-    path: PathBuf,
-}
-
-impl Drop for HeldGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
+    _guard: HostHeldGuard,
 }
 
 pub fn mark_waiting(
@@ -109,59 +89,21 @@ pub fn mark_waiting(
     pid: i64,
     attempt_id: Option<&str>,
 ) -> Result<WaitGuard> {
-    use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
-    let clock = crate::clock::SystemClock::new();
-    let dir = scratch.join(SHIM_DIRECTORY);
-    let _ = std::fs::create_dir_all(&dir);
     let info = WaitInfo {
         class: class.to_string(),
         pid,
         start_unix_seconds: now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
     };
-    let info_path = dir.join(WAIT_INFO_FILE);
-    if let Ok(bytes) = serde_json::to_vec(&info) {
-        let _ = std::fs::write(&info_path, bytes);
-    }
-    let wait_file_path = dir.join(WAIT_FILE);
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&wait_file_path);
-    let anchor = Directory::open_anchor(&dir)?;
-    let lock = anchor.lock_existing(
-        std::ffi::OsStr::new(WAIT_FILE),
-        LockMode::Shared,
-        WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(1_000_000)),
-        &CancelToken::new(),
-        &clock,
-    )?;
+    let (lock, json_path, lock_path) =
+        mark_record(&scratch.join(SHIM_DIRECTORY).join("waiters"), pid, &info)?;
     Ok(WaitGuard {
-        _lock: lock,
-        path: info_path,
+        _guard: HostWaitGuard {
+            _lock: lock,
+            json_path,
+            lock_path,
+        },
     })
-}
-
-pub fn is_waiting(scratch: &Path) -> Option<WaitInfo> {
-    let dir_path = scratch.join(SHIM_DIRECTORY);
-    let dir = Directory::open_anchor(&dir_path).ok()?;
-    let is_locked = dir
-        .try_lock_existing(std::ffi::OsStr::new(WAIT_FILE), LockMode::Exclusive)
-        .is_err_and(|error| matches!(error, FsError::LockTimeout { .. }));
-    if !is_locked {
-        return None;
-    }
-    let bytes = std::fs::read(dir_path.join(WAIT_INFO_FILE)).ok();
-    let info = bytes
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_else(|| WaitInfo {
-            class: "build".to_string(),
-            pid: 0,
-            start_unix_seconds: 0,
-            attempt_id: None,
-        });
-    Some(info)
 }
 
 pub fn mark_held(
@@ -171,10 +113,6 @@ pub fn mark_held(
     pid: i64,
     attempt_id: Option<&str>,
 ) -> Result<HeldGuard> {
-    use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
-    let clock = crate::clock::SystemClock::new();
-    let dir = scratch.join(SHIM_DIRECTORY);
-    let _ = std::fs::create_dir_all(&dir);
     let info = HeldInfo {
         class: class.to_string(),
         slot,
@@ -182,35 +120,53 @@ pub fn mark_held(
         start_unix_seconds: now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
     };
-    let info_path = dir.join(HELD_INFO_FILE);
-    if let Ok(bytes) = serde_json::to_vec(&info) {
-        let _ = std::fs::write(&info_path, bytes);
+    let (lock, json_path, lock_path) =
+        mark_record(&scratch.join(SHIM_DIRECTORY).join("holders"), pid, &info)?;
+    Ok(HeldGuard {
+        _guard: HostHeldGuard {
+            _lock: lock,
+            json_path,
+            lock_path,
+        },
+    })
+}
+
+pub fn lane_waiters(scratch: &Path) -> Vec<WaitInfo> {
+    live_records(&scratch.join(SHIM_DIRECTORY).join("waiters"))
+}
+
+pub fn lane_holders(scratch: &Path) -> Vec<HeldInfo> {
+    live_records(&scratch.join(SHIM_DIRECTORY).join("holders"))
+}
+
+fn mark_record<T: Serialize>(
+    dir_path: &Path,
+    pid: i64,
+    info: &T,
+) -> Result<(LockGuard, PathBuf, PathBuf)> {
+    use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+    let clock = crate::clock::SystemClock::new();
+    let _ = std::fs::create_dir_all(dir_path);
+    let json_path = dir_path.join(format!("{pid}.json"));
+    let lock_file = format!("{pid}.lock");
+    let lock_path = dir_path.join(&lock_file);
+    if let Ok(bytes) = serde_json::to_vec(info) {
+        let _ = std::fs::write(&json_path, bytes);
     }
-    let anchor = Directory::open_anchor(&dir)?;
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&lock_path);
+    let anchor = Directory::open_anchor(dir_path)?;
     let lock = anchor.lock_existing(
-        std::ffi::OsStr::new(HELD_FILE),
+        std::ffi::OsStr::new(&lock_file),
         LockMode::Shared,
         WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(1_000_000)),
         &CancelToken::new(),
         &clock,
     )?;
-    Ok(HeldGuard {
-        _lock: lock,
-        path: info_path,
-    })
-}
-
-pub fn is_holding(scratch: &Path) -> Option<HeldInfo> {
-    let dir_path = scratch.join(SHIM_DIRECTORY);
-    let dir = Directory::open_anchor(&dir_path).ok()?;
-    let is_locked = dir
-        .try_lock_existing(std::ffi::OsStr::new(HELD_FILE), LockMode::Exclusive)
-        .is_err_and(|error| matches!(error, FsError::LockTimeout { .. }));
-    if !is_locked {
-        return None;
-    }
-    let bytes = std::fs::read(dir_path.join(HELD_INFO_FILE)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    Ok((lock, json_path, lock_path))
 }
 
 pub struct HostWaitGuard {
@@ -317,71 +273,41 @@ pub fn mark_host_held(state: &Path, class: &str, slot: u64, pid: i64) -> Result<
 }
 
 pub fn host_holders(state: &Path, class: &str) -> Vec<HeldInfo> {
-    let dir_path = class_directory(state, class).join("holders");
-    let Ok(dir) = Directory::open_anchor(&dir_path) else {
-        return Vec::new();
-    };
-    let mut holders = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("lock") {
-                let Some(file_name) = path.file_name() else {
-                    continue;
-                };
-                let is_locked = dir
-                    .try_lock_existing(file_name, LockMode::Exclusive)
-                    .is_err_and(|error| matches!(error, FsError::LockTimeout { .. }));
-                let json_path = path.with_extension("json");
-                if is_locked {
-                    if let Some(info) = std::fs::read(&json_path)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<HeldInfo>(&bytes).ok())
-                    {
-                        holders.push(info);
-                    }
-                } else {
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(&json_path);
-                }
-            }
-        }
-    }
-    holders
+    live_records(&class_directory(state, class).join("holders"))
 }
 
 pub fn host_waiters(state: &Path, class: &str) -> Vec<WaitInfo> {
-    let dir_path = class_directory(state, class).join("waiters");
-    let Ok(dir) = Directory::open_anchor(&dir_path) else {
+    live_records(&class_directory(state, class).join("waiters"))
+}
+
+fn live_records<T: serde::de::DeserializeOwned>(dir_path: &Path) -> Vec<T> {
+    let Ok(dir) = Directory::open_anchor(dir_path) else {
         return Vec::new();
     };
-    let mut waiters = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir_path) {
+    let mut records = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("lock") {
-                let Some(file_name) = path.file_name() else {
-                    continue;
-                };
-                let is_locked = dir
-                    .try_lock_existing(file_name, LockMode::Exclusive)
-                    .is_err_and(|error| matches!(error, FsError::LockTimeout { .. }));
-                let json_path = path.with_extension("json");
-                if is_locked {
-                    if let Some(info) = std::fs::read(&json_path)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<WaitInfo>(&bytes).ok())
-                    {
-                        waiters.push(info);
-                    }
-                } else {
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(&json_path);
-                }
+            if path.extension().and_then(|s| s.to_str()) != Some("lock") {
+                continue;
+            }
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
+            let is_locked = dir
+                .try_lock_existing(file_name, LockMode::Exclusive)
+                .is_err_and(|error| matches!(error, FsError::LockTimeout { .. }));
+            let json_path = path.with_extension("json");
+            if is_locked
+                && let Some(info) = std::fs::read(&json_path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            {
+                records.push(info);
             }
         }
     }
-    waiters
+    records
 }
 
 pub fn active_classes(state: &Path) -> Vec<String> {
@@ -677,27 +603,32 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let scratch = temp.path().join("scratch");
         std::fs::create_dir_all(scratch.join(SHIM_DIRECTORY)).unwrap();
-        std::fs::write(scratch.join(SHIM_DIRECTORY).join(WAIT_FILE), b"").unwrap();
-        std::fs::write(scratch.join(SHIM_DIRECTORY).join(HELD_FILE), b"").unwrap();
 
-        assert!(is_waiting(&scratch).is_none());
-        assert!(is_holding(&scratch).is_none());
+        assert!(lane_waiters(&scratch).is_empty());
+        assert!(lane_holders(&scratch).is_empty());
 
         let wait_guard = mark_waiting(&scratch, "build", 42, Some("attempt-1")).unwrap();
-        let waiting = is_waiting(&scratch).unwrap();
+        let second_wait = mark_waiting(&scratch, "build", 43, Some("attempt-1")).unwrap();
+        assert_eq!(lane_waiters(&scratch).len(), 2);
+        drop(second_wait);
+        let proceeding = mark_held(&scratch, "build", 0, 43, Some("attempt-1")).unwrap();
+        assert_eq!(lane_waiters(&scratch).len(), 1);
+        assert_eq!(lane_holders(&scratch)[0].pid, 43);
+        drop(proceeding);
+        let waiting = lane_waiters(&scratch).remove(0);
         assert_eq!(waiting.class, "build");
         assert_eq!(waiting.pid, 42);
         assert_eq!(waiting.attempt_id.as_deref(), Some("attempt-1"));
         drop(wait_guard);
-        assert!(is_waiting(&scratch).is_none());
+        assert!(lane_waiters(&scratch).is_empty());
 
         let held_guard = mark_held(&scratch, "build", 0, 42, Some("attempt-1")).unwrap();
-        let holding = is_holding(&scratch).unwrap();
+        let holding = lane_holders(&scratch).remove(0);
         assert_eq!(holding.class, "build");
         assert_eq!(holding.slot, 0);
         assert_eq!(holding.pid, 42);
         drop(held_guard);
-        assert!(is_holding(&scratch).is_none());
+        assert!(lane_holders(&scratch).is_empty());
     }
 
     #[test]

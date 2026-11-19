@@ -1,3 +1,9 @@
+## Breaking changes
+
+### Lanes and settlement
+
+- Replace `domains.fabric.lanes.max_concurrent_builds` with `[admission.build].slots` in host or project configuration; the retired key is ignored with the normal unknown-key warning. (#3252)
+
 ## Features
 
 ### Host admission classes

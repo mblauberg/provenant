@@ -4053,18 +4053,15 @@ pub(super) fn prepare_candidates_inner(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
-        let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
-        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let build_class =
+            provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
         let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
                 prompt_text,
             )),
-            build_cap: Some(run::BuildCap {
-                slots: lanes.build_limit(total),
-                source: lanes.build_limit_source(),
-            }),
+            build_cap: Some(run::BuildCap::from(&build_class)),
             cargo_target: Some(cargo_target.clone()),
         };
         let text = format!(

@@ -554,7 +554,7 @@ fn child_wait_lease_cycle(parent_wait_commit: ParentWaitCommit) -> TestResult {
     });
     std::fs::write(
         store.writer_registry.join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\nmax_concurrent_builds=1\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\n[admission.build]\nslots=1\n",
     )?;
     let facts = HostFacts::new(100);
     let mut parent = lane(121, true);

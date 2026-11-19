@@ -534,8 +534,6 @@ pub struct Lanes {
     /// Source directories in host CARGO_HOME are read-only unless enabled.
     pub cargo_source_writes: Option<bool>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub max_concurrent_builds: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_lanes: Option<u64>,
@@ -592,7 +590,6 @@ impl Lanes {
         provenant_config::LaneBuildSettings {
             start_spacing_ms: self.start_spacing_ms,
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
-            max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
             cargo_source_writes: self.cargo_source_writes,
             cargo_incremental: self.cargo_incremental,
@@ -979,7 +976,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         &["warning", "critical", "never"],
     ),
     FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
-    FieldMetadata::int("lanes.max_concurrent_builds", 0, 64),
     FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.max_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
@@ -1177,24 +1173,15 @@ mod tests {
 
     #[test]
     fn lane_build_settings_validate_shared_bounds_and_auto() {
-        let lanes: Lanes =
-            serde_json::from_str(r#"{"max_concurrent_builds": -1, "cargo_build_jobs": -1}"#)
-                .unwrap();
-        assert_eq!(lanes.max_concurrent_builds, None);
+        let lanes: Lanes = serde_json::from_str(r#"{"cargo_build_jobs": -1}"#).unwrap();
         assert_eq!(lanes.cargo_build_jobs, None);
         let mut config = config();
-        config.lanes.max_concurrent_builds = Some(65);
         config.lanes.cargo_build_jobs = Some(1025);
         config.lanes.max_lanes = Some(65);
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
         let errors = config.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.field == "lanes.max_concurrent_builds")
-        );
         assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
         for key in [
             "max_lanes",
@@ -1721,6 +1708,40 @@ mod tests {
             config.warnings[0]
                 .message
                 .starts_with("domains.fabric.lanes.priority.writer:")
+        );
+    }
+
+    #[test]
+    fn retired_lane_build_cap_reports_the_ordinary_unknown_key_warning() {
+        #[derive(Serialize, Deserialize)]
+        struct Domains {
+            fabric: FabricConfig,
+        }
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        let text = b"schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=3\n";
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
+        let warning = loaded
+            .warnings
+            .iter()
+            .find(|warning| warning.rule == "unknown_key")
+            .expect("retired build cap is an unknown key");
+        assert_eq!(
+            warning.message,
+            "domains.fabric.lanes.max_concurrent_builds: unknown configuration key; ignored"
         );
     }
 }

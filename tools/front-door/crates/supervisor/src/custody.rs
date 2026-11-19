@@ -141,7 +141,7 @@ pub enum AdmissionError {
     )]
     Clock,
     #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs, cargo_debug"
+        "invalid host build settings: check domains.fabric.lanes.cargo_build_jobs and cargo_debug"
     )]
     BuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]
@@ -184,9 +184,8 @@ impl AdmissionError {
         match self {
             Self::Clock | Self::GuardianIdentity | Self::Processes { .. } => Vec::new(),
             Self::BuildSettings => vec![
-                "domains.fabric.lanes.max_concurrent_builds",
-                "cargo_build_jobs",
-                "cargo_debug",
+                "domains.fabric.lanes.cargo_build_jobs",
+                "domains.fabric.lanes.cargo_debug",
             ],
             Self::Disk { .. } => vec!["gc.critical_free"],
             Self::MemoryPressure { .. } => {

@@ -294,7 +294,7 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
         }
     }
     assert!(line.contains("waiting for a host build slot"), "{line}");
-    assert!(provenant_os::admission::is_waiting(&scratch).is_some());
+    assert!(!provenant_os::admission::lane_waiters(&scratch).is_empty());
     assert!(!rig.started("start"), "the second build must wait");
     assert!(
         Command::new("/bin/kill")
@@ -304,7 +304,7 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
     );
     first.wait()?;
     assert!(finish(&mut second, Duration::from_secs(10))?);
-    assert!(provenant_os::admission::is_waiting(&scratch).is_none());
+    assert!(provenant_os::admission::lane_waiters(&scratch).is_empty());
     assert!(rig.started("end"));
     Ok(())
 }
@@ -747,7 +747,7 @@ fn lane_nextest_runs_through_admission_slot() -> Result {
     assert!(provenant_test_support::wait_for(
         "nextest waiting",
         Duration::from_secs(10),
-        || { provenant_os::admission::is_waiting(&scratch).is_some() },
+        || { !provenant_os::admission::lane_waiters(&scratch).is_empty() },
         |waiting| *waiting
     )?);
 
