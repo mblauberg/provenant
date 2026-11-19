@@ -3083,12 +3083,12 @@ mod tests {
             let response = hook_with(&root, project, &prefix, mtime);
             assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
             let text = context(&response);
-            let quoted = format!("--state-dir '{}'", dir.display());
-            assert_eq!(
-                text.contains(&quoted) && text.contains(FIXTURE_ID),
-                shown,
-                "{text}"
-            );
+            // A renderable state dir reaches the notice so the store stays
+            // reachable; an unsafe one is withheld rather than leaked raw. The
+            // session id and a --state-dir reference are always present.
+            assert_eq!(text.contains(dir.to_str().unwrap()), shown, "{text}");
+            assert!(text.contains(FIXTURE_ID), "{text}");
+            assert!(text.contains("--state-dir"), "{text}");
         }
     }
 

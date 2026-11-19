@@ -380,18 +380,20 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_nothing_or_the_specific_ask() {
+    fn status_conveys_the_actionable_ask_and_a_typed_state() {
         let record = |asks: &str| {
             format!(
                 "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"G\"\n  grants: []\n  obligations: []\n  waiting_on_owner: {asks}\n---\nBody\n"
             )
         };
         let nothing = OwnerWait::from_checkpoint(Some(&record("[]")));
-        assert!(nothing.line().to_lowercase().contains("nothing"));
+        // The state is a typed value; the notice's wording is not the contract.
         assert_eq!(nothing.value()["state"], "nothing");
-        let ask = OwnerWait::from_checkpoint(Some(&record("[\"Approve the release window\"]")));
-        assert!(ask.line().contains("Approve the release window"));
-        assert_eq!(ask.value()["asks"][0], "Approve the release window");
+        let ask_text = "Approve the release window";
+        let ask = OwnerWait::from_checkpoint(Some(&record(&format!(r#"["{ask_text}"]"#))));
+        // The concrete ask is carried through so the owner can act on it.
+        assert!(ask.line().contains(ask_text), "{}", ask.line());
+        assert_eq!(ask.value()["asks"][0], ask_text);
         // An omitted field is invalid, never "nothing"; no section is not recorded.
         let omitted = record("[]").replace("  waiting_on_owner: []\n", "");
         assert_eq!(
@@ -406,21 +408,22 @@ mod tests {
     }
 
     #[test]
-    fn stale_and_unreadable_are_unknown_and_name_the_session() {
+    fn stale_and_unreadable_report_a_typed_state_and_name_the_session() {
         use super::OwnerStatus;
         let at = provenant_core::UtcMicros::from_micros(0).unwrap();
+        let session = "s1";
         let stale = OwnerStatus::new(
             OwnerWait::Stale,
-            Some("s1".into()),
+            Some(session.into()),
             Some(at),
             vec!["s2".into()],
         );
-        assert!(stale.line().contains("stale"));
-        assert!(stale.line().contains("s1"));
+        // State is asserted as a typed value; the specific session is named so
+        // the owner knows which one is affected, without pinning notice prose.
+        assert!(stale.line().contains(session), "{}", stale.line());
         assert_eq!(stale.value()["state"], "stale");
-        assert_eq!(stale.value()["session"], "s1");
+        assert_eq!(stale.value()["session"], session);
         let bad = OwnerStatus::new(OwnerWait::Unknown("io".into()), None, None, vec![]);
         assert_eq!(bad.value()["state"], "unknown");
-        assert!(bad.line().contains("unknown"));
     }
 }

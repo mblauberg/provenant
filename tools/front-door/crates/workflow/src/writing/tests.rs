@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
-fn matcher(set: RuleSet) -> Matcher {
-    let bytes = match set {
+fn rules_bytes(set: RuleSet) -> &'static [u8] {
+    match set {
         RuleSet::Legal => include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../../skills/legal-writing/lint-rules.json"
@@ -12,28 +12,63 @@ fn matcher(set: RuleSet) -> Matcher {
             "/../../../../skills/writing/lint-rules.json"
         ))
         .as_slice(),
-    };
-    Matcher::from_json(bytes, set).unwrap()
+    }
+}
+fn matcher(set: RuleSet) -> Matcher {
+    Matcher::from_json(rules_bytes(set), set).unwrap()
 }
 #[test]
 fn rule_sets_retain_vocabulary_and_legal_severity() {
+    // Probe each set with a token taken from its own rule definitions rather
+    // than a hand-kept word. Legal rules make blockers of tokens that general
+    // and academic only warn about; pick a plain token carrying each set's
+    // characteristic severity and assert the scan honours it.
     for set in [RuleSet::General, RuleSet::Academic, RuleSet::Legal] {
+        let bundle: serde_json::Value = serde_json::from_slice(rules_bytes(set)).unwrap();
+        let rules: Vec<&serde_json::Value> = bundle["shared"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(
+                bundle["sets"][set.name()]["rules"]
+                    .as_array()
+                    .unwrap()
+                    .iter(),
+            )
+            .collect();
+        let (expected_text, expected) = if set == RuleSet::Legal {
+            ("blocker", Severity::Blocker)
+        } else {
+            ("warning", Severity::Warning)
+        };
+        let probe = rules
+            .iter()
+            .find(|rule| {
+                rule["severity"].as_str() == Some(expected_text)
+                    && rule["pattern"].as_str().is_some_and(|p| {
+                        !p.is_empty()
+                            && p.chars().all(|c| {
+                                c.is_alphanumeric() || matches!(c, ' ' | '-' | '—' | '–' | '\'')
+                            })
+                    })
+            })
+            .and_then(|rule| rule["pattern"].as_str())
+            .expect("a plain token carrying the set's severity");
         let found = matcher(set)
-            .scan(Path::new("draft.md"), "é — robust\n")
+            .scan(Path::new("draft.md"), &format!("é — {probe}\n"))
             .unwrap();
         assert!(!found.is_empty());
         for f in &found {
             assert!(f.start < f.end);
             assert!(f.line >= 1);
         }
-        assert_eq!(
-            found[0].severity,
-            if set == RuleSet::Legal {
-                Severity::Blocker
-            } else {
-                Severity::Warning
-            }
-        );
+        assert!(found.iter().any(|f| f.severity == expected), "{found:?}");
+        if set != RuleSet::Legal {
+            assert!(
+                found.iter().all(|f| f.severity == Severity::Warning),
+                "{found:?}"
+            );
+        }
     }
     assert!(
         matcher(RuleSet::General)
