@@ -1551,7 +1551,7 @@ fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
 }
 // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
 #[test]
-fn tick_keeps_corrupt_checkpoints_visible_until_repaired() {
+fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -1573,36 +1573,46 @@ fn tick_keeps_corrupt_checkpoints_visible_until_repaired() {
         .join("graph-g-test.json");
     let valid = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"{} ").unwrap();
-    // The ordinary read reproduces the same error on every tick.
+    // The ordinary strict read still reproduces the same error.
     assert!(FileJournal::read_checkpoint(&root, project, "g-test").is_err());
     let first = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
     assert!(first.to_string().contains("provenant stop -- g-test"));
+    assert!(first.to_string().contains("decode"));
+    // The same corrupt bytes are quarantined: later ticks skip them instead of
+    // retrying the decode on every pass, independently of advance errors.
+    let marker = path.with_file_name("graph-g-test.unreadable");
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap_err()
-            .to_string()
-            .contains("g-test")
+            .unwrap()
+            .is_none()
+    );
+    assert!(marker.is_file());
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().nth(1),
+        Some("decode")
     );
     FileJournal::set_advance_error(&root, project, "g-test", Some("another error")).unwrap();
     FileJournal::set_advance_error(&root, project, "g-test", None).unwrap();
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap_err()
-            .to_string()
-            .contains("g-test")
+            .unwrap()
+            .is_none()
     );
+    // Restoring valid bytes clears the quarantine.
     std::fs::write(&path, &valid).unwrap();
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
             .unwrap()
             .is_some()
     );
-    assert!(!path.with_file_name("graph-g-test.unreadable").exists());
+    assert!(!marker.exists());
+    // A digest-mismatched checkpoint is reported once with its typed reason.
     let mut bad_digest: serde_json::Value = serde_json::from_slice(&valid).unwrap();
     bad_digest["digest"] = "sha256:bad".into();
     bad_digest["checkpoint"]["nodes"][0]["state"] = "succeeded".into();
     bad_digest["checkpoint"]["cancelled"] = true.into();
-    std::fs::write(&path, serde_json::to_vec(&bad_digest).unwrap()).unwrap();
+    let bad_bytes = serde_json::to_vec(&bad_digest).unwrap();
+    std::fs::write(&path, &bad_bytes).unwrap();
     std::fs::remove_dir_all(path.parent().unwrap().join("pending")).unwrap();
     assert_eq!(
         FileJournal::pending_graph_ids(&root, project).unwrap(),
@@ -1614,13 +1624,19 @@ fn tick_keeps_corrupt_checkpoints_visible_until_repaired() {
     let error = FileJournal::read_checkpoint(&root, project, "g-test").unwrap_err();
     assert_eq!(error.code(), "bad_digest");
     assert!(error.to_string().contains("g-test"));
-    assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+    let notice = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
+    assert!(notice.to_string().contains("bad_digest"));
+    assert!(notice.to_string().contains("provenant stop -- g-test"));
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap_err()
-            .to_string()
-            .contains("g-test")
+            .unwrap()
+            .is_none()
     );
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().nth(1),
+        Some("bad_digest")
+    );
+    // Changed bytes are a new observation and are reported again.
     std::fs::write(&path, b"{} ").unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
 }
@@ -1661,11 +1677,11 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     checkpoint["digest"] = "sha256:bad".into();
     std::fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+    // The same corrupt bytes are quarantined: the next tick skips them.
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
-            .unwrap_err()
-            .to_string()
-            .contains("g-test")
+            .unwrap()
+            .is_none()
     );
 }
 #[test]
