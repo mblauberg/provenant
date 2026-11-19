@@ -2,7 +2,8 @@
 use super::*;
 use provenant_cli::target::{ResolveError, Resolved, Want};
 use provenant_fabric_runtime::graph::{
-    AttemptState, FileJournal, GraphJournal, GraphRun, JournalError, PendingSteerQueueError,
+    AttemptState, FileJournal, GraphJournal, GraphRun, JournalError, NodeState,
+    PendingSteerQueueError,
 };
 use serde_json::{Value, json};
 
@@ -24,6 +25,49 @@ pub(crate) fn resolve(
     provenant_cli::target::resolve(target, want, |name| {
         FileJournal::read_status_checkpoint(root, project, name)
     })
+}
+
+/// The newest `NAME-k` graph when a changed-input launch superseded `NAME`.
+/// Only the suffix family the naming rule defines (`k >= 2`) counts. The old
+/// graph stays addressable; callers warn and name the newer handle as the next
+/// step rather than following it silently.
+pub(crate) fn superseding_handle(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    base: &str,
+) -> Option<String> {
+    let ids = FileJournal::reserved_graph_ids(root, project).ok()?;
+    let mut newest: Option<(u64, String)> = None;
+    for id in ids {
+        let Some(digits) = id
+            .strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix('-'))
+        else {
+            continue;
+        };
+        if digits.is_empty()
+            || digits.starts_with('0')
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(k) = digits.parse::<u64>() else {
+            continue;
+        };
+        if k >= 2 && newest.as_ref().is_none_or(|(best, _)| k > *best) {
+            newest = Some((k, id));
+        }
+    }
+    newest.map(|(_, id)| id)
+}
+
+/// The warning and `next:` lines a superseded name adds to a human view. The
+/// target is still read as asked; only the pointer moves to the newer handle.
+pub(crate) fn superseded_notice(name: &str, newest: &str, verb: &str) -> String {
+    crate::event_delivery::warn(&format!(
+        "graph `{name}` was superseded by `{newest}` (different input); reading the older graph"
+    ));
+    format!("next: provenant {verb} {newest}\n")
 }
 
 impl Factory {
@@ -225,17 +269,34 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             continue;
         }
         if target.attempt.is_none() {
-            rows.push(row(
+            let (state, reason, waiting_for) = if node.state == NodeState::Pending
+                && let Some(wait_reason) = &node.wait_reason
+            {
+                (
+                    json!("waiting"),
+                    Some(wait_reason.as_str()),
+                    json!(wait_reason),
+                )
+            } else {
+                (
+                    json!(node.state),
+                    node.advance_error
+                        .as_deref()
+                        .or(node.skip_reason.as_deref()),
+                    Value::Null,
+                )
+            };
+            let mut node_row = row(
                 format!("{}/{}", target.graph, node.id),
                 "node",
                 target,
                 Some(&node.id),
                 None,
-                json!(node.state),
-                node.advance_error
-                    .as_deref()
-                    .or(node.skip_reason.as_deref()),
-            ));
+                state,
+                reason,
+            );
+            node_row["waiting_for"] = waiting_for;
+            rows.push(node_row);
         }
         for attempt in node.recorded_attempts() {
             let number = attempt.key.attempt;
@@ -555,7 +616,9 @@ fn row_model(row: &Value) -> String {
 /// its note when there is one. At most `SUMMARY_ROW_BYTES`.
 pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> String {
     let mut line = format!("{name} {}", plain(&row["state"]));
-    if let Some(model) = model {
+    if let Some(model) = model
+        && (model != "-" || row["state"] != "waiting")
+    {
         line.push(' ');
         line.push_str(model);
     }
@@ -649,6 +712,11 @@ pub(crate) fn enrich_status_rows_within(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
+    let lane_holders = store
+        .as_ref()
+        .and_then(|store| provenant_cli::run::active_lane_admission(store, &call).ok())
+        .map(|records| records.0)
+        .unwrap_or_default();
     let local_prefix = format!("{}/", context.identity.host);
     let local_census = rows
         .iter()
@@ -782,13 +850,14 @@ pub(crate) fn enrich_status_rows_within(
             .and_then(|census| census.as_ref().ok())
             .map(Ok)
             .unwrap_or(Err(()));
-        let mut projected = provenant_cli::run::project_lane_with_census(
+        let mut projected = provenant_cli::run::project_lane_with_admission(
             &record,
             &waits,
             context.roots.state.as_path(),
             clock.wall_now().ok(),
             host == context.identity.host && row["latest_attempt"] == true,
             census,
+            &lane_holders,
         );
         if host == context.identity.host
             && let Some(store) = &store
@@ -1378,6 +1447,16 @@ pub(crate) fn unified_graph_command(
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
+            if matches!(command, GraphCommand::Status)
+                && let Some(name) = graph
+                && let Some(newest) = superseding_handle(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    name,
+                )
+            {
+                human.push_str(&superseded_notice(name, &newest, "status"));
+            }
             data["digests"] = json!(super::graph_status::node_digests(rows));
             if matches!(command, GraphCommand::Stop { .. })
                 && data["cancellation_requested"]["pending_acknowledgement"] == true
@@ -1699,6 +1778,8 @@ pub(crate) struct Listing {
     pub rows: Vec<ListedGraph>,
     pub omitted: std::collections::BTreeMap<String, usize>,
     pub next: Option<u64>,
+    pub admission_holders: Vec<provenant_os::admission::HeldInfo>,
+    pub admission_waiters: Vec<provenant_os::admission::WaitInfo>,
 }
 
 /// Every unsettled graph, always; then settled graphs newest first, within
@@ -1767,6 +1848,8 @@ pub(crate) fn select_listing(
         rows,
         omitted,
         next,
+        admission_holders: Vec::new(),
+        admission_waiters: Vec::new(),
     }
 }
 
@@ -1785,6 +1868,8 @@ pub(crate) fn graph_listing(
                     rows: Vec::new(),
                     omitted: Default::default(),
                     next: None,
+                    admission_holders: Vec::new(),
+                    admission_waiters: Vec::new(),
                 });
             }
             Err(error) => return Err(error),
@@ -1856,10 +1941,13 @@ pub(crate) fn graph_listing(
             }
         }
         let now = factory.clock.wall_now()?.as_micros();
+        // Settled-but-open graphs are counted in one summary line and hidden
+        // from the default listing; --full (like --all) includes their rows.
+        let settled_count = graphs.iter().filter(|graph| graph.settled).count();
         let mut listing = select_listing(
             graphs,
             now,
-            command.all,
+            command.all || globals.full,
             usize::try_from(command.limit).unwrap_or(usize::MAX),
             command.cursor,
         );
@@ -1897,7 +1985,32 @@ pub(crate) fn graph_listing(
             }
             graph.digests = super::graph_status::node_digests(&rows);
         }
-        Ok(listing)
+        let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
+        if root.as_path().exists() {
+            finished.admission_holders =
+                provenant_os::admission::standalone_holders(root.as_path());
+            finished.admission_waiters =
+                provenant_os::admission::standalone_waiters(root.as_path());
+            let execution = provenant_run::ExecutionContext {
+                state_root: root.clone(),
+                project_id: project,
+                actor_id: factory.context.identity.inbox.actor,
+                read_prompts: false,
+            };
+            let call = provenant_run::Request {
+                clock: &factory.clock,
+                cancel: &cancel,
+            };
+            if let Some(store) =
+                provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?
+            {
+                let (holders, waiters) =
+                    provenant_cli::run::active_lane_admission(&store, &call).map_err(run_error)?;
+                finished.admission_holders.extend(holders);
+                finished.admission_waiters.extend(waiters);
+            }
+        }
+        Ok(finished)
     })();
     match result {
         Ok(listing) => {
@@ -1954,9 +2067,59 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
+            if !listing.admission_waiters.is_empty() || !listing.admission_holders.is_empty() {
+                if !listing.rows.is_empty() {
+                    human.push('\n');
+                }
+                human.push_str("admission:\n");
+                let now_sec = (now.max(0) / 1_000_000) as u64;
+                for waiter in &listing.admission_waiters {
+                    let elapsed = now_sec.saturating_sub(waiter.start_unix_seconds);
+                    let holders = listing
+                        .admission_holders
+                        .iter()
+                        .filter(|h| h.class == waiter.class)
+                        .collect::<Vec<_>>();
+                    if holders.is_empty() {
+                        human.push_str(&format!(
+                            "  {} waiter: {} ({}s)\n",
+                            waiter.class,
+                            admission_waiter_description(waiter),
+                            elapsed
+                        ));
+                    } else {
+                        let holders_desc = holders
+                            .iter()
+                            .map(|h| provenant_cli::run::admission_holder_description(h))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        human.push_str(&format!(
+                            "  {} waiter: {} ({}s; held by {})\n",
+                            waiter.class,
+                            admission_waiter_description(waiter),
+                            elapsed,
+                            holders_desc
+                        ));
+                    }
+                }
+                for holder in &listing.admission_holders {
+                    let elapsed = now_sec.saturating_sub(holder.start_unix_seconds);
+                    human.push_str(&format!(
+                        "  {} holder: {} ({}s)\n",
+                        holder.class,
+                        provenant_cli::run::admission_holder_description(holder),
+                        elapsed
+                    ));
+                }
+            }
+            let more = if command.all || globals.full {
+                "--cursor"
+            } else {
+                "--full"
+            };
             for (state, count) in &listing.omitted {
                 human.push_str(&format!(
-                    "{count} {state} graphs not shown; --all lists them\n"
+                    "{count} {state} graph(s) not shown; use {more} to list them\n"
                 ));
             }
             if let Some(cursor) = listing.next {
@@ -1977,11 +2140,22 @@ pub(crate) fn graph_listing(
                     })
                 })
                 .collect();
+            let mut data = json!({
+                "graphs": rows,
+                "omitted": listing.omitted,
+                "next_cursor": listing.next,
+            });
+            if !listing.admission_holders.is_empty() || !listing.admission_waiters.is_empty() {
+                data["admission"] = json!({
+                    "holders": listing.admission_holders,
+                    "waiters": listing.admission_waiters,
+                });
+            }
             crate::emit(
                 &provenant_records::CommandResult::new(
                     "status",
                     provenant_records::Outcome::Ok,
-                    json!({"graphs":rows,"omitted":listing.omitted,"next_cursor":listing.next}),
+                    data,
                 ),
                 globals,
                 &human,
@@ -1989,6 +2163,13 @@ pub(crate) fn graph_listing(
             )
         }
         Err(error) => command_fail("status", error.as_ref(), globals),
+    }
+}
+
+fn admission_waiter_description(waiter: &provenant_os::admission::WaitInfo) -> String {
+    match &waiter.attempt_id {
+        Some(attempt) => format!("attempt {} (pid {})", attempt, waiter.pid),
+        None => format!("pid {}", waiter.pid),
     }
 }
 
@@ -2006,6 +2187,26 @@ fn graph_age(now_micros: i64, graph: &ListedGraph) -> String {
     graph
         .created_micros
         .map_or_else(|| "-".to_owned(), |created| age_text(now_micros - created))
+}
+
+/// Order a page with live lanes first and, outside `--full`, hide settled rows
+/// behind one count. `select_listing` has already ordered each group by age.
+pub(crate) fn finish_listing(mut listing: Listing, settled_count: usize, full: bool) -> Listing {
+    listing.rows.sort_by_key(|graph| {
+        !graph
+            .digests
+            .iter()
+            .any(|digest| digest.attempt_presence.as_deref() == Some("live"))
+    });
+    if !full {
+        listing.rows.retain(|graph| !graph.settled);
+        listing.omitted.clear();
+        listing.next = None;
+        if settled_count > 0 {
+            listing.omitted.insert("settled".to_owned(), settled_count);
+        }
+    }
+    listing
 }
 
 /// Read the retained graph journal without consulting live providers. A
@@ -3343,7 +3544,12 @@ mod tests {
         mark_unreadable_attempt(
             &mut rows[0],
             "attempt-id",
-            &provenant_records::DecodeError::Typed { line: 2, column: 3 },
+            &provenant_records::DecodeError::Typed {
+                line: 2,
+                column: 3,
+                field: None,
+                schema_version: None,
+            },
         );
         assert_eq!(rows[0]["state"], "unreadable");
         assert!(
@@ -3373,6 +3579,65 @@ mod tests {
             {"id":"parent--keep","access":"read_only","prompt":"keep","route":{"alias":"senior"},"detached":true},
             {"id":"other","access":"read_only","prompt":"other","route":{"alias":"senior"}}
         ]})).unwrap()
+    }
+
+    #[test]
+    fn lane_status_names_another_lanes_admission_holder() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let waiting_scratch = temp.path().join("waiting");
+        let holding_scratch = temp.path().join("holding");
+        let _held = provenant_os::admission::mark_held(
+            &holding_scratch,
+            "build",
+            2,
+            42,
+            Some("holder-attempt"),
+        )?;
+        let _wait = provenant_os::admission::mark_waiting(
+            &waiting_scratch,
+            "build",
+            43,
+            Some("waiting-attempt"),
+        )?;
+        let id = "11111111111111111111111111111111";
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let mut attempt: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version":1,"attempt_id":id,"project_id":id,
+            "key":{"project":id,"graph":"graph","node":"node","attempt":1},"attempt_number":1,"revision":1,"generation":1,
+            "requested_route":{"kind":"named","name":"senior"},
+            "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
+            "state":{"state":"running"},"usage":{},"read_only_writable":[],
+            "protected_paths":[],"trace":{},
+            "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
+                "digest":digest,"bytes":0,"complete":true,"redacted":false}
+        }))?;
+        attempt
+            .write_grants
+            .push(provenant_records::run::WriteGrantRecord {
+                extra: Default::default(),
+                source: provenant_records::run::WriteSource::Scratch,
+                path: provenant_records::AbsolutePath::new(&waiting_scratch)?,
+                scope: provenant_records::run::PathScope::Subtree,
+            });
+        let holders = provenant_os::admission::lane_holders(&holding_scratch);
+        let row = provenant_cli::run::project_lane_with_admission(
+            &attempt,
+            &[],
+            temp.path(),
+            None,
+            true,
+            Err(()),
+            &holders,
+        );
+        let reason = row.waiting_for.ok_or("missing admission wait")?;
+        assert!(
+            reason.contains("build")
+                && reason.contains("holder-attempt")
+                && reason.contains("slot 2"),
+            "{reason}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -3488,6 +3753,90 @@ mod tests {
         assert_eq!(first.rows[0].name, "s4");
         let second = select_listing(graphs, 3 * day, true, 2, first.next);
         assert_eq!(second.rows[0].name, "s2");
+    }
+
+    fn digest(presence: Option<&str>) -> super::super::graph_status::NodeDigest {
+        super::super::graph_status::NodeDigest {
+            key: provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([7; 16]),
+                "g",
+                "n",
+                1,
+            )
+            .expect("valid work key"),
+            outcome: "running".into(),
+            cause: None,
+            branch: None,
+            pr: json!({"state":"unknown","reference":null}),
+            ci: json!({"state":"unavailable"}),
+            result_path: None,
+            provider_error: None,
+            review_verdict: None,
+            findings_count: None,
+            findings_available: None,
+            review_partial: None,
+            attempt_state: Some("running".into()),
+            attempt_presence: presence.map(str::to_owned),
+            line: "  n: running".into(),
+            state: "running".into(),
+            settled: false,
+            handoff_status: None,
+            open_asks: Vec::new(),
+            evidence_error: None,
+        }
+    }
+
+    #[test]
+    fn listing_leads_with_live_lanes_and_counts_settled_graphs() {
+        let now = 1_000_000_000;
+        let mut live = listed("live", false, now - 3);
+        live.digests.push(digest(Some("live")));
+        let idle = listed("idle", false, now - 2);
+        let settled = listed("settled", true, now - 1);
+        let mut graphs = vec![settled, idle, live];
+        graphs.reverse(); // oldest first; finish_listing owns presentation order
+        let settling = finish_listing(
+            Listing {
+                rows: graphs.clone(),
+                omitted: Default::default(),
+                next: None,
+                admission_holders: Vec::new(),
+                admission_waiters: Vec::new(),
+            },
+            1,
+            false,
+        );
+        assert_eq!(
+            settling
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live", "idle"],
+            "live lanes lead and settled graphs are not listed"
+        );
+        assert_eq!(settling.omitted.get("settled"), Some(&1));
+
+        let full = finish_listing(
+            Listing {
+                rows: graphs,
+                omitted: Default::default(),
+                next: None,
+                admission_holders: Vec::new(),
+                admission_waiters: Vec::new(),
+            },
+            1,
+            true,
+        );
+        assert_eq!(
+            full.rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live", "idle", "settled"],
+            "--full lists settled graphs after live lanes"
+        );
+        assert!(full.omitted.is_empty());
     }
 
     #[test]

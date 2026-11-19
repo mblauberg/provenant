@@ -595,6 +595,42 @@ pub enum FacadeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<provenant_records::diagnostic::ResourceFact>,
     },
+    /// A writer bind refused because another lease holds the worktree. Holder
+    /// facts are local-only: peers receive the typed code and repair action,
+    /// never an unanchored worktree path.
+    #[error("writer lease held{}", .holder.map_or_else(String::new, |holder| format!(" by {holder}")))]
+    WriterLeaseHeld {
+        #[serde(skip)]
+        holder: Option<AttemptId>,
+        #[serde(skip)]
+        branch: Option<String>,
+        #[serde(skip)]
+        worktree: Option<String>,
+        #[serde(skip)]
+        age: Option<String>,
+        #[serde(skip)]
+        live: Option<bool>,
+    },
+    /// A typed run refusal with no richer facade projection. It carries the
+    /// run's own stable code and repair action so causes never collapse into
+    /// one umbrella refusal. Local detail is in-process only; peers see the
+    /// typed code and action, never the unprojected source text.
+    #[error("{run_code}: {next}")]
+    RunKind {
+        /// `provenant_run::ErrorKind::code()` that caused the refusal.
+        /// Named `run_code` so it does not collide with the serde tag `code`.
+        run_code: String,
+        /// Actionable repair for this kind, safe to disclose on the peer wire.
+        next: String,
+        /// Sanitised local diagnostic detail; never published to a peer.
+        #[serde(skip)]
+        detail: Option<String>,
+        /// The typed resource fact behind an admission refusal (disk floor,
+        /// memory pressure, lane cap). Closed and safe for the peer wire, so
+        /// the setting and its source survive both adapters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
+    },
     #[error("writer lock or writer is busy{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1198,6 +1234,41 @@ impl FacadeError {
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
             Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),
+            Self::WriterLeaseHeld {
+                holder,
+                branch,
+                worktree,
+                age,
+                live,
+            } => {
+                let mut facts = Vec::new();
+                if let Some(holder) = holder {
+                    facts.push(format!("attempt {holder}"));
+                }
+                if let Some(branch) = branch {
+                    facts.push(format!("branch {branch}"));
+                }
+                if let Some(worktree) = worktree {
+                    facts.push(format!("worktree {worktree}"));
+                }
+                if let Some(age) = age {
+                    facts.push(format!("reservation age {age}"));
+                }
+                if let Some(live) = live {
+                    facts.push(format!("live: {live}"));
+                }
+                if !facts.is_empty() {
+                    projected = projected.detail(facts.join(", "));
+                }
+                projected = projected.next("reconcile the holding attempt before retrying writer binding");
+            }
+            Self::RunKind { resource: Some(fact), .. } => projected = fact.project(projected),
+            Self::RunKind { next, detail, resource: None, .. } => {
+                if let Some(detail) = detail {
+                    projected = projected.detail(detail.clone());
+                }
+                projected = projected.next(next.clone());
+            }
             Self::CredentialRoot { access } => {
                 let access = match access.as_str() { "read" => "read", "write" => "write", _ => "requested" };
                 projected = projected.detail(format!("credential root refused for {access} grant"))
@@ -1213,6 +1284,9 @@ impl FacadeError {
     }
 
     pub fn code(&self) -> &str {
+        if let Self::RunKind { run_code, .. } = self {
+            return run_code;
+        }
         if let Self::GraphRelayRefused { refusal_code, .. }
         | Self::RecordedRefusal { refusal_code, .. } = self
             && !refusal_code.is_empty()
@@ -1249,9 +1323,11 @@ impl FacadeError {
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused { .. } => "confinement_refused",
+            Self::RunKind { .. } => "run_refused",
             Self::WriterBusy { .. } => "writer_busy",
             Self::WriterLockBusy => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
+            Self::WriterLeaseHeld { .. } => "writer_lease_held",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",
             Self::DispatchUnobserved { .. } => "dispatch_unobserved",
@@ -1660,6 +1736,18 @@ impl From<&super::CoordinationError> for FacadeError {
 impl From<&provenant_fabric_store::Error> for FacadeError {
     fn from(error: &provenant_fabric_store::Error) -> Self {
         use provenant_fabric_store::Error;
+        if let Error::Decode(decode) = error
+            && let provenant_records::DecodeError::UnsupportedVersion { found, .. } =
+                decode.root_cause()
+            && *found > 1
+        {
+            return Self::UpgradeRequired {
+                reader_release: env!("CARGO_PKG_VERSION").into(),
+                writer_release: "unknown".into(),
+                record: "record schema".into(),
+                version: *found,
+            };
+        }
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
@@ -1668,16 +1756,6 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
             Error::PathEncoding => Self::InvalidInput { detail: None },
-            Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
-                if *found > 1 =>
-            {
-                Self::UpgradeRequired {
-                    reader_release: env!("CARGO_PKG_VERSION").into(),
-                    writer_release: "unknown".into(),
-                    record: "record schema".into(),
-                    version: *found,
-                }
-            }
             Error::SchemaVersion(version)
                 if *version > provenant_fabric_store::CURRENT_SCHEMA_VERSION as i64 =>
             {
@@ -1888,6 +1966,8 @@ mod diagnostic_tests {
         let error = provenant_fabric_store::Error::Decode(provenant_records::DecodeError::Typed {
             line: 2,
             column: 3,
+            field: None,
+            schema_version: None,
         });
         let facade = FacadeError::from(&error);
         assert_eq!(facade.code(), "state_corrupt");
@@ -1910,6 +1990,14 @@ mod diagnostic_tests {
                 line: 1,
                 column: 1,
             }),
+            Error::Decode(
+                provenant_records::DecodeError::UnsupportedVersion {
+                    found: 3,
+                    line: 1,
+                    column: 1,
+                }
+                .with_context("/state/attempts/example/launch.json", "LaunchRecord"),
+            ),
         ];
         for error in errors {
             let facade = FacadeError::from(&error);

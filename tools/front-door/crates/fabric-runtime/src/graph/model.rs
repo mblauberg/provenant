@@ -652,6 +652,13 @@ pub struct GraphNode {
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Head of the local WIP commit made at graph submission, when the dirty
+    /// worktree setting chose `wip_commit`. Recorded as a graph event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_commit: Option<String>,
+    /// A retained-edit warning from the token-free dirty-worktree preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_dirty_warning: Option<String>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -704,6 +711,8 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<GraphRoute>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
     /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
@@ -717,6 +726,42 @@ pub struct GraphNode {
 }
 
 impl GraphNode {
+    /// Host admission outcomes cannot be supplied by a graph or planner.
+    pub fn has_host_writer_preflight(&self) -> bool {
+        fn raw_has_host_preflight(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                    (matches!(key.as_str(), "wip_commit" | "writer_dirty_warning")
+                        && !value.is_null())
+                        || raw_has_host_preflight(value)
+                }),
+                serde_json::Value::Array(values) => values.iter().any(raw_has_host_preflight),
+                _ => false,
+            }
+        }
+        self.wip_commit.is_some()
+            || self.writer_dirty_warning.is_some()
+            || self
+                .composite
+                .as_ref()
+                .is_some_and(|value| value.nodes.iter().any(Self::has_host_writer_preflight))
+            || self
+                .loop_body
+                .as_ref()
+                .is_some_and(|value| value.body.iter().any(Self::has_host_writer_preflight))
+            || self.plan.as_ref().is_some_and(|plan| {
+                plan.fallback.as_ref().is_some_and(|fallback| {
+                    fallback.nodes.iter().any(Self::has_host_writer_preflight)
+                }) || plan.templates.iter().any(|template| {
+                    template.node.iter().any(|(key, value)| {
+                        (matches!(key.as_str(), "wip_commit" | "writer_dirty_warning")
+                            && !value.is_null())
+                            || raw_has_host_preflight(value)
+                    }) || template.nodes.iter().any(raw_has_host_preflight)
+                })
+            })
+    }
+
     /// Construct a composite boundary with the same defaults as a decoded node.
     pub fn composite(id: String, depends_on: Vec<String>, spec: CompositeSpec) -> Self {
         Self {
@@ -903,6 +948,14 @@ impl GraphDocument {
     /// The single static admission decision for a submitted graph. The reason
     /// is suitable for bounded display and typed projection by the front door.
     pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), AdmissionError> {
+        self.admit_expanded(limits).map(|_| ())
+    }
+
+    /// Validate and return the same canonical topology used for host preflight.
+    pub fn admit_expanded(
+        &self,
+        limits: &crate::config::GraphLimits,
+    ) -> Result<Self, AdmissionError> {
         validate_schema(self)?;
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
@@ -920,7 +973,8 @@ impl GraphDocument {
             return Err(AdmissionError::StructuralLimit(reason));
         }
         envelope::admit(self, &[], &[], &plan)?;
-        validate_output_kinds(&expanded)
+        validate_output_kinds(&expanded)?;
+        Ok(expanded)
     }
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
@@ -1923,6 +1977,9 @@ pub struct NodeProgress {
     pub worktree: Option<String>,
     pub id: String,
     pub state: NodeState,
+    /// Reason a queued node is waiting: "cap" or "after".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
     /// State to restore when a cancelled graph is resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled_from: Option<NodeState>,
@@ -2405,6 +2462,8 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    /// Whether submission recorded an explicit retained-edit warning.
+    pub writer_dirty_preflight: bool,
     /// Review identity of the expanded node being launched.
     pub review_launch: bool,
     pub require_skill_location: bool,

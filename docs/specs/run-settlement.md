@@ -13,6 +13,18 @@ writer branch publication, the terminal record is committed before custody relea
 import refusal retains private Git for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
+The guardian transfers its existing writer exclusion to recovery; import and
+cleanup reuse that guard for the same scope and directory instead of opening a
+second description. Failed steps before import share a durable three-failure
+budget. A resumed worker honours `retry_after_ms` before its first pass and
+paces every subsequent pending pass even if that deadline has expired. Exhausted
+retries retain their cause and stop automatic recovery; status reports settlement
+blocked and calls for explicit reconciliation. A retry deadline overdue by three
+minutes is flagged as stalled in the existing status reason, including failures
+before a driver is claimed.
+- Why: a retained writer must not contend with itself or spend CPU retrying an
+  unchanged failure indefinitely.
+
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`

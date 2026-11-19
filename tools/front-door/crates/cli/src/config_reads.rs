@@ -53,7 +53,7 @@ reads! {
     "tracker" => [], "verify" => [], "check" => [], "check install" => ["accounts"],
     "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr"],
     "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward", "wait"],
-    "knobs" => []
+    "knobs" => [], "admit" => []
 }
 
 pub fn declaration(path: &str) -> Option<&'static ConfigRead> {
@@ -96,6 +96,21 @@ pub fn show_for(
     command: &str,
 ) -> Result<ResolvedConfig<crate::domains::Domains>, ConfigError> {
     provenant_config::config_show(roots, &sections_for(command)?)
+}
+
+/// Name the layer that set `field`, for one-line warnings that state an action
+/// before taking it. Shared so the steer notice and its settlement report agree.
+pub fn setting_source(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+    field: &str,
+) -> String {
+    match origins.get(field) {
+        Some(provenant_config::Origin::User { .. }) => format!("config.toml ({field})"),
+        Some(provenant_config::Origin::Compiled { profile }) => {
+            format!("compiled {profile:?} profile ({field})")
+        }
+        None => format!("compiled defaults ({field})"),
+    }
 }
 
 pub fn sections_for(

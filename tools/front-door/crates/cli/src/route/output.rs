@@ -479,10 +479,11 @@ pub fn run(
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} source={} weight={} pacing={:?}{}{}",
+                                "{} source={} weight={} weight_layer={} pacing={:?}{}{}",
                                 member.model.as_str(),
                                 member.source,
                                 member.weight,
+                                member.weight_layer.as_str(),
                                 member.pacing,
                                 member
                                     .effort

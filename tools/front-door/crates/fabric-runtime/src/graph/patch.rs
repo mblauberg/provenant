@@ -12,6 +12,36 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PATCH_SCHEMA_VERSION: u64 = 1;
+/// Validate a supplied sealed submission before the host performs Git effects.
+pub fn validate_submission_snapshot(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+    worktree_layout: provenant_config::WorktreeLayoutPort,
+) -> Result<(), PatchError> {
+    let Some(patch) = &document.submission_patch else {
+        return Ok(());
+    };
+    let library = TemplateLibrary::bundled();
+    let resolvers = BTreeMap::new();
+    let context = PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        journal: None,
+        limits,
+        worktree_layout,
+    };
+    let compiled = compile_submission(
+        &document.graph_id,
+        patch,
+        &context,
+        document.integration_branch.as_deref(),
+    )?;
+    if compiled.nodes != document.nodes {
+        return Err(PatchError::invalid("submission differs from bound nodes"));
+    }
+    Ok(())
+}
+
 const KEY_BYTES: usize = 128;
 const REASON_BYTES: usize = 512;
 
@@ -1102,7 +1132,20 @@ pub fn compile_submission(
         library: &library,
         resolvers: context.resolvers,
     };
-    let nodes = compiler.compile_all(&patch.nodes)?;
+    let mut nodes = compiler.compile_all(&patch.nodes)?;
+    for (raw, node) in patch.nodes.iter().zip(&mut nodes) {
+        if raw.get("use").and_then(Value::as_str) == Some("batch")
+            && library.layer("batch") == Some(Layer::Bundled)
+        {
+            plans::provision_paths(
+                std::slice::from_mut(node),
+                graph_id,
+                "",
+                &context.worktree_layout,
+            )
+            .map_err(PatchError::invalid)?;
+        }
+    }
     if nodes.is_empty() {
         return Err(PatchError::invalid("patch adds no nodes"));
     }
@@ -1370,6 +1413,11 @@ pub(super) fn prepare(
         }
     }
 
+    if local.iter().any(GraphNode::has_host_writer_preflight) {
+        return Err(PatchError::invalid(
+            "patch cannot supply host writer preflight metadata",
+        ));
+    }
     let mut nodes = if local.is_empty() {
         Vec::new()
     } else {
@@ -1476,6 +1524,11 @@ pub(super) fn prepare(
                 && (target.composite.is_none() && target.loop_body.is_none()
                     || node.prompt == target.prompt)
         };
+        if node.has_host_writer_preflight() && !same_retry {
+            return Err(PatchError::invalid(
+                "patch cannot supply host writer preflight metadata",
+            ));
+        }
         if (structural(target) || structural(&node)) && !same_retry {
             return Err(PatchError::new(
                 "conflict",

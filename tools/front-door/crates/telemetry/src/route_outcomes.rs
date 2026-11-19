@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use provenant_records::{AttemptFact, AttemptOutcome};
-use provenant_routing::{ModelId, PriorKey, RoutePrior};
+use provenant_routing::{ModelId, OutcomeKey, PriorKey, RoutePrior};
 use serde::Serialize;
 
 /// Values read from the immutable request and attempt receipt. Missing receipts
@@ -65,7 +65,7 @@ fn has_quality_outcome(fact: &AttemptFact) -> bool {
 pub fn priors(
     evidence: impl IntoIterator<Item = Evidence>,
 ) -> Result<Vec<RoutePrior>, crate::TelemetryError> {
-    let mut groups = BTreeMap::<(ModelId, String, PriorKey), (u64, u64)>::new();
+    let mut groups = BTreeMap::<OutcomeKey, (u64, u64)>::new();
     for (index, item) in evidence.into_iter().enumerate() {
         if index as u64 >= crate::MAX_ATTEMPTS {
             return Err(crate::TelemetryError::TooLarge("100,000 selected attempts"));
@@ -76,10 +76,7 @@ pub fn priors(
         let Some(pool) = item.pool else {
             continue;
         };
-        if item.access.is_none()
-            || item.fact.started_at.is_none()
-            || item.fact.tier.as_deref() != Some(pool.as_str())
-        {
+        if item.access.is_none() || item.fact.started_at.is_none() {
             continue;
         }
         let Some(context) = item.fact.routing_context.as_ref() else {
@@ -113,7 +110,9 @@ pub fn priors(
             }
             _ => continue,
         };
-        let counts = groups.entry((model, pool, role)).or_default();
+        let counts = groups
+            .entry(OutcomeKey::new(model, pool, role))
+            .or_default();
         if success {
             counts.0 += 1;
         } else {
@@ -125,11 +124,11 @@ pub fn priors(
     }
     Ok(groups
         .into_iter()
-        .map(|((model, pool, role), (successes, failures))| RoutePrior {
+        .map(|(key, (successes, failures))| RoutePrior {
             extra: Default::default(),
-            model,
-            pool,
-            role: role.as_str().to_owned(),
+            model: key.model,
+            pool: key.pool,
+            role: key.role.as_str().to_owned(),
             successes,
             failures,
             source: "route_outcomes:attributed_terminal_pool_draws".into(),

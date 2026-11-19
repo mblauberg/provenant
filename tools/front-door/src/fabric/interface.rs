@@ -1008,6 +1008,10 @@ impl Factory {
             provenant_fabric_runtime::graph::template::IMPLEMENT_PLAN_DEFAULT.into(),
             vec![config.domains.fabric.implement.plan.to_string()],
         );
+        resolvers.insert(
+            provenant_fabric_runtime::graph::template::BATCH_MAX_PARALLEL_DEFAULT.into(),
+            vec![config.domains.fabric.batch.max_parallel.to_string()],
+        );
         Ok(resolvers)
     }
 
@@ -1800,6 +1804,7 @@ impl Factory {
         };
         let mut templates = effective_templates(&library, template_name, input);
         templates["$implement_plan_default"] = json!(self.context.config.implement.plan);
+        templates["$batch_max_parallel_default"] = json!(self.context.config.batch.max_parallel);
         let mut identity_input = input.clone();
         if let Some(subject) = &review_subject {
             identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
@@ -2087,14 +2092,18 @@ impl Factory {
             }
         }
         document.set_replay_digest(&digest);
-        let submission_key = format!("submit:{}", document.graph_id);
-        patch::submission(
-            &mut document,
-            &submission_key,
-            &self.context.config.graph.limits,
-            self.context.port_table.worktree_layout.clone(),
-        )
-        .map_err(graph_patch_error)?;
+        // Explain is read-only and still shows the compiled submission. For a
+        // launch, the host performs writer preflight before sealing the patch.
+        if input["explain"] == true {
+            let submission_key = format!("submit:{}", document.graph_id);
+            patch::submission(
+                &mut document,
+                &submission_key,
+                &self.context.config.graph.limits,
+                self.context.port_table.worktree_layout.clone(),
+            )
+            .map_err(graph_patch_error)?;
+        }
         provenant_fabric_runtime::graph::admit_candidate(
             &document,
             None,
@@ -2104,13 +2113,12 @@ impl Factory {
             Some(&self.requester_lane_path()?),
         )
         .map_err(FacadeError::graph_candidate)?;
+        // Static admission is the single compile gate: a launch no longer seals
+        // the submission patch above, so admit here to keep every entry on the
+        // same typed (redacted) refusal.
         let expanded_for_warnings = document
-            .expanded(&self.context.config.graph.limits)
-            .map_err(|error| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: error.to_string(),
-            })?;
+            .admit_expanded(&self.context.config.graph.limits)
+            .map_err(FacadeError::graph_admission)?;
         input_warnings.extend(implementation_warnings(
             &expanded_for_warnings.nodes,
             input,
@@ -2211,6 +2219,12 @@ impl Factory {
                         config.origins.get("domains.fabric.implement.plan").map(|origin| json!(origin)).unwrap_or(json!("default"))
                     }
                 },
+                "max_parallel": {
+                    "value": input.pointer("/set/max_parallel").or_else(|| input.pointer("/document/with/max_parallel")).cloned().unwrap_or(json!(self.context.config.batch.max_parallel)),
+                    "source": if input.pointer("/set/max_parallel").or_else(|| input.pointer("/document/with/max_parallel")).is_some() { json!("parameter (--set)") } else {
+                        config.origins.get("domains.fabric.batch.max_parallel").map(|origin| json!(origin)).unwrap_or(json!("default"))
+                    }
+                },
             }));
         }
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
@@ -2227,7 +2241,7 @@ impl Factory {
         }
         result["warnings"] = json!(warnings);
         result["named"] = json!({
-            "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
+            "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
         Ok(result)
     }
@@ -2299,10 +2313,11 @@ impl Factory {
             // A proposed writer does not yet have a registered worktree.
             // Inspect its declared boundary now; registration is verified once
             // the worktree owner provisions it at launch.
-            let proposed = node
-                .attempt
-                .as_ref()
-                .is_some_and(|attempt| attempt.new_worktree.is_some())
+            let proposed = (node.provision_worktree
+                || node
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.new_worktree.is_some()))
                 && !path.exists();
             let mode = if proposed {
                 SourceAdmissionMode::Proposed

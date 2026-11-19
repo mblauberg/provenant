@@ -29,6 +29,31 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
 }
 
 #[test]
+fn planner_fragments_cannot_forge_writer_preflight() {
+    for field in ["writer_dirty_warning", "wip_commit"] {
+        let mut child = slice("injected", &[]);
+        child[field] = json!("forged");
+        let output = result(vec![child]);
+        let run = advance(&planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.expansions.is_empty());
+        assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::InvalidPlanExpansion));
+        assert!(run.checkpoint.pause_reason().unwrap().contains("host writer preflight"));
+    }
+}
+
+#[test]
+fn host_writer_preflight_detection_covers_plan_fallbacks_and_templates() {
+    for plan in [
+        json!({"max_nodes":1,"fallback":{"nodes":[{"id":"writer","access":"worktree_write","worktree":"tree","prompt":"write","writer_dirty_warning":"forged"}],"exports":[]}}),
+        json!({"max_nodes":1,"patterns":[{"name":"bad","node":{"writer_dirty_warning":"forged"}}]}),
+        json!({"max_nodes":1,"patterns":[{"name":"bad","nodes":[{"id":"child","wip_commit":"forged"}]}]}),
+    ] {
+        let node: GraphNode = serde_json::from_value(json!({"id":"plan","access":"read_only","prompt":"plan","plan":plan})).unwrap();
+        assert!(node.has_host_writer_preflight());
+    }
+}
+
+#[test]
 fn planner_fragment_writers_use_the_declared_worktree_template() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version": 1,
@@ -3727,6 +3752,11 @@ fn initial_submission_refuses_changed_snapshot_before_checkpoint_or_launch() {
     )
     .unwrap();
     document.submission_patch.as_mut().unwrap().nodes[0]["prompt"] = json!("changed prompt");
+    assert!(patch::validate_submission_snapshot(
+        &document,
+        &plans::generous(),
+        provenant_config::PortTable::builtin().worktree_layout,
+    ).is_err());
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner::default();
     assert!(advance(&document, &mut owner, &mut journal).is_err());

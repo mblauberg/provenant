@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use super::*;
 
 pub(super) fn list_data(
@@ -814,6 +816,23 @@ pub(super) fn edit_model_exclusion(
 }
 
 pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = provenant_core::default_state_home(roots.state.as_path())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| cwd.clone());
+    execute_in(command, roots, now, &home, &cwd)
+}
+
+pub(super) fn execute_in(
+    command: &Route,
+    roots: &Roots,
+    now: WallTime,
+    home: &Path,
+    cwd: &Path,
+) -> Result<Data, EdgeError> {
+    let selection_evidence = matches!(command, Route::Resolve(_))
+        .then(|| crate::route::selection_evidence(roots, home, cwd, None));
     match command {
         Route::List(query) => Ok(Data::List(display_list_data(roots, query)?)),
         Route::Resolve(query) => with_context(
@@ -828,6 +847,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
             |context, records, policies, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
+                    selection_evidence: selection_evidence.as_ref(),
                     ..*context
                 };
                 let request = resolve_request(query, context)?;

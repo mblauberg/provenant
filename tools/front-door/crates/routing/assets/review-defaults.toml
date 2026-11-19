@@ -120,13 +120,13 @@ large = "standard"
 [review.lenses]
 order = [
   "correctness-spec",
+  "flexibility",
   "tests",
   "reliability",
   "design-fit-reuse",
   "simplicity",
   "conventions-readability",
   "refactor-cleanup",
-  "flexibility",
 ]
 [review.lenses.by_kind.docs]
 order = ["conventions-readability"]

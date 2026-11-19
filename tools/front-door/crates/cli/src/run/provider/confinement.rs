@@ -1979,6 +1979,20 @@ pub(super) fn writer_source_context(
             error,
         )
     };
+    // A pin mismatch gets its own cause text naming the pinned commit and the
+    // current head, never the generic launch-handoff wording.
+    let pin_error = |error: run::RunError, uncommitted: &[String]| -> PrepareError {
+        match error {
+            run::RunError::WriterSourceMismatch { expected, actual } => {
+                PrepareError::WriterPinMismatch {
+                    pinned: expected,
+                    head: actual,
+                    uncommitted: uncommitted.to_vec(),
+                }
+            }
+            other => PrepareError::WriterContinuation(other.to_string()),
+        }
+    };
     let Some(source_head) = task.source_head.as_deref() else {
         if let Some(head) = task.head.as_deref() {
             let head = head.parse().map_err(|_| {
@@ -1988,7 +2002,7 @@ pub(super) fn writer_source_context(
             })?;
             writer
                 .require_source(head, policy)
-                .map_err(|error| boundary_error(error.into()))?;
+                .map_err(|error| boundary_error(pin_error(error, &[])))?;
         }
         return Ok(None);
     };
@@ -2017,16 +2031,7 @@ pub(super) fn writer_source_context(
         ))
     })?;
     if let Err(error) = writer.require_continuation_source(git, source, predecessor, policy) {
-        return Err(boundary_error(PrepareError::WriterContinuation(
-            if uncommitted.is_empty() {
-                error.to_string()
-            } else {
-                format!(
-                    "{error}; uncommitted predecessor edits: {}",
-                    uncommitted.join(", ")
-                )
-            },
-        )));
+        return Err(boundary_error(pin_error(error, &uncommitted)));
     }
     Ok((!uncommitted.is_empty()).then(|| {
         format!(

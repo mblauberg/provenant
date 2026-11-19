@@ -374,6 +374,14 @@ pub(super) fn validate_flat_plan(
                 "node deadline_seconds must be positive",
             ));
         }
+        if node.max_parallel == Some(0)
+            || node
+                .composite
+                .as_ref()
+                .is_some_and(|spec| spec.max_parallel == Some(0))
+        {
+            return Err(node_plan_error(node, "max_parallel must be positive"));
+        }
         if let Some(reason) = node
             .attempt
             .as_ref()
@@ -723,6 +731,7 @@ pub(super) fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            writer_dirty_preflight: node.writer_dirty_warning.is_some(),
             review_launch: is_review_node(node),
             on_stop: node.on_stop.clone(),
             family_group: node.family_group.clone(),
@@ -730,6 +739,7 @@ pub(super) fn validate_flat_plan(
             extra: node.extra.clone(),
             composite_members: node.composite_members.clone(),
             composite: node.composite.clone(),
+            max_parallel: node.max_parallel,
             role: node.role.clone(),
             distinct_from: node.distinct_from,
             distinct_strength: node.distinct_strength,

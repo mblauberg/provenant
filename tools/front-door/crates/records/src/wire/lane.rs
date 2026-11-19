@@ -627,6 +627,10 @@ impl crate::run::TerminalCause {
         Self::WriteGrantsRefused,
         Self::WorktreeBusy,
         Self::HandoffRefused,
+        Self::WriterPinMismatch {
+            pinned: provenant_core::GitOid::Sha1([0; 20]),
+            head: provenant_core::GitOid::Sha1([1; 20]),
+        },
         Self::RetainedWriterImport,
         Self::UnsupportedPlatform,
         Self::UnknownPacingAccount,
@@ -670,6 +674,7 @@ mod terminal_cause_tests {
             | TerminalCause::WriteGrantsRefused
             | TerminalCause::WorktreeBusy
             | TerminalCause::HandoffRefused
+            | TerminalCause::WriterPinMismatch { .. }
             | TerminalCause::RetainedWriterImport
             | TerminalCause::UnsupportedPlatform
             | TerminalCause::UnknownPacingAccount
@@ -715,6 +720,10 @@ mod terminal_cause_tests {
                     reason.contains(&format!("stdout.log line {line}")),
                     "{reason}"
                 );
+                assert!(reason.contains("fixture scoped note"));
+            } else if let TerminalCause::WriterPinMismatch { pinned, head } = cause {
+                assert!(reason.contains(&pinned.to_string()), "{reason}");
+                assert!(reason.contains(&head.to_string()), "{reason}");
                 assert!(reason.contains("fixture scoped note"));
             } else {
                 assert_eq!(reason, format!("{}; fixture scoped note", cause.detail()));

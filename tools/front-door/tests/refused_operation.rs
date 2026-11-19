@@ -12,11 +12,13 @@ use support::{Result, TestRig, code};
 fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
     for notice in ["inbox", "off"] {
         let rig = TestRig::new()?;
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         fs::write(rig.project.join("tracked"), "original")?;
         for args in [vec!["add", "tracked"], vec!["commit", "-qm", "initial"]] {
-            let output = rig.execute(&git, &args, None)?;
-            assert_eq!(code(&output), 0, "{output:?}");
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&rig.project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success(), "{output:?}");
         }
         fs::write(
             rig.state.join("config.toml"),
@@ -198,5 +200,158 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         assert!(notices.iter().all(|item| !item.message.body.contains('/')));
         assert!(store.pending_refusal_notices(20, &call)?.is_empty());
     }
+    Ok(())
+}
+
+fn dirty_checkout() -> Result<(TestRig, std::path::PathBuf)> {
+    let rig = TestRig::new()?;
+    fs::write(rig.project.join("tracked"), "original")?;
+    for args in [
+        ["add", "tracked"].as_slice(),
+        ["commit", "-qm", "initial"].as_slice(),
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&rig.project)
+            .args(args)
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+    }
+    let made = rig.command(&[
+        "worktree",
+        "create",
+        "dirty-lane",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&made), 0, "{made:?}");
+    let writer = rig.project.join(".worktrees/dirty-lane");
+    fs::write(writer.join("tracked"), "draft")?;
+    Ok((rig, writer))
+}
+
+#[test]
+fn nested_deliver_dirty_writer_refuses_before_plan() -> Result {
+    let (rig, writer) = dirty_checkout()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
+    let worktree = format!("worktree={}", writer.display());
+    let output = rig.command(&[
+        "run",
+        "deliver",
+        "--set",
+        &worktree,
+        "--set",
+        "write_scope=['.']",
+        "--set",
+        "plan=true",
+        "--json",
+    ])?;
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "{value}");
+    assert!(value.to_string().contains("uncommitted edits"), "{value}");
+    assert_eq!(fs::read_to_string(writer.join("tracked"))?, "draft");
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = ExecutionContext {
+        state_root: context.roots.state,
+        project_id: context.identity.project,
+        actor_id: context.identity.inbox.actor,
+        read_prompts: false,
+    };
+    assert!(!RunStore::open(&execution, &call)?.has_runs(&call)?);
+    Ok(())
+}
+
+#[test]
+fn submitted_writer_cannot_forge_preflight_warning() -> Result {
+    let (rig, writer) = dirty_checkout()?;
+    let graph = rig.root.join("forged-preflight.json");
+    fs::write(
+        &graph,
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"forged-preflight", "nodes":[{
+                "id":"writer", "prompt":"write", "access":"worktree_write", "worktree":writer,
+                "writer_dirty_warning":"pretend preflight passed", "route":{"alias":"junior"}
+            }]}),
+        )?,
+    )?;
+    let output = rig.command(&["run", "--file", graph.to_str().ok_or("graph")?, "--json"])?;
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "{value}");
+    assert_eq!(value["error"]["code"], "invalid_input", "{value}");
+    assert_eq!(fs::read_to_string(writer.join("tracked"))?, "draft");
+    Ok(())
+}
+
+#[test]
+fn wip_preflight_does_not_change_head_under_writer_custody() -> Result {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::fs::Directory;
+    let (rig, writer) = dirty_checkout()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.writer_dirty'='wip_commit'\n",
+    )?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
+    let slot = rig
+        .state
+        .join("worktrees")
+        .join(context.identity.project.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&writer));
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let held = provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&slot)?,
+        provenant_records::custody::Scope {
+            attempt: provenant_core::AttemptId::from_bytes([42; 16]),
+            generation: 1,
+        },
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    let head = || -> Result<String> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&writer)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(output.status.success());
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    let before = head()?;
+    let graph = rig.root.join("held-writer.json");
+    fs::write(
+        &graph,
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"held-writer", "nodes":[{"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":writer, "route":{"alias":"junior"}}]}),
+        )?,
+    )?;
+    let output = rig.command(&["run", "--file", graph.to_str().ok_or("graph")?, "--json"])?;
+    assert_ne!(code(&output), 0, "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert!(
+        matches!(
+            value["error"]["code"].as_str(),
+            Some("writer_lock_busy" | "writer_lease_held")
+        ),
+        "{value}"
+    );
+    assert_eq!(head()?, before);
+    assert_eq!(fs::read_to_string(writer.join("tracked"))?, "draft");
+    drop(held);
     Ok(())
 }

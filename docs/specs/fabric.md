@@ -92,7 +92,7 @@ Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
 another holder's item warns, records the previous holder in the same transaction
 as the custody change, and proceeds. Gone holders leave unattended items for
 adoption. Unknown native presence stays unknown. Run writer leases still own
-Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
+worktree custody. Cursors advance monotonically; an unreachable peer is Unknown.
 Holder identifiers in warnings use their normal hexadecimal display rather than
 debug-struct formatting.
 - Why: unattended work must remain discoverable without making advisory custody
@@ -182,9 +182,24 @@ the writer consumes. `domains.fabric.implement.plan` sets the default and
 input, write scope or explicit plan parameter emits the advisory
 `unbounded_brief_junior_writer` warning. Set
 `domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+
+`batch` expands over `items`, accepting either bare strings or structured item tables
+`{ id, brief | brief_file, route | model, write_scope, after, with }`. Mutual exclusion
+is enforced between `brief` and `brief_file`, and between `route` and `model`. Slices
+support ordering via `after`, which names prerequisite item IDs; unknown IDs and dependency
+cycles are refused at compile time with offending IDs named. Slices run under a concurrency
+cap specified by `max_parallel` (default from config `domains.fabric.batch.max_parallel`,
+reported with its source in `--explain`, and overridable per run via `--set max_parallel=N`).
+The host provisions a distinct managed worktree for each slice. A dependent slice
+starts from the current integration head after its prerequisites integrate; an
+independent slice starts from the graph's pinned integration base.
+Queued slices appear as `waiting` in status with reason `cap` or `after`. As each slice settles,
+it integrates into `integration_branch`; a merge conflict pauses only the conflicting slice
+(`blocked` with conflicting files reported) and leaves remaining slices running.
 - Why: single writers start without an implicit planning stage; callers choose
-  when planning adds value.
-- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+  when planning adds value. Batch tasks require flexible per-slice briefs, routing,
+  dependency ordering, bounded concurrency, and isolated merge conflict handling.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/transitions.rs`, `crates/run/src/delivery.rs`
 
 ### Graph admission and refusal causes
 
@@ -260,13 +275,25 @@ requests an interrupt through the attempt's existing custody owner only after
 that readiness record is durable. If readiness is not yet available, the text
 stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
-the next user turn. It preserves writer custody. When the provider session is
-unavailable, steer.fallback defaults to fresh_with_handoff: settlement warns
-with the configuration source, then starts a fresh session using the original
-accepted brief, the previous bounded handoff and all queued steer text. Set
-domains.fabric.steer.fallback to "refuse" to retain the accepted steer without
-a successor. A route, account, session or process identity mismatch remains
-fatal and never takes the fresh fallback.
+the next user turn. It preserves writer custody. Before it interrupts the live
+attempt, the owner prints one line naming the configured steer.fallback and the
+layer that set it, so the action is stated before it happens. When the provider
+session is unavailable, steer.fallback defaults to fresh_with_handoff: the fresh
+session continues with the original accepted brief, the previous bounded handoff
+and all queued steer text. Set domains.fabric.steer.fallback to "refuse" to
+retain the accepted steer without a successor. A route, account, session or
+process identity mismatch remains fatal and never takes the fresh fallback.
+Providers that can resume (claude, codex, cursor, agy, opencode) keep their
+session across the restart; command and host-native routes cannot resume and
+start fresh. Injecting a turn into an already-running provider process without
+a restart is not implemented: it needs a persistent, authenticated bidirectional
+channel per adapter, which none of the adapters expose. The resume-capable
+providers are the ones that could support it; until then the session-preserving
+restart is the delivery path. Steered lanes that settle close together claim a
+restart slot from
+a host-state gate spaced by domains.fabric.steer.restart_spacing_ms (default
+2000 ms; 0 disables), which bounds concurrent restarts instead of racing the
+launch lock; an applied wait names its configuration source.
 
 When placement or the accepted run owner is temporarily unavailable, the graph
 journal persists a bounded steer intent for the exact work key before replying
