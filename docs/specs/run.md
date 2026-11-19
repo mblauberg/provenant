@@ -7,6 +7,12 @@ Run admits attempts and records their outcomes. [Launch](run-launch.md),
 [settlement](run-settlement.md), [Git and delivery](run-git.md) and
 [attribution](run-attribution.md) specify their boundaries. Paths are relative
 to `tools/front-door/`.
+The handoff parsing rule lives in [settlement](run-settlement.md): a closed
+`handoff` fence wins, a final `json` fence is accepted with a warning, and
+adjacent repeated blocks settle as one declaration (identical, or the last of
+differing copies), each with a warning. A writer that exits without a handoff
+keeps its uncommitted paths and pinned head in the reason and sealed terminal,
+so the `handoff_missing` stop routes to the chair as a continuable stop.
 
 ## Operation IDs
 
