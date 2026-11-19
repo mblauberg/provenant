@@ -707,10 +707,9 @@ impl Driver<'_> {
             "killed {} surviving descendants",
             self.stopped_descendants.len()
         );
-        match warnings
-            .iter_mut()
-            .find(|warning| warning.starts_with("killed ") && warning.ends_with(" surviving descendants"))
-        {
+        match warnings.iter_mut().find(|warning| {
+            warning.starts_with("killed ") && warning.ends_with(" surviving descendants")
+        }) {
             Some(warning) => *warning = label,
             None => push_warning(warnings, omitted, &label),
         }

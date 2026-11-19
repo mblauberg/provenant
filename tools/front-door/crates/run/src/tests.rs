@@ -1799,7 +1799,12 @@ fn process_checkpoint_for_another_scope_is_refused() -> TestResult {
             RECORD_LIMIT,
         )?;
         let id = input.attempt_id;
-        assert!(!store.record_observed(id, &call)?.process_observation_valid.0);
+        assert!(
+            !store
+                .record_observed(id, &call)?
+                .process_observation_valid
+                .0
+        );
         // Recovery and mutation reads refuse a checkpoint for another scope.
         assert!(store.record(id, &call).is_err());
     }

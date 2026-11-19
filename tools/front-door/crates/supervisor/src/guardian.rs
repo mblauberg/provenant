@@ -1066,8 +1066,8 @@ impl Driver<'_> {
         let sample_interval = hooks
             .resource_sample_interval
             .map(|interval| interval.max(Duration::from_millis(1)));
-        let memory_path = sample_interval
-            .and_then(|_| crate::process_tree::snapshot_path(&self.attempt).ok());
+        let memory_path =
+            sample_interval.and_then(|_| crate::process_tree::snapshot_path(&self.attempt).ok());
         let env = with_process_tree_path(env, memory_path.as_deref());
         if memory_path.is_some() {
             let _ = crate::process_tree::publish(&self.attempt, None);
@@ -2174,9 +2174,10 @@ impl Driver<'_> {
                 input: !input.is_empty(),
                 secret_input: self.secret_input.as_ref(),
                 inherited_lease: None,
-                inherited_profile: self.profile_file.as_ref().map(|profile| {
-                    profile as &dyn provenant_os::sys::profile::LimitSource
-                }),
+                inherited_profile: self
+                    .profile_file
+                    .as_ref()
+                    .map(|profile| profile as &dyn provenant_os::sys::profile::LimitSource),
                 inherited_ports: ports,
                 process_group: false,
                 capture_stdout: plan.stdout.piped(),
