@@ -1,22 +1,61 @@
+// One credential layout per test, so the real preparations run in parallel.
 #[test]
-fn writer_plan_stages_scratch_in_private_temporary_directory()
+fn writer_plan_stages_scratch_with_no_github_config() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(Scenario::Layout(
+        "writer_plan_stages_scratch_with_no_github_config",
+        "missing",
+    ))
+}
+
+#[test]
+fn writer_plan_stages_scratch_with_a_symlinked_github_config()
 -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, false)
+    writer_preparation_fixture(Scenario::Layout(
+        "writer_plan_stages_scratch_with_a_symlinked_github_config",
+        "symlink",
+    ))
+}
+
+#[test]
+fn writer_plan_stages_scratch_with_a_symlinked_xdg_github_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(Scenario::Layout(
+        "writer_plan_stages_scratch_with_a_symlinked_xdg_github_config",
+        "symlink-xdg",
+    ))
 }
 
 // Medium: real provider fences, routing and preparation, with synthetic CLIs.
 #[test]
 fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(true, false)
+    writer_preparation_fixture(Scenario::Fence)
 }
 
 #[test]
 fn build_slot_preparation_does_not_require_a_target() -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, true)
+    writer_preparation_fixture(Scenario::BuildSlot)
 }
 
-fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn pool_redraw_continuation_and_unconfinable_plan_through_preparation()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(Scenario::Pools)
+}
+
+#[derive(Clone, Copy)]
+enum Scenario {
+    /// The full writer preparation under one GitHub config layout: test name, layout.
+    Layout(&'static str, &'static str),
+    Fence,
+    BuildSlot,
+    Pools,
+}
+
+fn writer_preparation_fixture(scenario: Scenario) -> Result<(), Box<dyn std::error::Error>> {
+    let fence_only = matches!(scenario, Scenario::Fence);
+    let gate_only = matches!(scenario, Scenario::BuildSlot);
+    let pools_only = matches!(scenario, Scenario::Pools);
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget};
     use provenant_os::clock::SystemClock;
@@ -35,39 +74,39 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
     if std::env::var_os(CHILD).is_none() {
         // Each auth layout runs the real preparation boundary in an isolated
         // process; neither depends on another test's host credential state.
-        let (test, layouts): (&str, &[&str]) = if fence_only {
-            (
+        let (test, layout) = match scenario {
+            Scenario::Layout(test, layout) => (test, layout),
+            Scenario::Fence => (
                 "provider_fence_preparation_reports_causes_and_selects_available_candidate",
-                &["missing"],
-            )
-        } else if gate_only {
-            ("build_slot_preparation_does_not_require_a_target", &["missing"])
-        } else {
-            (
-                "writer_plan_stages_scratch_in_private_temporary_directory",
-                &["missing", "symlink", "symlink-xdg"],
-            )
+                "missing",
+            ),
+            Scenario::BuildSlot => (
+                "build_slot_preparation_does_not_require_a_target",
+                "missing",
+            ),
+            Scenario::Pools => (
+                "pool_redraw_continuation_and_unconfinable_plan_through_preparation",
+                "missing",
+            ),
         };
-        for layout in layouts {
-            #[allow(clippy::disallowed_methods)]
-            let output = std::process::Command::new(std::env::current_exe()?)
-                .arg(test)
-                .env(CHILD, layout)
-                .env("GH_TOKEN", "fixture-host-token")
-                .env_remove("GIT_CONFIG_GLOBAL")
-                .env_remove("GH_CONFIG_DIR")
-                .env_remove("XDG_CONFIG_HOME")
-                .env_remove(provenant_core::consumer_env::GIT)
-                .env_remove(provenant_core::consumer_env::PRIMARY_CHECKOUT)
-                .env_remove(provenant_core::consumer_env::WORKTREE_GITDIR)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "GitHub config layout {layout}:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        #[allow(clippy::disallowed_methods)]
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .arg(test)
+            .env(CHILD, layout)
+            .env("GH_TOKEN", "fixture-host-token")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GH_CONFIG_DIR")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove(provenant_core::consumer_env::GIT)
+            .env_remove(provenant_core::consumer_env::PRIMARY_CHECKOUT)
+            .env_remove(provenant_core::consumer_env::WORKTREE_GITDIR)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "GitHub config layout {layout}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return Ok(());
     }
 
@@ -603,6 +642,281 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
         assert!(skipped_routes[0].detail.contains("protected path"));
         return Ok(());
     }
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = run::RunStore::open(
+        &run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: binding.project_id(),
+            actor_id: provenant_core::ActorId::from_bytes([5; 16]),
+            read_prompts: true,
+        },
+        &call,
+    )?;
+    store.create(
+        &run::PreparedRun {
+            attempt_id,
+            operation_id: paths.operation_id.clone(),
+            request: run::CanonicalRequest {
+                extra: Default::default(),
+                chair: None,
+                fresh_continuation: None,
+                schema_version: 1,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{attempt_id}")),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
+                    ..task.clone()
+                },
+                parent: None,
+                lane_depth: Some(1),
+                parent_attempt: None,
+            },
+            prompt: prompt.clone(),
+            created_at: provenant_core::WallTime::from_micros(100)?,
+        },
+        &call,
+    )?;
+    // Pool redraw, continuation and plan refusals through real preparation.
+    if pools_only {
+        let full = format!("Durable output instructions\n\n{prompt}");
+        // A failed diagnostic write must not fail a valid launch, and leaves no
+        // cached availability to change the provider lookups counted below.
+        std::fs::create_dir(attempt.join("availability.json"))?;
+        let launch = prepare_with(
+            &registry,
+            &task,
+            &full,
+            &paths,
+            None,
+            |adapter| {
+                assert_eq!(adapter, "cursor", "unrelated adapter was probed");
+                Ok(executable.clone())
+            },
+            None,
+        )?;
+        // A named pool redraws after an adapter disappears during local preparation.
+        // The first two lookups establish availability; the third refuses the first
+        // selected member, and the next lookup admits the remaining member.
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
+        )?;
+        let mut redraw_task = task.clone();
+        redraw_task.route = run::RequestedRoute::Named { required_family: None,
+            extra: Default::default(),
+            name: "redraw-fixture".into(),
+            effort: None,
+        };
+        let redraw_prompt = "pool redraw fixture";
+        redraw_task.prompt_digest =
+            provenant_records::CanonicalV1::file_digest(redraw_prompt.as_bytes());
+        let redraw_paths = run::LaunchPaths {
+            scratch: attempt.join("redraw-scratch"),
+            provider_state: attempt.join("redraw-provider-state"),
+            temporary: attempt.join("redraw-tmp"),
+            temporary_alias: None,
+            attempt_id: paths.attempt_id,
+            operation_id: paths.operation_id.clone(),
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            deadline_unix_ms: paths.deadline_unix_ms,
+        };
+        for path in [
+            &redraw_paths.scratch,
+            &redraw_paths.provider_state,
+            &redraw_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let lookup_count = std::cell::Cell::new(0);
+        let redraw_launch = prepare_with(
+            &registry,
+            &redraw_task,
+            redraw_prompt,
+            &redraw_paths,
+            None,
+            |adapter| {
+                assert_eq!(adapter, "cursor");
+                let count = lookup_count.get() + 1;
+                lookup_count.set(count);
+                if count == 3 {
+                    Err("fixture executable disappeared".into())
+                } else {
+                    Ok(executable.clone())
+                }
+            },
+            None,
+        )?;
+        assert_eq!(redraw_launch.skipped_routes.len(), 1);
+        assert!(
+            redraw_launch.skipped_routes[0]
+                .detail
+                .contains("selected route is unavailable")
+        );
+        assert!(
+            !redraw_launch.skipped_routes[0]
+                .detail
+                .contains("fixture executable disappeared")
+        );
+        assert_ne!(
+            redraw_launch.route.model.as_deref(),
+            Some(redraw_launch.skipped_routes[0].route.as_str())
+        );
+        let config = std::fs::read_to_string(state.join("config.toml"))?;
+        std::fs::write(
+            state.join("config.toml"),
+            config.replace("settlement_retries=1", "settlement_retries=0"),
+        )?;
+        let no_retry_paths = run::LaunchPaths {
+            scratch: attempt.join("no-redraw-scratch"),
+            provider_state: attempt.join("no-redraw-provider-state"),
+            temporary: attempt.join("no-redraw-tmp"),
+            temporary_alias: None,
+            attempt_id: paths.attempt_id,
+            operation_id: paths.operation_id.clone(),
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            deadline_unix_ms: paths.deadline_unix_ms,
+        };
+        for path in [
+            &no_retry_paths.scratch,
+            &no_retry_paths.provider_state,
+            &no_retry_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        // Settlement retries bound launched attempts. A member that preparation
+        // excluded never launched, so a zero budget still tries the next member.
+        let calls = std::cell::Cell::new(0);
+        let no_retry = prepare_with(
+            &registry,
+            &redraw_task,
+            redraw_prompt,
+            &no_retry_paths,
+            None,
+            |_| {
+                let count = calls.get() + 1;
+                calls.set(count);
+                if count == 3 {
+                    Err("fixture executable disappeared".into())
+                } else {
+                    Ok(executable.clone())
+                }
+            },
+            None,
+        )?;
+        assert_eq!(calls.get(), 4);
+        assert_eq!(no_retry.skipped_routes.len(), 1);
+        assert_eq!(no_retry.skipped_routes[0].kind, SkipKind::Unavailable);
+        assert!(
+            !no_retry.skipped_routes[0]
+                .detail
+                .contains("fixture executable disappeared")
+        );
+        assert_ne!(
+            no_retry.route.model.as_deref(),
+            Some(no_retry.skipped_routes[0].route.as_str())
+        );
+        drop(no_retry);
+        std::fs::remove_file(state.join("config.toml"))?;
+
+        // The original named pool may change or disappear after dispatch.
+        // A continuation must use the exact applied provider, model and
+        // account without consulting that pool or the original account alias.
+        let mut prior = store.record(attempt_id, &call)?;
+        prior.requested_route = run::RequestedRoute::Named { required_family: None,
+            extra: Default::default(),
+            name: "retired-pool".into(),
+            effort: None,
+        };
+        prior.applied_route = Some(launch.route.clone());
+        prior.session = Some("fixture-session".into());
+        // Cursor continuation is retained in the settled attempt, never the host home.
+        let retained_session = paths
+            .provider_state
+            .join("candidate-0/chats/fixture-session");
+        std::fs::create_dir_all(&retained_session)?;
+        std::fs::write(
+            retained_session.join("transcript"),
+            b"retained fixture session",
+        )?;
+        let mut continued_task = task.clone();
+        continued_task.route = prior.requested_route.clone();
+        continued_task.account = Some("retired-account-alias".into());
+        let continued_paths = run::LaunchPaths {
+            attempt_id: paths.attempt_id,
+            operation_id: OperationId::parse("different-resume-seed")?,
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            deadline_unix_ms: paths.deadline_unix_ms,
+            scratch: attempt.join("continued-scratch"),
+            provider_state: attempt.join("continued-provider-state"),
+            temporary: attempt.join("continued-tmp"),
+            temporary_alias: None,
+        };
+        for path in [
+            &continued_paths.scratch,
+            &continued_paths.provider_state,
+            &continued_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let continued = prepare_with(
+            &registry,
+            &continued_task,
+            "Continue the prior task",
+            &continued_paths,
+            Some(&prior),
+            |adapter| {
+                assert_eq!(adapter, "cursor", "resume probed a different provider");
+                Ok(executable.clone())
+            },
+            None,
+        )?;
+        assert_eq!(continued.route.provider, launch.route.provider);
+        assert_eq!(continued.route.model, launch.route.model);
+        assert_eq!(continued.route.account_key, launch.route.account_key);
+        assert!(continued.route.pool_selection.is_none());
+        assert!(continued.argv.iter().any(|arg| arg == "--resume"));
+        assert_eq!(
+            std::fs::read(
+                continued_paths
+                    .provider_state
+                    .join("candidate-0/chats/fixture-session/transcript")
+            )?,
+            b"retained fixture session"
+        );
+        // A writable tree the plan cannot cover names that error, not a disclosure denial.
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version = 1\n[domains.run]\nwriter_writes = ['{}']\n",
+                paths.scratch.display(),
+            ),
+        )?;
+        let error = prepare_with(
+            &registry,
+            &task,
+            &full,
+            &paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )
+        .err()
+        .ok_or("unconfinable worktree accepted")?;
+        assert!(
+            matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::Permission(provenant_confinement::permissions::PermissionError::ProtectedOverlap)))),
+            "{error}"
+        );
+        return Ok(());
+    }
     // A recorded sign-out followed by a healthy account-scoped status probe
     // must permit preparation without waiting for the quota backoff.
     let now = clock.unix_seconds();
@@ -688,46 +1002,6 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
         "{error}"
     );
     assert!(error.to_string().contains(&"a".repeat(40)), "{error}");
-    let call = run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = run::RunStore::open(
-        &run::ExecutionContext {
-            state_root: roots.state.clone(),
-            project_id: binding.project_id(),
-            actor_id: provenant_core::ActorId::from_bytes([5; 16]),
-            read_prompts: true,
-        },
-        &call,
-    )?;
-    store.create(
-        &run::PreparedRun {
-            attempt_id,
-            operation_id: paths.operation_id.clone(),
-            request: run::CanonicalRequest {
-                extra: Default::default(),
-                chair: None,
-                fresh_continuation: None,
-                schema_version: 1,
-                task: run::TaskRequest {
-                    context: Some(provenant_records::run::WorkContext {
-                        graph_id: Some(format!("lane-{attempt_id}")),
-                        node_id: Some("node".into()),
-                        attempt: Some(1),
-                        ..Default::default()
-                    }),
-                    ..task.clone()
-                },
-                parent: None,
-                lane_depth: Some(1),
-                parent_attempt: None,
-            },
-            prompt: prompt.clone(),
-            created_at: provenant_core::WallTime::from_micros(100)?,
-        },
-        &call,
-    )?;
     // Exercise the actual adapter, sandbox compiler and fixture executable in both lane modes.
     #[cfg(target_os = "macos")]
     {
@@ -1660,405 +1934,15 @@ printf 'agy 1.0.0\n'
         executor.execute(options)
     };
     let denied = run_shim("ci")?;
-    assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
-    assert_eq!(denied.stderr.bytes, b"github.deny_labels\n");
+    // A configured deny label is advisory: the command proceeds with a warning.
+    assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(0));
+    assert!(String::from_utf8_lossy(&denied.stderr.bytes).contains("github.deny_labels"));
     let allowed = run_shim("docs")?;
     assert_eq!(
         allowed.termination,
         provenant_os::exec::Termination::Exit(0)
     );
     assert_eq!(allowed.stdout.bytes, b"forwarded\n");
-    // A named pool redraws after an adapter disappears during local preparation.
-    // The first two lookups establish availability; the third refuses the first
-    // selected member, and the next lookup admits the remaining member.
-    let saved_config = std::fs::read(state.join("config.toml"))?;
-    std::fs::write(
-        state.join("config.toml"),
-        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
-    )?;
-    let mut redraw_task = task.clone();
-    redraw_task.route = run::RequestedRoute::Named { required_family: None,
-        extra: Default::default(),
-        name: "redraw-fixture".into(),
-        effort: None,
-    };
-    let redraw_prompt = "pool redraw fixture";
-    redraw_task.prompt_digest =
-        provenant_records::CanonicalV1::file_digest(redraw_prompt.as_bytes());
-    let redraw_paths = run::LaunchPaths {
-        scratch: attempt.join("redraw-scratch"),
-        provider_state: attempt.join("redraw-provider-state"),
-        temporary: attempt.join("redraw-tmp"),
-        temporary_alias: None,
-        attempt_id: paths.attempt_id,
-        operation_id: paths.operation_id.clone(),
-        task_index: paths.task_index,
-        lane_depth: paths.lane_depth,
-        deadline_unix_ms: paths.deadline_unix_ms,
-    };
-    for path in [
-        &redraw_paths.scratch,
-        &redraw_paths.provider_state,
-        &redraw_paths.temporary,
-    ] {
-        std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    let lookup_count = std::cell::Cell::new(0);
-    let redraw_launch = prepare_with(
-        &registry,
-        &redraw_task,
-        redraw_prompt,
-        &redraw_paths,
-        None,
-        |adapter| {
-            assert_eq!(adapter, "cursor");
-            let count = lookup_count.get() + 1;
-            lookup_count.set(count);
-            if count == 3 {
-                Err("fixture executable disappeared".into())
-            } else {
-                Ok(executable.clone())
-            }
-        },
-        None,
-    )?;
-    assert_eq!(redraw_launch.skipped_routes.len(), 1);
-    assert!(
-        redraw_launch.skipped_routes[0]
-            .detail
-            .contains("selected route is unavailable")
-    );
-    assert!(
-        !redraw_launch.skipped_routes[0]
-            .detail
-            .contains("fixture executable disappeared")
-    );
-    assert_ne!(
-        redraw_launch.route.model.as_deref(),
-        Some(redraw_launch.skipped_routes[0].route.as_str())
-    );
-    let config = std::fs::read_to_string(state.join("config.toml"))?;
-    std::fs::write(
-        state.join("config.toml"),
-        config.replace("settlement_retries=1", "settlement_retries=0"),
-    )?;
-    let no_retry_paths = run::LaunchPaths {
-        scratch: attempt.join("no-redraw-scratch"),
-        provider_state: attempt.join("no-redraw-provider-state"),
-        temporary: attempt.join("no-redraw-tmp"),
-        temporary_alias: None,
-        attempt_id: paths.attempt_id,
-        operation_id: paths.operation_id.clone(),
-        task_index: paths.task_index,
-        lane_depth: paths.lane_depth,
-        deadline_unix_ms: paths.deadline_unix_ms,
-    };
-    for path in [
-        &no_retry_paths.scratch,
-        &no_retry_paths.provider_state,
-        &no_retry_paths.temporary,
-    ] {
-        std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    // Settlement retries bound launched attempts. A member that preparation
-    // excluded never launched, so a zero budget still tries the next member.
-    let calls = std::cell::Cell::new(0);
-    let no_retry = prepare_with(
-        &registry,
-        &redraw_task,
-        redraw_prompt,
-        &no_retry_paths,
-        None,
-        |_| {
-            let count = calls.get() + 1;
-            calls.set(count);
-            if count == 3 {
-                Err("fixture executable disappeared".into())
-            } else {
-                Ok(executable.clone())
-            }
-        },
-        None,
-    )?;
-    assert_eq!(calls.get(), 4);
-    assert_eq!(no_retry.skipped_routes.len(), 1);
-    assert_eq!(no_retry.skipped_routes[0].kind, SkipKind::Unavailable);
-    assert!(
-        !no_retry.skipped_routes[0]
-            .detail
-            .contains("fixture executable disappeared")
-    );
-    assert_ne!(
-        no_retry.route.model.as_deref(),
-        Some(no_retry.skipped_routes[0].route.as_str())
-    );
-    drop(no_retry);
-    std::fs::write(state.join("config.toml"), saved_config)?;
-
-    let mut review_task = task.clone();
-    review_task.writer = None;
-    let review_paths = run::LaunchPaths {
-        scratch: attempt.join("review-scratch"),
-        provider_state: attempt.join("review-provider-state"),
-        temporary: attempt.join("review-tmp"),
-        temporary_alias: None,
-        ..redraw_paths
-    };
-    for path in [
-        &review_paths.scratch,
-        &review_paths.provider_state,
-        &review_paths.temporary,
-    ] {
-        std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    let review = prepare_with(
-        &registry,
-        &review_task,
-        "short review",
-        &review_paths,
-        None,
-        |_| Ok(executable.clone()),
-        None,
-    )?;
-    assert!(
-        review
-            .environment
-            .iter()
-            .any(|(key, value)| key == "PROVENANT_LANE_HEAD" && value == review_oid.as_str())
-    );
-    assert!(
-        review
-            .environment
-            .iter()
-            .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
-    );
-    let executed = executor.execute(ExecOptions::new(
-        &launch.argv,
-        &project,
-        Duration::from_secs(2),
-    ))?;
-    assert_eq!(executed.termination, Termination::Exit(0));
-    let update = provenant_os::provider_fence::acquire(
-        roots.state.as_path(),
-        "cursor",
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    drop(update);
-    assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
-    assert_eq!(
-        launch.route.model.as_deref(),
-        Some("cursor/composer-2.5")
-    );
-    assert_eq!(launch.argv[0], executable.as_os_str());
-    let scratch = paths.temporary.join("candidate-0");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(scratch.join("git-context.json"))?)?;
-    assert_eq!(metadata["base"], metadata["head"]);
-    assert_eq!(std::fs::read(scratch.join("git-diff.patch"))?, b"");
-    let pointer = launch
-        .argv
-        .last()
-        .ok_or("prompt missing")?
-        .to_str()
-        .ok_or("prompt UTF-8")?;
-    assert!(pointer.len() < 1024);
-    let spilled = attempt.join("prompt.md");
-    assert!(pointer.contains(spilled.to_str().ok_or("path UTF-8")?));
-    let spilled_text = std::fs::read_to_string(&spilled)?;
-    let location = spilled_text
-        .strip_suffix(&full)
-        .ok_or("spilled prompt lost the task text")?;
-    assert!(location.contains("Host-written Git context"));
-    assert!(location.contains(&scratch.display().to_string()));
-    assert_eq!(
-        store.record(attempt_id, &call)?.prompt.digest,
-        task.prompt_digest
-    );
-    assert_ne!(
-        task.prompt_digest,
-        provenant_records::CanonicalV1::file_digest(pointer.as_bytes())
-    );
-    assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
-    // The original named pool may change or disappear after dispatch.
-    // A continuation must use the exact applied provider, model and
-    // account without consulting that pool or the original account alias.
-    let mut prior = store.record(attempt_id, &call)?;
-    prior.requested_route = run::RequestedRoute::Named { required_family: None,
-        extra: Default::default(),
-        name: "retired-pool".into(),
-        effort: None,
-    };
-    prior.applied_route = Some(launch.route.clone());
-    prior.session = Some("fixture-session".into());
-    // Cursor continuation is retained in the settled attempt, never the host home.
-    let retained_session = paths
-        .provider_state
-        .join("candidate-0/chats/fixture-session");
-    std::fs::create_dir_all(&retained_session)?;
-    std::fs::write(
-        retained_session.join("transcript"),
-        b"retained fixture session",
-    )?;
-    let mut continued_task = task.clone();
-    continued_task.route = prior.requested_route.clone();
-    continued_task.account = Some("retired-account-alias".into());
-    let continued_paths = run::LaunchPaths {
-        attempt_id: paths.attempt_id,
-        operation_id: OperationId::parse("different-resume-seed")?,
-        task_index: paths.task_index,
-        lane_depth: paths.lane_depth,
-        deadline_unix_ms: paths.deadline_unix_ms,
-        scratch: attempt.join("continued-scratch"),
-        provider_state: attempt.join("continued-provider-state"),
-        temporary: attempt.join("continued-tmp"),
-        temporary_alias: None,
-    };
-    for path in [
-        &continued_paths.scratch,
-        &continued_paths.provider_state,
-        &continued_paths.temporary,
-    ] {
-        std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    let continued = prepare_with(
-        &registry,
-        &continued_task,
-        "Continue the prior task",
-        &continued_paths,
-        Some(&prior),
-        |adapter| {
-            assert_eq!(adapter, "cursor", "resume probed a different provider");
-            Ok(executable.clone())
-        },
-        None,
-    )?;
-    assert_eq!(continued.route.provider, launch.route.provider);
-    assert_eq!(continued.route.model, launch.route.model);
-    assert_eq!(continued.route.account_key, launch.route.account_key);
-    assert!(continued.route.pool_selection.is_none());
-    assert!(continued.argv.iter().any(|arg| arg == "--resume"));
-    assert_eq!(
-        std::fs::read(
-            continued_paths
-                .provider_state
-                .join("candidate-0/chats/fixture-session/transcript")
-        )?,
-        b"retained fixture session"
-    );
-    let confinement = launch.confinement.ok_or("writer confinement missing")?;
-    assert!(confinement.writer.is_some());
-    // Exercise the actual request builder with two distinct project overrides.
-    let project_a = binding.project_id();
-    let project_b = ProjectId::from_bytes([0xff; 16]);
-    let config = provenant_confinement::run_config::RunConfig {
-        projects: [
-            (
-                project_a.to_string(),
-                provenant_confinement::run_config::ProjectRunConfig {
-                    writer_writes: Some(vec![base.join("a-locks")]),
-                    ..Default::default()
-                },
-            ),
-            (
-                project_b.to_string(),
-                provenant_confinement::run_config::ProjectRunConfig {
-                    writer_writes: Some(vec![base.join("b-locks")]),
-                    ..Default::default()
-                },
-            ),
-        ]
-        .into(),
-        ..Default::default()
-    };
-    let request = confinement_request(
-        project_a,
-        ConfinementRoots {
-            host_roots: None,
-            cwd: &project,
-            home: &home,
-            state: Path::new("/fixture-host-state"),
-            credential_roots: &provenant_core::CredentialRoots::default(),
-            github_roots: &[],
-            protected_worktrees: &[],
-            scratch: &paths.scratch,
-            private_state: &paths.provider_state,
-            assets: &assets,
-            prompt_file: None,
-        },
-        confinement.writer.as_ref(),
-        &run::LaneAccess::default(),
-        &config,
-        "cursor",
-        false,
-        InventoryContext::Sandboxed,
-    )?;
-    assert!(request.permissions.protected_roots.is_empty());
-    assert_eq!(
-        request.permissions.write_roots,
-        vec![PathGrant {
-            path: base.join("a-locks"),
-            scope: PathScope::Subtree,
-        }]
-    );
-    // The default config enables the cargo seed, and prepare hands that to the
-    // lane's launch confinement, where `seed_target` reads it.
-    assert!(
-        confinement.cargo_target_seed,
-        "the default FabricConfig must reach the writer launch with the seed enabled"
-    );
-    assert!(!confinement.plan.permissions().writer_publishing());
-    assert!(!scratch.join("publishing.gitconfig").exists());
-    assert!(
-        confinement
-            .plan
-            .permissions()
-            .read_roots
-            .contains(&PathGrant {
-                path: spilled,
-                scope: PathScope::Exact,
-            })
-    );
-    assert_eq!(
-        confinement.plan.permissions().scratch.path,
-        paths.temporary.join("candidate-0")
-    );
-    let mut bad_task = task.clone();
-    bad_task.base = Some("absent-base".into());
-    let result = prepare_with(
-        &registry,
-        &bad_task,
-        "fixture prompt",
-        &paths,
-        None,
-        |_| Err("provider lookup must not happen for an invalid base".into()),
-        None,
-    );
-    assert!(
-        matches!(result, Err(PrepareError::Run(run::RunError::InvalidBase(base))) if base == "absent-base")
-    );
-    // A writable tree the plan cannot cover names that error, not a disclosure denial.
-    std::fs::write(
-        state.join("config.toml"),
-        format!(
-            "schema_version = 1\n[domains.run]\nwriter_writes = ['{}']\n",
-            paths.scratch.display(),
-        ),
-    )?;
-    let error = prepare_with(
-        &registry,
-        &task,
-        &full,
-        &paths,
-        None,
-        |_| Ok(executable.clone()),
-        None,
-    )
-    .err()
-    .ok_or("unconfinable worktree accepted")?;
-    assert!(
-        matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::Permission(provenant_confinement::permissions::PermissionError::ProtectedOverlap)))),
-        "{error}"
-    );
     Ok(())
 }
 

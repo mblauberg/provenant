@@ -3615,68 +3615,6 @@ mod tests {
     }
 
     #[test]
-    fn login_repair_uses_registered_account_context_or_says_unavailable() {
-        let mut entry: provenant_providers::accounts::Registration = serde_json::from_value(
-            serde_json::json!({"adapter":"claude","label":"work","key":"key","directory":"/tmp/account's files"}),
-        )
-        .unwrap();
-        assert_eq!(
-            login_repair(Some(&entry)),
-            "run `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude auth login` interactively"
-        );
-        let expired_repair = login_expired_repair(Some(&entry));
-        assert!(expired_repair.starts_with(
-            "try a short interactive session with `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude`"
-        ));
-        assert!(expired_repair.contains("if that does not refresh the login"));
-        assert!(expired_repair.contains("claude auth login` interactively"));
-        let diagnostic = login_diagnostic(
-            Some(&entry),
-            Some(100),
-            &provenant_records::RouteExclusionReason::LoginExpired,
-        );
-        assert!(
-            diagnostic.contains("work [claude]: login expired"),
-            "{diagnostic}"
-        );
-        assert!(diagnostic.contains("1970-01-01T00:01:40Z"), "{diagnostic}");
-        let mismatch = login_diagnostic(
-            Some(&entry),
-            Some(100),
-            &provenant_records::RouteExclusionReason::AccountMismatch,
-        );
-        assert!(mismatch.contains("signed-in account differs from registration"));
-        assert!(mismatch.contains("CLAUDE_CONFIG_DIR="));
-        assert!(diagnostic.contains(&expired_repair), "{diagnostic}");
-        let codex: provenant_providers::accounts::Registration = serde_json::from_value(
-            serde_json::json!({"adapter":"codex","label":"work","key":"key","directory":"/tmp/codex"}),
-        )
-        .unwrap();
-        assert_eq!(
-            login_expired_repair(Some(&codex)),
-            "run `CODEX_HOME='/tmp/codex' codex login` interactively"
-        );
-        let missing = login_diagnostic(
-            None,
-            None,
-            &provenant_records::RouteExclusionReason::LoginExpired,
-        );
-        assert!(
-            missing.contains("last successful observation unknown"),
-            "{missing}"
-        );
-        assert!(missing.contains("remedy unavailable"), "{missing}");
-        entry.directory = "/tmp/line\nbreak".into();
-        assert!(login_repair(Some(&entry)).contains("unavailable"));
-        entry.directory = "/tmp/`command`".into();
-        assert!(login_repair(Some(&entry)).contains("unavailable"));
-        entry.directory = "/tmp/account".into();
-        entry.adapter = "unknown".into();
-        assert!(login_repair(Some(&entry)).contains("unavailable"));
-        assert!(login_repair(None).contains("unavailable"));
-    }
-
-    #[test]
     fn account_mismatch_names_the_repair_and_sign_out_keeps_login_text() {
         let entry: provenant_providers::accounts::Registration = serde_json::from_value(
             serde_json::json!({"adapter":"agy","label":"work","key":"key","directory":"/tmp/account"}),

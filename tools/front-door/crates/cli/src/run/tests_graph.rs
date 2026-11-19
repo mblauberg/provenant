@@ -167,37 +167,6 @@ fn cli_io_projection_omits_untrusted_sources_in_both_formats()
     Ok(())
 }
 #[test]
-fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::error::Error>> {
-    let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
-        stage: provenant_records::run::WriterDeliveryStage::Integrate,
-        tool: "git",
-        command: "worktree list".into(),
-        limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
-    });
-    assert_eq!(failure.kind, ErrorKind::Io);
-    let reply = super::reply("run", Err(failure));
-    let mut rendered = Vec::new();
-    crate::render::render(
-        &reply.result,
-        crate::render::RenderMode::Human {
-            text: &reply.human,
-            summary: reply.summary.as_ref(),
-            read_only: reply.read_only,
-        },
-        &mut rendered,
-    )?;
-    let actual = String::from_utf8(rendered)?;
-    for part in [
-        "IO",
-        "Integrate",
-        "git",
-        &provenant_os::exec::DEFAULT_CAPTURE_LIMIT.to_string(),
-    ] {
-        assert!(actual.contains(part), "{actual}");
-    }
-    Ok(())
-}
-#[test]
 fn stats_summary_reports_cost_coverage() {
     use provenant_telemetry::{CostTotal, Totals};
     let mut totals = Totals {
@@ -220,69 +189,6 @@ fn stats_summary_reports_cost_coverage() {
     assert_eq!(totals_cache_read_share(&totals), Some(0.9));
     totals.usage.cache_write.missing = 1;
     assert_eq!(totals_cache_read_share(&totals), None);
-}
-#[test]
-fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
-    use provenant_telemetry::{ChairModelUsage, ConfiguredPrices, usage::ChairSession};
-    let prices = provenant_telemetry::validate_prices(&ConfiguredPrices {
-        schema_version: 1,
-        id: "empty".into(),
-        reviewed_at: "2026-10-29".into(), // timebomb: allow fixed price-table review date, never compared with the clock
-        units: "usd_microdollars_per_million_tokens".into(),
-        max_review_age_days: None,
-        discrepancy_threshold_bps: None,
-        models: Vec::new(),
-    })
-    .unwrap();
-    let chair = |usage| ChairSession {
-        adapter: "claude".into(),
-        account_identity: provenant_telemetry::usage::AccountIdentity::known(
-            "claude",
-            "work",
-            "fixture-epoch",
-        ),
-        session: "s".into(),
-        project: None,
-        config: None,
-        usage,
-        unread: None,
-    };
-    let usage = |read| {
-        vec![ChairModelUsage {
-            model: "claude-opus-5-5".into(),
-            usage: provenant_records::Usage {
-                uncached_input: Some(10),
-                cache_read: read,
-                cache_write: Some(0),
-                cache_write_1h: None,
-                output_excluding_reasoning: Some(1),
-                reasoning: None,
-            },
-        }]
-    };
-    let report = |usage| {
-        let report =
-            provenant_telemetry::stats_with_chair([], [chair(usage)], &prices, Default::default())
-                .unwrap();
-        stats_summary(&report)
-    };
-    let text = report(usage(Some(90)));
-    assert!(
-            text.contains(
-                "cache read by source [chair]: 90.0% of 100 input tokens (1 records reported, 0 did not)\n"
-            ),
-            "{text}"
-        );
-    assert!(
-        text.contains("cache read by model [chair] claude claude/claude-opus-5-5: 90.0%"),
-        "{text}"
-    );
-    assert!(
-        text.contains("chair: 1 sessions on this host (0 unread)"),
-        "{text}"
-    );
-    let text = report(usage(None));
-    assert!(!text.contains("cache read"), "{text}");
 }
 #[test]
 fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {

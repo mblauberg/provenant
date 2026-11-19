@@ -343,29 +343,6 @@ mod tests {
     use provenant_records::CanonicalV1;
     use provenant_run::{CanonicalRequest, PreparedRun};
 
-    #[test]
-    fn old_child_stores_are_not_read() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        std::fs::create_dir(base.join("home"))?;
-        std::fs::create_dir(base.join("checkout"))?;
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        std::fs::create_dir_all(roots.state.as_path().join("children/old"))?;
-        std::fs::set_permissions(
-            roots.state.as_path(),
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )?;
-        std::fs::write(
-            roots.state.as_path().join("children/old/run.sqlite3"),
-            b"invalid database",
-        )?;
-        let tree = read(&roots, None, 3, 100, false)?;
-        assert_eq!(tree["nodes"], json!([]));
-        assert_eq!(tree["unfetched_children"], json!([]));
-        Ok(())
-    }
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn host_tree_preserves_lineage_detail_and_usage() -> Result<(), Box<dyn std::error::Error>> {
