@@ -653,23 +653,14 @@ impl Driver<'_> {
             #[cfg(target_os = "macos")]
             {
                 let mut candidates = std::collections::BTreeSet::new();
-                // Native descendants require a requested provider stop, not
-                // merely its ordinary exit. Without a native child registry,
-                // an actual host holder must affirm that no graph child remains;
-                // an absent holder is not that proof.
-                let requested_stop = match reason {
-                    machine::StopReason::PostTerminalCleanup => false,
-                    machine::StopReason::ExplicitCancellation
-                    | machine::StopReason::Steered
-                    | machine::StopReason::WallDeadline
-                    | machine::StopReason::ProtocolRejected
-                    | machine::StopReason::SupervisorSignal
-                    | machine::StopReason::TokenBudget
-                    | machine::StopReason::ContextHandoff => true,
-                };
-                if requested_stop
-                    && (self.descendant_stop_allowed
-                        || (self.registry.is_none() && self.holder.is_some()))
+                // The lane's own tree ends with it, whatever ended the provider
+                // (#3545). Only recorded descendants with retained provider
+                // ancestry and sandbox-marked escapees are candidates, and each
+                // signal re-observes the exact identity. Without a native child
+                // registry, an actual host holder must affirm that no graph
+                // child remains; an absent holder is not that proof.
+                if self.descendant_stop_allowed
+                    || (self.registry.is_none() && self.holder.is_some())
                 {
                     candidates.extend(child.owned_cleanup_targets(&census, &spared));
                 }
@@ -679,6 +670,9 @@ impl Driver<'_> {
                 let targets =
                     host_authorised_targets(self.holder, &self.holder_context, candidates);
                 for delivery in child.stop_owned_targets(escalation, &targets) {
+                    if delivery.outcome == DeliveryOutcome::Delivered {
+                        self.stopped_descendants.insert(delivery.identity.clone());
+                    }
                     self.record_delivery(
                         Some(delivery.identity),
                         delivery_reason,
@@ -686,6 +680,7 @@ impl Driver<'_> {
                         delivery.outcome,
                     );
                 }
+                self.note_stopped_descendants(warnings, omitted);
             }
             #[cfg(not(target_os = "macos"))]
             drop(marked);
@@ -698,6 +693,26 @@ impl Driver<'_> {
                 &[],
                 Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)),
             );
+        }
+    }
+
+    /// One summary warning, refreshed in place, for every descendant this
+    /// guardian signalled; per-process warnings would crowd out the rest.
+    #[cfg(target_os = "macos")]
+    fn note_stopped_descendants(&self, warnings: &mut Vec<String>, omitted: &mut u64) {
+        if self.stopped_descendants.is_empty() {
+            return;
+        }
+        let label = format!(
+            "killed {} surviving descendants",
+            self.stopped_descendants.len()
+        );
+        match warnings
+            .iter_mut()
+            .find(|warning| warning.starts_with("killed ") && warning.ends_with(" surviving descendants"))
+        {
+            Some(warning) => *warning = label,
+            None => push_warning(warnings, omitted, &label),
         }
     }
 

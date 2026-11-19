@@ -727,6 +727,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         last_tracking: None,
         journal_warning_active: false,
         cleanup_holders_warned: false,
+        stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
         omitted_reaped: 0,
@@ -799,6 +800,9 @@ struct Driver<'a> {
     journal_warning_active: bool,
     /// The diagnostic holder scan has run; it runs once per guardian.
     cleanup_holders_warned: bool,
+    /// Descendants this guardian signalled, for the one summary warning.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
     settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,

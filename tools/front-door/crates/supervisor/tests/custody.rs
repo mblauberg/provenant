@@ -1480,7 +1480,7 @@ fn owner_with_descendant(root: &Path) -> Result<()> {
     drop(writer);
     Ok(())
 }
-fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &Path) -> Result<()> {
+fn setsid_descendant_is_tracked_before_exit_and_reaped_after_it(root: &Path) -> Result<()> {
     let ready_path = root.join("setsid-ready.sock");
     let gate_path = root.join("setsid-gate.sock");
     let ready_listener = UnixListener::bind(&ready_path)?;
@@ -1513,6 +1513,13 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     )?;
     drop(gate);
     let exit = exited(&handle)?;
+    // The lane's recorded tree ends with the provider (#3545).
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!exit.unresolved_cleanup, "{exit:?}");
+        wait_for_identity_absence(&descendant)?;
+    }
+    #[cfg(not(target_os = "macos"))]
     assert!(
         exit.unresolved_cleanup,
         "a live setsid descendant still holds custody"
@@ -1599,8 +1606,17 @@ fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
     assert_eq!(escaped.group_id, descendant.pid);
     drop(provider_stream);
     let exit = exited(&handle)?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
-    assert!(exit.unresolved_pids.contains(&descendant.pid), "{exit:?}");
+    // Retained ancestry proof lets cleanup end it after the provider exits.
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!exit.unresolved_cleanup, "{exit:?}");
+        wait_for_identity_absence(&descendant)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(exit.unresolved_cleanup, "{exit:?}");
+        assert!(exit.unresolved_pids.contains(&descendant.pid), "{exit:?}");
+    }
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     Ok(())
@@ -2448,8 +2464,9 @@ fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Re
         Directory::open_anchor(&root.join("orphan-tree-attempt"))?,
         scope(),
     )?;
-    let exit = exited(&handle)?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
+    // Whether cleanup ended the descendant first is platform policy; the
+    // guardian outlives neither it nor the owner.
+    let _first = exited(&handle)?;
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     wait_for_identity_absence(&guardian)?;
@@ -3024,8 +3041,8 @@ const CASES: &[Case] = &[
         wall_deadline_is_the_execution_bound,
     ),
     (
-        "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
-        setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+        "setsid_descendant_is_tracked_before_exit_and_reaped_after_it",
+        setsid_descendant_is_tracked_before_exit_and_reaped_after_it,
     ),
     (
         "descendant_stays_attributed_after_parent_exit_and_session_change",
