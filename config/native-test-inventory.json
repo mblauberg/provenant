@@ -21,13 +21,6 @@
     "binary": "provenant-cli"
   },
   {
-    "test": "lane_prepare_isolates_nested_writer_state",
-    "platform": "macOS",
-    "invocation": "capability",
-    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED",
-    "binary": "provenant::worktrees"
-  },
-  {
     "test": "writer_production_plan_denies_outside_writes",
     "platform": "macOS",
     "invocation": "dispatch",

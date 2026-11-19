@@ -3,7 +3,7 @@ slow-timeout = { period = "10s", terminate-after = 3 }
 
 [profile.ci]
 # These native cases run in the heavy tier, with no 30-second limit.
-default-filter = 'not (test(=lane_prepare_isolates_nested_claude_state) | test(=lane_builds_and_tests_swift_in_a_registered_worktree))'
+default-filter = 'not (test(=lane_builds_and_tests_swift_in_a_registered_worktree))'
 retries = 0
 flaky-result = "fail"
 fail-fast = false
@@ -70,7 +70,6 @@ not (
     )) |
     (package(=provenant) & binary(=integration) & test(=fabric_lane::lane_run_submits_child_through_parent_relay)) |
     (package(=provenant) & binary(=worktrees) & (
-        test(=lane_prepare_isolates_nested_claude_state) |
         test(=lane_builds_and_tests_swift_in_a_registered_worktree)
     ))
 )
@@ -85,23 +84,17 @@ serial-process = { max-threads = 1 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Three overlapping real command lanes each wait for a published process sample.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=command_adapter) & test(=command_lane_reads_its_supervisors_process_tree_through_the_cli)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # One real writer launch from a fetched remote branch takes about 20 seconds on
 # an idle macOS runner and passes 30 seconds under shared-runner load.
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# A branch writer launched from a linked, separate-Git-directory or bare-linked
-# checkout makes one real launch: Git subprocesses, two host process censuses,
+# A branch writer launched from a linked checkout makes one real launch: Git subprocesses, two host process censuses,
 # provider preparation and the Git confinement handoff. That takes 9 to 14
 # seconds on a developer Mac and 22 to 30+ seconds on shared runners.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & (test(=writer_cli_branch_from_linked_checkout_uses_primary_layout) | test(=writer_cli_branch_from_separate_git_directory_uses_saved_primary) | test(=writer_cli_branch_from_bare_linked_checkout_uses_common_layout))'
+filter = 'package(=provenant) & binary(=graph_provider) & test(=writer_cli_branch_from_linked_checkout_uses_primary_layout)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # These graph fixtures perform durable settlement and, for paging, repeatedly
@@ -133,7 +126,7 @@ filter = 'test(=lane_builds_and_tests_swift_in_a_registered_worktree)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.default.overrides]]
-filter = 'test(=read_only_lane_builds_and_tests_swift_in_scratch) | test(=read_only_lane_builds_and_tests_cargo_in_scratch)'
+filter = 'test(=read_only_lane_builds_and_tests_cargo_in_scratch)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # Creating 100 real worktrees for the repository-facts counting test is slow
@@ -148,16 +141,10 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Three isolated credential layouts each run real writer preparation. Retain
-# every layout and assertion while allowing their combined time on shared hosts.
-[[profile.default.overrides]]
-filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 # These real Git fixtures exceeded 30 seconds on shared hosts. Keep the full
 # repository/worktree coverage with a finite watchdog for each test.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=worktrees) & (test(=gc_fetches_default_and_removes_only_clean_merged_worktrees) | test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))'
+filter = 'package(=provenant) & binary(=worktrees) & (test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 
