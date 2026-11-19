@@ -1121,7 +1121,7 @@ fn evidence_ref_name(reference: &str) -> Option<GitRefName> {
     }
     reference
         .strip_prefix("refs/remotes/")
-        .and_then(|remote_tracking| GitRefName::remote_tracking(remote_tracking).ok())
+        .and_then(|remote| GitRefName::remote_ref(remote).ok())
 }
 
 fn resolve_commit_tree(
@@ -1855,7 +1855,7 @@ fn collect_impl(
                             detail,
                         })?;
                 }
-                // A census is slow: never under the repository lock.
+                // A census is slow; only this lane's writer custody is held here.
                 if census {
                     census_free(context, &lane.path, !dry)
                 } else {
@@ -1940,7 +1940,7 @@ fn collect_impl(
                         active_retirement = Some(retirement);
                         Ok(())
                     };
-                let mut removed = if policy.mode == CollectionMode::LandingCleanup {
+                let removed = if policy.mode == CollectionMode::LandingCleanup {
                     remove_tree_when_before_delete_locked(
                         context,
                         entry,
@@ -1949,7 +1949,7 @@ fn collect_impl(
                         cancel,
                         &eligible,
                         Some(&settings),
-                        Repository::Remove,
+                        false,
                         Some(&mut before_output),
                         before_delete,
                     )?
@@ -1963,7 +1963,7 @@ fn collect_impl(
                         cancel,
                         &eligible,
                         Some(&settings),
-                        Repository::Remove,
+                        false,
                         before_delete,
                     )?
                 };
@@ -2020,7 +2020,6 @@ fn collect_impl(
                     )?;
                     active_retirement = Some(retirement.clone());
                 }
-                removed.repository = None;
                 if policy.mode != CollectionMode::LandingCleanup
                     && let Some(cache) = removed.lane_cache.as_deref()
                 {

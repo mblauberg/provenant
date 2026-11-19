@@ -298,8 +298,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
             &clock,
         )
     };
-    assert!(matches!(admit(), Err(CustodyError::Busy)));
-    drop(first);
     let second = admit()?;
     assert!(matches!(
         slot.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
@@ -322,6 +320,7 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
     );
     second.withdraw_unlaunched()?;
     assert_eq!(std::fs::read(&first_path)?, first_bytes);
+    drop(first);
     let recovery = acquire_recovery(
         slot.try_clone()?,
         scope(),
@@ -446,11 +445,9 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         // A retention record that ended counts against the same bound.
         retention: Some(Retention {
             guardian: identity.clone(),
-            // The latest wall time from_micros accepts, 9999-12-30T22:00:00Z;
-            // the wire's six fractional digits keep its length at the maximum.
-            since: Some(provenant_core::WallTime::from_micros(
-                253_402_207_200_000_000,
-            )?),
+            // The latest representable wall time; the wire's six fractional
+            // digits keep its length at the maximum.
+            since: Some(provenant_core::WallTime::MAX),
             limit_ms: u64::MAX,
             ended: Some(RetentionEnd {
                 reason: RetentionEndReason::LimitReached,
@@ -527,6 +524,233 @@ fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
         &clock,
     )
 }
+
+#[test]
+fn shared_occupancy_admits_siblings_while_exclusive_removal_waits() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let first_scope = scope();
+    let second_scope = Scope {
+        attempt: AttemptId::from_bytes([3; 16]),
+        generation: 1,
+    };
+    let mut first = crate::fixture::acquire_writer(
+        directory.try_clone()?,
+        first_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    first.reservation.launch_state = LaunchState::HandingOff;
+    first.reservation.attempt_device = Some(1);
+    first.reservation.attempt_inode = Some(2);
+    Publication::require_durable(write_record(
+        &first.directory,
+        "reservation.json",
+        &first.reservation,
+        PublishMode::Replace,
+    )?)?;
+    let second = crate::fixture::acquire_writer(
+        directory.try_clone()?,
+        second_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+
+    let removal = lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    );
+    assert!(matches!(
+        removal,
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    drop(first);
+    let removal = lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    );
+    assert!(matches!(
+        removal,
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    drop(second);
+    drop(lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn holder_history_stays_shared_after_a_sibling_settles() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let first_scope = scope();
+    let second_scope = Scope {
+        attempt: AttemptId::from_bytes([3; 16]),
+        generation: 1,
+    };
+    let first = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        first_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(!worktree_was_shared(
+        &slot,
+        &first_scope.attempt.to_string()
+    )?);
+
+    let second = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        second_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(worktree_was_shared(
+        &slot,
+        &second_scope.attempt.to_string()
+    )?);
+    let second_evidence = second.directory.try_clone()?;
+    drop(second);
+    clear_reservation(&second_evidence, second_scope)?;
+
+    assert!(worktree_was_shared(
+        &slot,
+        &first_scope.attempt.to_string()
+    )?);
+    drop(first);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn holder_history_keeps_a_lone_attempt_unshared() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let current = scope();
+    let holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        current,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+
+    assert!(!worktree_was_shared(&slot, &current.attempt.to_string())?);
+    let evidence = slot.open_verified_directory(OsStr::new(&current.attempt.to_string()))?;
+    evidence.unlink(OsStr::new(HOLDER_ADMISSION))?;
+    assert!(worktree_was_shared(&slot, &current.attempt.to_string()).is_err());
+    drop(holder);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn worktree_sharing_guard_blocks_a_new_sibling_until_release() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let current = scope();
+    let holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        current,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+
+    let sharing = worktree_sharing_guard(&slot, &current.attempt.to_string())?;
+    assert!(!sharing.was_shared());
+    let sibling = Scope {
+        attempt: AttemptId::from_bytes([4; 16]),
+        generation: 1,
+    };
+    assert!(matches!(
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            sibling,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &cancel,
+            &clock,
+        ),
+        Err(CustodyError::Busy)
+    ));
+    drop(sharing);
+
+    let sibling_holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        sibling,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(worktree_was_shared(&slot, &current.attempt.to_string())?);
+    drop(sibling_holder);
+    drop(holder);
+    Ok(())
+}
+
+#[test]
+fn unrelated_attempt_custody_lock_does_not_prove_live_slot_holder() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut first = crate::fixture::acquire_writer(
+        directory.try_clone()?,
+        scope(),
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    first.reservation.launch_state = LaunchState::HandingOff;
+    first.reservation.attempt_device = Some(1);
+    first.reservation.attempt_inode = Some(2);
+    Publication::require_durable(write_record(
+        &first.directory,
+        "reservation.json",
+        &first.reservation,
+        PublishMode::Replace,
+    )?)?;
+    let unrelated_attempt_lock = first
+        .directory
+        .try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+    drop(first);
+
+    let error = crate::fixture::acquire_writer(
+        directory,
+        Scope {
+            attempt: AttemptId::from_bytes([4; 16]),
+            generation: 1,
+        },
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )
+    .expect_err("a busy Run attempt custody lock is not supervisor slot holder proof");
+    assert!(matches!(error, CustodyError::Fenced));
+    drop(unrelated_attempt_lock);
+    Ok(())
+}
+
 #[test]
 fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -1505,6 +1729,9 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "custody_held",
         "lease_missing",
         "guardian_replaced",
+        "holder_replaced",
+        "legacy_holder_record",
+        "holder_proof_missing_after_exclusive_recovery",
         "custody_replaced",
         "writer_replaced",
         "record_missing",
@@ -1529,6 +1756,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             scope(),
             recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
             custody.as_ref().ok_or(CustodyError::Fenced)?,
+            recovery.holder.as_ref().ok_or(CustodyError::Fenced)?,
         )?;
         let mut guardian = if case == "before_identity_publication" {
             // The guardian has acquired the prepared inode but has not yet
@@ -1548,6 +1776,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     .ok_or(CustodyError::InvalidRecord)?,
                 recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
                 custody.as_ref().ok_or(CustodyError::Fenced)?,
+                recovery.holder.as_ref().ok_or(CustodyError::Fenced)?,
             )?)
         };
         let provider = recovery
@@ -1605,6 +1834,45 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 .require_durable()?;
             }
             "guardian_replaced" => replace_lock(&evidence, "guardian.lock")?,
+            "holder_replaced" => replace_lock(&evidence, "holder.lock")?,
+            "legacy_holder_record" => {
+                let mut record: serde_json::Value =
+                    read_record(&evidence, "guardian-lock.json", RECORD_LIMIT)?;
+                record
+                    .as_object_mut()
+                    .ok_or(CustodyError::InvalidRecord)?
+                    .remove("holder");
+                record["schema_version"] = 1.into();
+                write_record(
+                    &evidence,
+                    "guardian-lock.json",
+                    &record,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+                // Evidence from before per-attempt holder locks is refused and
+                // reported, never read as a half-proof.
+                assert!(liveness::is_legacy_record(&evidence)?);
+                assert!(
+                    recovery
+                        .after_guardian_loss(&attempt, &world, || Ok(true))
+                        .is_err()
+                );
+                continue;
+            }
+            "holder_proof_missing_after_exclusive_recovery" => {
+                drop(recovery.lease.take());
+                let clock = SystemClock::new();
+                recovery.lease = Some(lock_writer_exclusion(
+                    &recovery.lock_directory,
+                    WaitBudget::cli(clock.mono_now(), 1)?,
+                    &CancelToken::new(),
+                    &clock,
+                )?);
+                // Recovery without its own holder lock never substitutes the
+                // shared occupancy it now holds.
+                drop(recovery.holder.take());
+            }
             "custody_replaced" => replace_lock(&attempt, "custody.lock")?,
             "writer_replaced" => replace_lock(&recovery.lock_directory, "writer.lock")?,
             "lease_missing" => drop(recovery.lease.take()),
@@ -1625,6 +1893,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                             .ok_or(CustodyError::InvalidRecord)?,
                         recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
                         custody.as_ref().ok_or(CustodyError::Fenced)?,
+                        recovery.holder.as_ref().ok_or(CustodyError::Fenced)?,
                     )
                     .is_err()
                 );

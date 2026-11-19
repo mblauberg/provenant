@@ -21,6 +21,24 @@ macro_rules! lane_row {
     }
 }
 
+fn token_budget_usage_schema() -> Value {
+    object(
+        &[
+            ("unit", string()),
+            ("unit_detail", string()),
+            ("limit", unsigned()),
+            (
+                "source",
+                choices(&["default", "host", "project", "template", "tier", "launch"]),
+            ),
+            ("counted", nullable(unsigned())),
+            ("reported_input", nullable(unsigned())),
+            ("basis", choices(&["attempt", "session"])),
+        ],
+        &[("notice", nullable(string()))],
+    )
+}
+
 fn settlement_reason_schema() -> Value {
     let mut schema = choices(&[]);
     schema["enum"] = json!(crate::run::SettlementReason::ALL);
@@ -102,6 +120,7 @@ lane_row! {
         title: String => string();
         requested_priority: i64 => integer();
         limits: Value => any();
+        budget_usage: crate::TokenBudgetUsage => nullable(token_budget_usage_schema());
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
@@ -546,6 +565,14 @@ impl LaneRow {
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
             limits: lane.limits.as_ref().map(|limits| json!(limits)),
+            budget_usage: lane.limits.as_ref().and_then(|limits| {
+                limits.budget_usage(
+                    &lane.usage,
+                    lane.applied_route
+                        .as_ref()
+                        .and_then(|route| route.provider.as_deref()),
+                )
+            }),
             handoff: lane.state.stop().map(|stop| json!(stop.handoff_result())),
             provider_error: None,
             capabilities: None,

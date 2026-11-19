@@ -60,6 +60,286 @@ fn terminal_settles_a_private_rewind() -> std::result::Result<(), Box<dyn std::e
 }
 
 #[test]
+fn terminal_settles_and_publishes_rebased_lane()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let initial_base = fixture.prepare()?.head(&fixture.writer)?;
+
+    // Model a force-updated base: it is known to the host, but has no ancestry
+    // from this lane's launch base. A rebased lane commit must still publish.
+    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let tree = provenant_os::fixture::git_command_at(&executable)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .args([
+            "-C",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            "rev-parse",
+            &format!("{initial_base}^{{tree}}"),
+        ])
+        .output()?;
+    assert!(tree.status.success());
+    let tree = std::str::from_utf8(&tree.stdout)?.trim();
+    let moved = provenant_os::fixture::git_command_at(&executable)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .args([
+            "-C",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            tree,
+            "-m",
+            "replacement base",
+        ])
+        .output()?;
+    assert!(moved.status.success());
+    let moved_base = GitOid::parse(std::str::from_utf8(&moved.stdout)?.trim())?;
+    fixture.git(&[
+        "update-ref",
+        "refs/remotes/origin/main",
+        &moved_base.to_string(),
+    ])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+
+    // Now terminal settles the attempt that rebased its work onto moved_base
+    let review = fixture.terminal(|| {
+        let attempt = fixture.root.join("attempt");
+        let scratch = attempt.join("tmp/candidate-0");
+        std::fs::create_dir_all(&scratch)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(
+            &executable,
+            fixture.root.join("home"),
+            fixture.root.join("state"),
+        )?;
+        let repo = runtime.open_repo(
+            &SystemExecutor::new(1)?,
+            &fixture.writer.project,
+            provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+            &provenant_core::CancelToken::new(),
+        )?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+        crate::objects::prepare_bound(
+            &executable,
+            worktree.repo(),
+            &Directory::open_anchor(&attempt)?,
+            &scratch,
+            "refs/heads/lane",
+            initial_base,
+        )?;
+
+        // Lane creates a commit on top of moved_base (rebased onto moved_base).
+        // The host does not know this tip until terminal imports it.
+        let output = provenant_os::fixture::git_command_at(&executable)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+            .env("GIT_DIR", scratch.join("git-common"))
+            .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                repo.common_git_dir().join("objects"),
+            )
+            .args([
+                "commit-tree",
+                &format!("{}^{{tree}}", moved_base),
+                "-p",
+                &moved_base.to_string(),
+                "-m",
+                "rebased commit",
+            ])
+            .output()?;
+        assert!(output.status.success());
+        let rebased_tip = std::str::from_utf8(&output.stdout)?.trim();
+
+        std::fs::write(
+            scratch.join("git-common/refs/heads/lane"),
+            format!("{rebased_tip}\n"),
+        )?;
+        Ok(())
+    })?;
+
+    assert!(!review);
+    assert!(fixture.root.join("attempt/writer-terminal.json").exists());
+    let published_head = fixture.prepare()?.head(&fixture.writer)?;
+    assert_ne!(published_head, initial_base);
+    assert_ne!(published_head, moved_base);
+    let recovery_ref = format!("refs/provenant/recovery/{initial_base}");
+    let recovery = provenant_os::fixture::git_command_at(&executable)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .args([
+            "-C",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            "rev-parse",
+            &recovery_ref,
+        ])
+        .output()?;
+    assert!(recovery.status.success());
+    assert_eq!(
+        std::str::from_utf8(&recovery.stdout)?.trim(),
+        initial_base.to_string()
+    );
+    Ok(())
+}
+
+#[test]
+fn private_attempt_git_views_keep_commits_and_staged_paths_separate()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host_base = fixture.prepare()?.head(&fixture.writer)?;
+    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    provenant_os::fixture::private_state_dir(&fixture.root.join("home"))?;
+    let runtime = provenant_confinement::UtilityRuntime::new(
+        &executable,
+        fixture.root.join("home"),
+        fixture.root.join("state"),
+    )?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let repo = runtime.open_repo(&executor, &fixture.writer.project, budget, &cancel)?;
+    let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+
+    let prepare = |name: &str,
+                   base: GitOid|
+     -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        let attempt_path = fixture.root.join(name);
+        let scratch = attempt_path.join("tmp/candidate-0");
+        std::fs::create_dir_all(&scratch)?;
+        crate::objects::prepare_bound(
+            &executable,
+            worktree.repo(),
+            &Directory::open_anchor(&attempt_path)?,
+            &scratch,
+            "refs/heads/lane",
+            base,
+        )?;
+        Ok(scratch)
+    };
+
+    let sibling = prepare("sibling-attempt", host_base)?;
+    let parent = prepare("parent-attempt", host_base)?;
+    std::fs::write(
+        fixture.writer.worktree.join("sibling.txt"),
+        "sibling staged version\n",
+    )?;
+    private_git(&fixture, &sibling, &executable, &["add", "sibling.txt"])?;
+    let sibling_tree = private_git(&fixture, &sibling, &executable, &["write-tree"])?;
+
+    std::fs::write(
+        fixture.writer.worktree.join("parent.txt"),
+        "parent commit\n",
+    )?;
+    private_git(&fixture, &parent, &executable, &["add", "parent.txt"])?;
+    // A plain commit consumes the attempt's full staged snapshot. The sibling's
+    // staged path is absent from this index and cannot enter the commit.
+    private_git(
+        &fixture,
+        &parent,
+        &executable,
+        &["commit", "-qm", "parent commit"],
+    )?;
+    let parent_tip = private_git(&fixture, &parent, &executable, &["rev-parse", "HEAD"])?;
+    assert_eq!(
+        private_git(&fixture, &parent, &executable, &["rev-parse", "HEAD^"])?,
+        host_base.to_string()
+    );
+    assert!(
+        private_git(
+            &fixture,
+            &parent,
+            &executable,
+            &["cat-file", "-e", "HEAD:sibling.txt"]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["write-tree"])?,
+        sibling_tree
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["show", ":sibling.txt"])?,
+        "sibling staged version"
+    );
+
+    // Advance the host branch and launch a third attempt at that tip. The live
+    // sibling's index remains byte-for-byte represented by the same tree.
+    std::fs::write(
+        fixture.writer.worktree.join("host-advance.txt"),
+        "host advance\n",
+    )?;
+    fixture.lane_git(&["add", "host-advance.txt"])?;
+    fixture.commit(&fixture.writer.worktree, "host advance")?;
+    let host_tip = GitOid::parse(&worktree_git(
+        &fixture,
+        &executable,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    assert_ne!(host_tip, host_base);
+    let child = prepare("child-attempt", host_tip)?;
+    assert_eq!(
+        private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?,
+        host_tip.to_string()
+    );
+    assert!(
+        private_git(
+            &fixture,
+            &child,
+            &executable,
+            &["cat-file", "-e", &parent_tip]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["write-tree"])?,
+        sibling_tree
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["show", ":sibling.txt"])?,
+        "sibling staged version"
+    );
+
+    std::fs::write(fixture.writer.worktree.join("child.txt"), "child commit\n")?;
+    private_git(&fixture, &child, &executable, &["add", "child.txt"])?;
+    private_git(
+        &fixture,
+        &child,
+        &executable,
+        &["commit", "-qm", "child commit"],
+    )?;
+    let child_tip = private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?;
+    assert_eq!(
+        private_git(&fixture, &child, &executable, &["rev-parse", "HEAD^"])?,
+        host_tip.to_string()
+    );
+    assert!(
+        private_git(
+            &fixture,
+            &child,
+            &executable,
+            &["cat-file", "-e", &parent_tip]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        private_git(&fixture, &parent, &executable, &["rev-parse", "HEAD"])?,
+        parent_tip
+    );
+    assert_eq!(
+        private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?,
+        child_tip
+    );
+    Ok(())
+}
+
+#[test]
 fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
@@ -202,11 +482,6 @@ fn overlapping_origin_requests_share_a_fetch_even_when_it_starts_later()
                 let requested = OriginRefreshRequest::capture()?;
                 start.wait();
                 coalesced_origin_refresh(common, &requested, &CancelToken::new(), || {
-                    // Origin refresh must never need or retain the config lock.
-                    let _config = common.try_lock(
-                        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-                        provenant_os::fs::LockMode::Exclusive,
-                    )?;
                     fetches.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })

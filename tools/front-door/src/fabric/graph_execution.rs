@@ -138,6 +138,19 @@ fn preflight_writer_worktrees(
             continue;
         }
         canonical_paths.insert(canonical, path.to_owned());
+        // Another lane's edits in a shared worktree are that lane's work, not
+        // leftovers: refusing or committing them would act on someone else's
+        // files. Skip the dirty check for this path and say why.
+        let attached = writer.attached_lanes().map_err(run_error)?;
+        if !attached.is_empty() {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: worktree {path} is in use by {}; skipping the dirty-worktree preflight for it",
+                attached.join(", ")
+            );
+            outcomes.insert(path.to_owned(), (None, None));
+            continue;
+        }
         let paths =
             writer
                 .uncommitted_paths(&git)
@@ -302,8 +315,11 @@ pub(crate) fn tick_graphs(
                 let checkpoint =
                     FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
                 let Some(checkpoint) = checkpoint else {
-                    // Only an absent checkpoint reaches this branch. Recheck
-                    // under the writer lock before retiring its pending marker.
+                    // An absent checkpoint, or a corrupt one already quarantined
+                    // by an earlier tick, reaches this branch. The strict read
+                    // matches Ok(None) only for the absent case (a corrupt
+                    // record stays an error there), so the pending marker is
+                    // retired only for a genuinely absent checkpoint.
                     if matches!(
                         FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
                         Ok(None)

@@ -18,14 +18,23 @@ pub enum TimeError {
 
 /// A UTC timestamp of exact microsecond precision. No system clock is read.
 /// Uses jiff's timestamp range, narrowed to RFC3339's nonnegative four-digit
-/// years: 0000-01-01T00:00:00.000000Z through jiff::Timestamp::MAX
-/// rounded down to microseconds (9999-12-30T22:00:00.999999Z).
-/// Jiff enforces the upper bound; construction rejects its signed-year range.
+/// years: 0000-01-01T00:00:00.000000Z through [`Self::MAX`]
+/// (9999-12-30T22:00:00.000000Z, 253_402_207_200_000_000 microseconds).
+/// Jiff's `Timestamp::MAX` carries nanoseconds past that whole second, but
+/// jiff caps microsecond construction at the second, so every value above
+/// [`Self::MAX`] is rejected with [`TimeError::WallRange`]. Construction also
+/// rejects jiff's signed-year range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct UtcMicros(jiff::Timestamp);
 pub type WallTime = UtcMicros;
 impl UtcMicros {
+    /// The greatest instant [`Self::from_micros`] accepts. Jiff's microsecond
+    /// bound stops at this whole second; its `Timestamp::MAX` carries
+    /// nanoseconds beyond it that this type cannot construct. Built with a
+    /// const constructor, so an invalid bound fails at compile time.
+    pub const MAX: Self = Self(jiff::Timestamp::constant(253_402_207_200, 0));
+
     pub fn from_micros(micros: i64) -> Result<Self, TimeError> {
         // RFC3339 has a four-digit nonnegative year. Jiff also supports earlier
         // signed years, which are outside this wire contract.
@@ -462,6 +471,29 @@ mod tests {
             assert!(UtcMicros::parse(input).is_err());
         }
         assert!(UtcMicros::from_micros(i64::MAX).is_err());
+    }
+    #[test]
+    fn wall_time_max_round_trips_and_the_next_microsecond_is_rejected() {
+        assert_eq!(WallTime::MAX.as_micros(), 253_402_207_200_000_000);
+        assert_eq!(WallTime::MAX.to_string(), "9999-12-30T22:00:00.000000Z");
+        assert_eq!(
+            WallTime::parse(&WallTime::MAX.to_string()).unwrap(),
+            WallTime::MAX
+        );
+        assert_eq!(
+            WallTime::from_micros(WallTime::MAX.as_micros()).unwrap(),
+            WallTime::MAX
+        );
+        let wire = serde_json::to_string(&WallTime::MAX).unwrap();
+        assert_eq!(wire, r#""9999-12-30T22:00:00.000000Z""#);
+        assert_eq!(
+            serde_json::from_str::<WallTime>(&wire).unwrap(),
+            WallTime::MAX
+        );
+        assert!(matches!(
+            WallTime::from_micros(WallTime::MAX.as_micros() + 1),
+            Err(TimeError::WallRange)
+        ));
     }
     #[test]
     fn budgets_and_deadlines_check_caps_overflow_and_expiry() {

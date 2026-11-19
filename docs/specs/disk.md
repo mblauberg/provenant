@@ -89,8 +89,10 @@ removal depends on it.
   cache; a seeded target's cloned file times made it look idle at once.
 
 An EPERM process with complete descriptor evidence and no observed cwd or
-descriptor beneath a candidate produces a warning once rather than making every
-worktree unknown. Positive path evidence protects the affected candidate;
+descriptor beneath a candidate produces one aggregate warning with a count and
+its meaning (custody is unknown for those processes), rather than making every
+worktree unknown or printing one line per process. Per-PID detail stays behind
+the gc `--full` flag. Positive path evidence protects the affected candidate;
 incomplete descriptor evidence and other unknown custody still prevent removal.
 For worktree output, foreign policy uses verified worktree creation and lane
 custody, not a configured path. A verified primary checkout and managed linked

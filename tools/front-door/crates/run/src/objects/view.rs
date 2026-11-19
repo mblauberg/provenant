@@ -1,5 +1,5 @@
-//! Private lane Git state. Paths stay compatible with provider confinement;
-//! only host-sealed directory identities may be reopened for settlement.
+//! Attempt-private Git state. Only host-sealed directory identities may be
+//! reopened for settlement; launch never reads or resets a sibling index.
 use super::*;
 
 /// Copy a stable index, expanding split indexes before a clean host view uses it.
@@ -114,9 +114,17 @@ fn prepare_refs_from(
     write(&common, "HEAD", head.as_bytes())?;
     directory(&common, OsStr::new("objects"))?;
     directory(&common, OsStr::new("refs"))?;
-    copy_index(git, source_private, &common, root_path)?;
-    // Preserve per-worktree settings and merge metadata alongside the index.
-    for name in ["config.worktree", "MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
+    // Reader snapshots preserve the source index. Writer indexes start at
+    // their own launch tip and never inherit host or sibling staging.
+    if branch.is_none() {
+        copy_index(git, source_private, &common, root_path)?;
+    }
+    let private_files: &[&str] = if branch.is_none() {
+        &["config.worktree", "MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"]
+    } else {
+        &["config.worktree"]
+    };
+    for name in private_files {
         match source_private.read_stable(OsStr::new(name), 1024 * 1024) {
             Ok(bytes) => write(&common, name, &bytes)?,
             Err(error) if error.is_not_found() => {}
@@ -151,6 +159,22 @@ fn prepare_refs_from(
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    if let Some((_, base)) = branch {
+        let objects = scratch.current_path()?.join("git-objects");
+        let alternate = common_path.join("objects");
+        execute_bounded(
+            git,
+            &common.current_path()?,
+            root_path,
+            &args(&["read-tree", &base.to_string()]),
+            None,
+            Execution {
+                object_directory: Some(&objects),
+                alternate_directory: Some(&alternate),
+                ..Execution::default()
+            },
+        )?;
     }
     common.sync()?;
     Ok(())
@@ -205,22 +229,18 @@ pub(crate) struct ObjectSource {
     pub refs: Directory,
 }
 
-pub(crate) fn merge_head(source: &ObjectSource) -> Result<Vec<u8>> {
-    Ok(source
-        .refs
-        .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)?)
-}
-
 /// Objects needed by an in-progress merge, including staged blobs that may
 /// never have appeared in a commit. Git parses the index; paths stay opaque.
 struct MergeState {
     parents: Vec<GitOid>,
     blobs: Vec<GitOid>,
-    stage_zero_paths: Vec<u8>,
 }
 
 fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<MergeState>> {
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    source
+        .refs
+        .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
     let directory = source.refs.current_path()?;
     let unmerged = execute(
         &git,
@@ -248,7 +268,6 @@ fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<Merg
         return Err(invalid());
     }
     let mut blobs = Vec::new();
-    let mut stage_zero_paths = Vec::new();
     let stages = execute(
         &git,
         &directory,
@@ -283,16 +302,8 @@ fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<Merg
             "160000" => {} // Submodule objects belong to the submodule.
             _ => return Err(invalid()),
         }
-        if stage == "0" {
-            stage_zero_paths.extend_from_slice(&entry[tab + 1..]);
-            stage_zero_paths.push(0);
-        }
     }
-    Ok(Some(MergeState {
-        parents,
-        blobs,
-        stage_zero_paths,
-    }))
+    Ok(Some(MergeState { parents, blobs }))
 }
 
 pub(crate) fn merge_objects(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Vec<GitOid>> {
@@ -306,57 +317,42 @@ pub(crate) fn merge_objects(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
     Ok(objects)
 }
 
-pub(crate) fn set_private_tip(source: &ObjectSource, branch: &str, tip: GitOid) -> Result<()> {
-    let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
-    let mut held = source.refs.try_clone()?;
+pub(crate) fn update_private_tip(
+    source: &ObjectSource,
+    branch: &str,
+    tip: GitOid,
+    expected_old: GitOid,
+) -> Result<()> {
+    use std::io::Write;
+    // Ref publication never parses the lane's mutable config.
+    let reference = provenant_confinement::repo::GitRefName::new(branch).map_err(|_| invalid())?;
+    let (parent, leaf) = reference.as_str().rsplit_once('/').ok_or_else(invalid)?;
+    let mut directory = source.refs.try_clone()?;
     for component in parent.split('/') {
-        held = directory(&held, OsStr::new(component))?;
+        directory = directory.open_verified_directory(OsStr::new(component))?;
     }
-    held.atomic_write(
-        OsStr::new(leaf),
-        ".budget-",
-        format!("{tip}\n").as_bytes(),
-        PublishMode::Replace,
-    )?
-    .require_durable()?;
-    Ok(())
+    let leaf = OsStr::new(leaf);
+    let mut lock_name = leaf.to_os_string();
+    lock_name.push(".lock");
+    let mut lock = directory.create_new(&lock_name)?;
+    let result = (|| -> Result<()> {
+        if private_tip(source, branch)? != expected_old {
+            return Err(RunError::Validation("lane Git CAS ref update failed"));
+        }
+        writeln!(&mut lock, "{tip}")?;
+        lock.sync()?;
+        directory.publish_git_ref_lock(leaf, &lock)?;
+        directory.sync()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = directory.discard_git_ref_lock(leaf, &lock);
+    }
+    result
 }
 
 pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid> {
-    let head = source.refs.read_stable(OsStr::new("HEAD"), 1024)?;
-    if std::str::from_utf8(&head).map(str::trim).ok() != Some(format!("ref: {branch}").as_str()) {
-        return Err(invalid());
-    }
-    let read_loose = || -> Result<Vec<u8>> {
-        let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
-        let mut directory = source.refs.try_clone()?;
-        for component in parent.split('/') {
-            directory = directory.open_verified_directory(OsStr::new(component))?;
-        }
-        Ok(directory.read_stable(OsStr::new(leaf), 128)?)
-    };
-    let bytes = match read_loose() {
-        Ok(bytes) => bytes,
-        Err(RunError::Filesystem(error)) if error.is_not_found() => {
-            let packed = source
-                .refs
-                .read_stable(OsStr::new("packed-refs"), 1024 * 1024)?;
-            let mut found = None;
-            for line in packed.split(|byte| *byte == b'\n') {
-                if let Some(index) = line.iter().position(|byte| *byte == b' ')
-                    && &line[index + 1..] == branch.as_bytes()
-                {
-                    if found.is_some() {
-                        return Err(invalid());
-                    }
-                    found = Some(line[..index].to_vec());
-                }
-            }
-            found.ok_or_else(invalid)?
-        }
-        Err(error) => return Err(error),
-    };
-    GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
+    provenant_os::git::private_branch_tip(&source.refs, branch).map_err(|_| invalid())
 }
 
 pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
@@ -376,9 +372,9 @@ pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
         attempt,
         "writer-objects.json",
         &crate::db::bytes(&ObjectBinding {
-            schema_version: 2,
+            schema_version: 4,
             candidate: candidate.into(),
-            identities: Some(ViewIdentities::read(&held, &refs, &objects)?),
+            identities: ViewIdentities::read(&held, &refs, &objects)?,
             extra: Default::default(),
         })?,
         crate::RECORD_LIMIT,
@@ -389,8 +385,7 @@ pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
 pub(super) struct ObjectBinding {
     schema_version: u64,
     candidate: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    identities: Option<ViewIdentities>,
+    identities: ViewIdentities,
     #[serde(default, flatten)]
     extra: provenant_records::ExtraFields,
 }
@@ -463,6 +458,19 @@ pub(crate) fn prepare_bound(
     branch: &str,
     base: GitOid,
 ) -> Result<()> {
+    prepare_candidate(git, repo, attempt, scratch, branch, base)?;
+    seed_native_index(repo, base)?;
+    bind(attempt, scratch)
+}
+
+fn prepare_candidate(
+    git: &Path,
+    repo: &VerifiedRepo,
+    attempt: &Directory,
+    scratch: &Path,
+    branch: &str,
+    base: GitOid,
+) -> Result<(Directory, Directory, Directory)> {
     let candidate = scratch
         .file_name()
         .and_then(OsStr::to_str)
@@ -489,7 +497,9 @@ pub(crate) fn prepare_bound(
     )?
     .require_durable()?;
     prepare_refs(git, repo, &held, branch, base)?;
-    bind(attempt, scratch)
+    let objects = held.open_verified_directory(OsStr::new("git-objects"))?;
+    let refs = held.open_verified_directory(OsStr::new("git-common"))?;
+    Ok((held, refs, objects))
 }
 
 pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding>> {
@@ -498,8 +508,6 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
     else {
         return Ok(None);
     };
-    // Keep the records crate's bounded, duplicate-key-refusing decoder while
-    // admitting both persisted versions at this owning boundary.
     let binding: ObjectBinding = provenant_records::decode(
         bytes.as_slice(),
         provenant_records::Limits {
@@ -507,12 +515,7 @@ pub(super) fn object_binding(attempt: &Directory) -> Result<Option<ObjectBinding
             ..Default::default()
         },
     )?;
-    if !valid_candidate(&binding.candidate)
-        || !matches!(
-            (binding.schema_version, binding.identities.is_some()),
-            (1, false) | (2, true)
-        )
-    {
+    if !valid_candidate(&binding.candidate) || binding.schema_version != 4 {
         return Err(invalid());
     }
     Ok(Some(binding))
@@ -528,145 +531,351 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
     let scratch = temporary.open_verified_directory(OsStr::new(&candidate))?;
     let objects = scratch.open_verified_directory(OsStr::new("git-objects"))?;
     let refs = scratch.open_verified_directory(OsStr::new("git-common"))?;
-    // Version 1 runs predate identity sealing. Preserve their no-follow recovery
-    // path; every new launch uses version 2 and refuses replaced directories.
-    if let Some(expected) = binding.identities
-        && expected != ViewIdentities::read(&scratch, &refs, &objects)?
-    {
+    if binding.identities != ViewIdentities::read(&scratch, &refs, &objects)? {
         return Err(RunError::Validation("private Git view identity changed"));
     }
     Ok(Some(ObjectSource { objects, refs }))
 }
 
-pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Result<()> {
-    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-    let merge = merge_state(source, repo)?;
-    if let Some(state) = &merge {
-        let input = state
-            .parents
-            .iter()
-            .chain(&state.blobs)
-            .map(|oid| format!("{oid}\n"))
-            .collect::<String>();
-        let types = execute_bounded(
-            &git,
-            repo.common_git_dir(),
-            repo.root_path(),
-            &args(&["cat-file", "--batch-check=%(objecttype)"]),
-            None,
-            Execution {
-                input: Some(input.as_bytes()),
-                ..Execution::default()
-            },
-        )?;
-        let mut types = types.split(|byte| *byte == b'\n');
-        for expected in std::iter::repeat_n(b"commit".as_slice(), state.parents.len())
-            .chain(std::iter::repeat_n(b"blob".as_slice(), state.blobs.len()))
-        {
-            if types.next() != Some(expected) {
-                return Err(RunError::Validation(
-                    "merge index object is unavailable or has the wrong type",
-                ));
-            }
-        }
-        let merge_head = source
-            .refs
-            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)?;
-        match repo
-            .private_dir()
-            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
-        {
-            Ok(existing) if existing != merge_head => {
-                return Err(RunError::Validation(
-                    "host merge state changed before import",
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
-        for name in ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
-            match source.refs.read_stable(OsStr::new(name), 1024 * 1024) {
-                Ok(bytes) => repo
-                    .private_dir()
-                    .atomic_write(
-                        OsStr::new(name),
-                        ".lane-merge-",
-                        &bytes,
-                        PublishMode::Replace,
-                    )?
-                    .require_durable()?,
-                Err(error) if error.is_not_found() && name != "MERGE_HEAD" => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-    } else {
-        // A continuation may have committed the merge in its private view.
-        // Clear host merge state only when the published branch contains every
-        // recorded parent; an abort or unrelated host change stays fenced.
-        match repo
-            .private_dir()
-            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
-        {
-            Ok(raw) => {
-                let text = std::str::from_utf8(&raw).map_err(|_| invalid())?;
-                let mut count = 0;
-                for line in text.lines() {
-                    let parent = GitOid::parse(line).map_err(|_| invalid())?;
-                    execute(
-                        &git,
-                        repo.private_git_dir(),
-                        repo.root_path(),
-                        &args(&["merge-base", "--is-ancestor", &parent.to_string(), "HEAD"]),
-                        None,
-                    )?;
-                    count += 1;
-                }
-                if count == 0 {
-                    return Err(invalid());
-                }
-                for name in ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
-                    match repo.private_dir().unlink(OsStr::new(name)) {
-                        Ok(()) => {}
-                        Err(error) if error.is_not_found() => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                repo.private_dir().sync()?;
-            }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    match source
-        .refs
-        .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
+const NATIVE_INDEX_RECORD: &str = "provenant-native-index.json";
+/// Serialises native-index advances for one worktree. It lives beside the
+/// record in the worktree's private Git directory, so it never contends with
+/// the custody slot's admission gate that launch, removal and landing probe.
+const NATIVE_INDEX_LOCK: &str = "provenant-native-index.lock";
+const NATIVE_INDEX_LIMIT: u64 = 64 * 1024 * 1024;
+const NATIVE_INDEX_WAIT_SECONDS: u64 = 10;
+
+/// One command that repairs a native index that stopped following the branch:
+/// it resets the index to HEAD and drops the record, so the next settlement
+/// records the repaired index instead of judging it against the stale one.
+pub(crate) const NATIVE_INDEX_REMEDY: &str =
+    "git reset -q && rm -f -- \"$(git rev-parse --git-path provenant-native-index.json)\"";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NativeIndexRecord {
+    schema_version: u64,
+    followed: String,
+    /// Digest of the index entries Provenant last left in place. An index that
+    /// no longer matches was committed, reset or restaged by someone else since,
+    /// so merging from `followed` could silently stage a reversal.
+    index_digest: String,
+}
+
+fn native_index_record(repo: &VerifiedRepo) -> Result<Option<NativeIndexRecord>> {
+    let bytes = match repo
+        .private_dir()
+        .read_stable(OsStr::new(NATIVE_INDEX_RECORD), 4096)
     {
-        Ok(bytes) => repo
-            .private_dir()
-            .atomic_write(
-                OsStr::new("index"),
-                ".lane-index-",
-                &bytes,
-                PublishMode::Replace,
-            )?
-            .require_durable()?,
-        Err(error) if error.is_not_found() => {}
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let record: NativeIndexRecord = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if record.schema_version != 2 {
+        return Err(invalid());
+    }
+    GitOid::parse(&record.followed).map_err(|_| invalid())?;
+    Ok(Some(record))
+}
+
+/// The commit the host worktree's native index last followed, if recorded.
+/// Publications advance the index from this commit, never from whichever tip a
+/// given publication happened to replace: siblings may publish between two
+/// advances, and a crash may leave the index behind the branch.
+#[cfg(test)]
+pub(crate) fn followed_native_index(repo: &VerifiedRepo) -> Result<Option<GitOid>> {
+    native_index_record(repo)?
+        .map(|record| GitOid::parse(&record.followed).map_err(|_| invalid()))
+        .transpose()
+}
+
+fn record_native_index(
+    repo: &VerifiedRepo,
+    followed: GitOid,
+    index_digest: &str,
+    mode: PublishMode,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(&NativeIndexRecord {
+        schema_version: 2,
+        followed: followed.to_string(),
+        index_digest: index_digest.to_owned(),
+    })
+    .map_err(|_| invalid())?;
+    match repo
+        .private_dir()
+        .atomic_write(OsStr::new(NATIVE_INDEX_RECORD), ".run-", &bytes, mode)
+    {
+        Ok(publication) => publication.require_durable()?,
+        Err(error) if mode == PublishMode::NoReplace && error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
-    let paths = if let Some(state) = merge {
-        state.stage_zero_paths
-    } else {
-        execute(
+    Ok(())
+}
+
+/// Digest of the index's entries (mode, object, stage and path), read without
+/// taking index.lock or rewriting the index. A missing or oversized index is
+/// unreadable here rather than an error for the caller's settlement.
+fn index_digest(git: &Path, repo: &VerifiedRepo) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    match repo.private_dir().metadata_at(OsStr::new("index"), false) {
+        Ok(metadata)
+            if metadata.kind == FileKind::Regular && metadata.size <= NATIVE_INDEX_LIMIT => {}
+        Ok(_) => {
+            return Err(RunError::Validation(
+                "native index is not a bounded regular file",
+            ));
+        }
+        Err(error) if error.is_not_found() => {
+            return Err(RunError::Validation("native index is missing"));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let entries = execute(
+        git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(&["ls-files", "-s", "-z"]),
+        None,
+    )?;
+    Ok(Sha256::digest(&entries)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn paths_from(git: &Path, repo: &VerifiedRepo, arguments: &[&str]) -> Result<Vec<String>> {
+    let bytes = execute(
+        git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(arguments),
+        None,
+    )?;
+    let mut paths = bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+/// Record the commit the native index starts from when a writer first attaches.
+/// An existing record is kept: it is never newer than the index, which is the
+/// safe direction for the two-tree merge. An index that cannot be digested
+/// leaves no record; the first sync records one.
+pub(crate) fn seed_native_index(repo: &VerifiedRepo, base: GitOid) -> Result<()> {
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let Ok(digest) = index_digest(&git, repo) else {
+        return Ok(());
+    };
+    record_native_index(repo, base, &digest, PublishMode::NoReplace)
+}
+
+/// Why the native index could not follow the branch tip. The index is left as
+/// it was. Commits are absent when the inspection failed before resolving them,
+/// and the paths are the ones that differ from the commit the index followed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct IndexOutOfSync {
+    pub followed: Option<GitOid>,
+    pub target: Option<GitOid>,
+    pub paths: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IndexSync {
+    /// The index follows the branch tip, whether it advanced now or already did.
+    Synced,
+    /// A native merge, rebase or similar operation owns the index, or another
+    /// settlement is advancing it; nothing moved and the record is unchanged, so
+    /// the next sync advances from the same commit.
+    Deferred,
+    /// The index was left unchanged and the record was not advanced: Git refused
+    /// the two-tree merge, the index changed since Provenant last left it, or it
+    /// could not be inspected. This is advisory and never fails settlement.
+    OutOfSync(IndexOutOfSync),
+}
+
+#[derive(Default)]
+struct Resolved {
+    followed: Option<GitOid>,
+    target: Option<GitOid>,
+}
+
+/// Move only committed host state into the native index. Private staging and
+/// merge metadata never leave their attempt. Git holds index.lock while its
+/// index-only two-tree merge resolves the branch tip and preserves unrelated
+/// native staging. Working files may contain live lane edits and are never
+/// checked out.
+///
+/// The merge runs from the recorded commit the index last followed to the
+/// branch tip, so it is idempotent: repeating it after a crash, or after a
+/// sibling already advanced the index, is a no-op. It runs only while the index
+/// still matches what the record says Provenant left there; an index someone
+/// else committed, reset or restaged since is left alone. `fallback` is used
+/// only when nothing is recorded. Every inspection or record failure, including
+/// a corrupt record, becomes an unknown result that leaves the index and the
+/// record as they were. One lock per worktree serialises concurrent syncs.
+pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> IndexSync {
+    let mut resolved = Resolved::default();
+    let unknown = |resolved: &Resolved, reason: String| {
+        IndexSync::OutOfSync(IndexOutOfSync {
+            followed: resolved.followed,
+            target: resolved.target,
+            paths: Vec::new(),
+            reason,
+        })
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let Ok(budget) = provenant_core::WaitBudget::cli(clock.mono_now(), NATIVE_INDEX_WAIT_SECONDS)
+    else {
+        return unknown(&resolved, "native index wait budget".to_owned());
+    };
+    let _lock = match repo.private_dir().lock(
+        OsStr::new(NATIVE_INDEX_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    ) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return IndexSync::Deferred,
+        Err(error) => return unknown(&resolved, format!("native index lock: {error}")),
+    };
+    match advance_native_index(repo, fallback, &mut resolved) {
+        Ok(sync) => sync,
+        Err(error) => unknown(&resolved, error.to_string()),
+    }
+}
+
+fn advance_native_index(
+    repo: &VerifiedRepo,
+    fallback: GitOid,
+    resolved: &mut Resolved,
+) -> Result<IndexSync> {
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let recorded = native_index_record(repo)?;
+    let followed = match &recorded {
+        Some(record) => GitOid::parse(&record.followed).map_err(|_| invalid())?,
+        None => fallback,
+    };
+    resolved.followed = Some(followed);
+    let target = GitOid::parse(
+        std::str::from_utf8(&execute(
             &git,
             repo.private_git_dir(),
             repo.root_path(),
-            &args(&["ls-files", "-z"]),
+            &args(&["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]),
             None,
-        )?
-    };
-    // Git applies these modes separately. Combining them leaves skip-worktree
-    // set on entries which also carry assume-unchanged.
+        )?)
+        .map_err(|_| invalid())?
+        .trim(),
+    )
+    .map_err(|_| invalid())?;
+    resolved.target = Some(target);
+    if followed == target {
+        // Nothing to merge. Staging added since the last sync belongs to the
+        // person: it sits on the tip the index already follows, so it becomes
+        // the baseline the next advance is judged against.
+        if let Ok(live) = index_digest(&git, repo)
+            && recorded
+                .as_ref()
+                .is_none_or(|record| record.index_digest != live)
+        {
+            record_native_index(repo, target, &live, PublishMode::Replace)?;
+        }
+        return Ok(IndexSync::Synced);
+    }
+    for marker in [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+        "sequencer",
+        "BISECT_START",
+    ] {
+        match repo.private_dir().metadata_at(OsStr::new(marker), false) {
+            Ok(_) => return Ok(IndexSync::Deferred),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let live = index_digest(&git, repo)?;
+    if let Some(record) = &recorded
+        && record.index_digest != live
+    {
+        let target_name = target.to_string();
+        let followed_name = followed.to_string();
+        let diff = |tree: &str| {
+            paths_from(
+                &git,
+                repo,
+                &[
+                    "diff-index",
+                    "--cached",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    tree,
+                ],
+            )
+        };
+        if diff(&target_name)?.is_empty() {
+            // The index already holds exactly the tip: an advance that died
+            // before recording, or a reset to it. Nothing to merge.
+            record_native_index(repo, target, &live, PublishMode::Replace)?;
+            return Ok(IndexSync::Synced);
+        }
+        return Ok(IndexSync::OutOfSync(IndexOutOfSync {
+            followed: Some(followed),
+            target: Some(target),
+            paths: diff(&followed_name).unwrap_or_default(),
+            reason: "the index changed since Provenant last advanced it, so a merge from the recorded commit could stage a reversal".to_owned(),
+        }));
+    }
+    if let Err(error) = execute(
+        &git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(&[
+            "read-tree",
+            "-i",
+            "-m",
+            &followed.to_string(),
+            &target.to_string(),
+        ]),
+        None,
+    ) {
+        let paths = paths_from(
+            &git,
+            repo,
+            &[
+                "diff-tree",
+                "-r",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &followed.to_string(),
+                &target.to_string(),
+            ],
+        )
+        .unwrap_or_default();
+        return Ok(IndexSync::OutOfSync(IndexOutOfSync {
+            followed: Some(followed),
+            target: Some(target),
+            paths,
+            reason: error.to_string(),
+        }));
+    }
+    let paths = execute(
+        &git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(&["ls-files", "-z"]),
+        None,
+    )?;
     for flag in ["--no-skip-worktree", "--no-assume-unchanged"] {
         execute_bounded(
             &git,
@@ -680,7 +889,13 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
             },
         )?;
     }
-    Ok(())
+    record_native_index(
+        repo,
+        target,
+        &index_digest(&git, repo)?,
+        PublishMode::Replace,
+    )?;
+    Ok(IndexSync::Synced)
 }
 
 #[cfg(test)]
@@ -690,7 +905,7 @@ mod stored_shape_tests {
     #[test]
     fn object_binding_preserves_additive_fields_and_declared_identity() {
         let payload = br#"{
-            "schema_version":2,
+            "schema_version":4,
             "candidate":"candidate-1",
             "future_binding":{"enabled":true},
             "identities":{
@@ -716,7 +931,7 @@ mod stored_shape_tests {
         }
 
         assert_eq!(
-            binding.identities.as_ref().expect("schema 2 identities"),
+            &binding.identities,
             &ViewIdentities {
                 scratch: DirectoryIdentity {
                     device: 1,

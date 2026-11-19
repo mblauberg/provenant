@@ -597,38 +597,51 @@ mod graph_writer_admission_tests {
             workers: &Free,
         };
         let cancel = CancelToken::new();
-        let (info, registry) = worktrees::with_context(
+        let (info1, info2) = worktrees::with_context(
             &roots,
             &rig.home,
             &rig.project,
             &factory.clock,
             &cancel,
             |ctx| {
-                let registry = roots
-                    .state
-                    .as_path()
-                    .join("worktrees")
-                    .join(ctx.binding.project_id().to_string());
-                let info = worktrees::create(
+                let info1 = worktrees::create(
                     &worktrees::WorktreeContext {
                         workers: &Free,
                         ..*ctx
                     },
                     WorktreeCreate {
-                        branch: "graph-lane".into(),
+                        branch: "graph-lane-1".into(),
                         base: Some("HEAD".into()),
                     },
                     &cancel,
                 )?;
-                Ok((info, registry))
+                let info2 = worktrees::create(
+                    &worktrees::WorktreeContext {
+                        workers: &Free,
+                        ..*ctx
+                    },
+                    WorktreeCreate {
+                        branch: "graph-lane-2".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )?;
+                Ok((info1, info2))
             },
         )?;
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1, "graph_id":"real-graph-lock", "nodes":[{
-                "id":"writer", "role":"plan", "access":"worktree_write", "worktree":info.path,
-                "source":{"type":"commit", "commit":info.head.to_string()}, "prompt":"write code",
-                "route":{"adapter":"fixture", "model":"fixture/model"}
-            }]
+            "schema_version":1, "graph_id":"real-graph-lock", "nodes":[
+                {
+                    "id":"writer-1", "role":"plan", "access":"worktree_write", "worktree":info1.path,
+                    "source":{"type":"commit", "commit":info1.head.to_string()}, "prompt":"write code 1",
+                    "route":{"adapter":"fixture", "model":"fixture/model"}
+                },
+                {
+                    "id":"writer-2", "role":"plan", "access":"worktree_write", "worktree":info2.path,
+                    "source":{"type":"commit", "commit":info2.head.to_string()}, "prompt":"write code 2",
+                    "route":{"adapter":"fixture", "model":"fixture/model"}
+                }
+            ]
         }))?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 1)?;
         let mut owner = BoundGraphOwner {
@@ -648,41 +661,24 @@ mod graph_writer_admission_tests {
             tick: false,
         };
         let mut journal = MemoryJournal::default();
-        let directory =
-            Directory::open_anchor(&registry.join(worktrees::state_dir_name(&info.path)))?;
-        let guard = directory.lock(
-            std::ffi::OsStr::new("writer.lock"),
-            LockMode::Exclusive,
-            budget,
-            &cancel,
-            &factory.clock,
-        )?;
-        let waiting = provenant_cli::run::with_deferred_provider_launch(|| {
-            advance(&document, &mut owner, &mut journal)
-        })?;
-        assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
-        assert!(waiting.checkpoint.nodes[0].launch_retry.is_some());
-        assert_eq!(
-            waiting.checkpoint.nodes[0].advance_owner_code.as_deref(),
-            Some("writer_busy")
-        );
-        drop(guard);
-        // Re-observe the same operation once its persisted wake is due.
-        factory.clock.wait_until(
-            factory
-                .clock
-                .mono_now()
-                .checked_add(provenant_core::DurationMicros::from_micros(5_000_000))?,
-        )?;
         let submitted = provenant_cli::run::with_deferred_provider_launch(|| {
             advance(&document, &mut owner, &mut journal)
         })?;
         assert_eq!(submitted.checkpoint.nodes[0].state, NodeState::Running);
+        assert!(submitted.checkpoint.nodes[0].launch_retry.is_none());
         assert!(
             submitted.checkpoint.nodes[0].attempts[0]
                 .attempt_ref
                 .is_some(),
-            "graph must submit the same writer after custody is released"
+            "first distinct-branch writer launches immediately without waiting"
+        );
+        assert_eq!(submitted.checkpoint.nodes[1].state, NodeState::Running);
+        assert!(submitted.checkpoint.nodes[1].launch_retry.is_none());
+        assert!(
+            submitted.checkpoint.nodes[1].attempts[0]
+                .attempt_ref
+                .is_some(),
+            "second distinct-branch writer launches concurrently without repository lock waits"
         );
         Ok(())
     }
@@ -2344,6 +2340,7 @@ mod result_tests {
         run.checkpoint.nodes[0].writer_binding =
             Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: Some(identity.clone()),
                 worktree: path.display().to_string(),
                 head: "1".repeat(40),
@@ -2380,6 +2377,7 @@ mod result_tests {
         run.checkpoint.nodes[0].writer_binding =
             Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: None,
                 worktree: "/private/host/writer".into(),
                 head: "1".repeat(40),

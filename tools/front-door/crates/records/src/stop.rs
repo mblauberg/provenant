@@ -423,7 +423,7 @@ impl StopCause {
     }
 
     /// What follows a stop with this cause: the chair while custody is not
-    /// proved released (one writer per worktree is a real boundary), else the
+    /// proved released (an unresolved attempt retains its custody), else the
     /// node's `on_stop` override unless the cause is pinned, else a fresh
     /// same-route attempt while the cause's retries last, else the default.
     pub fn next_step(self, on_stop: &OnStop, facts: StopFacts) -> NextStep {

@@ -451,15 +451,15 @@ fn terminal_ignores_protected_changes_present_at_lane_start()
 }
 
 #[test]
-fn terminal_imports_a_stopped_merge_into_the_worktree()
+fn terminal_retains_a_stopped_merge_in_private_git()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    stopped_merge_is_restored(false)
+    stopped_merge_stays_private(false)
 }
 
 #[test]
 fn budget_stop_preserves_a_stopped_merge_without_committing_conflict_markers()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    stopped_merge_is_restored(true)
+    stopped_merge_stays_private(true)
 }
 
 #[test]

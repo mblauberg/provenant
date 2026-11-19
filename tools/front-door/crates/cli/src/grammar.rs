@@ -1156,7 +1156,7 @@ pub enum Internal {
     },
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
-        #[arg(hide = true, num_args = 5..=6, catalog_u64_range = 3..=2147483647)]
+        #[arg(hide = true, num_args = 7..=8, catalog_u64_range = 3..=2147483647)]
         descriptors: Vec<u64>,
     },
 }
@@ -1364,7 +1364,7 @@ pub struct Wait {
     /// Wait until GitHub reports this exact head; never verdict another SHA
     #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
     pub head: Option<String>,
-    /// PR check settlement: failure (default) or complete
+    /// PR check settlement: failure (default) or complete (waits for all checks, with a 60-minute default budget)
     #[arg(long, value_enum, requires = "prs")]
     pub until: Option<PrWaitUntil>,
     /// Wait until every target settles (the default)
@@ -1379,7 +1379,7 @@ pub struct Wait {
     /// Print one line per transition until the wait ends
     #[arg(long)]
     pub follow: bool,
-    /// Wait budget (default domains.wait.timeout_seconds; clamped to domains.wait.max_timeout_seconds)
+    /// Wait budget (default domains.wait.timeout_seconds, or domains.wait.pr_complete_timeout_seconds with --pr --until complete; clamped to domains.wait.max_timeout_seconds)
     #[arg(long, value_name = "SPAN", value_parser = positive_span_seconds, catalog_bounds = (1, u64::MAX))]
     pub timeout: Option<u64>,
 }
