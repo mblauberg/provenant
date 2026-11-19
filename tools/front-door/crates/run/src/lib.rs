@@ -714,7 +714,10 @@ impl RunError {
     /// A publication the host refuses on the lane's own history. Retrying the
     /// same tip cannot change it, and waiting only fences the worktree.
     pub(crate) fn is_publication_refusal(&self) -> bool {
-        matches!(self, Self::LaneTipUnrooted { .. } | Self::PublicationDiverged)
+        matches!(
+            self,
+            Self::LaneTipUnrooted { .. } | Self::PublicationDiverged
+        )
     }
 
     /// A generic code can wrap multiple guards; classify the typed cause rather
