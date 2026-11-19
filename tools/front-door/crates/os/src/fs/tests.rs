@@ -105,34 +105,6 @@ fn clone_file_refuses_existing_destination() {
 }
 
 #[test]
-fn copy_file_keeps_bytes_mode_and_mtime_and_refuses_existing_destination() {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
-    let source_path = temp.path().join("source");
-    std::fs::write(&source_path, b"payload").unwrap();
-    std::fs::set_permissions(&source_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
-    std::fs::File::open(&source_path)
-        .unwrap()
-        .set_modified(when)
-        .unwrap();
-    std::fs::write(temp.path().join("existing"), b"existing").unwrap();
-    let dir = Directory::open_anchor(temp.path()).unwrap();
-    let source = dir.open_read(OsStr::new("source")).unwrap();
-    dir.copy_file_from(&source, OsStr::new("copy")).unwrap();
-    let copy = temp.path().join("copy");
-    assert_eq!(std::fs::read(&copy).unwrap(), b"payload");
-    let metadata = std::fs::metadata(&copy).unwrap();
-    assert_eq!(metadata.permissions().mode() & 0o7777, 0o755);
-    assert_eq!(metadata.modified().unwrap(), when);
-    assert!(dir.copy_file_from(&source, OsStr::new("existing")).is_err());
-    assert_eq!(
-        std::fs::read(temp.path().join("existing")).unwrap(),
-        b"existing"
-    );
-}
-
-#[test]
 fn stable_read_bounds_bytes_and_retains_the_held_anchor() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir(temp.path().join("original")).unwrap();

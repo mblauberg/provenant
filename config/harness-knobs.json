@@ -702,7 +702,7 @@
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/cargo_target.rs",
       "effect": "CARGO_TARGET_DIR for lanes: private (default; the worktree's own target in its lane cache, seeded warm by a copy-on-write clone of the project's host seed generation with dep-info aged so members rebuild from this worktree's sources), project (the writer worktree's own target/ beside its Cargo workspace) or an absolute path. provenant worktree seed-target prints and seeds the private target for a checkout outside a lane. The value and its source appear in the lane preamble and in provenant config show.",
-      "trade_off": "private starts warm and costs little disk on APFS, where clones share blocks; off APFS the seed is a full copy, with a warning. It is removed with the worktree. project shares artifacts with builds a person runs in the same checkout but starts cold. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
+      "trade_off": "private starts warm and costs little disk on APFS, where clones share blocks; where the filesystem cannot clone, the target starts unseeded and cold, with a warning. It is removed with the worktree. project shares artifacts with builds a person runs in the same checkout but starts cold. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
     },
     "lanes.ci_scope": {
       "type": "enum",

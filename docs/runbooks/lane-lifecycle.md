@@ -78,8 +78,11 @@ refreshes it when the verify base moves. It builds the configured verify base,
 so uncommitted work is not the seed source. Each writer clones a compatible
 generation and ages its dep-info, so workspace members rebuild once from the
 worktree's sources and registry crates stay fresh. A `seeded` report proves the
-clone (`copied` when the filesystem cannot clone); Cargo's verbose `Fresh`
-lines prove dependency reuse. Settlement releases the target. For a checkout
+clone; where the filesystem cannot clone, the lane warns `clone_failed` and
+builds cold. Cargo's verbose `Fresh` lines prove dependency reuse. Settlement
+starts a detached cleanup that removes the target once writer custody is free;
+worktree removal and lane-cache GC catch the rest. A continuation reuses a
+target still present and otherwise seeds a new one. For a checkout
 outside a lane, `provenant worktree seed-target PATH` seeds the same target and
 prints it for `CARGO_TARGET_DIR`.
 

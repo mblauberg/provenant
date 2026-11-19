@@ -45,7 +45,7 @@ The host's own build output supplies target seed generations.
 ## Cargo target directory
 
 The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
-- `private` (default): the worktree's own target in its lane cache, `~/Library/Caches/provenant-lane-cargo/<digest>/target` (lint-only runs in `target-lint`), seeded warm from the project's host seed generation (below). A clone shares blocks with the seed on APFS. Where the filesystem cannot clone, each file is copied with its mode and modification time, the seed reports `copied` and the host warns. Lane settlement and worktree removal release it; a continuation re-seeds. `provenant worktree seed-target PATH` seeds the same directory for a checkout outside a lane and prints it for `CARGO_TARGET_DIR`; an existing target is kept.
+- `private` (default): the worktree's own target in its lane cache, `~/Library/Caches/provenant-lane-cargo/<digest>/target` (lint-only runs in `target-lint`), seeded warm from the project's host seed generation (below). A clone shares blocks with the seed on APFS. Where the filesystem cannot clone, the target stays unseeded: the outcome is a `clone_failed` fallback, the host warns once and the first build is cold. A copy is never made, because it cannot finish inside the seed budget. Settlement starts a detached lane cleanup that removes the target once writer custody is free (`src/fabric/settlement.rs` → `gc_cleanup::release_settled_cache`); one it misses, worktree removal and lane-cache GC remove later. A continuation reuses a target still present and seeds a new one otherwise. `provenant worktree seed-target PATH` seeds the same directory for a checkout outside a lane and prints it for `CARGO_TARGET_DIR`; an existing target is kept.
 - `project`: the writer worktree's own target, `target/` beside the Cargo workspace the verify port selects, with lint-only runs in `target/provenant-lint`. Builds by a person or chair in that checkout share it, and it goes with the worktree, but a new worktree starts cold. The host neither creates it nor grants it separately: it lies in the writer-controlled worktree, which the lane may already write and execute. Read-only lanes and projects without a Cargo manifest use the lane cache.
 - Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `project` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
 
@@ -54,7 +54,7 @@ No mode shares one target between worktrees of a repository. The `shared` value,
 - Why the seed is the host generation, not a settled lane's target: generations already exist per project, are built by the host from the verify base (landed code) rather than from writer-controlled output, and record the compiler, host triple and Cargo profile a clone must match. A lane's target carries none of those guarantees and would need a second store and retention.
 
 The preamble and `provenant config show` report the resolved target directory and its source, e.g. `(source: default; lanes.cargo_target)` or `(source: host; lanes.cargo_target)`.
-Target seeding and clone machinery are used only for `private`. A lane's seed outcome is in `cargo-target-setup.json`; a fallback or a copy also warns on the host's stderr.
+Target seeding and clone machinery are used only for `private`. A lane's seed outcome is in `cargo-target-setup.json`; a fallback also warns once on the host's stderr.
 
 ## Cargo target seed
 

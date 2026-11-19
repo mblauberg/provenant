@@ -786,33 +786,6 @@ impl Directory {
         os::clone_file(&source.file, &self.file, name)
             .map_err(error("clone file", &self.path.join(name)))
     }
-    /// Copy a held regular file's bytes into a new entry, keeping its
-    /// permission bits and modification time. For filesystems that cannot
-    /// clone; never replaces an existing entry.
-    #[cfg(unix)]
-    pub fn copy_file_from(&self, source: &FileHandle, name: &OsStr) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        let name = component(name)?;
-        let path = self.path.join(name);
-        let metadata = source
-            .file
-            .metadata()
-            .map_err(error("fstat copy source", &source.path))?;
-        let mut copy = self.create_new(name)?;
-        let mut reader = &source.file;
-        io::copy(&mut reader, &mut copy.file).map_err(error("copy file", &path))?;
-        copy.file
-            .set_permissions(std::fs::Permissions::from_mode(
-                metadata.permissions().mode() & 0o7777,
-            ))
-            .map_err(error("fchmod copy", &path))?;
-        let modified = metadata
-            .modified()
-            .map_err(error("fstat copy source", &source.path))?;
-        copy.file
-            .set_times(std::fs::FileTimes::new().set_modified(modified))
-            .map_err(error("futimens copy", &path))
-    }
     /// Clone a held directory, with everything under it, into a new entry. The
     /// kernel does this in one call, keeping modes and leaving links unfollowed.
     /// Never copies as a fallback and never replaces an existing entry.

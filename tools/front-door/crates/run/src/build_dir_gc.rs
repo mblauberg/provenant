@@ -215,6 +215,12 @@ fn retire_one(
     let tree = PayloadTree::claim(root, name, &metadata).map_err(io::Error::other)?;
     let mut guards: Vec<LockGuard> = Vec::new();
     for target in TARGETS {
+        // An old directory may lack either target; a missing one holds no lock.
+        match tree.metadata_at(OsStr::new(target)) {
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(io::Error::other(error)),
+            Ok(_) => {}
+        }
         for path in profiles(&tree, OsStr::new(target))? {
             let profile = open_path(&tree, &path)?;
             for lock in LOCKS {

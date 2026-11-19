@@ -187,10 +187,6 @@ fallback_reasons! {
     FRESHNESS_RESET_FAILED = "freshness_reset_failed",
 }
 
-/// Seeded, but by a plain copy: the filesystem refused to clone (not APFS or a
-/// reflink filesystem).
-const COPIED: &str = "copied";
-
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Outcome {
     status: String,
@@ -250,14 +246,10 @@ impl Outcome {
         }
     }
     /// One line for the host's stderr when a seed was wanted and not used, so
-    /// a lane that builds its dependencies from scratch is not a surprise, or
-    /// when it was copied because the filesystem cannot clone.
+    /// a lane that builds its dependencies from scratch is not a surprise.
+    /// Where the filesystem cannot clone, the reason is `clone_failed`: the
+    /// target stays unseeded and its first build is cold.
     pub(crate) fn fallback_warning(&self, what: &str) -> Option<String> {
-        if self.status == "seeded" && self.reason == COPIED {
-            return Some(format!(
-                "warning: {what} seeded by a full copy; this filesystem cannot clone, so the seed uses its full size on disk"
-            ));
-        }
         (self.status == "fallback").then(|| {
             format!(
                 "warning: {what} not seeded ({}{}); this lane builds without it",
@@ -413,7 +405,7 @@ fn seed_target_with(
             project_key: "",
         },
         None,
-        |source, dest, _| clone(source, dest).map(|()| false),
+        |source, dest, _| clone(source, dest),
     )
 }
 
@@ -431,7 +423,7 @@ fn seed_target_cancellable(
     cache: &Path,
     compatibility: SeedCompatibility<'_>,
     cancel: Option<&provenant_core::CancelToken>,
-    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<bool, &'static str>,
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
     let budget = SeedBudget::new();
     let deadline = &budget;
@@ -578,7 +570,7 @@ fn seed_target_cancellable(
         let staging = cache_dir
             .open_verified_directory(&stage)
             .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
-        let copied = clone(&source, &staging, deadline)?;
+        clone(&source, &staging, deadline)?;
         age_dep_info(&cache.join(&stage)).map_err(|_| fallback_reasons::FRESHNESS_RESET_FAILED)?;
         if deadline.expired() {
             return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
@@ -590,17 +582,15 @@ fn seed_target_cancellable(
         cache_dir
             .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
             .map_err(|_| fallback_reasons::PUBLISH_FAILED)?;
-        Ok(copied)
+        Ok(())
     })();
     match result {
-        Ok(copied) => Outcome {
+        Ok(()) => Outcome {
             status: "seeded".into(),
-            reason: if cache_dir.sync().is_err() {
-                "durability_unconfirmed".into()
-            } else if copied {
-                COPIED.into()
-            } else {
+            reason: if cache_dir.sync().is_ok() {
                 "cloned".into()
+            } else {
+                "durability_unconfirmed".into()
             },
             detail: None,
             seed_source: Some(SeedSource {
@@ -613,12 +603,18 @@ fn seed_target_cancellable(
             if reason == fallback_reasons::CANCELLED
                 || reason == fallback_reasons::SEED_BUDGET_EXHAUSTED =>
         {
+            // The clone's own budget or token is spent; remove the partial
+            // stage with a fresh bounded budget so it does not linger for the
+            // next seed to spend its budget on. One that does not finish is
+            // retried by the next seed under the store lock.
+            let _ = remove_seed_tree(&cache_dir, &stage, None, &SeedBudget::new());
             Outcome::fallback(reason)
         }
         Err(reason) => {
             match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
                 Ok(true) => {}
                 Ok(false) => {
+                    let _ = remove_seed_tree(&cache_dir, &stage, None, &SeedBudget::new());
                     return Outcome::fallback(
                         if cancel.is_some_and(|token| token.is_cancelled()) {
                             fallback_reasons::CANCELLED
@@ -681,7 +677,7 @@ fn clone_target(
     destination: &provenant_os::fs::Directory,
     cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
-    clone_target_until(source, destination, cancel, &SeedBudget::new()).map(|_| ())
+    clone_target_until(source, destination, cancel, &SeedBudget::new())
 }
 
 #[cfg(unix)]
@@ -690,19 +686,21 @@ fn clone_target_until(
     destination: &provenant_os::fs::Directory,
     cancel: &provenant_core::CancelToken,
     deadline: &SeedBudget,
-) -> Result<bool, &'static str> {
+) -> Result<(), &'static str> {
     // The seed can be read-only; make each clone writable without changing the seed.
-    let store = CloneStore {
-        unavailable: fallback_reasons::TARGET_UNAVAILABLE,
-        read_failed: fallback_reasons::TARGET_READ_FAILED,
-        too_deep: fallback_reasons::TARGET_TOO_DEEP,
-        unsupported: fallback_reasons::TARGET_CONTAINS_UNSUPPORTED_ENTRY,
-        writable_files: true,
-        copied: std::cell::Cell::new(false),
-        deadline,
-    };
-    clone_tree(source, destination, &store, cancel)?;
-    Ok(store.copied.get())
+    clone_tree(
+        source,
+        destination,
+        &CloneStore {
+            unavailable: fallback_reasons::TARGET_UNAVAILABLE,
+            read_failed: fallback_reasons::TARGET_READ_FAILED,
+            too_deep: fallback_reasons::TARGET_TOO_DEEP,
+            unsupported: fallback_reasons::TARGET_CONTAINS_UNSUPPORTED_ENTRY,
+            writable_files: true,
+            deadline,
+        },
+        cancel,
+    )
 }
 
 #[cfg(any(unix, test))]
@@ -751,8 +749,6 @@ struct CloneStore<'a> {
     too_deep: &'static str,
     unsupported: &'static str,
     writable_files: bool,
-    /// Set when any file had to be copied because the filesystem cannot clone.
-    copied: std::cell::Cell<bool>,
     deadline: &'a SeedBudget,
 }
 
@@ -813,15 +809,11 @@ fn clone_entries(
             }
             FileKind::Regular => {
                 let file = source.open_read(&name).map_err(|_| store.read_failed)?;
-                if destination.clone_file_from(&file, &name).is_err() {
-                    // A failed clone leaves no entry. Off APFS or a reflink
-                    // filesystem, copy: a warm seed beats a cold build even
-                    // at full size on disk. The copy keeps modes and times.
-                    destination
-                        .copy_file_from(&file, &name)
-                        .map_err(|_| fallback_reasons::CLONE_FAILED)?;
-                    store.copied.set(true);
-                }
+                // Off APFS or a reflink filesystem the clone fails and the
+                // target stays unseeded: a copy cannot fit the seed budget.
+                destination
+                    .clone_file_from(&file, &name)
+                    .map_err(|_| fallback_reasons::CLONE_FAILED)?;
                 if store.writable_files {
                     destination
                         .open_read(&name)
@@ -843,34 +835,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_copied_seed_reports_copied_and_warns() {
-        let state = tempfile::tempdir().unwrap();
-        generation(state.path(), "001", "v1", "host");
-        let cache = state.path().join("cache");
-        std::fs::create_dir(&cache).unwrap();
-        let outcome = seed_target_cancellable(
-            state.path(),
-            &cache,
-            SeedCompatibility {
-                version: "v1",
-                triple: "host",
-                cargo_profile: &provenant_config::LaneBuildSettings::default()
-                    .cargo_build_profile(&[])
-                    .unwrap(),
-                project_key: "",
-            },
-            None,
-            |_, _, _| Ok(true),
-        );
-        assert_eq!(
-            (outcome.status.as_str(), outcome.reason.as_str()),
-            ("seeded", COPIED)
-        );
-        assert!(
-            outcome
-                .fallback_warning("the Cargo target")
-                .is_some_and(|warning| warning.contains("full copy"))
-        );
+    fn a_spent_budget_or_cancelled_clone_removes_its_stage() {
+        for reason in [
+            fallback_reasons::SEED_BUDGET_EXHAUSTED,
+            fallback_reasons::CANCELLED,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("cache");
+            std::fs::create_dir(&cache).unwrap();
+            generation(tmp.path(), "001", "v1", "host");
+            let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |_, stage| {
+                stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
+                Err(reason)
+            });
+            assert_eq!(outcome, Outcome::fallback(reason));
+            assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        }
     }
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
@@ -1127,7 +1107,7 @@ mod tests {
             None,
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
-                Ok(false)
+                Ok(())
             },
         );
         assert_eq!(
@@ -1204,7 +1184,7 @@ mod tests {
             None,
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
-                Ok(false)
+                Ok(())
             },
         );
         assert_eq!(outcome.status, "seeded");
