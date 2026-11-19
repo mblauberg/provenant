@@ -2122,6 +2122,16 @@ pub(crate) fn pr_land_keeps_a_branch_held_by_a_paused_rebase() -> Result {
     assert_deleted(&landing)
 }
 
+pub(crate) fn pr_land_keeps_a_branch_held_by_a_bisect() -> Result {
+    let landing = landing()?;
+    let held = hold(&landing, "bisect")?;
+    assert_kept(&landing, race(&landing, &[])?, "bisected")?;
+
+    git_in(&landing.rig, &held, &["bisect", "reset"])?;
+    git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
+    assert_deleted(&landing)
+}
+
 pub(crate) fn pr_land_keeps_a_branch_held_in_a_checkout_that_went_away() -> Result {
     // The paused rebase lives in the worktree's administrative directory, so
     // losing the checkout directory does not release the branch.

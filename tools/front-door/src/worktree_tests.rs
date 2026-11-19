@@ -319,6 +319,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_leaves_a_reused_branch_name_alone",
             "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head",
             "pr_land_keeps_a_branch_held_by_a_paused_rebase",
+            "pr_land_keeps_a_branch_held_by_a_bisect",
             "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away",
             "pr_land_refuses_when_a_worktree_entry_cannot_be_read",
             "pr_land_refuses_when_worktree_state_is_malformed",
@@ -455,6 +456,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "pr_land_keeps_a_branch_held_by_a_paused_rebase" => {
                     crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_paused_rebase()
+                }
+                "pr_land_keeps_a_branch_held_by_a_bisect" => {
+                    crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_bisect()
                 }
                 "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away" => {
                     crate::pr_land_tests::pr_land_keeps_a_branch_held_in_a_checkout_that_went_away()
