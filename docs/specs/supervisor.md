@@ -135,7 +135,15 @@ open writer-lock paths, with a reconcile action. An open path is not proof of
 flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
+
+While retaining, the guardian blocks on process, cancellation and signal
+events. It runs a signal-free settlement check after a process event (at most
+every 100 ms) or at a backstop (5 s with process watches, else 1 s). It repeats
+the bounded stop only on cancellation or every 30 s, and reads host graph
+evidence only when a stop has signal candidates. Idle retention therefore costs
+no CPU between events.
 - Why: detached services must not hold a lease or cause unsafe release.
+- Why: retained custody can last hours, and one guardian runs per lane (#3560).
 
 ### Durable exit publication
 
@@ -329,6 +337,11 @@ objects, configuration and credentials, using the repository object store as a
 read-only alternate. The repository's refs, config, alternates, hooks and admin
 metadata stay read-only to lanes. The host imports verified objects and moves
 the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
+The lane Git wrapper binds commands implicitly targeting its
+worktree; commands for other repositories, commands with explicit repository
+selectors and Git transport endpoints pass through with their arguments and
+environment intact. Fixture commands remove inherited lane Git selectors and
+use native Git while retaining the surrounding tool PATH.
 - Why: ordinary Git works in the lane while other lanes' refs and the host's Git
   behaviour stay protected; sharing objects and caches is intended.
 

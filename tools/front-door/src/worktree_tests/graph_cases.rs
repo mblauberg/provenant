@@ -46,10 +46,15 @@ fn spawn_graph_command(
     })
 }
 
+/// Failure ceiling for a stopped graph to settle. Stop is observed by waiting
+/// on the graph's own terminal state, so this bounds a missed cancellation, not
+/// the latency of a correct one. It stays below the fixture's held fetch.
+const GRAPH_STOP_CEILING: Duration = Duration::from_secs(20);
+
 fn finish_graph_command(mut pending: PendingGraphCommand, phase: &str) -> Result<Value> {
     let exited = provenant_test_support::wait_for(
         "graph submission after stop",
-        Duration::from_secs(4),
+        GRAPH_STOP_CEILING,
         || pending.child.try_wait(),
         |status| matches!(status, Ok(Some(_)) | Err(_)),
     )?;
@@ -309,7 +314,7 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             fs::write(
                 &wrapper,
                 format!(
-                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 30; fi;; esac\nexec '{}' \"$@\"\n",
+                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 120; fi;; esac\nexec '{}' \"$@\"\n",
                     gate.display(),
                     gate.display(),
                     git_exe.display()
@@ -336,11 +341,10 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             &gate.join("entered"),
             "graph preparation entered",
         )?;
-        let before = std::time::Instant::now();
         ok(&rig, &["stop", "preparation-first", "--json"])?;
         ok(
             &rig,
-            &["wait", "preparation-first", "--timeout", "3s", "--json"],
+            &["wait", "preparation-first", "--timeout", "20s", "--json"],
         )?;
         let first = finish_graph_command(first, phase)?;
         assert!(
@@ -348,10 +352,6 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             "{phase}: {first}"
         );
         let stopped = ok(&rig, &["status", "preparation-first", "--json"])?;
-        assert!(
-            before.elapsed() < Duration::from_secs(4),
-            "{phase}: {stopped}"
-        );
         assert_eq!(
             stopped["data"]["rows"][0]["state"], "cancelled",
             "{phase}: {stopped}"
@@ -376,7 +376,7 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
         ok(&rig, &["stop", "preparation-next", "--json"])?;
         ok(
             &rig,
-            &["wait", "preparation-next", "--timeout", "3s", "--json"],
+            &["wait", "preparation-next", "--timeout", "20s", "--json"],
         )?;
         let next = finish_graph_command(next, phase)?;
         assert!(

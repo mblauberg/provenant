@@ -126,6 +126,101 @@ fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
     const { assert!(super::CANCEL_WATCH_POLL_MS > super::CANCEL_FALLBACK_POLL_MS) };
 }
 
+/// Drive the retained-custody schedule like the guardian loop: act, then
+/// block until the next deadline, capped like one reactor turn. Returns
+/// (escalations, observations, wakes) over the window.
+fn drive_retained(window_ms: u64, watched: bool, event_every_ms: Option<u64>) -> (u64, u64, u64) {
+    let mut schedule = super::RetainedSchedule {
+        watched,
+        ..Default::default()
+    };
+    let (mut escalations, mut observations, mut wakes) = (0, 0, 0);
+    let mut now = 0;
+    let mut next_event = event_every_ms;
+    while now <= window_ms {
+        match schedule.next(now) {
+            super::RetainedStep::Escalate => escalations += 1,
+            super::RetainedStep::Observe => observations += 1,
+            super::RetainedStep::Wait => {}
+        }
+        let mut wait = schedule.wait_ms(now).min(1_000);
+        if let Some(at) = next_event {
+            wait = wait.min(at.saturating_sub(now));
+        }
+        // A zero wait would spin; the schedule must always leave a deadline.
+        assert!(wait > 0, "retained schedule spun at {now} ms: {schedule:?}");
+        now += wait;
+        wakes += 1;
+        if let (Some(at), Some(every)) = (next_event, event_every_ms)
+            && now >= at
+        {
+            schedule.process_event = true;
+            next_event = Some(at + every);
+        }
+    }
+    (escalations, observations, wakes)
+}
+
+#[test]
+fn retained_custody_idles_on_events_instead_of_repeating_cleanup() {
+    // Ten idle minutes with a detached service alive: one immediate stop,
+    // then one per escalation backstop. Looks stay at the observation
+    // backstop; before #3560 a full stop pass ran every 100 ms.
+    let window = 600_000;
+    let stops = window / super::RETAINED_ESCALATION_MS + 1;
+    let (escalations, observations, wakes) = drive_retained(window, false, None);
+    assert_eq!(escalations, stops);
+    assert!(
+        observations + escalations <= window / super::RETAINED_OBSERVE_MS + 1,
+        "{observations} looks"
+    );
+    assert!(
+        wakes <= window / super::RETAINED_OBSERVE_MS + 1,
+        "{wakes} wakes"
+    );
+    // Healthy exit watches stretch looks to the full-census backstop.
+    let (escalations, observations, _) = drive_retained(window, true, None);
+    assert_eq!(escalations, stops);
+    assert!(observations + escalations <= window / super::FULL_CENSUS_INTERVAL_MS + stops);
+}
+
+#[test]
+fn retained_custody_looks_promptly_after_an_event_but_never_faster_than_the_walk_rate() {
+    // A service churning children wakes the guardian on every exit; looks
+    // stay at the census walk rate and never repeat the stop.
+    let window = 60_000;
+    let (escalations, observations, _) = drive_retained(window, true, Some(1));
+    assert_eq!(escalations, window / super::RETAINED_ESCALATION_MS + 1);
+    assert!(
+        observations <= window / super::CENSUS_INTERVAL_MS + 1,
+        "{observations} looks"
+    );
+    // One exit after a quiet spell is looked at without waiting for a backstop.
+    let mut schedule = super::RetainedSchedule {
+        watched: true,
+        ..Default::default()
+    };
+    assert_eq!(schedule.next(0), super::RetainedStep::Escalate);
+    assert_eq!(schedule.next(2_000), super::RetainedStep::Wait);
+    schedule.process_event = true;
+    assert_eq!(schedule.wait_ms(2_000), 0);
+    assert_eq!(schedule.next(2_000), super::RetainedStep::Observe);
+    assert!(!schedule.process_event);
+    assert_eq!(schedule.wait_ms(2_000), super::FULL_CENSUS_INTERVAL_MS);
+}
+
+#[test]
+fn retained_custody_repeats_the_stop_at_once_on_cancellation() {
+    let mut schedule = super::RetainedSchedule::default();
+    assert_eq!(schedule.next(0), super::RetainedStep::Escalate);
+    assert_eq!(schedule.next(10), super::RetainedStep::Wait);
+    schedule.escalation_requested = true;
+    assert_eq!(schedule.wait_ms(10), 0);
+    assert_eq!(schedule.next(10), super::RetainedStep::Escalate);
+    assert_eq!(schedule.next(20), super::RetainedStep::Wait);
+    assert_eq!(schedule.wait_ms(20), super::RETAINED_OBSERVE_MS - 10);
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]

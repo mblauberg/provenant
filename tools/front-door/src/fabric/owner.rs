@@ -3956,6 +3956,7 @@ impl BoundGraphOwner<'_> {
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Unclassified => AttemptOutcome::Unclassified,
                             Outcome::Rejected if !launched => preparation_cause
+                                .or(Some(provenant_records::run::TerminalCause::AccessPolicyRefused))
                                 .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
                             Outcome::ReviewRequired if matches!(
                                 &attempt.state,

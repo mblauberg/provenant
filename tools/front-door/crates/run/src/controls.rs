@@ -5796,22 +5796,31 @@ impl RunStore {
                     .clock
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))?;
-                self.withdraw(
+                self.withdraw_with_preparation_failure(
                     id,
-                    AttemptState::Starting {
-                        extra: Default::default(),
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Starting {
+                            extra: Default::default(),
+                        },
+                        outcome: if cancelled {
+                            Outcome::Cancelled
+                        } else {
+                            Outcome::Rejected
+                        },
+                        reason: if cancelled {
+                            "cancelled before writer launch"
+                        } else {
+                            "launch interrupted: writer preparation never reached a guardian"
+                        },
+                        finished_at: now,
+                        failure: None,
+                        terminal_cause: if cancelled {
+                            None
+                        } else {
+                            Some(TerminalCause::HandoffRefused)
+                        },
+                        terminal_note: None,
                     },
-                    if cancelled {
-                        Outcome::Cancelled
-                    } else {
-                        Outcome::Rejected
-                    },
-                    if cancelled {
-                        "cancelled before writer launch"
-                    } else {
-                        "launch interrupted: writer preparation never reached a guardian"
-                    },
-                    now,
                     call,
                 )?;
                 return Ok(Reconciled::Withdrawn);
@@ -5861,22 +5870,31 @@ impl RunStore {
             .clock
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
-        let done = self.withdraw(
+        let done = self.withdraw_with_preparation_failure(
             id,
-            AttemptState::Starting {
-                extra: Default::default(),
+            crate::store::Withdrawal {
+                expected: AttemptState::Starting {
+                    extra: Default::default(),
+                },
+                outcome: if cancelled {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Rejected
+                },
+                reason: if cancelled {
+                    "cancelled before launch"
+                } else {
+                    "launch interrupted: never reached a guardian"
+                },
+                finished_at: now,
+                failure: None,
+                terminal_cause: if cancelled {
+                    None
+                } else {
+                    Some(TerminalCause::HandoffRefused)
+                },
+                terminal_note: None,
             },
-            if cancelled {
-                Outcome::Cancelled
-            } else {
-                Outcome::Rejected
-            },
-            if cancelled {
-                "cancelled before launch"
-            } else {
-                "launch interrupted: never reached a guardian"
-            },
-            now,
             call,
         )?;
         Ok(match done {
@@ -6420,13 +6438,13 @@ mod tests {
             return Err("interrupted preparation did not settle".into());
         };
         assert_eq!(*outcome, Outcome::Rejected);
-        assert_eq!(*terminal_cause, None);
+        assert_eq!(*terminal_cause, Some(TerminalCause::HandoffRefused));
         assert_eq!(*terminal_note, None);
         let projected =
             provenant_records::wire::lane::LaneRow::project(&terminal, Default::default());
         assert_eq!(
             projected.reason.as_deref(),
-            Some(Outcome::Rejected.diagnostic_reason())
+            Some(TerminalCause::HandoffRefused.detail())
         );
         Ok(())
     }

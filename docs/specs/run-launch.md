@@ -11,7 +11,7 @@ Admission commits the reservation and attempt together. A worktree's owning lane
 decides who else writes in it; active lanes share an occupancy lease. Resource
 probes run outside the admission transaction. Busy capacity is not a queue. Direct-run custody uses
 the same captured project and actor identity as the run store. Uncertain custody
-keeps its ownership until release is proved. Writer-bind refusals identify the durable lease holder, branch, worktree, reservation age and observed liveness. Reservation age is measured from its last durable update. Reconciliation reports released custody only after exclusion and native absence evidence prove it safe; an unknown or live holder retains custody. Stable lock inodes remain in place so concurrent observers cannot split exclusion.
+keeps its ownership until release is proved. Writer-bind refusals identify the durable lease holder, branch, worktree, reservation age and observed liveness. Reservation age is measured from its last durable update. Reconciliation reports released custody only after exclusion and native absence evidence prove it safe; an unknown or live holder retains custody. Uncertain custody and unreadable reservations are reported as warnings while reconciliation continues; they remain fenced until safe release is proved. Stable lock inodes remain in place so concurrent observers cannot split exclusion.
 - Why: shared work must remain possible without holding coordination locks across external work.
 
 Nested sharing is authorised by the owning guardian's host-sealed worktree
@@ -117,7 +117,10 @@ acknowledged as success.
 
 A pre-launch routing refusal retains a bounded host-authored explanation in
 its result alongside the safe cause and remedy. Provider-originated diagnostics
-never supply that public explanation.
+never supply that public explanation. Every refusal path in lane launch carries
+a typed terminal cause plus the command that fixes it, recorded in the attempt's
+terminal record (`terminal-pending.json`) and displayed by `result` and `wait`.
+Refusals never settle without a typed cause.
 
 Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.

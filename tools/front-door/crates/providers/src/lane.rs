@@ -609,6 +609,12 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     };
     let mut bytes = b"#!/bin/sh\n".to_vec();
     if options.scrub {
+        if let Some(bound) = &options.bound {
+            let exports = bound_exports(bound).map_err(|_| {
+                wrapper_error("the private Git binding cannot be represented in the wrapper")
+            })?;
+            bytes.extend_from_slice(exports.as_bytes());
+        }
         let global = if let Some(config) = &options.identity_config {
             shell_quote_os(config.as_os_str()).map_err(|_| {
                 wrapper_error(
@@ -623,12 +629,6 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
         );
         if options.identity_config.is_none() {
             bytes.extend_from_slice(b"GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n");
-        }
-        if let Some(bound) = &options.bound {
-            let exports = bound_exports(bound).map_err(|_| {
-                wrapper_error("the private Git binding cannot be represented in the wrapper")
-            })?;
-            bytes.extend_from_slice(exports.as_bytes());
         }
     }
     if let Some(exec_path) = host_exec_path(Path::new(std::ffi::OsStr::from_bytes(git))) {
@@ -1292,14 +1292,6 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
     script
 }
 
-/// Shell that applies the private binding only when Git acts on the lane
-/// checkout itself, and otherwise clears every inherited binding. Git acts on
-/// the checkout when its physical working directory (moved by any leading
-/// `-C`) lies inside the worktree and the nearest `.git` entry walking up from
-/// there is the worktree's own marker. `init` and `clone` create a repository,
-/// so they never bind. The leading global options are Git's own list (`git help
-/// git`); an option the parser does not know, or a missing value, means it
-/// cannot tell where the subcommand starts, so it does not bind.
 fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
     use std::os::unix::ffi::OsStrExt;
     if value
@@ -1321,6 +1313,18 @@ fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
     Ok(quoted)
 }
 
+/// Shell that applies the private binding only when Git acts on the lane
+/// checkout itself, and otherwise leaves the Git selectors and arguments as
+/// the caller gave them. Either way the wrapper's own scrub that follows
+/// (global and system configuration, credential helpers, exec path) still
+/// applies, so a command for another repository never inherits the host's
+/// credentials or identity. Git acts on the checkout when its physical working
+/// directory (moved by any leading `-C`) lies inside the worktree and the
+/// nearest `.git` entry walking up from there is the worktree's own marker.
+/// Repository-creating and transport commands name their own targets, so they
+/// never bind. The leading global options are Git's own list (`git help git`);
+/// an option the parser does not know, or a missing value, means it cannot
+/// tell where the subcommand starts, so it does not bind.
 fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
     let worktree = shell_quote_os(bound.worktree.as_os_str())?;
     let mut exports = String::new();
@@ -1330,14 +1334,12 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
         names.push(key);
         exports.push_str(&format!("  export {key}={}\n", shell_quote_os(value)?));
     }
-    // Whatever the lane does not bind is cleared in both branches, so an
-    // inherited index or identity cannot redirect Git inside the checkout.
+    // Clear selectors not supplied by the lane before binding the checkout.
     let others: Vec<&str> = UNBOUND
         .into_iter()
         .filter(|name| !names.contains(name))
         .collect();
     let others = others.join(" ");
-    names.extend(others.split(' ').filter(|name| !name.is_empty()));
     Ok(format!(
         concat!(
             "lane_worktree={}\n",
@@ -1356,7 +1358,7 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "      *) break ;;\n",
             "    esac\n",
             "  done\n",
-            "  case \"$1\" in init|clone) return 1 ;; esac\n",
+            "  case \"$1\" in init|clone|receive-pack|upload-pack|upload-archive) return 1 ;; esac\n",
             "  case \"$lane_d\" in \"$lane_worktree\"|\"$lane_worktree\"/*) ;; *) return 1 ;; esac\n",
             "  while [ \"$lane_d\" != \"$lane_worktree\" ]; do\n",
             "    if [ -e \"$lane_d/.git\" ] || [ -L \"$lane_d/.git\" ]; then return 1; fi\n",
@@ -1366,18 +1368,13 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "if lane_git_bound \"$@\"; then\n",
             "  unset {}\n",
             "{}",
-            "else\n",
-            "  unset {}\n",
             "fi\n",
         ),
-        worktree,
-        others,
-        exports,
-        names.join(" "),
+        worktree, others, exports,
     ))
 }
 
-/// Selectors and identity a non-lane Git must not inherit.
+/// Selectors and identity a bound Git command must not inherit.
 const UNBOUND: [&str; 9] = [
     "GIT_DIR",
     "GIT_COMMON_DIR",
@@ -3221,7 +3218,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Selectors inherited from a parent, such as a hook's Git, are cleared.
+        // Bound commands replace inherited selectors; unrelated commands keep theirs.
         let run = |cwd: &Path, args: &[&str]| {
             let output = std::process::Command::new(&wrapper)
                 .env_clear()
@@ -3236,7 +3233,7 @@ mod tests {
             String::from_utf8(output.stdout).unwrap()
         };
         let bound = |args: &str| format!("/private/it's|Lane||{args}\n");
-        let unbound = |args: &str| format!("|||{args}\n");
+        let unbound = |args: &str| format!("/inherited|Inherited|/inherited/index|{args}\n");
         assert_eq!(run(&worktree, &["status"]), bound("status"));
         assert_eq!(run(&nested, &["status"]), bound("status"));
         for cwd in [&outside, &sibling] {
@@ -3318,6 +3315,89 @@ mod tests {
         let link = outside.join("link");
         std::os::unix::fs::symlink(&worktree, &link).unwrap();
         assert_eq!(run(&link, &["status"]), bound("status"));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn wrapper_imports_into_an_unrelated_repository_from_lane_cwd()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let lane = root.join("lane");
+        let source = root.join("source");
+        let destination = root.join("destination.git");
+        std::fs::create_dir(&lane)?;
+        std::fs::create_dir(&source)?;
+        for (cwd, args) in [
+            (&lane, vec!["init", "-q"]),
+            (&source, vec!["init", "-q"]),
+            (&source, vec!["commit", "--allow-empty", "-qm", "fixture"]),
+            (
+                &root,
+                vec!["init", "--bare", "-q", destination.to_str().ok_or("path")?],
+            ),
+        ] {
+            assert!(
+                provenant_os::fixture::git_command()
+                    .current_dir(cwd)
+                    .args(args)
+                    .status()?
+                    .success()
+            );
+        }
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
+        let wrapper = root.join("wrapper");
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &git,
+                &GitWrapper {
+                    scrub: true,
+                    bound: Some(BoundGit {
+                        worktree: lane.clone(),
+                        env: vec![
+                            ("GIT_DIR".into(), lane.join(".git").into_os_string()),
+                            ("GIT_COMMON_DIR".into(), lane.join(".git").into_os_string()),
+                            ("GIT_WORK_TREE".into(), lane.clone().into_os_string()),
+                        ],
+                    }),
+                    ..Default::default()
+                },
+            )?,
+        )?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let output = provenant_os::fixture::git_command_at(&wrapper)
+            .current_dir(&lane)
+            .args([
+                "--git-dir",
+                source.join(".git").to_str().ok_or("path")?,
+                "-c",
+                "protocol.file.allow=always",
+                "push",
+            ])
+            .arg(format!(
+                "--receive-pack={} receive-pack",
+                shell_quote_os(wrapper.as_os_str())?
+            ))
+            .arg(&destination)
+            .arg("HEAD:refs/heads/imported")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            provenant_os::fixture::git_command()
+                .arg("--git-dir")
+                .arg(destination)
+                .args(["rev-parse", "--verify", "refs/heads/imported"])
+                .status()?
+                .success()
+        );
+        assert!(!lane.join(".git/refs/heads/imported").exists());
+        Ok(())
     }
 
     #[test]

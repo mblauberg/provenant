@@ -3699,10 +3699,20 @@ mod provisioned_writer_submission_tests {
         )? {
             return Ok(());
         }
-        for quota in [false, true] {
-            writer_continuation_fixture(true, quota)?;
+        writer_continuation_fixture(true, false)
+    }
+
+    // Split from the retry case so each test provisions two repositories and
+    // fits the per-test time budget (#2627).
+    #[test]
+    fn foreign_writer_continues_after_quota_limit_and_replays_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test(
+            "fabric::provisioned_writer_submission_tests::foreign_writer_continues_after_quota_limit_and_replays_delivery",
+        )? {
+            return Ok(());
         }
-        Ok(())
+        writer_continuation_fixture(true, true)
     }
 
     #[test]
