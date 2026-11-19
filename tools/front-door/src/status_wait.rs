@@ -483,6 +483,7 @@ pub(crate) fn reading_pr_event(
         "checks_failed",
         "checks_pending",
         "failing_checks",
+        "pending_checks",
         "merge",
         "review",
         "error",
@@ -498,7 +499,7 @@ pub(crate) fn reading_pr_event(
                         .and_then(|n| usize::try_from(n).ok())
                         .is_none()
             }
-            "failing_checks" => !value
+            "failing_checks" | "pending_checks" => !value
                 .as_array()
                 .is_some_and(|items| items.iter().all(Value::is_string)),
             "error" => !value.is_null() && !value.is_string(),
@@ -1229,7 +1230,16 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         assets: &resolved.assets,
         cwd: &resolved.project,
     };
-    let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout, &origin));
+    // A `--pr --until complete` wait must outlast a normal CI run, so it uses
+    // its own configured default budget. An explicit --timeout still wins and
+    // every budget shares the same maximum.
+    let complete = matches!(command.until, Some(provenant_cli::PrWaitUntil::Complete));
+    let budget = if complete {
+        settings.complete_timeout(command.timeout, &origin)
+    } else {
+        settings.timeout(command.timeout, &origin)
+    };
+    let deadline = Instant::now() + Duration::from_secs(budget);
     let stop = Stop::default();
     let cadence = origin.local_cadence(&settings);
     let interval = cadence.interval;
@@ -1437,7 +1447,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 number,
                 repository: repository.clone(),
                 watch_head,
-                complete: matches!(command.until, Some(provenant_cli::PrWaitUntil::Complete)),
+                complete,
             }
         }));
     }
@@ -2102,6 +2112,7 @@ mod tests {
             "checks_passed",
             "checks_total",
             "failing_checks",
+            "pending_checks",
             "merge",
         ] {
             let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
@@ -2928,7 +2939,7 @@ mod tests {
                 "merge": "clean", "review": "unknown", "error": null,
                 "checks_passed": 0, "checks_total": 2,
                 "checks_failed": 1, "checks_pending": 1,
-                "failing_checks": ["lint"]
+                "failing_checks": ["lint"], "pending_checks": ["build"]
             }),
         };
         let source = |complete| {
@@ -2943,6 +2954,7 @@ mod tests {
         assert_eq!(complete.len(), 1, "{complete:?}");
         assert!(complete[0].contains("fail=1"), "{complete:?}");
         assert!(complete[0].contains("pending=1"), "{complete:?}");
+        assert!(complete[0].contains("pending_names=build"), "{complete:?}");
         assert!(pr_timeout_details(&source(false), &[Some(reading)]).is_empty());
     }
 }
