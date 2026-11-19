@@ -46,7 +46,10 @@ acknowledged as success.
 
 A pre-launch routing refusal retains a bounded host-authored explanation in
 its result alongside the safe cause and remedy. Provider-originated diagnostics
-never supply that public explanation.
+never supply that public explanation. Every refusal path in lane launch carries
+a typed terminal cause plus the command that fixes it, recorded in the attempt's
+terminal record (`terminal-pending.json`) and displayed by `result` and `wait`.
+Refusals never settle without a typed cause.
 
 Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.

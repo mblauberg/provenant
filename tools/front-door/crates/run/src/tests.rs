@@ -1270,7 +1270,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     )?;
     assert_eq!(
         String::from_utf8(result.bytes)?,
-        Outcome::Rejected.diagnostic_reason()
+        TerminalCause::AccessPolicyRefused.detail()
     );
     Ok(())
 }
