@@ -8,4 +8,5 @@
   every signal. Recovery after a lost supervisor does the same from the
   recorded identities. The exit records one "killed N surviving descendants"
   warning. Processes found only by working directory are never signalled.
-  (#3545)
+  Background services an unsandboxed lane starts (for example a compiler-cache
+  server) now end with the lane. (#3545)

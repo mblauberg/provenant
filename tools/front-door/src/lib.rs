@@ -1010,16 +1010,33 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             .with_graph_read(move |context, input, cancel, within| {
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
-        // Lane process-tree sampling is opt-in: 0 (the default) runs no sampler.
+        // Lane process-tree sampling runs only when asked for: an explicit
+        // interval, or an admission memory limit that needs a sample.
         let resource_sample_interval =
             match roots::resolve(globals, Workspace::Project, Product::Optional)
                 .map_err(|error| error.to_string())
                 .and_then(|resolved| {
                     provenant_cli::config_reads::read_for(&resolved.roots, "internal")
+                        .map(|config| (config, resolved))
                         .map_err(|error| error.to_string())
                 }) {
-                Ok(config) => match config.domains.run.resource_sample_interval_ms {
-                    0 => None,
+                Ok((config, resolved)) => match config.domains.run.resource_sample_interval_ms {
+                    0 => provenant_config::ResolvedAdmissionClass::resolve_all(
+                        resolved.roots.state.as_path(),
+                        Some(&resolved.project),
+                    )
+                    .into_values()
+                    .find(|class| class.memory_per_slot_bytes.is_some())
+                    .map(|class| {
+                        let millis = provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS;
+                        let source = class
+                            .memory_per_slot_source
+                            .map_or("unknown", |source| source.description());
+                        let _ = writeln!(io::stderr().lock(),
+                            "process-tree sampling every {millis}ms (source: admission.{}.memory_per_slot, {source})",
+                            class.name);
+                        provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL
+                    }),
                     millis @ 1..=60_000 => {
                         let source = config
                             .origins

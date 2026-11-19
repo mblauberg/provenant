@@ -50,7 +50,13 @@ and host child checks must permit cleanup. When there is no native child
 registry, a present host holder must affirm that no graph child remains. Spared
 and protected owners and their possible descendants stay excluded. The exit
 records one summary warning ("killed N surviving descendants") and at most 16
-unresolved identities; the reservation journal records up to 128.
+unresolved identities; the reservation journal records up to 128. Background
+services an unsandboxed lane starts (for example a compiler-cache server) are
+its descendants, so they now end with the lane. Under retained custody the
+repeated stop takes at most three censuses: TERM, a wait on exit watches for the
+signalled processes, KILL, another wait, and one last look; with nothing to
+signal it stops after the first. The signal-free settlement look runs only on
+macOS, the one platform where it can settle.
 A census listing or cwd observation alone never grants signal authority.
 Recovery after guardian loss signals only recorded descendants whose identity
 still matches and live processes carrying the attempt's sandbox mark; it runs
@@ -411,9 +417,11 @@ The process-tree interface reads a host-sampled snapshot of the lane's own
 descendants without process-listing authority. A missing, stale, incomplete or
 unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
-Sampling is off by default: `domains.run.resource_sample_interval_ms` (0 by
-default, else 1..=60000 ms) enables it, and only then is
-`PROVENANT_PROCESS_TREE` set. Each private snapshot records a
+Sampling runs only when something needs it:
+`domains.run.resource_sample_interval_ms` (1..=60000 ms) sets an interval, and
+when it is 0 (the default) an admission class with `memory_per_slot` turns
+sampling on every 5000 ms, logging that class and its config layer as the
+source. Otherwise sampling is off and `PROVENANT_PROCESS_TREE` is unset. Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
 available from `provenant config show --full`.

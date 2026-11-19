@@ -279,7 +279,7 @@ fn check_memory_and_trim(memory_limit: Option<u64>, trim_action: Option<&str>, c
     };
     let Some(rss) = sample_rss_bytes() else {
         say(&format!(
-            "warning: class '{class}' sets a memory limit but no process-tree sample is available; set domains.run.resource_sample_interval_ms to enable it"
+            "warning: class '{class}' sets a memory limit but no process-tree sample is available; limit not checked"
         ));
         return;
     };
