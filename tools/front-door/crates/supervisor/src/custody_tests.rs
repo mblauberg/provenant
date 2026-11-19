@@ -1643,7 +1643,13 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 )?
                 .require_durable()?;
             }
-            "live_provider" => world.census_facts.push(process_fact(provider.clone())),
+            // The census observes the provider live, so it is not also absent.
+            "live_provider" => {
+                world.observations.insert(
+                    provider.pid,
+                    ProcessObservation::Present(process_fact(provider.clone())),
+                );
+            }
             // An unrecorded descendant still in the provider's session.
             "live_descendant" => world.census_facts.push(process_fact(ProcessIdentity {
                 boot: BOOT.into(),
