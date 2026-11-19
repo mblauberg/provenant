@@ -135,7 +135,15 @@ open writer-lock paths, with a reconcile action. An open path is not proof of
 flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
+
+While retaining, the guardian blocks on process, cancellation and signal
+events. It runs a signal-free settlement check after a process event (at most
+every 100 ms) or at a backstop (5 s with process watches, else 1 s). It repeats
+the bounded stop only on cancellation or every 30 s, and reads host graph
+evidence only when a stop has signal candidates. Idle retention therefore costs
+no CPU between events.
 - Why: detached services must not hold a lease or cause unsafe release.
+- Why: retained custody can last hours, and one guardian runs per lane (#3560).
 
 ### Durable exit publication
 
