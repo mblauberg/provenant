@@ -26,6 +26,7 @@ enum Source {
         /// The head this wait is pinned to. Until GitHub reports it, no
         /// verdict is taken from the pull request's current head.
         watch_head: Option<String>,
+        complete: bool,
     },
 }
 impl Source {
@@ -369,6 +370,7 @@ fn read(
             number,
             repository,
             watch_head,
+            complete,
         } => match repository {
             Ok(repository) => match crate::pr::status::wait_line_observed(
                 edge.cwd,
@@ -377,11 +379,12 @@ fn read(
                 *number,
                 &forge_request(deadline, cancel, pr_read_timeout),
                 crate::pr::observer::POLL,
+                *complete,
             ) {
                 Ok(line) => {
                     let line = gate_line(line, watch_head.as_deref());
                     Reading {
-                        settle: match line.verdict() {
+                        settle: match line.wait_verdict(*complete) {
                             Some(true) => Settle::Succeeded,
                             Some(false) => Settle::Unsuccessful,
                             None => Settle::Pending,
@@ -402,13 +405,18 @@ fn read(
     }
 }
 
-fn reading_pr_event(number: u64, watch_head: Option<&str>, detail: Value) -> Reading {
+fn reading_pr_event(
+    number: u64,
+    watch_head: Option<&str>,
+    complete: bool,
+    detail: Value,
+) -> Reading {
     let label = format!("#{number}");
     match serde_json::from_value::<crate::pr::status::Line>(detail["status"].clone()) {
         Ok(line) => {
             let line = gate_line(line, watch_head);
             Reading {
-                settle: match line.verdict() {
+                settle: match line.wait_verdict(complete) {
                     Some(true) => Settle::Succeeded,
                     Some(false) => Settle::Unsuccessful,
                     None => Settle::Pending,
@@ -1326,6 +1334,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 number,
                 repository: repository.clone(),
                 watch_head,
+                complete: matches!(command.until, Some(provenant_cli::PrWaitUntil::Complete)),
             }
         }));
     }
@@ -1637,9 +1646,13 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             let interval = Duration::from_secs(60);
             scope.spawn(move || {
                 let mut session = None;
-                let watch_head = match source {
-                    Source::Pr { watch_head, .. } => watch_head.as_deref(),
-                    _ => None,
+                let (watch_head, complete) = match source {
+                    Source::Pr {
+                        watch_head,
+                        complete,
+                        ..
+                    } => (watch_head.as_deref(), *complete),
+                    _ => (None, false),
                 };
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
@@ -1713,7 +1726,22 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             Ok(Some(detail)) => {
                                 last_reconcile = Instant::now();
                                 if detail["status"].is_object() {
-                                    reading_pr_event(*number, watch_head, detail)
+                                    let event =
+                                        reading_pr_event(*number, watch_head, complete, detail);
+                                    if complete {
+                                        // Journal records are bounded and omit Actions runs.
+                                        // Reconcile through the observer before settling.
+                                        read(
+                                            source,
+                                            edge,
+                                            &mut session,
+                                            deadline,
+                                            pr_read_timeout,
+                                            &stop.cancel,
+                                        )
+                                    } else {
+                                        event
+                                    }
                                 } else {
                                     // Webhook records carry identifiers only;
                                     // fetch the authoritative PR status now.
@@ -1826,6 +1854,15 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             );
             human.push_str(&line);
             human.push('\n');
+            if let (Source::Pr { complete: true, .. }, Some(reading)) = (source, reading)
+                && let Ok(status) =
+                    serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+            {
+                for failure in status.failure_lines() {
+                    human.push_str(&failure);
+                    human.push('\n');
+                }
+            }
             if let Some(reading) = reading {
                 for digest in reading.data["digests"].as_array().into_iter().flatten() {
                     if let Some(line) = digest["line"].as_str() {
@@ -1877,7 +1914,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     human.push_str(&final_line(&sources, &latest, done, &superseding));
     // Compact output keeps an owner summary, not a head-only truncation, so
     // the settle states and the next command stay on its last line.
-    let summary = provenant_cli::Summary::new(
+    let mut summary = provenant_cli::Summary::new(
         mode_heading(mode).trim_end().to_owned(),
         rows.iter()
             .map(|row| row["line"].as_str().unwrap_or("").to_owned())
@@ -1888,6 +1925,15 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             next_command(&sources, &latest, &superseding)
         )),
     );
+    // Completion reports must retain every failing check and its link in compact output.
+    for (source, reading) in sources.iter().zip(&latest) {
+        if let (Source::Pr { complete: true, .. }, Some(reading)) = (source, reading)
+            && let Ok(status) =
+                serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+        {
+            summary.lines.extend(status.failure_lines());
+        }
+    }
     crate::emit_summarised(
         &provenant_records::CommandResult::new(
             "wait",
@@ -2153,6 +2199,7 @@ mod tests {
             number: 7,
             repository: Ok("owner/repo".into()),
             watch_head: None,
+            complete: false,
         };
         for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
             let mut sources = vec![Source::Graph("fix".parse().expect("target"))];
@@ -2531,6 +2578,25 @@ mod tests {
     }
 
     #[test]
+    fn pr_journal_obeys_the_selected_completion_policy() {
+        let status = json!({
+            "number": 7, "state": "OPEN", "head": "head", "draft": false,
+            "merge": "clean", "review": "unknown", "error": null,
+            "checks_passed": 0, "checks_total": 2,
+            "checks_failed": 1, "checks_pending": 1
+        });
+        let event = json!({"status": status});
+        assert_eq!(
+            reading_pr_event(7, None, false, event.clone()).settle,
+            Settle::Unsuccessful
+        );
+        assert_eq!(
+            reading_pr_event(7, None, true, event).settle,
+            Settle::Pending
+        );
+    }
+
+    #[test]
     fn a_pinned_wait_ignores_the_verdict_of_another_head() {
         let line: crate::pr::status::Line = serde_json::from_value(json!({
             "number": 7, "state": "OPEN", "head": "stale", "draft": false,
@@ -2552,6 +2618,7 @@ mod tests {
             number: 7,
             repository: Ok("owner/repo".into()),
             watch_head: None,
+            complete: false,
         }];
         let pending = Reading {
             settle: Settle::Pending,

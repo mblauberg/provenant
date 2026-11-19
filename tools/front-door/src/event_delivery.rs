@@ -728,6 +728,11 @@ fn poll_detail(
         projected_checks.push(json!({"bucket":bucket}));
     }
     let mut projected_status = serde_json::to_value(status)?;
+    // Full failure details are read from the observer at completion; do not
+    // let an unbounded check matrix overflow the event journal.
+    if let Some(status) = projected_status.as_object_mut() {
+        status.remove("failed_check_details");
+    }
     if let Some(names) = projected_status["failing_checks"].as_array_mut() {
         names.truncate(16);
         for name in names {

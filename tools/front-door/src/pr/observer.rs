@@ -595,6 +595,44 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         Ok(entry.page.body)
     }
 
+    /// Observe every Actions run for this exact head through the shared cache.
+    pub(crate) fn active_workflows(
+        &mut self,
+        head: &str,
+        max_age: Duration,
+        request: &Request,
+    ) -> Result<Option<bool>, ObserveError> {
+        if !matches!(head.len(), 40 | 64) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ObserveError::Unavailable(format!(
+                "not a commit id: {head}"
+            )));
+        }
+        let mut page = 1_u64;
+        let mut seen = false;
+        let mut active = false;
+        loop {
+            let value = self.resource(
+                &format!("actions/runs?head_sha={head}&per_page=100&page={page}"),
+                max_age,
+                request,
+            )?;
+            let runs = value["workflow_runs"]
+                .as_array()
+                .ok_or_else(|| ObserveError::Unavailable("invalid Actions runs response".into()))?;
+            for run in runs {
+                let status = run["status"]
+                    .as_str()
+                    .ok_or_else(|| ObserveError::Unavailable("Actions run has no status".into()))?;
+                seen = true;
+                active |= status != "completed";
+            }
+            if runs.len() < 100 {
+                return Ok(seen.then_some(active));
+            }
+            page += 1;
+        }
+    }
+
     /// Read a pull request's mergeability before diagnosing its missing checks.
     /// `first` is the resource the caller already read; only an UNKNOWN result
     /// rereads, at most [`MERGEABLE_UNKNOWN_RETRIES`] times, within the caller's
@@ -926,9 +964,10 @@ fn valid_resource_path(path: &str) -> bool {
             !part.is_empty()
                 && part != "."
                 && part != ".."
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                && part.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'_' | b'.' | b'?' | b'=' | b'&')
+                })
         })
 }
 
@@ -1349,6 +1388,43 @@ mod tests {
     }
     fn state() -> tempfile::TempDir {
         tempfile::tempdir().expect("state")
+    }
+
+    #[test]
+    fn actions_runs_are_head_filtered_and_all_pages_contribute() {
+        let shared = Shared::new();
+        shared.with(|world| {
+            world.resources.insert(
+                format!("repos/Owner/Repo/actions/runs?head_sha={HEAD}&per_page=100&page=1"),
+                json!({"workflow_runs": vec![json!({"status":"completed"}); 100]}),
+            );
+            world.resources.insert(
+                format!("repos/Owner/Repo/actions/runs?head_sha={HEAD}&per_page=100&page=2"),
+                json!({"workflow_runs": [{"status":"queued"}]}),
+            );
+        });
+        let dir = state();
+        let mut observer = shared.observer(dir.path());
+        let request = Request::within(Duration::from_secs(60));
+        assert_eq!(
+            observer
+                .active_workflows(HEAD, Duration::ZERO, &request)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(shared.requests(), 2);
+        shared.with(|world| {
+            world.resources.insert(
+                format!("repos/Owner/Repo/actions/runs?head_sha={HEAD}&per_page=100&page=2"),
+                json!({"workflow_runs": [{"status":"completed"}]}),
+            );
+        });
+        assert_eq!(
+            observer
+                .active_workflows(HEAD, Duration::ZERO, &request)
+                .unwrap(),
+            Some(false)
+        );
     }
 
     #[test]
