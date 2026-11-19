@@ -131,14 +131,17 @@ layer.
 
 ## Lane Git and import
 
-Writers of one verified worktree incarnation and branch share private Git
-HEAD, index, refs and objects; unrelated worktrees use separate contexts.
-Configuration and credential setup stay private to each attempt. Contexts
+Writers of one verified worktree incarnation share its files and hold
+occupancy together. Each attempt has its own private Git state (HEAD, index,
+refs, objects, configuration and credential setup) in its attempt directory,
+so siblings never see each other's staging or unpublished commits. Contexts
 outlive attempt scratch, and later admissions never reset live Git state.
 The host does not execute with lane-mutable Git configuration. For sandboxed
 lanes, confinement protects the repository's shared Git state.
-Import uses Git's quarantined receive and verification; publication compares
-against the pinned base. The base remains pinned until publication.
+Import uses Git's quarantined receive and verification; publication
+compare-and-swaps the host branch against the tip it observed. A lane whose
+history forked from the branch is refused at once and its private Git is
+retained for recovery. The base remains pinned until publication.
 Import retention refs belong to each attempt, even for an identical commit;
 publication and cleanup remove only that attempt's pins.
 The GitHub credential receipt governs token delivery even when sandboxing is
