@@ -25,6 +25,19 @@ before a driver is claimed.
 - Why: a retained writer must not contend with itself or spend CPU retrying an
   unchanged failure indefinitely.
 
+Settlement of an exited attempt waits for its writer lock within the store's
+lock budget (the SQLite busy timeout, 30 s by default) and wakes as soon as the
+lock is released. Contention that outlives the wait is `WriterExclusionBusy`,
+reported as `waiting for writer lock <path>, held by <holder>`, where the
+holder names each attempt reserved in the slot and whether its guardian is
+live. It sets a retry deadline but never spends the failure budget, never
+seals cleanup as failed and never exhausts a resumed worker. A wait that
+outlives its holder ages into the stalled reason. Probes of a live attempt
+still take the lock once without waiting.
+- Why: another settler or a releasing guardian holding the lock is progress,
+  not failure; counting it blocked settlement and left steered nodes running
+  with no successor (#3572).
+
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`
