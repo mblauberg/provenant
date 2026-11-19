@@ -320,6 +320,11 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .to_owned();
         let mut host =
             provenant_run::HostLaunchContext::from_environment(&rig.state, &rig.project, host_git);
+        // The fixture home owns the Rust toolchain. A host directory with its
+        // own `cargo` would shadow it, and the host rustup proxy fails under
+        // the fixture HOME, which has no default toolchain.
+        host.executable_search_path
+            .retain(|directory| !directory.join("cargo").exists());
         host.default_account_directories = [
             ("codex".into(), home.join(".codex")),
             ("claude".into(), home.join(".claude-fixture")),
