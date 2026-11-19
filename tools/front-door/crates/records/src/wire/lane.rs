@@ -158,6 +158,10 @@ impl LaneRow {
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
                 terminal_cause
+                    .or_else(|| {
+                        (*outcome == crate::run::Outcome::Rejected)
+                            .then_some(crate::run::TerminalCause::AccessPolicyRefused)
+                    })
                     .map(|cause| cause.diagnostic(detail))
                     .or_else(|| {
                         (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)

@@ -7,6 +7,12 @@ Run admits attempts and records their outcomes. [Launch](run-launch.md),
 [settlement](run-settlement.md), [Git and delivery](run-git.md) and
 [attribution](run-attribution.md) specify their boundaries. Paths are relative
 to `tools/front-door/`.
+The handoff parsing rule lives in [settlement](run-settlement.md): a closed
+`handoff` fence wins, a final `json` fence is accepted with a warning, and
+adjacent repeated blocks settle as one declaration (identical, or the last of
+differing copies), each with a warning. A writer that exits without a handoff
+keeps its uncommitted paths and pinned head in the reason and sealed terminal,
+so the `handoff_missing` stop routes to the chair as a continuable stop.
 
 ## Operation IDs
 
@@ -135,6 +141,9 @@ Writers use private Git state; the host does not execute with lane-mutable Git
 configuration. For sandboxed lanes, confinement protects shared Git state.
 Import uses Git's quarantined receive and verification; publication compares
 against the pinned base. The base remains pinned until publication.
+Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
+(such as `hint:` lines) is filtered from stderr before warning so advice lines
+never surface as Provenant warnings.
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.

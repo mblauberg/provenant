@@ -2965,7 +2965,14 @@ impl RunStore {
                 if decoded.outcome == Outcome::Succeeded {
                     decoded.outcome = Outcome::ReviewRequired;
                 }
-                decoded.reason = Some(EMPTY_WRITER_REASON.into());
+                // Keep any reason already recorded, notably the census of
+                // uncommitted paths from the terminal check. The empty final
+                // message is a separate cause carried by `terminal_cause`;
+                // overwriting the reason would hide the paths from the chair.
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {EMPTY_WRITER_REASON}"),
+                    None => EMPTY_WRITER_REASON.into(),
+                });
                 decoded.terminal_cause = Some(TerminalCause::EmptyWriterResult);
             } else {
                 decoded.outcome = Outcome::Failed;
@@ -5283,6 +5290,13 @@ mod writer_recovery_tests {
     #[test]
     fn empty_committed_writer_requires_review_and_controls_fail()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let test = provenant_os::fixture::exact_test_path(
+            module_path!(),
+            "empty_committed_writer_requires_review_and_controls_fail",
+        );
+        if provenant_os::fixture::reexec_with_clean_git(&test)? {
+            return Ok(());
+        }
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
         for (writer, outcome, answer) in [
@@ -5459,6 +5473,170 @@ mod writer_recovery_tests {
             } else {
                 assert_eq!(*actual, Outcome::Failed);
             }
+        }
+        Ok(())
+    }
+
+    /// A writer that exits without a handoff and without a commit keeps its
+    /// uncommitted paths in the terminal reason: the empty-final-message cause
+    /// must not overwrite them (#3341). The branch head and the dirty file are
+    /// preserved for the chair, so the graph stays continuable in both the
+    /// empty and the non-empty final-message cases. A commit would move the
+    /// head and end the census, so this case needs a writer that never committed.
+    #[test]
+    fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_records::run::{PartialSignal, SettlementReason};
+
+        const DIRTY: &str = "left-uncommitted.txt";
+        for (answer, empty) in [("", true), ("Work remains in the renderer.", false)] {
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.task.writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let pin = format!("refs/provenant/import/{}", launch.base);
+            fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            drop(provenant_supervisor::fixture::bind_writer_attempt(
+                lease, &attempt,
+            )?);
+            // The writer exited mid-build with an edit it never committed and
+            // no commit: the branch head stays at its base for the chair.
+            std::fs::write(fixture.writer.worktree.join(DIRTY), "uncommitted edit\n")?;
+
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            let mut fake =
+                crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Succeeded));
+            fake.answer = Some(answer.to_owned());
+            let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+
+            let AttemptState::Terminal {
+                outcome,
+                reason,
+                stop,
+                ..
+            } = &finished.state
+            else {
+                return Err("not terminal".into());
+            };
+            // Uncommitted work is never delivered or reported as a success; the
+            // missing handoff or empty message does not hide that outcome.
+            assert_eq!(*outcome, Outcome::Uncommitted, "{reason:?}");
+            let reason = reason.as_deref().ok_or("terminal reason")?;
+            assert!(
+                reason.contains(DIRTY),
+                "uncommitted path lost from reason: {reason}"
+            );
+            assert!(
+                reason.contains("uncommitted"),
+                "uncommitted cause lost from reason: {reason}"
+            );
+            let terminal: crate::writer::WriterTerminal = crate::db::decode(
+                &read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+                    .ok_or("writer terminal not sealed")?,
+            )?;
+            assert_eq!(terminal.head, launch.base, "recorded head");
+            assert_eq!(
+                finished.partial_signals,
+                [
+                    PartialSignal::HandoffMissing,
+                    PartialSignal::UncommittedWork
+                ]
+            );
+            let stop = stop.as_ref().ok_or("typed stop")?;
+            let next_after = |retries| {
+                stop.next_step(
+                    &Default::default(),
+                    provenant_records::StopFacts {
+                        retries,
+                        custody_released: true,
+                    },
+                )
+            };
+            let next = next_after(0);
+            if empty {
+                assert!(reason.contains(EMPTY_WRITER_REASON), "{reason}");
+                assert_eq!(
+                    finished.settlement_reason,
+                    Some(SettlementReason::EmptyResult)
+                );
+                assert_eq!(stop.cause(), provenant_records::StopCause::EmptyResult);
+                // run.md "What follows a stop": `empty_result` allows one fresh
+                // same-route attempt, then moves to a new route.
+                assert_eq!(
+                    next,
+                    provenant_records::NextStep::SameRoute {
+                        continuation: provenant_records::Continuation::Fresh
+                    },
+                    "{reason}"
+                );
+                assert_eq!(next_after(1), provenant_records::NextStep::NewRoute);
+            } else {
+                assert!(
+                    reason.contains("handoff_missing"),
+                    "missing handoff not named: {reason}"
+                );
+                assert_eq!(
+                    finished.settlement_reason,
+                    Some(SettlementReason::HandoffMissing)
+                );
+                assert_eq!(stop.cause(), provenant_records::StopCause::HandoffMissing);
+                assert_eq!(next, provenant_records::NextStep::Chair, "{reason}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(fixture.writer.worktree.join(DIRTY))?,
+                "uncommitted edit\n",
+                "dirty work must be preserved"
+            );
         }
         Ok(())
     }

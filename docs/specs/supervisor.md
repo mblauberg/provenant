@@ -335,7 +335,11 @@ inventory; the common Git directory's parent does not establish that owner.
 A writer owns a private Git directory with the shared object store as a
 read-only alternate; shared refs, config, hooks and admin metadata stay
 read-only, and the host imports the result and moves the branch by
-compare-and-swap.
+compare-and-swap. The lane Git wrapper binds commands implicitly targeting its
+worktree; commands for other repositories, commands with explicit repository
+selectors and Git transport endpoints pass through with their arguments and
+environment intact. Fixture commands remove inherited lane Git selectors and
+use native Git while retaining the surrounding tool PATH.
 - Why: ordinary Git works in the lane while other lanes' refs and the host's Git
   behaviour stay protected; sharing objects and caches is intended.
 
