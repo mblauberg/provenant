@@ -136,6 +136,18 @@ pr_paths = [
   "tools/front-door/src/worktree_tests/**",
   "tools/front-door/tests/graph_provider.rs",
   "tools/front-door/tests/command_adapter.rs",
+  # Every package a native group filters by name needs an entry here, or a pull
+  # request defers its only real test to main (scripts/check-ci-suites). These
+  # are the narrow files those native tests cover; a whole crate would pull
+  # most pull requests onto the scarce macOS pool.
+  # light: package(=provenant-run) & test(cargo_seed)
+  "tools/front-door/crates/run/src/cargo_seed.rs",
+  "tools/front-door/crates/run/src/target_seed.rs",
+  "tools/front-door/crates/run/src/cargo_target.rs",
+  # custody: provenant-cli project_paths lane lock
+  "tools/front-door/crates/cli/src/run/provider/project_paths.rs",
+  # dispatch: provenant-fabric-runtime writer quota continuation
+  "tools/front-door/crates/fabric-runtime/src/graph/graph_tests/composite_and_allowance_tests.rs",
   "tools/front-door/.config/**",
   "tools/front-door/Cargo.toml",
   "tools/front-door/crates/*/Cargo.toml",

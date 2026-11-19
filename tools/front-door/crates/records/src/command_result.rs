@@ -47,6 +47,21 @@ impl Outcome {
         Self::Pending,
         Self::Waiting,
     ];
+    /// The process exit code of an envelope with this status: the stable
+    /// tier of the consumer contract. It lives beside the status so a
+    /// process without the CLI, such as a guardian, exits by the same table.
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::Ok | Self::Waiting => 0,
+            Self::Failed | Self::Refused => 1,
+            Self::Invalid => 2,
+            Self::Error => 3,
+            Self::Unavailable => 4,
+            Self::Pending => 5,
+            Self::Timeout => 124,
+            Self::Cancelled => 130,
+        }
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResult<T> {

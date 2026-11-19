@@ -374,6 +374,49 @@ pub struct WriterLaunch {
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    /// Lanes that hold or retain this worktree's occupancy: every recorded
+    /// reservation, plus an unnamed entry when a live holder has none. Empty
+    /// means no other lane is attached. Observation only; it never locks.
+    pub fn attached_lanes(&self) -> Result<Vec<String>> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(Vec::new());
+        };
+        let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(slot)
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let mut lanes: Vec<String> = listing
+            .reservations
+            .iter()
+            .map(|reservation| {
+                format!(
+                    "{} (attempt {})",
+                    reservation.branch.as_deref().unwrap_or("unknown branch"),
+                    reservation.scope.attempt
+                )
+            })
+            .collect();
+        if lanes.is_empty() && self.other_holders_live(None)? {
+            lanes.push("a live lane".to_owned());
+        }
+        Ok(lanes)
+    }
+
+    pub(crate) fn other_holders_live(&self, attempt: Option<&Directory>) -> Result<bool> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(false);
+        };
+        let current_attempt = attempt
+            .map(|a| a.current_path())
+            .transpose()?
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+        Ok(provenant_supervisor::custody::other_holders_live(
+            slot,
+            current_attempt.as_deref(),
+        )?)
+    }
+
     /// The verified checkout that owns project configuration, if one exists.
     pub fn project_root(&self) -> Option<&Path> {
         self.layout.project()
@@ -627,43 +670,26 @@ impl WriterLaunch {
     /// the effective lane head. An unreadable Git fact is not proof of either.
     pub(crate) fn budget_clean_point(&self, attempt: &Directory) -> Result<bool> {
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        let (head, native) = self.effective_head(attempt, self.base)?;
+        let head = self.effective_head(attempt)?;
         let repo = self.worktree.repo();
         let source = crate::objects::bound_source(attempt)?
             .ok_or(RunError::Validation("clean point needs private Git state"))?;
-        let index_dir = if native {
-            repo.private_dir()
-        } else {
-            &source.refs
-        };
-        for directory in [repo.private_dir(), &source.refs] {
-            for name in [
-                "MERGE_HEAD",
-                "CHERRY_PICK_HEAD",
-                "REVERT_HEAD",
-                "rebase-merge",
-                "rebase-apply",
-            ] {
-                match directory.metadata_at(OsStr::new(name), false) {
-                    Ok(_) => return Ok(false),
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(error.into()),
-                }
+        let index_dir = &source.refs;
+        for name in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+        ] {
+            match index_dir.metadata_at(OsStr::new(name), false) {
+                Ok(_) => return Ok(false),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
             }
         }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
         let index = index_dir.current_path()?.join("index");
-        let mut indexes = vec![index];
-        if head == self.base {
-            // Before the first native commit the heads cannot identify which
-            // index owns staged edits. Neither index may carry pending work.
-            repo.private_dir()
-                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
-            let native_index = repo.private_dir().current_path()?.join("index");
-            if !indexes.contains(&native_index) {
-                indexes.push(native_index);
-            }
-        }
         let objects = source.objects.current_path()?;
         let alternate = repo.common_git_dir().join("objects");
         let clean = crate::objects::with_clean_view(&git, repo, head, None, |_, path| {
@@ -682,40 +708,27 @@ impl WriterLaunch {
                     },
                 )
             };
-            run(&["update-ref", "HEAD", &head.to_string()], &indexes[0])?;
-            for index in &indexes {
-                if !run(
-                    &[
-                        "--no-optional-locks",
-                        "--work-tree",
-                        repo.root_path()
-                            .to_str()
-                            .ok_or(RunError::Validation("worktree path"))?,
-                        "status",
-                        "--porcelain",
-                        "-z",
-                        "-uall",
-                    ],
-                    index,
-                )?
-                .is_empty()
-                {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
+            run(&["update-ref", "HEAD", &head.to_string()], &index)?;
+            Ok(run(
+                &[
+                    "--no-optional-locks",
+                    "--work-tree",
+                    repo.root_path()
+                        .to_str()
+                        .ok_or(RunError::Validation("worktree path"))?,
+                    "status",
+                    "--porcelain",
+                    "-z",
+                    "-uall",
+                ],
+                &index,
+            )?
+            .is_empty())
         })?;
         if !clean {
             return Ok(false);
         }
-        let upstream_dir = if native {
-            // Branch tracking config can be worktree-local when Git enables
-            // extensions.worktreeConfig; resolve the upstream from this
-            // worktree's private Git directory while refs stay shared.
-            repo.private_git_dir().to_path_buf()
-        } else {
-            source.refs.current_path()?
-        };
+        let upstream_dir = source.refs.current_path()?;
         let branch = self
             .branch
             .as_str()
@@ -735,37 +748,95 @@ impl WriterLaunch {
         Ok(std::str::from_utf8(&upstream).is_ok_and(|tip| tip.trim() == head.to_string()))
     }
 
-    /// Select the lane head while settlement holds writer exclusion. Native Git
-    /// advances the shared branch without updating the private candidate ref.
-    fn effective_head(&self, attempt: &Directory, base: GitOid) -> Result<(GitOid, bool)> {
+    /// Only this attempt's private ref attributes a commit to the lane. The
+    /// shared checkout branch may have been advanced by a sibling.
+    fn effective_head(&self, attempt: &Directory) -> Result<GitOid> {
+        let source = crate::objects::bound_source(attempt)?
+            .ok_or(RunError::Validation("writer needs private Git state"))?;
+        crate::objects::private_tip(&source, self.branch.as_str())
+    }
+
+    /// Staged snapshots outlive terminal cleanup until the host reconciles
+    /// them. Read Git data through a clean host view, never lane configuration.
+    pub(crate) fn private_staged_paths(&self, attempt: &Directory) -> Result<Vec<String>> {
+        let Some(source) = crate::objects::bound_source(attempt)? else {
+            return Ok(Vec::new());
+        };
+        let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        if let Some(source) = crate::objects::bound_source(attempt)? {
-            let private = crate::objects::private_tip(&source, self.branch.as_str())?;
-            if private != base {
-                return Ok((private, false));
-            }
-        }
-        let head = crate::objects::resolve_ref(&git, self.worktree.repo(), self.branch.as_str())?;
-        Ok((head, head != base))
+        let repo = self.worktree.repo();
+        let index = source.refs.current_path()?.join("index");
+        source
+            .refs
+            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        let objects = source.objects.current_path()?;
+        let alternate = repo.common_git_dir().join("objects");
+        let bytes = crate::objects::with_clean_view(&git, repo, tip, None, |_, path| {
+            crate::objects::execute_bounded(
+                &git,
+                path,
+                repo.root_path(),
+                &[
+                    "diff-index",
+                    "--cached",
+                    "--name-only",
+                    "--no-renames",
+                    "-z",
+                    &tip.to_string(),
+                    "--",
+                ]
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+                None,
+                crate::objects::Execution {
+                    object_directory: Some(&objects),
+                    index_file: Some(&index),
+                    alternate_directory: Some(&alternate),
+                    ..Default::default()
+                },
+            )
+        })?;
+        Ok(bytes
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect())
     }
 
     /// When a writer lane passes its token budget and stops, commit its
     /// uncommitted work in the lane's worktree so it ends up committed on its branch.
-    fn commit_budget_stop(&self, attempt: &Directory, base: GitOid) -> Result<BudgetCommit> {
+    pub(crate) fn commit_budget_stop(&self, attempt: &Directory) -> Result<BudgetCommit> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let source = crate::objects::bound_source(attempt)?.ok_or(RunError::Validation(
             "budget commit needs private Git state",
         ))?;
-        let (tip, native) = self.effective_head(attempt, base)?;
-        let index_dir = if native {
-            repo.private_dir()
+        let scope = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+            .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok())
+            .map(|req| req.task.profile.write_scope)
+            .unwrap_or_default();
+        // Unscoped work needs a lifetime history, held stable until commit.
+        // The admission gate prevents a new sibling entering after this check.
+        let sharing = if scope.is_empty() {
+            self.custody
+                .as_ref()
+                .map(|(slot, _)| {
+                    let path = attempt.current_path()?;
+                    let current = path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .ok_or(RunError::Validation("budget attempt identity"))?;
+                    provenant_supervisor::custody::worktree_sharing_guard(slot, current)
+                        .map_err(|error| RunError::Io(std::io::Error::other(error)))
+                })
+                .transpose()?
         } else {
-            &source.refs
+            None
         };
-        // Never stage away conflict stages or finish a merge, cherry-pick,
-        // revert or rebase on the lane's behalf. A merge is restored by the
-        // existing stopped-merge import; the others stay as the lane left them.
+        let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
+        // Never stage away conflict stages or finish an in-progress Git
+        // operation on the lane's behalf. Its state stays private for recovery.
         for (name, operation) in [
             ("MERGE_HEAD", "merge"),
             ("CHERRY_PICK_HEAD", "cherry-pick"),
@@ -773,30 +844,30 @@ impl WriterLaunch {
             ("rebase-merge", "rebase"),
             ("rebase-apply", "rebase"),
         ] {
-            match index_dir.metadata_at(OsStr::new(name), false) {
+            match source.refs.metadata_at(OsStr::new(name), false) {
                 Ok(_) => return Ok(BudgetCommit::note(in_progress_note(operation))),
                 Err(error) if error.is_not_found() => {}
                 Err(error) => return Err(error.into()),
             }
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
-        if native {
-            // Snapshot through a private index; do not mutate the native index
-            // before the new objects have passed import verification.
-            crate::objects::copy_index(&git, index_dir, &source.refs, repo.root_path())?;
-        }
         // Reuse stable, no-follow reading before passing the index path to Git.
         source
             .refs
             .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+
         let alternate = repo.common_git_dir().join("objects");
         let index = source.refs.current_path()?.join("index");
         crate::objects::with_clean_view(&git, repo, tip, None, |_, path| {
             let run_git = |args: &[&str]| {
-                let argv = [OsString::from("--work-tree"), repo.root_path().into()]
-                    .into_iter()
-                    .chain(args.iter().map(OsString::from))
-                    .collect::<Vec<_>>();
+                let argv = [
+                    OsString::from("--literal-pathspecs"),
+                    OsString::from("--work-tree"),
+                    repo.root_path().into(),
+                ]
+                .into_iter()
+                .chain(args.iter().map(OsString::from))
+                .collect::<Vec<_>>();
                 crate::objects::execute_bounded(
                     &git,
                     path,
@@ -819,34 +890,111 @@ impl WriterLaunch {
             if status.is_empty() {
                 return Ok(BudgetCommit::note("budget stop: worktree already clean"));
             }
-            let paths = status_paths(&status)?;
-            let message = budget_commit_message(&paths);
-            run_git(&["add", "-A"])?;
-            run_git(&[
-                "-c",
-                "user.name=provenant",
-                "-c",
-                "user.email=provenant@invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                &message,
-            ])?;
-            let bytes = run_git(&["rev-parse", "HEAD"])?;
-            let head = GitOid::parse(
-                std::str::from_utf8(&bytes)
-                    .map_err(|_| RunError::Validation("budget commit head"))?
-                    .trim(),
-            )
-            .map_err(|_| RunError::Validation("budget commit head"))?;
-            crate::objects::set_private_tip(&source, self.branch.as_str(), head)?;
+            let paths = status_paths_raw(&status, true)?
+                .into_iter()
+                .map(|path| {
+                    String::from_utf8(path).map_err(|_| {
+                        RunError::Validation("budget stop cannot commit non-UTF-8 paths")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if sharing.as_ref().is_some_and(|history| history.was_shared()) {
+                return Ok(BudgetCommit {
+                    note: "budget stop: no owned paths declared; shared worktree left intact",
+                    committed: None,
+                    leftover: Some(BudgetLeftover::SharedUnscoped { paths }),
+                });
+            }
+            let any_dirty = !paths.is_empty();
+            let owned_paths: Vec<String> = if scope.is_empty() {
+                paths
+            } else {
+                paths
+                    .into_iter()
+                    .filter(|p| {
+                        let path = Path::new(p);
+                        scope.iter().any(|s| {
+                            let prefix = Path::new(s);
+                            prefix == Path::new(".") || path == prefix || path.starts_with(prefix)
+                        })
+                    })
+                    .collect()
+            };
+            if owned_paths.is_empty() {
+                let note = if !any_dirty {
+                    "budget stop: worktree already clean"
+                } else {
+                    "budget stop: dirty files exist only outside declared paths"
+                };
+                return Ok(BudgetCommit::note(note));
+            }
+            let message = budget_commit_message(&owned_paths);
+            let mut add_args = vec!["add", "-A", "--"];
+            add_args.extend(owned_paths.iter().map(String::as_str));
+            run_git(&add_args)?;
+            // Build the exact owned tree in a disposable index. The attempt's
+            // other staged paths remain staged, never swept into this commit.
+            let budget_index = path.join("budget-index");
+            let run_budget = |args: &[&str], input: Option<&[u8]>| {
+                crate::objects::execute_bounded(
+                    &git,
+                    path,
+                    repo.root_path(),
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    None,
+                    crate::objects::Execution {
+                        object_directory: Some(&objects),
+                        index_file: Some(&budget_index),
+                        alternate_directory: Some(&alternate),
+                        input,
+                        ..Default::default()
+                    },
+                )
+            };
+            run_budget(&["read-tree", &tip.to_string()], None)?;
+            let mut budget_add = vec!["--literal-pathspecs", "--work-tree"];
+            let worktree = repo
+                .root_path()
+                .to_str()
+                .ok_or(RunError::Validation("worktree path"))?;
+            budget_add.extend([worktree, "add", "-A", "--"]);
+            budget_add.extend(owned_paths.iter().map(String::as_str));
+            run_budget(&budget_add, None)?;
+            let parse_oid = |raw: Vec<u8>| {
+                GitOid::parse(
+                    std::str::from_utf8(&raw)
+                        .map_err(|_| RunError::Validation("budget commit object"))?
+                        .trim(),
+                )
+                .map_err(|_| RunError::Validation("budget commit object"))
+            };
+            let tree = parse_oid(run_budget(&["write-tree"], None)?)?;
+            let head = parse_oid(run_budget(
+                &[
+                    "-c",
+                    "user.name=provenant",
+                    "-c",
+                    "user.email=provenant@invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    &tree.to_string(),
+                    "-p",
+                    &tip.to_string(),
+                ],
+                Some(message.as_bytes()),
+            )?)?;
+            // This OID is returned by commit-tree itself, never a later read of
+            // a shared HEAD. CAS publishes only into this attempt's ref.
+            run_git(&["read-tree", "-m", &tip.to_string(), &head.to_string()])?;
+            crate::objects::update_private_tip(&source, self.branch.as_str(), head, tip)?;
             Ok(BudgetCommit {
                 note: "work committed on its branch",
+                leftover: None,
                 committed: Some(BudgetWork {
                     sha: head.to_string().chars().take(SHORT_SHA).collect(),
-                    files: paths.len(),
-                    paths: paths.into_iter().take(BUDGET_PATHS).collect(),
+                    files: owned_paths.len(),
+                    paths: owned_paths.into_iter().take(BUDGET_PATHS).collect(),
                 }),
             })
         })
@@ -893,9 +1041,10 @@ pub(crate) const SHORT_SHA: usize = 9;
 pub(crate) const BUDGET_PATHS: usize = 20;
 
 /// What a budget stop did to the lane's branch.
-struct BudgetCommit {
-    note: &'static str,
-    committed: Option<BudgetWork>,
+pub(crate) struct BudgetCommit {
+    pub(crate) note: &'static str,
+    pub(crate) committed: Option<BudgetWork>,
+    pub(crate) leftover: Option<BudgetLeftover>,
 }
 
 impl BudgetCommit {
@@ -903,15 +1052,23 @@ impl BudgetCommit {
         Self {
             note,
             committed: None,
+            leftover: None,
         }
     }
 }
 
+/// Files deliberately left untouched because ownership was never established.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum BudgetLeftover {
+    SharedUnscoped { paths: Vec<String> },
+}
+
 /// Work a budget stop committed.
-struct BudgetWork {
-    sha: String,
-    files: usize,
-    paths: Vec<String>,
+pub(crate) struct BudgetWork {
+    pub(crate) sha: String,
+    pub(crate) files: usize,
+    pub(crate) paths: Vec<String>,
 }
 
 /// Path names only, with control characters made visible so a name cannot
@@ -945,7 +1102,7 @@ fn budget_commit_message(paths: &[String]) -> String {
 /// uncommitted.
 fn in_progress_note(operation: &str) -> &'static str {
     match operation {
-        "merge" => "budget commit skipped: in-progress merge preserved for stopped-merge handling",
+        "merge" => "budget commit skipped: in-progress merge preserved in attempt-private Git",
         "cherry-pick" => "budget commit skipped: in-progress cherry-pick left uncommitted",
         "revert" => "budget commit skipped: in-progress revert left uncommitted",
         _ => "budget commit skipped: in-progress rebase left uncommitted",
@@ -955,11 +1112,27 @@ fn in_progress_note(operation: &str) -> &'static str {
 use provenant_supervisor::custody::ImportFence;
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct MergeRestored {
+pub(crate) struct PrivateMergeRetained {
     #[serde(default, flatten)]
     pub extra: provenant_records::ExtraFields,
     pub schema_version: u64,
     pub scope: provenant_records::custody::Scope,
+}
+
+/// Sealed beside the attempt when the host's native index could not follow the
+/// published branch tip. Status surfaces it; the index was left unchanged.
+pub(crate) const INDEX_OUT_OF_SYNC: &str = "index-out-of-sync.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct IndexOutOfSyncNotice {
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub schema_version: u64,
+    pub scope: provenant_records::custody::Scope,
+    pub followed: Option<GitOid>,
+    pub target: Option<GitOid>,
+    pub paths: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -971,9 +1144,36 @@ struct GitPins {
     base: GitOid,
 }
 
-/// Remove only this attempt's host-owned retention ref after terminal commit.
-/// The head-keyed import ref belongs to publish_branch's custody-protected CAS;
-/// a delayed cleanup must never delete another lane's in-progress import.
+struct LaunchBases {
+    host: GitOid,
+    work: GitOid,
+}
+
+fn launch_bases(attempt: &Directory, fallback: GitOid) -> Result<LaunchBases> {
+    let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(LaunchBases {
+            host: fallback,
+            work: fallback,
+        });
+    };
+    let pins: GitPins = crate::db::decode(&raw)?;
+    if pins.schema_version != 1 {
+        return Err(RunError::Validation("writer Git pins version mismatch"));
+    }
+    // Recovery can re-prepare at a newer host tip. The sealed launch facts,
+    // rather than that fresh observation, still own attribution and file replay.
+    Ok(LaunchBases {
+        host: pins.base,
+        work: pins.base,
+    })
+}
+
+/// Remove this attempt's host-owned retention refs after terminal commit: its
+/// lane-base ref and attempt-scoped import pin. Legacy head-keyed pins from
+/// before attempt-scoped refs are removed with the last of them; they are
+/// never written now, so no current lane's in-progress import shares the name.
 pub(crate) fn cleanup_git_pins(
     state: &Path,
     writer: &WriterRequest,
@@ -1003,6 +1203,10 @@ pub(crate) fn cleanup_git_pins(
         ))?;
     let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
     if remove_import_pin && let Some(head) = head {
+        refs.push(crate::objects::import_pin(scope.attempt, head));
+    }
+    if remove_import_pin && let Some(head) = head {
+        // Pins written before per-attempt import refs were never attempt-scoped.
         refs.push(format!("refs/provenant/import/{head}"));
     }
     for reference in refs {
@@ -1083,7 +1287,7 @@ impl crate::RunStore {
 }
 
 /// Reopen the persisted scope and verify current Git worktree membership.
-/// The subsequent supervisor writer flock supplies exclusion.
+/// The subsequent supervisor occupancy lease protects the worktree from removal.
 pub fn prepare_writer(
     request: &WriterRequest,
     state: &Path,
@@ -1110,37 +1314,18 @@ fn prepare_writer_with_facts_and_clock(
     state: &Path,
     project: ProjectId,
     facts: &worktrees::RepoFacts,
-    clock: &dyn Clock,
+    _clock: &dyn Clock,
 ) -> Result<WriterLaunch> {
-    use provenant_core::WaitBudget;
-    use provenant_os::fs::LockMode;
     let utility = runtime(state)?;
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-    // Discover only the structural anchor before taking the lock. Even the
-    // first probed open reads config snapshots and must exclude sibling writes.
-    let common = provenant_confinement::repo::VerifiedRepo::open_common_directory(&request.project)
-        .map_err(worktrees::WorktreeError::from)?;
     let cancel = CancelToken::new();
-    let _config_lock = worktrees::lock_repository(
-        &common,
-        LockMode::Shared,
-        WaitBudget::cli(clock.mono_now(), 60)
-            .map_err(error("set writer config lock budget", None))?,
-        &cancel,
-        clock,
-    )?;
     let repo = utility
         .open_repo(&executor, &request.project, budget()?, &cancel)
         .map_err(utility_error(
             "open writer repository",
             Some(&request.project),
         ))?;
-    if !common.metadata()?.same_identity(&repo.common_identity()) {
-        return Err(RunError::Validation(
-            "writer repository changed during setup",
-        ));
-    }
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
     let branch = writer_branch(&worktree)?;
@@ -1360,6 +1545,7 @@ impl LaunchConfinement {
                 free_floor: 0,
                 grace_seconds: 0,
                 idle_seconds: 0,
+                target_idle_seconds: None,
             },
             false,
             budget,
@@ -1541,7 +1727,9 @@ impl LaunchConfinement {
                 }
             }
         }
-        if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
+        if let Some(warning) =
+            target_outcome.fallback_warning("the Cargo target", "this lane builds without it")
+        {
             use std::io::Write;
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
@@ -1688,33 +1876,16 @@ fn prepare_writer_git(
     cancel: &CancelToken,
     _policy: &provenant_records::policy::Policy,
 ) -> Result<()> {
-    use provenant_core::{Clock, WaitBudget};
-    use provenant_os::{clock::SystemClock, fs::LockMode};
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
     let private_identity = writer.worktree.repo().private_identity();
     let common_identity = writer.worktree.repo().common_identity();
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-    let old_repo = writer.worktree.repo();
     let project = writer.executor_root.clone();
     let path = writer.worktree.path().to_path_buf();
-    let common = old_repo.common_dir().try_clone()?;
-    let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
-        let clock = SystemClock::new();
-        Ok(worktrees::lock_repository(
-            &common,
-            mode,
-            WaitBudget::cli(clock.mono_now(), 60)
-                .map_err(error("set writer config lock budget", None))?,
-            cancel,
-            &clock,
-        )?)
-    };
-    // Sibling config replacements can exhaust even a bounded stable read.
-    // Share the initial snapshot phase, then release before the fetch so
-    // overlapping origin requests can still coalesce without this lock.
-    let config_lock = lock_config(LockMode::Shared)?;
+    // Git replaces config atomically. Open a verified snapshot and reopen after
+    // fetch so a sibling's completed config update is observed coherently.
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(utility_error("reopen writer repository", Some(&project)))?;
@@ -1756,7 +1927,6 @@ fn prepare_writer_git(
     let repo = writer.worktree.repo();
     repo.revalidate()
         .map_err(error("verify writer repository before fetch", Some(&path)))?;
-    drop(config_lock);
     crate::HostDeliveryContext::refresh_origin(
         &WriterRequest {
             extra: Default::default(),
@@ -1769,13 +1939,12 @@ fn prepare_writer_git(
         cancel,
         &writer.facts,
     )?;
-    // Keep post-fetch snapshots and both upstream writes in one exclusive
-    // phase. Reopening outside this phase races siblings' atomic config writes.
-    let config_lock = lock_config(LockMode::Exclusive)?;
+    // Fetch may race with sibling config writes. Reopen after it and let Git's
+    // config.lock serialize the independent upstream updates.
     repo.revalidate_identity()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
-    // Configuration may legitimately change while fetch owns no mutation lock.
-    // Refresh every dependent snapshot only after regaining the common owner.
+    // Configuration may legitimately change while fetch runs; refresh every
+    // dependent snapshot from Git's atomically replaced config file.
     let fresh_repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(utility_error(
@@ -1925,7 +2094,6 @@ fn prepare_writer_git(
         return Err(RunError::Validation("writer branch changed before launch"));
     }
     writer.worktree = refreshed;
-    drop(config_lock);
     Ok(())
 }
 
@@ -1988,7 +2156,10 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
 // Refusals are stable snake_case codes, recorded as the outcome `detail`.
-fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result<(), &'static str> {
+pub(crate) fn verified_cargo_config(
+    build: &Path,
+    cargo_home: &Path,
+) -> std::result::Result<(), &'static str> {
     let present = |directory: &Path| {
         provenant_confinement::cargo::CONFIG_FILES
             .iter()
@@ -2743,11 +2914,6 @@ mod cargo_setup_tests {
             fixture.run_git(&["config", "--local", "--get", "branch.chore/x.merge"])?,
             branch
         );
-        let common = Directory::open_anchor(&fixture.git_dir)?;
-        drop(common.try_lock_existing(
-            OsStr::new(worktrees::REPOSITORY_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-        )?);
         Ok(())
     }
 
@@ -2820,66 +2986,6 @@ mod cargo_setup_tests {
         std::fs::write(&branch_lock, b"held")?;
         fixture.prepare_git(&mut writer)?;
         assert_eq!(std::fs::read(&branch_lock)?, b"held");
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::disallowed_methods)] // The holder thread must keep the real flock for a real interval.
-    fn writer_preparation_waits_for_the_config_lock_holder() -> FixtureResult<()> {
-        // #3393: a concurrent launch queues on the repository lock rather than
-        // failing, and never reads the holder's unfinished Git config.
-        if clean_environment_child(stringify!(
-            writer_preparation_waits_for_the_config_lock_holder
-        ))? {
-            return Ok(());
-        }
-        let fixture = WriterFixture::new()?;
-        let lane = fixture.add_worktree("chore/config", "lane")?;
-        let request = fixture.request(&lane);
-        let common = Directory::open_anchor(&fixture.git_dir)?;
-        let config_lock = common.try_lock(
-            OsStr::new(worktrees::REPOSITORY_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let config = common.read_bounded(OsStr::new("config"), 1024 * 1024)?;
-        common
-            .atomic_write(
-                OsStr::new("config"),
-                ".test-config-",
-                b"[unfinished",
-                provenant_os::fs::PublishMode::Replace,
-            )?
-            .require_durable()?;
-        let holder_dir = Directory::open_anchor(&fixture.git_dir)?;
-        let holder = std::thread::spawn(move || -> std::result::Result<(), String> {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            let restored = holder_dir
-                .atomic_write(
-                    OsStr::new("config"),
-                    ".test-config-",
-                    &config,
-                    provenant_os::fs::PublishMode::Replace,
-                )
-                .and_then(|publication| publication.require_durable())
-                .map_err(|error| error.to_string());
-            drop(config_lock);
-            restored
-        });
-
-        let clock = crate::tests::clock();
-        let result = prepare_writer_with_facts_and_clock(
-            &request,
-            &fixture.state,
-            fixture.custody_project,
-            &worktrees::RepoFacts::default(),
-            &clock,
-        );
-        holder.join().map_err(|_| "lock holder panicked")??;
-        result?;
-        assert_ne!(
-            common.read_bounded(OsStr::new("config"), 1024 * 1024)?,
-            b"[unfinished"
-        );
         Ok(())
     }
 
@@ -3567,15 +3673,7 @@ impl WriterLaunch {
             repo.private_dir()
                 .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
         }
-        let mut indexes = vec![ref_index];
-        // The native index may contain staged deletions after the lane HEAD
-        // advances, so inspect it alongside private Git on the first snapshot.
-        repo.private_dir()
-            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
-        let native_index = repo.private_dir().current_path()?.join("index");
-        if !indexes.contains(&native_index) {
-            indexes.push(native_index);
-        }
+        let index = ref_index;
         let source_objects = source_objects.as_deref();
         let alternate = repo.common_git_dir().join("objects");
         let (changed, status) =
@@ -3595,7 +3693,7 @@ impl WriterLaunch {
                         },
                     )
                 };
-                run(&["update-ref", "HEAD", &head.to_string()], &indexes[0])?;
+                run(&["update-ref", "HEAD", &head.to_string()], &index)?;
                 let changed = run(
                     &[
                         "diff",
@@ -3608,26 +3706,23 @@ impl WriterLaunch {
                         &head.to_string(),
                         "--",
                     ],
-                    &indexes[0],
+                    &index,
                 )?;
-                let mut status = Vec::new();
-                for index in &indexes {
-                    status.extend(run(
-                        &[
-                            "--no-optional-locks",
-                            "--work-tree",
-                            repo.root_path()
-                                .to_str()
-                                .ok_or(RunError::Validation("worktree path"))?,
-                            "status",
-                            "--porcelain",
-                            "-z",
-                            "--untracked-files=all",
-                            "--ignore-submodules=all",
-                        ],
-                        index,
-                    )?);
-                }
+                let status = run(
+                    &[
+                        "--no-optional-locks",
+                        "--work-tree",
+                        repo.root_path()
+                            .to_str()
+                            .ok_or(RunError::Validation("worktree path"))?,
+                        "status",
+                        "--porcelain",
+                        "-z",
+                        "--untracked-files=all",
+                        "--ignore-submodules=all",
+                    ],
+                    &index,
+                )?;
                 Ok((changed, status))
             })?;
         let mut paths: Vec<Vec<u8>> = changed
@@ -3750,11 +3845,11 @@ impl WriterLaunch {
             && crate::artifacts::read_sealed(attempt, "budget-commit.json", crate::RECORD_LIMIT)?
                 .is_none()
         {
-            // Recovery holds writer exclusion and custody is absent. Commit
+            // Recovery retains occupancy and this attempt has no live custody. Commit
             // failure is diagnostic and must not replace the budget outcome.
-            let (note, work) = match self.commit_budget_stop(attempt, base) {
-                Ok(commit) => (commit.note.to_owned(), commit.committed),
-                Err(error) => (format!("budget commit failed: {error}"), None),
+            let (note, work, leftover) = match self.commit_budget_stop(attempt) {
+                Ok(commit) => (commit.note.to_owned(), commit.committed, commit.leftover),
+                Err(error) => (format!("budget commit failed: {error}"), None, None),
             };
             let record = match work {
                 Some(work) => serde_json::json!({
@@ -3764,7 +3859,7 @@ impl WriterLaunch {
                     "files": work.files,
                     "paths": work.paths,
                 }),
-                None => serde_json::json!({"schema_version":1,"note":note}),
+                None => serde_json::json!({"schema_version":1,"note":note,"leftover":leftover}),
             };
             crate::artifacts::seal(
                 attempt,
@@ -3775,12 +3870,16 @@ impl WriterLaunch {
         }
         let verified_tip = match settlement.head() {
             Some(head) => head,
-            None => self.effective_head(attempt, base)?.0,
+            None => self.effective_head(attempt)?,
         };
         settlement.set_head(verified_tip)?;
-        if let Err(error) =
-            self.report_write_scope(attempt, base, verified_tip, source.as_ref(), enforcement)
-        {
+        if let Err(error) = self.report_write_scope(
+            attempt,
+            launch_bases(attempt, base)?.work,
+            verified_tip,
+            source.as_ref(),
+            enforcement,
+        ) {
             if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
                 return Err(error);
             }
@@ -3818,7 +3917,10 @@ impl WriterLaunch {
                 verified_tip,
                 &merge_objects,
                 Some(&import_cancel),
-                Some(custody),
+                crate::objects::ImportScope {
+                    attempt: custody.scope().attempt,
+                    custody: Some(custody),
+                },
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
         }
@@ -3836,15 +3938,19 @@ impl WriterLaunch {
                 &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
                     .ok_or(RunError::NotFound)?,
             )?;
-            let ancestor = crate::objects::publish_branch(
+            let published = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
-                self.branch.as_str(),
-                base,
-                request.task.base_ref.as_deref(),
-                verified_tip,
+                crate::objects::BranchPublication {
+                    branch: self.branch.as_str(),
+                    base,
+                    launch_ref: request.task.base_ref.as_deref(),
+                    head: verified_tip,
+                    attempt: custody.scope().attempt,
+                },
                 enforcement,
             )?;
+            let ancestor = published.ancestor;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
@@ -3863,45 +3969,49 @@ impl WriterLaunch {
                     )
                     .and_then(|publication| publication.require_durable());
             }
-            // Restore the private index only after receive succeeds.
-            if !merge_objects.is_empty()
-                && crate::objects::resolve_ref(
-                    &git_executable,
-                    self.worktree.repo(),
-                    self.branch.as_str(),
-                )? != verified_tip
-            {
-                return Err(RunError::Validation(
-                    "writer branch advanced before stopped merge could be restored",
-                ));
-            }
-            if let Some(source) = &source
-                && crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
-                && crate::objects::resolve_ref(
-                    &git_executable,
-                    self.worktree.repo(),
-                    self.branch.as_str(),
-                )? == verified_tip
-            {
-                self.advance_files(attempt, verified_tip)?;
-                crate::objects::restore_index(source, self.worktree.repo())?;
-                if !merge_objects.is_empty() {
-                    crate::artifacts::seal(
-                        attempt,
-                        "merge-restored.json",
-                        &crate::db::bytes(&MergeRestored {
-                            extra: Default::default(),
-                            schema_version: 1,
-                            scope: custody.scope(),
-                        })?,
-                        crate::RECORD_LIMIT,
-                    )?;
+            let at_tip = match &source {
+                Some(source) => {
+                    crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
+                        && crate::objects::resolve_ref(
+                            &git_executable,
+                            self.worktree.repo(),
+                            self.branch.as_str(),
+                        )? == verified_tip
                 }
+                None => false,
+            };
+            if at_tip {
+                self.advance_files(attempt, verified_tip)?;
+            }
+            if source.is_some() {
+                // Every settlement and resume runs this: it advances from the
+                // recorded commit to the branch tip, whichever lane moved it,
+                // and does nothing when the index already follows the tip.
+                let fallback = if published.previous == verified_tip {
+                    base
+                } else {
+                    published.previous
+                };
+                self.sync_native_index(attempt, custody.scope(), fallback);
+            }
+            if at_tip {
                 crate::objects::clear_import_refs(
                     &git_executable,
                     self.worktree.repo(),
                     custody.scope().attempt,
                     &merge_objects,
+                )?;
+            }
+            if !merge_objects.is_empty() {
+                crate::artifacts::seal(
+                    attempt,
+                    "private-merge-retained.json",
+                    &crate::db::bytes(&PrivateMergeRetained {
+                        extra: Default::default(),
+                        schema_version: 1,
+                        scope: custody.scope(),
+                    })?,
+                    crate::RECORD_LIMIT,
                 )?;
             }
             settlement.advance(crate::settlement::Phase::Record)?;
@@ -3953,17 +4063,10 @@ impl WriterLaunch {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
 
-        if !merge_objects.is_empty() {
-            let source = source
-                .as_ref()
-                .ok_or(RunError::Validation("merge source missing"))?;
-            worktrees::check_writer_terminal_with_merge(
-                self.worktree.repo(),
-                &crate::objects::merge_head(source)?,
-            )?;
-        } else {
-            worktrees::check_writer_terminal(self.worktree.repo())?;
-        }
+        // The host checkout must not be left mid-operation: settlement
+        // advances its files and index. A lane's own unfinished operation
+        // stays in its private Git, which never reaches the host.
+        worktrees::check_writer_terminal(self.worktree.repo())?;
         // The remote ref and dirty census can change after the first pass.
         // Once sealed, this attempt's summary is immutable even if its effect
         // receipt transaction failed. Reuse it after revalidating the pinned head.
@@ -4107,8 +4210,27 @@ impl WriterLaunch {
             let location = format!(
                 "the lane's work is commit {tip} on branch {branch}, retained in its private Git"
             );
-            if tip == self.base || held != self.base {
+            let bases = launch_bases(attempt, self.base)?;
+            if tip == bases.work || held != bases.host {
                 return Ok(String::new());
+            }
+            // Hold the admission gate from the sibling check through the
+            // converge, so no sibling is admitted into files being restored.
+            // An observer holding the gate leaves the worktree intact.
+            let _admission = match &self.custody {
+                Some((slot, _)) => {
+                    match provenant_supervisor::custody::writer_admission_guard(slot) {
+                        Ok(gate) => Some(gate),
+                        Err(provenant_supervisor::custody::CustodyError::Busy) => {
+                            return Ok(format!("worktree left intact; {location}"));
+                        }
+                        Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
+                    }
+                }
+                None => None,
+            };
+            if self.other_holders_live(Some(attempt))? {
+                return Ok(format!("shared worktree left intact; {location}"));
             }
             let scratch = source.refs.current_path()?;
             let objects = source.objects.current_path()?;
@@ -4120,12 +4242,12 @@ impl WriterLaunch {
                     objects: Some(&objects),
                 },
                 tip,
-                self.base,
+                bases.work,
             )?;
             crate::objects::worktree::seal_reverted(attempt, tip)?;
             let mut note = format!(
                 "worktree restored to {} ({} files); {location}",
-                self.base, moved.moved
+                bases.work, moved.moved
             );
             if !moved.kept.is_empty() {
                 let listed: Vec<_> = moved
@@ -4141,10 +4263,63 @@ impl WriterLaunch {
         attempt_work().unwrap_or_else(|error| format!("worktree files not restored: {error}"))
     }
 
+    /// Bring the shared native index to the branch tip. The index is advisory
+    /// state beside the branch, so no failure here fails settlement: a refused,
+    /// uninspectable or externally changed index leaves a typed notice that a
+    /// later settlement replaces or clears, and anything unwritable only warns.
+    fn sync_native_index(
+        &self,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        fallback: GitOid,
+    ) {
+        let warn = |message: String| {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        };
+        match crate::objects::sync_native_index(self.worktree.repo(), fallback) {
+            crate::objects::IndexSync::Deferred => {}
+            crate::objects::IndexSync::Synced => {
+                match attempt.unlink(std::ffi::OsStr::new(INDEX_OUT_OF_SYNC)) {
+                    Ok(()) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => warn(format!("index_out_of_sync notice not cleared: {error}")),
+                }
+            }
+            crate::objects::IndexSync::OutOfSync(report) => {
+                warn(format!(
+                    "index_out_of_sync: native index left unchanged; {} path(s) differ: {}",
+                    report.paths.len(),
+                    report.reason
+                ));
+                let sealed = crate::db::bytes(&IndexOutOfSyncNotice {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    scope,
+                    followed: report.followed,
+                    target: report.target,
+                    paths: report.paths,
+                    reason: report.reason,
+                })
+                .and_then(|bytes| {
+                    crate::artifacts::replace(
+                        attempt,
+                        INDEX_OUT_OF_SYNC,
+                        &bytes,
+                        crate::RECORD_LIMIT,
+                    )
+                });
+                if let Err(error) = sealed {
+                    warn(format!("index_out_of_sync notice not recorded: {error}"));
+                }
+            }
+        }
+    }
+
     /// After a revert, publication moves the files forward again so the files,
     /// index and HEAD agree at the published commit.
     fn advance_files(&self, attempt: &Directory, tip: GitOid) -> Result<()> {
-        if !crate::objects::worktree::reverted(attempt)? || tip == self.base {
+        let base = launch_bases(attempt, self.base)?.work;
+        if !crate::objects::worktree::reverted(attempt)? || tip == base {
             return Ok(());
         }
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
@@ -4156,7 +4331,7 @@ impl WriterLaunch {
                 git_dir: repo.common_git_dir(),
                 objects: None,
             },
-            self.base,
+            base,
             tip,
         )?;
         Ok(())
@@ -4337,7 +4512,7 @@ mod stored_shape_tests {
             scope,
             base: oid,
         })?;
-        unknown_field_survives(MergeRestored {
+        unknown_field_survives(PrivateMergeRetained {
             extra: Default::default(),
             schema_version: 1,
             scope,

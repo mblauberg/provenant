@@ -266,6 +266,7 @@ HOST_SECTIONS = (
      "Omit a key for its host-dependent default; -1 also selects automatic behaviour."),
     ("host_run_settings", "Host run settings", "Omit a key for its default."),
     ("host_land_settings", "Host land settings", "Omit a key for its default."),
+    ("domain_wait_settings", "Wait settings", "Omit a key for its default."),
     ("host_graph_settings", "Host graph settings", "Omit a key for its default."),
     ("host_gc_settings", "Host GC settings", "Omit a key for its default."),
     ("host_cleanup_settings", "Host cleanup settings", "Omit a key for its default."),

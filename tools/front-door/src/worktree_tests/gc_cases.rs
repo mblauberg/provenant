@@ -515,6 +515,33 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
             })
             .unwrap_or_default()
     };
+    // Each removal names its target and why it went.
+    let removed = |value: &Value| -> Vec<(String, String)> {
+        value
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        Some((
+                            entry["path"].as_str()?.to_owned(),
+                            entry["reason"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let over_budget = [
+        (
+            stale.to_string_lossy().into_owned(),
+            "over_budget".to_owned(),
+        ),
+        (
+            fresh.to_string_lossy().into_owned(),
+            "over_budget".to_owned(),
+        ),
+    ];
     // Over the cap, the least recently used goes first, the one Cargo holds
     // is skipped, and the next oldest goes until the cap is met.
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
@@ -524,22 +551,14 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
         dirs["errors"].as_array().ok_or("errors")?.is_empty(),
         "{dirs}"
     );
-    assert_eq!(
-        names(&dirs["removed"]),
-        [stale.to_string_lossy(), fresh.to_string_lossy()],
-        "{dirs}"
-    );
+    assert_eq!(removed(&dirs["removed"]), over_budget, "{dirs}");
     assert_eq!(names(&dirs["busy"]), [building.to_string_lossy()], "{dirs}");
     assert!(stale.join("debug/deps/payload").is_file());
     assert!(building.join("release/deps/payload").is_file());
     assert!(fresh.join("fast/deps/payload").is_file());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     let dirs = &applied["data"]["build_dirs"];
-    assert_eq!(
-        names(&dirs["removed"]),
-        [stale.to_string_lossy(), fresh.to_string_lossy()],
-        "{dirs}"
-    );
+    assert_eq!(removed(&dirs["removed"]), over_budget, "{dirs}");
     assert_eq!(names(&dirs["busy"]), [building.to_string_lossy()], "{dirs}");
     assert!(building.join("release/deps/payload").is_file());
     assert!(dirs["bytes"].as_u64().ok_or("bytes")? >= 2 * 65_536);

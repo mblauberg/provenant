@@ -1139,6 +1139,7 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant wait" => &[
             "every target resolves before the wait starts; no target waits for this project's running graphs",
+            "`--pr --until complete` defaults to domains.wait.pr_complete_timeout_seconds (60 minutes); an explicit --timeout still wins",
             "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
             WAIT_JSON_CONTRACT,
         ],
@@ -1167,6 +1168,18 @@ mod tests {
         }
         assert!(help.contains("keep that session"), "{help}");
         assert!(help.contains("restart fresh"), "{help}");
+    }
+
+    #[test]
+    fn wait_help_names_the_complete_wait_timeout_knob() {
+        let mut model = command_model();
+        let wait = model.find_subcommand_mut("wait").expect("wait grammar");
+        let help = wait.render_long_help().to_string();
+        assert!(
+            help.contains("domains.wait.pr_complete_timeout_seconds"),
+            "{help}"
+        );
+        assert!(help.contains("60-minute"), "{help}");
     }
 
     #[test]
@@ -2761,9 +2774,36 @@ mod tests {
         words.push("overflow.md");
         invalid(&words);
         valid(&["internal", "supervise"]);
-        valid(&["internal", "supervise", "3", "4", "5", "6", "7"]);
+        // Seven capabilities, plus the optional native profile descriptor.
+        valid(&["internal", "supervise", "3", "4", "5", "6", "7", "8", "9"]);
+        valid(&[
+            "internal",
+            "supervise",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+        ]);
         invalid(&["internal", "supervise", "3"]);
-        invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
+        invalid(&["internal", "supervise", "3", "4", "5", "6", "7", "8"]);
+        invalid(&[
+            "internal",
+            "supervise",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+        ]);
+        invalid(&["internal", "supervise", "2", "4", "5", "6", "7", "8", "9"]);
     }
     #[test]
     fn wait_and_output_bounds() {

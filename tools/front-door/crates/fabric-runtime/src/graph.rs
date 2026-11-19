@@ -593,6 +593,7 @@ pub trait AttemptOwner {
         _worktree: &str,
         _branch: &str,
         _base: &str,
+        _owner: Option<provenant_core::Digest>,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         Ok(None)
     }
@@ -602,6 +603,7 @@ pub trait AttemptOwner {
         &mut self,
         _path: &str,
         _source: &str,
+        _owner: Option<provenant_core::Digest>,
     ) -> Result<bool, Self::Error> {
         Ok(false)
     }
@@ -2444,6 +2446,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                    if checkpoint.nodes[node_index].provisioned_owner.is_none() {
+                        let inherited = checkpoint
+                            .nodes
+                            .iter()
+                            .filter(|row| row.worktree.as_deref() == Some(path))
+                            .find_map(|row| row.provisioned_owner);
+                        checkpoint.nodes[node_index].provisioned_owner = inherited;
+                    }
                     if node.provision_worktree
                         && (relay::pending_provisioning(&checkpoint)
                             .iter()
@@ -2528,7 +2538,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         )? {
                             continue 'schedule;
                         }
-                        match owner.provision_child_worktree(path, &source) {
+                        let creation_owner =
+                            checkpoint.nodes[node_index].provisioned_owner.or_else(|| {
+                                checkpoint
+                                    .nodes
+                                    .iter()
+                                    .filter(|row| row.worktree.as_deref() == Some(path))
+                                    .find_map(|row| row.provisioned_owner)
+                            });
+                        checkpoint.nodes[node_index].provisioned_owner = creation_owner;
+                        match owner.provision_child_worktree(path, &source, creation_owner) {
                             Ok(true) => {}
                             Ok(false) => {
                                 return Err(GraphError::Refused(
@@ -2589,7 +2608,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 base
                             }
                         };
-                        owner.provision_writer_worktree(path, &spec.branch, &base)
+                        let creation_owner =
+                            checkpoint.nodes[node_index].provisioned_owner.or_else(|| {
+                                checkpoint
+                                    .nodes
+                                    .iter()
+                                    .filter(|row| row.worktree.as_deref() == Some(path))
+                                    .find_map(|row| row.provisioned_owner)
+                            });
+                        checkpoint.nodes[node_index].provisioned_owner = creation_owner;
+                        owner.provision_writer_worktree(path, &spec.branch, &base, creation_owner)
                     } else {
                         owner.bind_writer_worktree(path)
                     };
@@ -2653,7 +2681,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &admission_policy,
                     ) {
                         transitions::Admission::Ready => {}
-                        transitions::Admission::WriterBusy => break,
                         transitions::Admission::PolicyRefused { code, detail } => {
                             // The refused node is terminal; it has no next attempt.
                             transitions::fail_with(&mut checkpoint.nodes[node_index], code, detail);

@@ -554,7 +554,11 @@ and the base plan digest, so publication and landing review reads reject the sam
 corrupt state. Save validates the inline checkpoint before externalising text,
 then verifies that durable blobs reconstruct the same representation before
 publication. The observation index uses the validated published value; recovery
-independently loads and validates the committed checkpoint.
+independently loads and validates the committed checkpoint. A host tick read of
+a checkpoint that fails validation quarantines its exact bytes once with the
+typed reason, reports it once, and skips identical bytes on later ticks; changed
+bytes or an explicit retire reopen the report. Status and strict reads still
+surface the corrupt record.
 `graph::checkpoint_digest` owns the envelope payload and domain;
 `graph::graph_plan_digest` derives the shared plan identity from a persisted
 document. Hand-built journal fixtures use `FileJournal::prepare_fixture_checkpoint`

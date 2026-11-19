@@ -51,6 +51,13 @@ pub enum ProviderEvent {
     Unclassified {
         message: String,
     },
+    /// Provider configuration advice, such as a deprecated config key. It
+    /// never marks the turn failed; the host surfaces it once per attempt as
+    /// a warning, naming the config file when the provider gave one.
+    Warning {
+        message: String,
+        source: Option<String>,
+    },
     Denied {
         action: String,
     },

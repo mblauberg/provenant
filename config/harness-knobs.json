@@ -28,6 +28,7 @@
       "domains.pr.land.batch_size",
       "domains.pr.land.gate.checks",
       "domains.pr.land.gate.timeout_seconds",
+      "domains.wait.pr_complete_timeout_seconds",
       "domains.pr.land.local_gate.mode",
       "domains.pr.land.local_gate.commands",
       "domains.fabric.graph.limits.nodes",
@@ -44,6 +45,7 @@
     "settings": {
       "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"},
       "discard_archive_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "14d", "effect": "Retain explicit discard archives for at least this duration before GC sweep collection; 14 days provides a bounded recovery window for accidental discards without accumulating large archive stores"},
+      "cargo_target_idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "30d", "effect": "Collect a managed Cargo target (target or target-lint in a private lane cache or a retired shared cache) when nothing under it was written for this long, whatever lanes.cargo_cache_max allows; a target held by a Cargo lock or live lane is always kept. The value and source appear in GC output"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
       "idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "6h", "effect": "Idle age for settled attempt scratch, unowned artifacts and standalone caches; a busy or unreleased attempt is always kept"},
       "sweep_budget": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "5m", "effect": "Maximum wall time for one GC pass; the saved retention class and candidate cursor resume on the next pass, and the effective value and source appear in GC output"},
@@ -146,6 +148,7 @@
       "source_view_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "300", "effect": "Total time allowed to build the pinned source view of a `review` lane. The view is built with one batched object read, so a healthy large repository needs far less. Raise it on a slow disk or a heavily loaded host."},
       "source_view_entries": {"type": "int", "allowed": "1 to 4294967295 files", "default": "100000", "effect": "Maximum files in a pinned source view. A larger tree is refused, naming this limit."},
       "source_view_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "536870912", "effect": "Maximum total file bytes in a pinned source view. A larger tree is refused, naming this limit."},
+      "retained_custody_seconds": {"type": "int", "allowed": "1 to 604800 seconds", "default": "3600", "effect": "How long a guardian keeps custody of a lane whose processes outlived cleanup, such as a detached service, while it repeats a bounded stop. Past the limit it records the unresolved processes and the blocker on the exit, releases the lane's writer lock and exits; `provenant reconcile` then ends proven orphans. Nothing in the worktree is removed."},
       "writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "[]", "effect": "Directories writer lanes may read, write and execute as subtrees; read-only lanes are unchanged"},
       "review_exempt": {"type": "string_list", "allowed": "repository-relative paths without wildcards", "default": "[\"docs/release-notes/next.d/\", \"docs/specs/\", \"Cargo.lock\", \".tracker-input\"]", "effect": "Paths that do not count toward an uncommitted outcome; a project list replaces the host list and an empty list disables exemptions"},
       "sandboxed_routes": {"type": "string_list", "allowed": "up to 64 route prefixes (adapter/model), printable ASCII", "default": "[]", "effect": "Routes whose lanes run sandboxed under default configuration, matched by prefix on the route id. Default is empty; users can add routes (e.g. OpenCode Zen tier opencode/opencode/). lanes.sandbox=off overrides listed routes with a warning; an empty list leaves the knob to decide."},
@@ -272,6 +275,12 @@
       "warn_unbounded_junior": {"type": "bool", "default": "true", "effect": "Warn when a junior implementation writer has an unbounded brief."}
     }
   },
+  "domain_wait_settings": {
+    "path": "domains.wait",
+    "settings": {
+      "pr_complete_timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "3600", "effect": "Default budget for `provenant wait --pr --until complete`, covering a normal CI run (60 minutes). An explicit --timeout overrides it and domains.wait.max_timeout_seconds still clamps it; other waits keep domains.wait.timeout_seconds."}
+    }
+  },
   "host_graph_settings": {
     "path": "domains.fabric.graph",
     "settings": {
@@ -354,6 +363,12 @@
         "default": 16777216,
         "effect": "Maximum bytes copied into an attempt's read-only user skill tree. Content exceeding the bound is skipped with a warning. Inspect value and origin with config show."
       },
+      "git_config_allow": {
+        "type": "string_list",
+        "allowed": "up to 64 Git configuration keys, such as push.default, or a prefix ending in .* such as pull.*; include and includeIf are never passed",
+        "default": [],
+        "effect": "Extra host Git configuration keys a sandboxed lane receives from the host system and global files beyond the compiled allowlist (user.name, user.email, alias.*, color.*, core, diff and merge presentation keys, filter.lfs.{clean,smudge,process,required}, and url.*.insteadOf whose URLs carry no password or token and name a user only in SSH form). Compiled-allowlist values that carry a credential are withheld; keys listed here pass verbatim, so listing credential.* or http.* hands the lane those credentials; a pattern that itself carries a credential is invalid. Withheld key names, never values, are recorded with this list and its origin in the launch receipt. Unsandboxed lanes read the host configuration in full."
+      },
       "projects.{project}.capabilities": {
         "type": "string_list",
         "allowed": "postgres",
@@ -427,6 +442,7 @@
       "policy.PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Automatic dependency setup warns with a redacted cause and lets the writer continue; cancellation still stops preparation. The setting source is named in each warning."},
       "policy.LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block. The setting source is named in each warning."},
       "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning. The setting source is named in each warning."},
+      "policy.LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane with the shipped retained-custody limit. The setting source is named in each warning."},
       "policy.PORT_BLOCKS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An exhausted port-block pool warns the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GUARDIAN_LANE_PORT_ALLOCATION_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed. The setting source is named in each warning."},
       "policy.PACING_ADAPTER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An adapter reserve defaults to shipped values and can be configured; the observation reports its effective percentage and source. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -450,6 +466,8 @@
       "policy.LAUNCH_TOOL_SEARCH_PATH_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An optional Cargo directory that cannot be represented in PATH is omitted with a warning. The setting source is named in each warning."},
       "policy.LAUNCH_PACKAGE_GRANT_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A shared package prefix is omitted and the executable receives an exact grant; the omission is reported. The setting source is named in each warning."},
       "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted. The setting source is named in each warning."},
+      "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A host Git configuration file that cannot be located or read contributes no settings to a sandboxed lane's private Git configuration, with a warning naming the file. The setting source is named in each warning."},
+      "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A filter driver the host marks required (filter.<driver>.required) but the allowlist withholds leaves a sandboxed lane's Git without that filter, so its content would be committed unfiltered; the launch warns naming the key. Pass the driver with domains.lanes.git_config_allow. The setting source is named in each warning."},
       "policy.LANE_INSTALL_GIT_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A missing PATH warns and uses system defaults with the private Git launcher first. The setting source is named in each warning."},
       "policy.LANE_INSTALL_GIT_NONE_2": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unbound Git launcher whose directory cannot be encoded in PATH is omitted with a warning. The setting source is named in each warning."},
       "policy.LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning. The setting source is named in each warning."},

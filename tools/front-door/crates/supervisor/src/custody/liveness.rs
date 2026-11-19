@@ -3,6 +3,24 @@ use super::*;
 
 const LOCK: &str = "guardian.lock";
 const RECORD: &str = "guardian-lock.json";
+const HOLDER_LOCK: &str = "holder.lock";
+/// Schema 2 adds the per-attempt holder lock identity. Schema 1 evidence was
+/// written before shared worktree occupancy and is not migrated: drain writers
+/// on the old version before upgrading.
+const SCHEMA: u64 = 2;
+
+/// Whether this attempt's guardian record predates the per-attempt holder lock.
+pub(crate) fn is_legacy_record(attempt: &Directory) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Version {
+        schema_version: u64,
+    }
+    match read_record::<Version>(attempt, RECORD, RECORD_LIMIT) {
+        Ok(version) => Ok(version.schema_version < SCHEMA),
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Identity {
@@ -33,9 +51,23 @@ struct GuardianLock {
     guardian: Identity,
     writer: Identity,
     custody: Identity,
+    holder: Identity,
 }
 impl GuardianLock {
     fn names_match(&self, recovery: &Recovery, attempt: &Directory) -> Result<bool> {
+        let holder_matches = match recovery.holder.as_ref() {
+            Some(holder) => {
+                self.holder.matches_lock(holder.metadata()?)
+                    && self.holder.matches_lock(
+                        recovery
+                            .directory
+                            .metadata_at(OsStr::new(HOLDER_LOCK), false)?,
+                    )
+            }
+            // Missing per-attempt proof never substitutes another holder's
+            // shared occupancy, even during exclusive recovery.
+            None => false,
+        };
         Ok(self.attempt.matches(attempt.metadata()?)
             && self
                 .guardian
@@ -47,7 +79,8 @@ impl GuardianLock {
                 recovery
                     .lock_directory
                     .metadata_at(OsStr::new("writer.lock"), false)?,
-            ))
+            )
+            && holder_matches)
     }
 }
 
@@ -59,16 +92,18 @@ pub(crate) fn prepare_guardian_lifetime(
     scope: Scope,
     writer: &LockGuard,
     custody: &LockGuard,
+    holder: &LockGuard,
 ) -> Result<()> {
     let guardian = evidence.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let record = GuardianLock {
-        schema_version: 1,
+        schema_version: SCHEMA,
         scope,
         guardian_process: None,
         attempt: Identity::of(attempt.metadata()?),
         guardian: Identity::of(guardian.metadata()?),
         writer: Identity::of(writer.metadata()?),
         custody: Identity::of(custody.metadata()?),
+        holder: Identity::of(holder.metadata()?),
     };
     write_record(evidence, RECORD, &record, PublishMode::NoReplace)?.require_durable()?;
     Ok(())
@@ -83,7 +118,9 @@ pub(crate) fn hold_guardian_lifetime(
     guardian_process: &ProcessIdentity,
     writer: &LockGuard,
     custody: &LockGuard,
+    holder: &LockGuard,
 ) -> Result<LockGuard> {
+    let holder_metadata = holder.metadata()?;
     guardian_process
         .validate()
         .map_err(|_| CustodyError::InvalidRecord)?;
@@ -95,13 +132,14 @@ pub(crate) fn hold_guardian_lifetime(
     }
     let guardian = evidence.try_lock_existing(OsStr::new(LOCK), LockMode::Exclusive)?;
     let mut record: GuardianLock = read_record(evidence, RECORD, RECORD_LIMIT)?;
-    if record.schema_version != 1
+    if record.schema_version != SCHEMA
         || record.scope != scope
         || record.guardian_process.is_some()
         || !record.attempt.matches(attempt.metadata()?)
         || !record.guardian.matches_lock(guardian.metadata()?)
         || !record.writer.matches_lock(writer.metadata()?)
         || !record.custody.matches_lock(custody.metadata()?)
+        || !record.holder.matches_lock(holder_metadata)
     {
         return Err(CustodyError::Fenced);
     }
@@ -139,6 +177,10 @@ pub enum LossUnproven {
     #[error("the process census is incomplete")]
     CensusIncomplete,
     #[error(
+        "the guardian never completed a census of its process tree and the lane had no sandbox mark; an unrecorded process cannot be ruled out"
+    )]
+    GuardianCensusIncomplete,
+    #[error(
         "the guardian omitted {omitted} descendants from its record; an unrecorded process cannot be ruled out"
     )]
     DescendantsOmitted { omitted: u64 },
@@ -163,7 +205,7 @@ impl GuardianLossRecovery {
     pub fn scope(&self) -> Scope {
         self.recovery.scope()
     }
-    /// Retain writer exclusion for the shared settlement driver. Native proof
+    /// Retain worktree occupancy for the settlement driver. Native proof
     /// covers cleanup even when the guardian died before republishing its exit.
     pub fn into_recovery(mut self) -> Result<Recovery> {
         if !self.record.names_match(&self.recovery, &self.attempt)? {
@@ -220,13 +262,23 @@ impl Recovery {
     ) -> Result<std::result::Result<GuardianLossRecovery, LossUnproven>> {
         validate_anchor(&self.directory, &self.reservation)?;
         // Omitted descendants have sessions and groups no census can check.
-        // An incomplete guardian census is not such a gap: it is the normal
-        // state until a full census, and the fresh census below, the session
-        // and group match and the sandbox scan stand in for it.
         if self.reservation.omitted_descendants > 0 {
             return Ok(Err(LossUnproven::DescendantsOmitted {
                 omitted: self.reservation.omitted_descendants,
             }));
+        }
+        // A spawned tree the guardian never completed a census of may hold a
+        // daemon that double-forked and called setsid: it is recorded nowhere
+        // and matches no pid, session or group. Only the attempt's sandbox
+        // mark, inherited and kept across both, lets the scan below stand in
+        // for the guardian's census, so an unsandboxed lane is refused. A
+        // handing-off attempt recorded no provider yet, so nothing can have
+        // escaped.
+        if self.reservation.census_incomplete
+            && self.reservation.launch_state == LaunchState::Spawned
+            && !self.reservation.sandboxed
+        {
+            return Ok(Err(LossUnproven::GuardianCensusIncomplete));
         }
         let record: GuardianLock = match read_record(&self.directory, RECORD, RECORD_LIMIT) {
             Ok(record) => record,
@@ -236,7 +288,7 @@ impl Recovery {
             Err(error) => return Err(error),
         };
         let metadata = attempt.metadata()?;
-        if record.schema_version != 1
+        if record.schema_version != SCHEMA
             || record.scope != self.scope()
             || record.guardian_process.as_ref().is_some_and(|guardian| {
                 guardian.validate().is_err()

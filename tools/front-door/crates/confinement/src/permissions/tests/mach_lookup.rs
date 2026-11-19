@@ -67,6 +67,12 @@ fn native_attempt_mach_lookups_preserve_custody_membership()
                 git_grants_digest: [0; 32],
                 publishing: false,
                 common_git_dir: "/fixture/repo/.git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,

@@ -4,8 +4,9 @@ Anchor: docs/specs/run.md, docs/specs/fabric.md
 
 Start an approved writer with the `implement` template (`deliver` for the
 composite through CI, review and landing), inspect `--explain`, then submit
-without it. One writer owns each worktree; parallel slices integrate into one
-branch before full review. Mechanism (confinement, redaction, custody, settlement,
+without it. A worktree's owning lane decides who else writes in it; authorised
+writers share its occupancy lease. Independent slices use separate worktrees
+and integrate into one branch before full review. Mechanism (confinement, redaction, custody, settlement,
 priorities) is in the [run spec](../specs/run.md) and
 [supervisor spec](../specs/supervisor.md); templates are in
 [routing and templates](routing-and-templates.md).
@@ -25,8 +26,15 @@ priorities) is in the [run spec](../specs/run.md) and
   its `BRANCH` and `PATH` placeholders). A checkout with no lane owner record
   may have been made outside Provenant: check custody, then pass `--worktree
   PATH` explicitly.
-- Dirty trees, held writer locks and retained import fences refuse a new
-  writer; a clean worktree from a terminal lane is reused.
+- An authorised nested writer may share its parent's exact live checkout,
+  including its edits. Independent work provisions a separate checkout. Dirty
+  trees and retained import fences still protect ordinary checkout reuse;
+  a clean worktree from a terminal lane is reused.
+- Optional `write_scope` path claims warn the owning lane about overlaps and
+  refuse nothing. Commit only owned paths with `git commit -- <owned paths>`;
+  Git serialises commits through `index.lock`, with bounded collision retries.
+- Removal and GC require exclusive occupancy with no live holders. Never
+  discard a live holder's worktree or delete its lease to bypass custody.
 - Writer rebases use the lane's private Git and pass host import checks. If Git
   cannot write rebase state, stop with `needs_host_rebase`; never create a clone
   or second checkout to bypass it. A host-authorised merge of `origin/main` is
@@ -76,15 +84,22 @@ lane cache (`lanes.cargo_target = "private"`), cloned from the repository's host
 seed. A host builds that seed with `provenant worktree seed-build`, and tick
 refreshes it when the verify base moves. It builds the configured verify base,
 so uncommitted work is not the seed source. Each writer clones a compatible
-generation and ages its dep-info, so workspace members rebuild once from the
-worktree's sources and registry crates stay fresh. A `seeded` report proves the
+generation and ages the dep-info each unit's fingerprint names, whatever fingerprint layout Cargo
+uses, so workspace members rebuild once from the worktree's sources and registry
+crates stay fresh. A seed with a fingerprint that names no readable dep-info is not
+used (`seed_layout_unrecognised`). A `seeded` report proves the
 clone; where the filesystem cannot clone, the lane warns `clone_failed` and
 builds cold. Cargo's verbose `Fresh` lines prove dependency reuse. Settlement
 starts a detached cleanup that removes the target once writer custody is free;
 worktree removal and lane-cache GC catch the rest. A continuation reuses a
 target still present and otherwise seeds a new one. For a checkout
 outside a lane, `provenant worktree seed-target PATH` seeds the same target and
-prints it for `CARGO_TARGET_DIR`.
+prints it for `CARGO_TARGET_DIR`. It resolves the toolchain as cargo and rustup
+do (`rust-toolchain.toml`; unset `RUSTUP_HOME` and `CARGO_HOME` mean
+`$HOME/.rustup` and `$HOME/.cargo`) and applies the lane's verification. Each
+reason it does not seed names what was expected and what was found, such as the
+two compilers, and a repair step. Only `seed-build` and tick produce host
+seeds, so after a toolchain change no seed matches until one of them runs.
 
 Each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
 limits history per repository; `max_bytes` limits the whole host and can evict a
@@ -152,3 +167,6 @@ Sources are sampled, so intermediate states between samples are not reported.
 Tests run Git only through `provenant_os::fixture` (`git_command()` or
 `run_git(cwd, args)`), which drops the lane's `GIT_*` binding so a fixture never
 commits into the lane's own repository (the workspace policy gate enforces it).
+The [verifier](../../scripts/verify-nextest) also clears the calling lane's
+`PROVENANT_GIT` executable override before tests; fixtures that need a selected
+executable set it explicitly.

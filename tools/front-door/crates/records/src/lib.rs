@@ -106,7 +106,7 @@ pub mod work_key;
 pub use finding_decision::{FindingDecision, FindingDisposition};
 pub use limit::{
     BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, LaneLimits, Limit, LimitSource,
-    LimitStrength,
+    LimitStrength, TokenBudgetUsage,
 };
 pub use pause::{Pause, PauseCause};
 pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, StopFacts, StopRule};

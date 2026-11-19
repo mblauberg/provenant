@@ -8,8 +8,10 @@ The [consumer contract](../specs/consumer-contract.md) marks each command, outpu
 
 ## Writing a fragment
 
-Add one file per user-visible change to `next.d/`, named `<issue>-<topic>.md`. Follow the `writing` skill's release-note guidance. Use a section heading (`Breaking changes`, `Behaviour changes`, `Additions` or `Fixes`), then an area heading from the list below, then a concise bullet ending in the issue number. Breaking changes state the required action. Link a guide for detail and omit internal-only changes. Paths are relative to `next.d/`.
+Add one file per user-visible change to `next.d/`, named `<issue>-<topic>.md`. Follow the `writing` skill's release-note guidance. Line 1 is one section heading (`## Breaking changes`, `## Behaviour changes`, `## Additions` or `## Fixes`), then an area heading (`### <area>`) from the list below, then a concise bullet ending in the issue number. One section per fragment; use two fragments for two sections. Breaking changes state the required action. Link a guide for detail and omit internal-only changes. Paths are relative to `next.d/`.
 
 Areas: CLI and install; Lanes and settlement; Git and safety; Accounts, quota and routing; Pipelines and graphs; Chair, inbox and console; Fabric; Telemetry and providers.
 
-Keep `_intro.md` to two sentences about the release and its breaking changes. Preview with `scripts/collate-release-notes` and check with `scripts/collate-release-notes --check`.
+`scripts/collate-release-notes --check` runs in CI and in `scripts/prepare-release`. It fails, naming file and line, on anything collation would drop or misfile: a later `##` heading, or content before the first heading. An unknown section or area only warns and lists the valid choices; the entry is filed under Additions or left untagged.
+
+Keep `_intro.md` to two sentences about the release and its breaking changes. Preview with `scripts/collate-release-notes`.

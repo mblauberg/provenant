@@ -12,6 +12,7 @@ mod contract;
 pub mod cursor;
 pub mod duration;
 mod dylib;
+pub mod git_config;
 pub use dylib::{ClosureOutcome, DependencyClosure, IncompleteReason};
 pub mod host;
 pub mod identity;

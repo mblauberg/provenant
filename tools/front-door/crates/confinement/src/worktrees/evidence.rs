@@ -151,11 +151,12 @@ pub fn retained_refs(
     cancel: &CancelToken,
 ) -> Result<Vec<EvidenceRef>, WorktreeError> {
     let mut refs = read_branch_tips(context, cancel)?;
-    let remote = run_git(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
-    if exit_code(&remote)? != 0 {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    refs.extend(parse_branch_tips(&remote.stdout.bytes)?);
+    refs.extend(read_ref_tips(
+        context,
+        context.repo,
+        GitRead::RemoteBranchTips,
+        cancel,
+    )?);
     Ok(refs
         .into_iter()
         .filter(|(reference, _)| {

@@ -494,6 +494,7 @@ pub(super) fn seal_launch_task(
         request_digest,
         effective_network: task.access.network(task.writer.is_some()),
         effective_database_ipc: task.access.database_ipc,
+        writer_worktree: None,
     }
 }
 
@@ -683,6 +684,7 @@ pub(super) fn launch_on_host_with_wait(
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
         let task = &request.task;
+        let mut writer_worktree = None;
         let operation = session.store.attempt_operation(attempt.attempt_id, call)?;
         let mut host = host.clone();
         if let Some(writer) = task.writer.as_ref() {
@@ -697,6 +699,7 @@ pub(super) fn launch_on_host_with_wait(
                     use provenant_confinement::worktrees;
                     let tree =
                         provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
+                    writer_worktree = Some(worktrees::acquire_worktree_subject(tree.repo())?);
                     if let Some(mut owner) = worktrees::load_owner(&tree)?
                         && owner.origin == worktrees::WorktreeOrigin::Lane
                         && (owner.operation_id.as_ref() == Some(&operation.operation_id)
@@ -718,6 +721,11 @@ pub(super) fn launch_on_host_with_wait(
             )
             .map_err(run::RunError::from)?;
         }
+        let mut sealed = seal_launch_task(
+            request_digest,
+            &session.store.effective_launch_task(request, task),
+        );
+        sealed.writer_worktree = writer_worktree;
         run::HolderContext {
             schema_version: 1,
             roots: seed.clone(),
@@ -729,10 +737,7 @@ pub(super) fn launch_on_host_with_wait(
                 .as_ref()
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
-            sealed: Some(seal_launch_task(
-                request_digest,
-                &session.store.effective_launch_task(request, task),
-            )),
+            sealed: Some(sealed),
         }
         .encode()
     };

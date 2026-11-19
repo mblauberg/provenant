@@ -86,6 +86,11 @@ fn database_profile(
             git_grants_digest: [7; 32],
             publishing: false,
             common_git_dir: root.join("git"),
+            git_state: PathGrant {
+                path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                    .into(),
+                scope: PathScope::Subtree,
+            },
             cargo_cache: PathGrant {
                 path: scratch.join("cache"),
                 scope: PathScope::Subtree,

@@ -122,7 +122,10 @@ pub fn lane_caches(home: &Path, policy: &CacheGcPolicy, report: &mut DiskReport)
         let entry = &mut report.entries[index];
         entry.state = Some(state.into());
         entry.owner = owner.map(|path| path.to_string_lossy().into_owned());
-        if matches!(state, "orphaned" | "idle" | "tombstone") {
+        if matches!(
+            state,
+            "orphaned" | "replaced" | "idle" | "foreign_idle" | "tombstone"
+        ) {
             entry.reclaim = Some("gc".into());
         }
     }
@@ -182,6 +185,8 @@ fn classify_lane_cache(
         Some(CacheGcReason::Idle) => "idle",
         Some(CacheGcReason::Tombstone) => "tombstone",
         Some(CacheGcReason::Foreign) => "foreign",
+        Some(CacheGcReason::ForeignIdle) => "foreign_idle",
+        Some(CacheGcReason::Replaced) => "replaced",
         Some(CacheGcReason::Live) => "live",
         Some(CacheGcReason::Busy) => "busy",
         Some(CacheGcReason::Unobservable) => "unobservable",

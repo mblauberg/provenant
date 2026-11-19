@@ -93,7 +93,7 @@ project, using one bounded host process census for the pass. Failed project
 recovery does not prevent other projects or scheduled tasks from running.
 A sealed exit remains settlement evidence when the census is unavailable;
 live attempts retain their automatic fence. Unknown attempts are queued for
-proof-only recovery: the original guardian and custody locks, writer lease and
+proof-only recovery: the original guardian, custody and attempt holder locks and
 a fresh empty worktree census must prove absence before same-boot settlement.
 Unknown evidence itself never clears custody.
 Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
@@ -138,7 +138,7 @@ launch again.
 ### Quiescence before release
 
 A writer stays fenced until the provider is reaped, two complete censuses show
-no surviving member or escapee, and a fresh lock on the original lease inode
+no surviving member or escapee, and a fresh lock on the original holder inode
 succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
 decision with matching authority clears one, and that decision permits no signal.
 - Why: a leftover descendant could still write the worktree.
@@ -167,6 +167,49 @@ evidence only when a stop has signal candidates. Idle retention therefore costs
 no CPU between events.
 - Why: detached services must not hold a lease or cause unsafe release.
 - Why: retained custody can last hours, and one guardian runs per lane (#3560).
+
+The guardian's reactor latches every kqueue edge it drains (supervisor signal,
+cancellation change, process event) until the loop that acts on it takes it,
+and a supervisor signal stays visible to every later loop. A pacing or retry
+pause therefore cannot drop one. A supervisor signal during cleanup or
+retention gets one more bounded stop (TERM, the descendant grace, KILL); then
+the guardian ends retention and exits.
+- Why: kqueue reports each edge once. A v2.2.0 guardian discarded a SIGTERM
+  this way and held a lane's writer lock for 2h43m (#3572, #3585).
+
+Retention is bounded by `domains.run.retained_custody_seconds` (1..=604800 s,
+default 3600). The launcher resolves it, because the guardian cannot read
+config. `provenant config show --full` shows the value and its source, and
+unreadable run settings warn and keep the default
+(`LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT`). The unresolved exit carries
+a `retention` record: the holding guardian's identity, when retention began
+and the limit. `provenant status` names that guardian's PID and age only while
+its census shows that exact identity alive; otherwise it says the guardian is
+gone and points to `provenant reconcile`. A settled exit drops the record. When
+retention ends with the exit still unresolved, whether by signal or by limit,
+the guardian adds `retention.ended` to the record. This records the reason, the
+time retained and the blocker (`stop_refused`, `protected_owner`,
+`census_incomplete`, `survived_stop` or `settlement_unproven`) beside the
+unresolved PIDs. `stop_refused` means a live candidate this pass was not
+allowed to be signalled; a withheld permission with nothing to stop refuses
+nothing. Past the limit it then exits with the typed `RetentionLimit`
+failure: status `timeout` (exit 124), error code `RETENTION_LIMIT`, where
+other guardian faults exit `error` (3) with `SUPERVISOR`. Ending retention signals nothing and removes nothing.
+The unresolved exit and reservation keep the writer fenced. Once the guardian
+is gone, `provenant reconcile` ends only proven orphans, through the orphan
+recovery path.
+- Why: an orphaned guardian must not hold a lane indefinitely, and the fence,
+  not the guardian, is what protects the worktree.
+
+Reaping the leader under the fenced lease backs off from 25 ms to 1 s and stops
+at a 5 s monotonic deadline, since a pause ends early on any reactor edge. The
+provider group is then dropped unsignalled, and its bounded reaper permit
+takes over. Retrying an undurable cleanup reservation or exit publication
+continues while the disk may recover, but once a supervisor signal has
+latched it stops after 5 s and the guardian exits with an error. The previous
+reservation, or the exit's `publication_pending` marker, stays the durable
+fence for reconcile, as after a crash.
+- Why: a retry loop with no bound or backoff could keep a guardian alive.
 
 ### Durable exit publication
 
@@ -355,10 +398,12 @@ inventory; the common Git directory's parent does not establish that owner.
 
 ### Shared Git metadata is read-only
 
-A writer owns a private Git directory with the shared object store as a
-read-only alternate; shared refs, config, hooks and admin metadata stay
-read-only, and the host imports the result and moves the branch by
-compare-and-swap. The lane Git wrapper binds commands implicitly targeting its
+Each writer owns an attempt-private Git view with separate refs, index,
+objects, configuration and credentials, using the repository object store as a
+read-only alternate. The repository's refs, config, alternates, hooks and admin
+metadata stay read-only to lanes. The host imports verified objects and moves
+the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
+The lane Git wrapper binds commands implicitly targeting its
 worktree; commands for other repositories, commands with explicit repository
 selectors and Git transport endpoints pass through with their arguments and
 environment intact. Fixture commands remove inherited lane Git selectors and
@@ -475,16 +520,30 @@ refuses credential-bearing URLs.
 - Why: roots differ.
 - Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
 
-### One writer; removal never forces
+### Shared occupancy; removal never forces
 
-Git's own inventory is the worktree registry. One writer holds each linked
-worktree, and custody outlives the requesting call. `worktree remove` refuses
-the primary, a live writer or observed process, and has no force. Dirty work
-requires explicit discard, with its recoverable archive captured before removal;
-it deletes a branch only with current landing evidence or explicit discard.
+Git's own inventory is the worktree registry. A worktree's owning lane decides
+who else writes in it. Worktree occupancy is a shared lease: any number of lanes
+may hold one worktree simultaneously. By maintainer decision (#3451), path claims
+are advisory and overlapping claims refuse nothing; a live conflicting writer is
+not excluded by Provenant. Attempts own separate Git refs, indexes and object
+stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
+uses expected-old-tip compare-and-swap after verification, retaining divergent
+private commits for recovery. Custody outlives the requesting call. Each attempt
+also holds its own holder lease; proof that a sibling has settled cannot release
+another attempt's custody. An unscoped budget commit requires durable proof that
+no sibling shared the worktree during that attempt, and holds the admission gate
+through the commit. Shared attempts instead report typed leftover paths.
+Removal requires exclusive occupancy with zero live holders and no unresolved
+reservation. Terminal outcome publication alone does not release custody. Under
+exclusion, removal checks native cleanliness and every recorded attempt index;
+staged work or uncertain index identity retains the checkout. `worktree remove`
+refuses the primary, a live writer or observed process, and has no force. Dirty
+work requires explicit discard, with its recoverable archive captured before
+removal; it deletes a branch only with current landing evidence or explicit discard.
 A persisted writer reservation remains a custody fence when its kernel lock is
-absent: read-only occupancy is unknown until run-owned reconciliation settles
-the attempt, and cache guards refuse the slot without clearing its evidence.
+absent until run-owned reconciliation settles the attempt; cache guards and
+actual removal both refuse without clearing its evidence.
 Named removal without current landing or subsumption proof returns
 `WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
 explicit-discard recovery command. `IdentityChanged` remains a changed-identity

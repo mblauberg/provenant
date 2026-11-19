@@ -909,6 +909,7 @@ fn main() -> Result<()> {
         private_dir(scratch)?;
         let mode = match &worktree {
             Some(tree) => {
+                provenant_confinement::worktrees::acquire_worktree_subject(tree.repo())?;
                 AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority::for_worktree(
                     tree,
                     &selected_ref,
@@ -1056,6 +1057,7 @@ fn main() -> Result<()> {
             user: &user,
             host_var: &|key| std::env::var_os(key),
             skill_stage_max_bytes: 16 * 1024 * 1024,
+            git_config_allow: &[],
             account: account.as_ref(),
             token: token.as_ref(),
             cwd,

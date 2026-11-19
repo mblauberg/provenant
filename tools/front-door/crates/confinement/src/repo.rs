@@ -270,6 +270,17 @@ impl GitRefName {
         Ok(Self(format!("refs/remotes/{value}")))
     }
 
+    /// Any ref Git lists under `refs/remotes/`. Unlike `remote_tracking` it
+    /// does not require a `remote/branch` shape: a ref fetched by hand, such
+    /// as `refs/remotes/pr123`, is valid Git state that readers must accept.
+    pub fn remote_ref(value: impl AsRef<str>) -> Result<Self, GitRefError> {
+        let value = value.as_ref();
+        if !valid_branch(value) {
+            return Err(GitRefError);
+        }
+        Ok(Self(format!("refs/remotes/{value}")))
+    }
+
     pub fn branch(value: impl AsRef<str>) -> Result<Self, GitRefError> {
         let branch = value.as_ref();
         if !valid_branch(branch) {

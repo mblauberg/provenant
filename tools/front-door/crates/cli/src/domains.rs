@@ -692,6 +692,9 @@ pub use provenant_records::UserSkillsMode;
 pub struct LanesSettings {
     pub user_skills: UserSkillsMode,
     pub skill_stage_max_bytes: u64,
+    /// Extra host Git configuration keys passed deliberately to sandboxed
+    /// lanes beyond the compiled allowlist (`provenant_providers::git_config`).
+    pub git_config_allow: Vec<String>,
     #[serde(default)]
     pub projects: std::collections::BTreeMap<String, ProjectLanesConfig>,
 }
@@ -715,6 +718,7 @@ impl Default for LanesSettings {
         Self {
             user_skills: UserSkillsMode::default(),
             skill_stage_max_bytes: 16 * 1024 * 1024,
+            git_config_allow: Vec::new(),
             projects: Default::default(),
         }
     }
@@ -731,17 +735,36 @@ impl LanesSettings {
 
 impl DomainConfig for LanesSettings {
     fn validate(&self) -> Vec<SectionError> {
-        Vec::new()
+        use provenant_providers::git_config::{MAX_ALLOW, valid_pattern};
+        let mut errors = Vec::new();
+        if self.git_config_allow.len() > MAX_ALLOW {
+            errors.push(SectionError {
+                detail: None,
+                field: "git_config_allow".into(),
+                code: "range",
+            });
+        }
+        for (index, pattern) in self.git_config_allow.iter().enumerate() {
+            if !valid_pattern(pattern) {
+                errors.push(SectionError {
+                    detail: None,
+                    field: format!("git_config_allow.{index}"),
+                    code: "value",
+                });
+            }
+        }
+        errors
     }
 }
 
 const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     "lanes",
-    |_| "user_skills = \"discover\"\nskill_stage_max_bytes = 16777216\n",
+    |_| "user_skills = \"discover\"\nskill_stage_max_bytes = 16777216\ngit_config_allow = []\n",
 )
 .with_fields(&[
     FieldMetadata::enumeration("user_skills", &["discover", "off"]),
     FieldMetadata::new("skill_stage_max_bytes", "int"),
+    FieldMetadata::new("git_config_allow", "array"),
     FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
     FieldMetadata::new("projects.{project}.shared_paths", "array"),
     FieldMetadata::new("projects.{project}.capabilities", "array"),
@@ -956,10 +979,20 @@ mod tests {
             (max_targets.min, max_targets.max, &max_targets.default),
             (Some(1), Some(1024), &json!(64))
         );
+        let pr_complete = field("domains.wait.pr_complete_timeout_seconds");
+        assert_eq!(
+            (pr_complete.min, pr_complete.max, &pr_complete.default),
+            (Some(1), Some(u32::MAX as i64), &json!(3600))
+        );
         let pr_read = field("domains.wait.pr_read_timeout_seconds");
         assert_eq!(
             (pr_read.min, pr_read.max, &pr_read.default),
             (Some(1), Some(600), &json!(60))
+        );
+        let grace = field("domains.wait.actions_grace_seconds");
+        assert_eq!(
+            (grace.min, grace.max, &grace.default),
+            (Some(0), Some(600), &json!(60))
         );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
@@ -1145,6 +1178,42 @@ mod tests {
                 .user_skills_for(Some("other-proj")),
             UserSkillsMode::Off
         );
+    }
+
+    #[test]
+    fn git_config_allow_defaults_empty_and_reports_its_user_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        assert!(config.domains.lanes.git_config_allow.is_empty());
+        let edited = edit(
+            &roots,
+            json!({"domains.lanes.git_config_allow": ["push.default", "pull.*"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            edited.config.domains.lanes.git_config_allow,
+            ["push.default", "pull.*"]
+        );
+        assert!(matches!(
+            edited.config.origins.get("domains.lanes.git_config_allow"),
+            Some(provenant_config::Origin::User { .. })
+        ));
+        for invalid in ["include.path", "includeIf.*", "*", "user"] {
+            let settings = LanesSettings {
+                git_config_allow: vec![invalid.into()],
+                ..LanesSettings::default()
+            };
+            assert_eq!(
+                settings
+                    .validate()
+                    .into_iter()
+                    .map(|error| error.field)
+                    .collect::<Vec<_>>(),
+                ["git_config_allow.0"],
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

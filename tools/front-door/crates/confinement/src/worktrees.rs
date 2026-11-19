@@ -67,7 +67,7 @@ use crate::repo::{
 use crate::status::{StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
     GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
-    run_utility,
+    execute_git_prepared_ref_delete, run_utility,
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
@@ -98,26 +98,6 @@ use thiserror::Error;
 const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
-/// The single common-directory protocol for repository mutations and the Git
-/// snapshots they depend on. Acquisition waits within the caller's budget, so
-/// concurrent launches queue rather than fail (#3393); a repository holder may
-/// only try a writer lock without waiting. Release
-/// this owner before network discovery, slow census, or provider execution.
-pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
-
-/// Coordinate all checkouts, independently of their state registry or caller.
-/// Shared holders read Git configuration; exclusive holders mutate Git state.
-pub fn lock_repository(
-    common: &Directory,
-    mode: LockMode,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard, FsError> {
-    // Protect creation/removal, registration, and coherent Git config snapshots.
-    // Never retain this hold across provider work or network discovery.
-    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
-}
 const WRITER_LOCK: &str = "writer.lock";
 
 /// The configured path for a writer created from a validated branch name.
@@ -303,6 +283,8 @@ pub enum WorktreeError {
     Primary,
     #[error("worktree Git output is malformed or incomplete")]
     InvalidOutput,
+    #[error("worktree Git read failed: {0}")]
+    GitRead(Box<GitReadFailure>),
     #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
     MutationFailed {
         operation: GitMutationOperation,
@@ -318,14 +300,14 @@ pub enum WorktreeError {
     PathEncoding,
     #[error("durable retirement authority could not be read or advanced")]
     Retirement(#[source] Box<dyn std::error::Error + Send + Sync>),
-    #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
-        "the partial checkout and new branch were removed, so it is safe to retry"
+    #[error("worktree creation failed: {cause}; {}", if *.artifacts_absent {
+        "no checkout or new branch remains, so it is safe to retry"
     } else {
-        "the partial checkout or branch it made could not be fully removed; inspect the configured worktree layout and branch before retrying"
+        "checkout or branch state remains or could not be verified; inspect the configured worktree layout and branch before retrying"
     })]
     CreateFailed {
         cause: Box<WorktreeError>,
-        rolled_back: bool,
+        artifacts_absent: bool,
     },
     #[error(transparent)]
     Filesystem(#[from] FsError),
@@ -335,6 +317,25 @@ pub enum WorktreeError {
     Repository(#[from] RepoError),
     #[error(transparent)]
     PathWire(#[from] PathWireError),
+}
+
+/// A Git read that ended outside its contract: the subcommand it ran, how it
+/// ended, and Git's first stderr line or the output defect that was found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitReadFailure {
+    pub command: String,
+    pub status: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for GitReadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`git {}` {}", self.command, self.status)?;
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
 }
 
 /// Closed operation names: no Git output, arguments or host paths are disclosed.
@@ -842,6 +843,7 @@ pub enum RetainReason {
     Changed,
     GitFailure,
     Unregistered,
+    RefAbsent,
     LockedOrPrunable,
     /// Provenant did not create the branch, or cannot observe that it did.
     NotCreated,
@@ -1017,31 +1019,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let common = temporary.path();
-        let admin = common.join("worktrees");
-        std::fs::create_dir(&admin)?;
-        let target = common.join("target");
-        for index in 0..1024 {
-            let entry = admin.join(format!("entry-{index:04}"));
-            std::fs::create_dir(&entry)?;
-            std::fs::write(
-                entry.join("gitdir"),
-                target.join(".git").as_os_str().as_encoded_bytes(),
-            )?;
-        }
-        let keep = admin.join("keep");
-        std::fs::create_dir(&keep)?;
-        std::fs::write(keep.join("gitdir"), b"/another/worktree/.git")?;
-        assert!(remove_admin_entry(common, &target));
-        assert_eq!(std::fs::read_dir(&admin)?.count(), 1);
-        assert!(keep.is_dir());
-        Ok(())
-    }
-
     const WORKTREE_LIST: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/external/git/worktree-list-sha1.z"
@@ -1074,6 +1051,28 @@ mod tests {
             parsed
                 .keys()
                 .any(|name| name.as_str() == "refs/heads/feature/recorded")
+        );
+    }
+
+    #[test]
+    fn branch_tips_accept_every_remote_ref_git_lists() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let listing = format!("refs/remotes/origin/main\0{oid}\0\nrefs/remotes/pr3467\0{oid}\0\n");
+        let parsed = parse_branch_tips(listing.as_bytes()).expect("Git-listed remote refs");
+        let names: Vec<_> = parsed.keys().map(GitRefName::as_str).collect();
+        assert_eq!(names, ["refs/remotes/origin/main", "refs/remotes/pr3467"]);
+    }
+
+    #[test]
+    fn git_read_failure_names_command_status_and_detail() {
+        let failure = WorktreeError::GitRead(Box::new(GitReadFailure {
+            command: GitRead::RemoteBranchTips.command_label(),
+            status: "exited 128".into(),
+            detail: "fatal: bad object".into(),
+        }));
+        assert_eq!(
+            failure.to_string(),
+            "worktree Git read failed: `git for-each-ref --format=%(refname)%00%(objectname)%00 refs/remotes` exited 128: fatal: bad object"
         );
     }
 

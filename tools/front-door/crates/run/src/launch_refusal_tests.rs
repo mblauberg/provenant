@@ -179,11 +179,8 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert_eq!(*terminal_cause, Some(TerminalCause::AccessPolicyRefused));
+    assert_eq!(*terminal_cause, Some(TerminalCause::Unrecorded));
     let (_, reason) = LaneRow::state_and_reason(&record.state);
-    assert_eq!(
-        reason.as_deref(),
-        Some(TerminalCause::AccessPolicyRefused.detail())
-    );
+    assert_eq!(reason.as_deref(), Some(TerminalCause::Unrecorded.detail()));
     Ok(())
 }

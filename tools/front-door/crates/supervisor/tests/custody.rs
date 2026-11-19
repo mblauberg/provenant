@@ -408,8 +408,11 @@ impl provenant_os::capture::FrameDecoder for Decoder {
     }
 }
 fn budget(clock: &SystemClock) -> Result<WaitBudget> {
+    budget_seconds(clock, 5)
+}
+fn budget_seconds(clock: &SystemClock, seconds: u64) -> Result<WaitBudget> {
     use provenant_core::Clock;
-    Ok(WaitBudget::cli(clock.mono_now(), 5)?)
+    Ok(WaitBudget::cli(clock.mono_now(), seconds)?)
 }
 fn start(
     root: &Path,
@@ -1813,6 +1816,245 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
 /// misses the last blocker's exit wakes only on that backstop.
 #[cfg(target_os = "macos")]
 const RELEASE_AFTER_LAST_BLOCKER: Duration = Duration::from_millis(2_500);
+/// Start a lane whose sandbox escapee outlives cleanup and may not be stopped,
+/// so its guardian retains custody. Returns the escapee's socket, which ends
+/// it when dropped, and its identity, once the unresolved exit is published.
+#[cfg(target_os = "macos")]
+fn retain_unstoppable_escapee(
+    root: &Path,
+    name: &str,
+    plan: CapturePlan,
+) -> Result<(UnixStream, ProcessIdentity)> {
+    let (stream, escapee, handle) = launch_unstoppable_escapee(
+        root,
+        name,
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..plan
+        },
+    )?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    Ok((stream, escapee))
+}
+/// Start that lane with `plan` as given and return once the escapee reports,
+/// before the guardian's cleanup has published an exit.
+#[cfg(target_os = "macos")]
+fn launch_unstoppable_escapee(
+    root: &Path,
+    name: &str,
+    plan: CapturePlan,
+) -> Result<(UnixStream, ProcessIdentity, CustodyHandle)> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
+    // Live graph children forbid the escapee stop: only its own exit settles.
+    std::fs::write(home.join("live-graph-children"), b"pending")?;
+    let ready_path = root.join(format!("{name}.sock"));
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let (writer, handle) = start(
+        root,
+        name,
+        "s2-detach-provider",
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+        ],
+        plan,
+    )?;
+    drop(writer);
+    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let escapee = process_identity(read_pid_line(&mut stream)?)?;
+    Ok((stream, escapee, handle))
+}
+/// The retention record the guardian last published on the unresolved exit.
+#[cfg(target_os = "macos")]
+fn published_retention(root: &Path, name: &str) -> Result<serde_json::Value> {
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join(format!("{name}-attempt/process-exit.json")),
+    )?)?;
+    assert_eq!(exit["unresolved_cleanup"], true, "{exit}");
+    Ok(exit["retention"].clone())
+}
+/// A supervisor signal that arrives while the guardian retains custody, and so
+/// after or during its cleanup, ends the guardian within a bound: the reactor
+/// keeps the signal even when a pacing wait drains it (#3585). The exit stays
+/// unresolved, names why and keeps the escapee for reconcile.
+#[cfg(target_os = "macos")]
+fn sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer(
+    root: &Path,
+) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(root, "sigterm", CapturePlan::default())?;
+    let writer = root.join("sigterm-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let signalled = Instant::now();
+    fixture::signal_recorded_process(&guardian, libc::SIGTERM)?;
+    let clock = SystemClock::new();
+    let released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget_seconds(&clock, GUARDIAN_SIGNAL_RELEASE.as_secs() + 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = signalled.elapsed();
+    assert!(
+        waited < GUARDIAN_SIGNAL_RELEASE,
+        "writer released {waited:?} after SIGTERM"
+    );
+    drop(released);
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let retention = published_retention(root, "sigterm")?;
+    assert_eq!(retention["guardian"]["pid"], guardian.pid, "{retention}");
+    assert_eq!(
+        retention["ended"]["reason"], "supervisor_signal",
+        "{retention}"
+    );
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    // Ending retention signals nothing: the escapee is left for reconcile.
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// A SIGTERM that lands during cleanup, after the provider exits and before
+/// the exit is published, still ends the guardian within the bound: cleanup's
+/// pacing pauses drain the signal edge, and the reactor keeps it (#3585).
+#[cfg(target_os = "macos")]
+fn sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer(root: &Path) -> Result<()> {
+    let (stream, escapee, handle) = launch_unstoppable_escapee(
+        root,
+        "midclean",
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: MID_CLEANUP_GRACE_MS,
+            ..CapturePlan::default()
+        },
+    )?;
+    let writer = root.join("midclean-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let provider = reservation_identity(&writer, "provider")?;
+    // The guardian reaps the provider only after cleanup, so its zombie marks
+    // the cleanup window; the exit is not yet published.
+    wait_for_zombie(&provider)?;
+    assert!(
+        !root.join("midclean-attempt/process-exit.json").exists(),
+        "the exit was published before the signal"
+    );
+    let signalled = Instant::now();
+    fixture::signal_recorded_process(&guardian, libc::SIGTERM)?;
+    let clock = SystemClock::new();
+    let released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget_seconds(&clock, GUARDIAN_SIGNAL_RELEASE.as_secs() + 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = signalled.elapsed();
+    assert!(
+        waited < GUARDIAN_SIGNAL_RELEASE,
+        "writer released {waited:?} after a mid-cleanup SIGTERM"
+    );
+    drop(released);
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    let retention = published_retention(root, "midclean")?;
+    assert_eq!(
+        retention["ended"]["reason"], "supervisor_signal",
+        "{retention}"
+    );
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// Retention past its configured limit records the unresolved processes and
+/// the blocker on the exit, then the guardian exits with the typed failure and
+/// its writer lock falls. Nothing is signalled or removed (#3585).
+#[cfg(target_os = "macos")]
+fn retention_past_its_limit_exits_with_the_typed_outcome(root: &Path) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(
+        root,
+        "limit",
+        CapturePlan {
+            retained_custody_ms: RETENTION_LIMIT_MS,
+            ..CapturePlan::default()
+        },
+    )?;
+    let writer = root.join("limit-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(10))?;
+    assert_eq!(
+        status.code(),
+        Some(i32::from(provenant_records::Outcome::Timeout.exit_code())),
+        "a retention limit exits as a timeout, not a supervisor fault: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let clock = SystemClock::new();
+    let _released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let retention = published_retention(root, "limit")?;
+    assert_eq!(retention["guardian"]["pid"], guardian.pid, "{retention}");
+    assert_eq!(retention["limit_ms"], RETENTION_LIMIT_MS, "{retention}");
+    assert_eq!(retention["ended"]["reason"], "limit_reached", "{retention}");
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    assert!(
+        retention["ended"]["retained_ms"]
+            .as_u64()
+            .is_some_and(|retained| retained >= RETENTION_LIMIT_MS),
+        "{retention}"
+    );
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join("limit-attempt/process-exit.json"),
+    )?)?;
+    assert_eq!(
+        exit["unresolved_pids"],
+        serde_json::json!([escapee.pid]),
+        "{exit}"
+    );
+    // The escapee is left for reconcile, unsignalled.
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// A signalled guardian runs one bounded stop, publishes and exits. Loaded CI
+/// hosts stretch the stop's census passes, so the bound is generous; the
+/// defect it guards against held the lock for hours.
+#[cfg(target_os = "macos")]
+const GUARDIAN_SIGNAL_RELEASE: Duration = Duration::from_millis(10_000);
+/// The descendant grace for the mid-cleanup signal test: long enough that a
+/// SIGTERM sent once the provider has exited lands inside cleanup.
+#[cfg(target_os = "macos")]
+const MID_CLEANUP_GRACE_MS: u64 = 2_000;
+#[cfg(target_os = "macos")]
+const RETENTION_LIMIT_MS: u64 = 300;
 /// Retained custody releases the writer soon after the last process blocking
 /// settlement exits. Its exit must wake the guardian whether it lands in a
 /// stop's exit wait, between a census and its watch, or in the idle wait.
@@ -1820,34 +2062,7 @@ const RELEASE_AFTER_LAST_BLOCKER: Duration = Duration::from_millis(2_500);
 fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
     root: &Path,
 ) -> Result<()> {
-    let home = root.join("HOME");
-    std::fs::create_dir_all(&home)?;
-    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
-    // Live graph children forbid the escapee stop: only its own exit settles.
-    std::fs::write(home.join("live-graph-children"), b"pending")?;
-    let ready_path = root.join("release.sock");
-    let ready_listener = UnixListener::bind(&ready_path)?;
-    let (writer, handle) = start(
-        root,
-        "release",
-        "s2-detach-provider",
-        &[
-            ready_path.into_os_string(),
-            scope().attempt.sandbox_lookup_name().into(),
-        ],
-        CapturePlan {
-            root_flush_ms: 30,
-            descendant_grace_ms: 10,
-            ..CapturePlan::default()
-        },
-    )?;
-    drop(writer);
-    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
-    byte(&mut stream, b'R')?;
-    let escapee = process_identity(read_pid_line(&mut stream)?)?;
-    let exit = exited(&handle)?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
-    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    let (stream, escapee) = retain_unstoppable_escapee(root, "release", CapturePlan::default())?;
     // Its socket closing ends the escapee, at once and with no signal.
     drop(stream);
     wait_for_identity_absence(&escapee)?;
@@ -2706,6 +2921,24 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let clock = SystemClock::new();
     // Guardian loss frees the kernel lease, but never clears the durable fence.
     let writer_path = root.join("crash-writer");
+    // An unsandboxed lane is proven gone only after its guardian completed a
+    // census of the tree, which a running guardian does within seconds. Wait
+    // for that record, so the loss below is the ordinary mid-run one.
+    let reservation = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read(&reservation)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value["census_incomplete"] == false)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the guardian never completed a census"
+        );
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
         Directory::open_anchor(&writer_path)?,
@@ -2874,7 +3107,7 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
     Ok(())
 }
 
-// Medium: intentionally omit the sixth descriptor at the real first exec.
+// Medium: intentionally omit the profile descriptor at the real first exec.
 // This does not require Seatbelt; refusal happens before the native backend.
 fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
@@ -3135,6 +3368,21 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
+        "sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer",
+        sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer",
+        sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "retention_past_its_limit_exits_with_the_typed_outcome",
+        retention_past_its_limit_exits_with_the_typed_outcome,
+    ),
+    #[cfg(target_os = "macos")]
+    (
         "unsandboxed_detached_service_does_not_block_settlement",
         unsandboxed_detached_service_does_not_block_settlement,
     ),
@@ -3321,7 +3569,7 @@ fn main() -> Result<()> {
             }),
             Err(_) => None,
         };
-        provenant_supervisor::supervise(
+        let supervised = provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
                 holder: refusal
@@ -3343,7 +3591,12 @@ fn main() -> Result<()> {
                 stdout_decoder: Some(&Decoder),
                 ..Default::default()
             },
-        )?;
+        );
+        // Exit as `internal supervise` does: by the typed error's status.
+        if let Err(error) = supervised {
+            let _ = writeln!(io::stderr(), "supervise: {error}");
+            std::process::exit(i32::from(error.outcome().0.exit_code()));
+        }
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--fixture")

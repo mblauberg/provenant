@@ -17,7 +17,9 @@ and recording process (`recorded 45s ago by process <pid>: ...`), never as a
 current failure. `provenant reconcile --abandon` now releases a node whose
 guardian died with its cleanup unresolved once a fresh census proves every
 recorded process gone and no process carries the lane's sandbox mark;
-otherwise it refuses and names the live PID or the omitted descendants.
+otherwise it refuses and names the live PID or the omitted descendants. A lane
+without a sandbox mark whose guardian never completed a census of its processes
+is refused too, because a daemon that detached itself cannot be ruled out.
 Deferred Git cleanup is now retried for launched writers too; a refused import
 keeps its Git evidence instead.
 

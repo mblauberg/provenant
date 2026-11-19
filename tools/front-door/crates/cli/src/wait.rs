@@ -8,10 +8,14 @@ use serde::{Deserialize, Serialize};
 pub const SECTION_KEY: &str = "domains.wait";
 /// The key that bounds every wait budget.
 pub const MAX_TIMEOUT_KEY: &str = "domains.wait.max_timeout_seconds";
+/// The default budget for `--pr --until complete`, long enough for a normal CI run.
+pub const COMPLETE_TIMEOUT_KEY: &str = "domains.wait.pr_complete_timeout_seconds";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    /// Default budget for a `--pr --until complete` wait, which must outlast CI.
+    pub pr_complete_timeout_seconds: u64,
     pub timeout_seconds: u64,
     pub max_timeout_seconds: Option<u64>,
     pub local_interval_ms: u64,
@@ -23,10 +27,14 @@ pub struct Settings {
     pub forge_source: String,
     pub max_targets: u64,
     pub pr_read_timeout_seconds: u64,
+    /// How long a pull request wait holds a settling reading pending while
+    /// Actions has reported no run for its head. Zero settles at once.
+    pub actions_grace_seconds: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            pr_complete_timeout_seconds: 3600,
             timeout_seconds: 300,
             max_timeout_seconds: None,
             local_interval_ms: 500,
@@ -37,6 +45,7 @@ impl Default for Settings {
             forge_source: "auto".into(),
             max_targets: 64,
             pr_read_timeout_seconds: 60,
+            actions_grace_seconds: 60,
         }
     }
 }
@@ -205,6 +214,19 @@ impl Settings {
         let requested = override_seconds
             .filter(|seconds| *seconds != 0)
             .unwrap_or(self.timeout_seconds);
+        self.bounded(requested, origin)
+    }
+
+    /// The budget for `--pr --until complete`: the request, else the longer
+    /// configured completion default, under the same maximum as every wait.
+    pub fn complete_timeout(&self, override_seconds: Option<u64>, origin: &Origin) -> u64 {
+        let requested = override_seconds
+            .filter(|seconds| *seconds != 0)
+            .unwrap_or(self.pr_complete_timeout_seconds);
+        self.bounded(requested, origin)
+    }
+
+    fn bounded(&self, requested: u64, origin: &Origin) -> u64 {
         let maximum = self
             .max_timeout_seconds
             .unwrap_or(provenant_core::MAX_LANE_RUNTIME_SECONDS);
@@ -222,6 +244,12 @@ impl Settings {
 impl DomainConfig for Settings {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors: Vec<_> = [
+            (
+                "pr_complete_timeout_seconds",
+                self.pr_complete_timeout_seconds,
+                1,
+                u32::MAX as u64,
+            ),
             ("timeout_seconds", self.timeout_seconds, 1, u32::MAX as u64),
             (
                 "max_timeout_seconds",
@@ -246,6 +274,7 @@ impl DomainConfig for Settings {
                 1,
                 600,
             ),
+            ("actions_grace_seconds", self.actions_grace_seconds, 0, 600),
         ]
         .into_iter()
         .filter(|(_, value, min, max)| !(min..=max).contains(&value))
@@ -268,10 +297,11 @@ impl DomainConfig for Settings {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "timeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
+        "pr_complete_timeout_seconds = 3600\ntimeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\nactions_grace_seconds = 60\n"
     },
 )
 .with_fields(&[
+    FieldMetadata::int("pr_complete_timeout_seconds", 1, u32::MAX as i64),
     FieldMetadata::int("timeout_seconds", 1, u32::MAX as i64),
     FieldMetadata::int("max_timeout_seconds", 1, u32::MAX as i64),
     FieldMetadata::int("local_interval_ms", 10, 60000),
@@ -282,6 +312,7 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::new("forge_source", "string"),
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
+    FieldMetadata::int("actions_grace_seconds", 0, 600),
 ]);
 
 #[cfg(test)]
@@ -388,5 +419,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn complete_wait_defaults_to_an_hour_and_respects_overrides() {
+        let origin = Origin::compiled(Default::default());
+        let settings = Settings::default();
+        assert_eq!(settings.pr_complete_timeout_seconds, 3600);
+        assert_eq!(settings.complete_timeout(None, &origin), 3600);
+        assert_eq!(settings.complete_timeout(Some(0), &origin), 3600);
+        assert_eq!(settings.complete_timeout(Some(120), &origin), 120);
+        // A configured default replaces the hour, but an explicit --timeout wins.
+        let configured = Settings {
+            pr_complete_timeout_seconds: 7200,
+            ..Settings::default()
+        };
+        assert_eq!(configured.complete_timeout(None, &origin), 7200);
+        assert_eq!(configured.complete_timeout(Some(120), &origin), 120);
+        // The shared maximum still bounds a completion wait.
+        let bounded = Settings {
+            max_timeout_seconds: Some(600),
+            ..Settings::default()
+        };
+        assert_eq!(bounded.complete_timeout(None, &origin), 600);
+        assert_eq!(bounded.complete_timeout(Some(7200), &origin), 600);
     }
 }

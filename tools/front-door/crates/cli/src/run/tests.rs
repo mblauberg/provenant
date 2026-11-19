@@ -1082,9 +1082,25 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         .atomic_write(
                             OsStr::new("writer-objects.json"),
                             ".test-",
-                            &serde_json::to_vec(
-                                &json!({"schema_version":1,"candidate":"candidate-0"}),
-                            )?,
+                            &serde_json::to_vec(&{
+                                use std::os::unix::fs::MetadataExt as _;
+                                let identity = |name: &str| -> Result<_, Box<dyn std::error::Error>> {
+                                    let metadata = std::fs::metadata(
+                                        attempt_path.join("tmp/candidate-0").join(name),
+                                    )?;
+                                    Ok(json!({"device": metadata.dev(), "inode": metadata.ino()}))
+                                };
+                                let scratch = std::fs::metadata(attempt_path.join("tmp/candidate-0"))?;
+                                json!({
+                                    "schema_version": 4,
+                                    "candidate": "candidate-0",
+                                    "identities": {
+                                        "scratch": {"device": scratch.dev(), "inode": scratch.ino()},
+                                        "refs": identity("git-common")?,
+                                        "objects": identity("git-objects")?,
+                                    },
+                                })
+                            })?,
                             PublishMode::NoReplace,
                         )?
                         .require_durable()?;
@@ -1343,3 +1359,24 @@ mod provider_tests;
 mod reporting_tests;
 #[path = "tests_submission.rs"]
 mod submission_tests;
+
+#[test]
+fn one_config_deprecation_notice_gives_one_warning_across_channels() {
+    let notice = "[features].multi_agent is deprecated. Use [agents].enabled=false instead.";
+    let events = [ProviderEvent::Warning {
+        message: notice.into(),
+        source: Some("config.toml".into()),
+    }];
+    let stderr = format!(
+        "2026-11-19T01:02:03Z  WARN codex_core::config: /home/u/.codex/config.toml: {notice}\nunrelated\n"
+    );
+    let warnings = config_notice_warnings(&events, stderr.as_bytes(), true);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(notice) && warnings[0].contains("config.toml"));
+    // The adapter decides whether stderr is read at all.
+    assert!(config_notice_warnings(&[], stderr.as_bytes(), false).is_empty());
+    // Stderr alone still gives one warning, without the log prefix.
+    let alone = config_notice_warnings(&[], stderr.as_bytes(), true);
+    assert_eq!(alone.len(), 1);
+    assert!(!alone[0].contains("WARN codex_core"), "{alone:?}");
+}

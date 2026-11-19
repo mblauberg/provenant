@@ -10,7 +10,12 @@ Paths are relative to `tools/front-door/`.
 A settlement driver holds an exclusive lease. Journal locks do not span external
 commands, and terminal effects have separate exclusion. Import precedes
 writer branch publication, the terminal record is committed before custody release, and
-import refusal retains private Git for recovery.
+import refusal retains private Git for recovery. Private staged indexes also
+survive terminal cleanup and remain a worktree-removal fence until reconciled.
+Staging and stopped merges stay in attempt-private Git, with the worktree files
+left intact. Native index convergence uses only committed trees and preserves
+conflicting native staging or operations. Each attempt publishes only its private ref; a sibling-divergent host tip
+refuses publication while retaining both commits for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 The guardian transfers its existing writer exclusion to recovery; import and
@@ -211,12 +216,16 @@ It requires the original guardian lock and attempt custody lock to be free,
 holds both alongside the original writer lease, and takes a fresh complete
 process census under those locks. A tree whose recorded descendants omitted
 identities is never proven gone, because no census can check their sessions or
-groups. An incomplete guardian census is no such gap: a guardian keeps that
-flag until its first full census, so a guardian lost mid-run has it, and the
-fresh census and the checks below stand in for it. Recorded
-roots, descendants, identities an unresolved exit named, and their sessions or
-groups must have no surviving member, and no live process may carry the
-attempt's sandbox mark. The trusted host must also
+groups. Nor is a spawned tree whose guardian never completed a census of it,
+unless the attempt's sandbox mark was in effect: a daemon that double-forks and
+calls setsid after the guardian's last complete census is recorded nowhere and
+matches no pid, session or group, and only the inherited mark finds it. The
+guardian clears the incomplete flag at its first full census, which a running
+guardian takes at least every 5 s, so a guardian lost mid-run normally has a
+complete record; an unsandboxed lane lost before that is refused, and
+`reconcile --abandon` is the explicit escape. Recorded roots, descendants,
+identities an unresolved exit named, and their sessions or groups must have no
+surviving member, and no live process may carry the attempt's sandbox mark. The trusted host must also
 prove worktree non-occupancy under exclusion; unknown or occupied is not free.
 For a read-only attempt there is no worktree to occupy.
 

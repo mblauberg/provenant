@@ -70,6 +70,40 @@ pub fn wait_for<T: std::fmt::Debug>(
     }
 }
 
+/// True when the process no longer exists or is a zombie awaiting its parent's
+/// reap: a zombie has already run its last instruction, but `kill -0` still
+/// succeeds on it until init collects it, so liveness is read from `ps` state.
+#[allow(clippy::disallowed_methods)] // Observe a process without signalling it.
+pub fn process_is_gone(pid: &str) -> std::io::Result<bool> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", pid])
+        .stderr(std::process::Stdio::null())
+        .output()?;
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    Ok(state.is_empty() || state.starts_with('Z'))
+}
+
+/// Wait up to two seconds for a process to be gone (see `process_is_gone`),
+/// reporting the survivor when the deadline expires. A live process always
+/// fails.
+pub fn assert_process_gone(pid: &str) -> Result<(), String> {
+    let mut failure = None;
+    wait_for(
+        &format!("process {pid} to be gone"),
+        std::time::Duration::from_secs(2),
+        || match process_is_gone(pid) {
+            Ok(gone) => gone,
+            Err(error) => {
+                failure = Some(error.to_string());
+                true
+            }
+        },
+        |gone| *gone,
+    )?;
+    failure.map_or(Ok(()), |error| Err(format!("probe process {pid}: {error}")))
+}
+
 /// Reports an unavailable sandbox-dependent test locally, or fails when CI
 /// requires native confinement. The ordinal makes skips visible and countable
 /// in captured test output.

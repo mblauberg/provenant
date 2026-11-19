@@ -1,4 +1,5 @@
 //! Scheduled host work. Deadlines live on disk; this process owns no timers.
+use crate::worktrees::GcCompletion;
 use provenant_cli::Globals;
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{Clock, DurationMicros, WaitBudget, WallTime};
@@ -18,12 +19,34 @@ use std::{
 mod steward;
 
 const DAY_SECONDS: u64 = 86_400;
+/// An unfinished scheduled collection retries after this delay, then after
+/// each factor-fold longer one, and never later than the daily cadence.
+const GC_RETRY_BASE_SECONDS: u64 = 15 * 60;
+const GC_RETRY_FACTOR: u64 = 4;
+const GC_RESULT: &str = "gc-result.json";
 const MAX_SEED_DISCOVERY_ERRORS: usize = 16;
 const MAX_SEED_ERROR_BYTES: usize = 1024;
+/// Bound on an error saved in a task result, so a result never outgrows its read cap.
+const MAX_RESULT_ERROR_BYTES: usize = 1024;
+/// Bound on a saved cause quoted in a tick note.
+const MAX_NOTE_CAUSE_BYTES: usize = 256;
+/// A result file is never written within this much of its read cap.
+const SEED_RESULT_SLACK_BYTES: u64 = 64 * 1024;
+const MAX_GC_RESULT_BYTES: u64 = 64 * 1024;
+/// Times a completed collection tries to advance its deadline.
+const GC_ADVANCE_ATTEMPTS: u32 = 3;
+const MAX_SEED_PROJECT_PATH_BYTES: usize = 1024;
 const MAX_BUSY_SEED_PROJECTS: usize = 512;
-const MAX_SEED_RESULT_ERROR_BYTES: usize = 16 * 1024;
+const MAX_SEED_PROJECT_RECORDS: usize = 512;
+const MAX_SEED_RESULT_BYTES: u64 = 2 * 1024 * 1024;
 const SEED_WORK_RETRY_MICROS: i64 = 60_000_000;
 
+fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// The daily collection deadline. It advances only when a collection
+/// completes, so a failed or interrupted one stays due.
 #[derive(Default, Serialize, Deserialize)]
 struct Cadence {
     #[serde(flatten)]
@@ -31,13 +54,18 @@ struct Cadence {
     next_gc_at: Option<WallTime>,
 }
 
+/// A task's last outcome, written by its detached worker or its scheduler.
 #[derive(Serialize, Deserialize)]
-struct GcResult {
+struct TaskResult {
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
     state: String,
     at: WallTime,
     error: Option<String>,
+    /// Consecutive attempts that did not complete. It selects the retry delay
+    /// after a failure and restarts at zero when a collection completes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    failures: u32,
 }
 
 const SEED_QUEUE: &str = "seed-queue.json";
@@ -52,21 +80,18 @@ enum SeedScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SeedRequest {
     scope: SeedScope,
-    prior_error: Option<String>,
 }
 
 impl SeedRequest {
     fn full() -> Self {
         Self {
             scope: SeedScope::Full,
-            prior_error: None,
         }
     }
 
-    fn busy(project_keys: Vec<String>, prior_error: Option<String>) -> Self {
+    fn busy(project_keys: Vec<String>) -> Self {
         Self {
             scope: SeedScope::Busy(project_keys),
-            prior_error,
         }
     }
 
@@ -92,13 +117,17 @@ struct SeedQueue {
     retry_at: Option<WallTime>,
 }
 
-fn write_gc_result(
+fn publish<T: Serialize>(
     directory: &Directory,
-    at: WallTime,
-    state: &str,
-    error: Option<String>,
+    file: &str,
+    purpose: &str,
+    value: &T,
 ) -> Result<(), String> {
-    write_result(directory, "gc-result.json", "tick-gc", at, state, error)
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    directory
+        .atomic_write(file.as_ref(), purpose, &bytes, PublishMode::Replace)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn write_result(
@@ -109,89 +138,314 @@ fn write_result(
     state: &str,
     error: Option<String>,
 ) -> Result<(), String> {
-    let result = GcResult {
+    write_task_result(directory, file, purpose, at, state, error, 0)
+}
+
+fn write_task_result(
+    directory: &Directory,
+    file: &str,
+    purpose: &str,
+    at: WallTime,
+    state: &str,
+    error: Option<String>,
+    failures: u32,
+) -> Result<(), String> {
+    let result = TaskResult {
         extra: Default::default(),
         state: state.into(),
         at,
-        error,
+        error: error.map(|error| truncate_bytes(error, MAX_RESULT_ERROR_BYTES)),
+        failures,
     };
-    let bytes = serde_json::to_vec(&result).map_err(|error| error.to_string())?;
-    directory
-        .atomic_write(file.as_ref(), purpose, &bytes, PublishMode::Replace)
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    publish(directory, file, purpose, &result)
 }
 
-/// The cadence lock is held by the caller. Spawn errors retain a due deadline;
-/// completion belongs to the collector's one-shot worker, never the scheduler.
+fn write_gc_result(
+    directory: &Directory,
+    at: WallTime,
+    state: &str,
+    error: Option<String>,
+    failures: u32,
+) -> Result<(), String> {
+    write_task_result(directory, GC_RESULT, "tick-gc", at, state, error, failures)
+}
+
+fn read_gc_result(directory: &Directory) -> Result<Option<TaskResult>, String> {
+    match directory.read_bounded(GC_RESULT.as_ref(), MAX_GC_RESULT_BYTES) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// What one check of the scheduled collection found, for the tick's report.
+#[derive(Debug, PartialEq, Eq)]
+struct GcReport {
+    state: &'static str,
+    /// When a recorded failure is next retried, while it waits.
+    retry_at: Option<WallTime>,
+    /// Context for an operator, such as the age and next retry of an old failure.
+    note: Option<String>,
+}
+
+impl GcReport {
+    fn state(state: &'static str) -> Self {
+        Self {
+            state,
+            retry_at: None,
+            note: None,
+        }
+    }
+}
+
+/// Seconds to wait after the given number of consecutive unfinished attempts:
+/// 15 minutes, then 1 hour, 4 hours and 16 hours, capped at the daily cadence.
+fn gc_retry_delay_seconds(failures: u32) -> u64 {
+    let mut delay = GC_RETRY_BASE_SECONDS;
+    for _ in 1..failures {
+        delay = delay.saturating_mul(GC_RETRY_FACTOR);
+        if delay >= DAY_SECONDS {
+            return DAY_SECONDS;
+        }
+    }
+    delay.min(DAY_SECONDS)
+}
+
+/// A result dated after `now` comes from a clock that has since moved back. It
+/// cannot be waited out, so it is retried at once; the retry's own result is
+/// dated correctly.
+fn gc_retry_at(result: &TaskResult, now: WallTime) -> Result<WallTime, String> {
+    if result.at > now {
+        return Ok(now);
+    }
+    result
+        .at
+        .checked_add(
+            DurationMicros::from_seconds(gc_retry_delay_seconds(result.failures))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn describe_span(micros: i64) -> String {
+    let seconds = micros.max(0) / 1_000_000;
+    if seconds < 60 {
+        "under a minute".to_owned()
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < DAY_SECONDS as i64 {
+        format!("{}h{:02}m", seconds / 3_600, seconds % 3_600 / 60)
+    } else {
+        format!("{}d{:02}h", seconds / 86_400, seconds % 86_400 / 3_600)
+    }
+}
+
+/// A recorded failure that is waiting for its retry. It is old news, not a
+/// fresh failure: the tick reports its age and the next attempt and does not
+/// fail.
+fn gc_retry_pending(result: &TaskResult, retry_at: WallTime, now: WallTime) -> GcReport {
+    GcReport {
+        state: "retry_pending",
+        retry_at: Some(retry_at),
+        note: Some(format!(
+            "the last scheduled GC failed {} ago ({}); attempt {} retries in {}",
+            describe_span(now.as_micros().saturating_sub(result.at.as_micros())),
+            truncate_bytes(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "no saved cause".to_owned()),
+                MAX_NOTE_CAUSE_BYTES
+            ),
+            result.failures.max(1).saturating_add(1),
+            describe_span(retry_at.as_micros().saturating_sub(now.as_micros())),
+        )),
+    }
+}
+
+enum GcUnfinished {
+    /// A worker holds its lock, or has been launched too recently to judge.
+    Live(&'static str),
+    /// No worker holds the lock: the failure was just recorded.
+    Interrupted(String),
+    /// The worker finished between the snapshot and the lock probe.
+    Settled(TaskResult),
+}
+
+/// A result that still reads queued or running is trusted only while the
+/// worker lock is held; a free lock proves the worker is gone.
+fn settle_unfinished_gc(
+    directory: &Directory,
+    now: WallTime,
+    result: &TaskResult,
+) -> Result<GcUnfinished, String> {
+    let live = if result.state == "running" {
+        "running"
+    } else {
+        "queued"
+    };
+    // Only a launch in the last minute is too recent to judge; one dated in the
+    // future is a clock that moved back, and no worker is waited on for it.
+    if result.state == "queued"
+        && (0..SEED_WORK_RETRY_MICROS)
+            .contains(&now.as_micros().saturating_sub(result.at.as_micros()))
+    {
+        return Ok(GcUnfinished::Live(live));
+    }
+    let _worker = match directory.try_lock("gc-worker.lock".as_ref(), LockMode::Exclusive) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(GcUnfinished::Live(live)),
+        Err(error) => return Err(error.to_string()),
+    };
+    // Re-read the atomic result under custody: the worker may have completed
+    // after our snapshot.
+    match read_gc_result(directory) {
+        Ok(Some(current)) if !matches!(current.state.as_str(), "running" | "queued") => {
+            return Ok(GcUnfinished::Settled(current));
+        }
+        // Still unfinished, unreadable or gone, with no worker to finish it.
+        _ => {}
+    }
+    let error = "scheduled GC interrupted; next: provenant gc --apply".to_owned();
+    write_gc_result(
+        directory,
+        now,
+        "failed",
+        Some(error.clone()),
+        result.failures.saturating_add(1),
+    )?;
+    Ok(GcUnfinished::Interrupted(error))
+}
+
+/// The cadence lock is held by the caller. The daily deadline advances only
+/// when a worker completes (`advance_gc_cadence`), so a failed or interrupted
+/// collection stays due and is retried with a bounded backoff from its recorded
+/// failure count. A spawn error is such a failure. A collection that is queued
+/// or running is never launched twice. Only a failure found now is an error;
+/// an older one waiting for its retry is reported with its age.
 fn queue_gc(
     directory: &Directory,
     now: WallTime,
     spawn: impl FnOnce() -> Result<(), String>,
-) -> Result<&'static str, String> {
-    let mut cadence = read_cadence(directory).map_err(|error| error.to_string())?;
-    if !gc_due(&cadence, now) {
-        return match directory.read_bounded("gc-result.json".as_ref(), 64 * 1024) {
-            Ok(bytes) => {
-                let mut result: GcResult =
-                    serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-                if result.state == "running"
-                    || result.state == "queued"
-                        && now.as_micros().saturating_sub(result.at.as_micros())
-                            >= SEED_WORK_RETRY_MICROS
-                {
-                    let _worker = match directory
-                        .try_lock("gc-worker.lock".as_ref(), LockMode::Exclusive)
-                    {
-                        Ok(lock) => lock,
-                        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok("running"),
-                        Err(error) => return Err(error.to_string()),
-                    };
-                    // The worker may have completed between the snapshot and
-                    // our lock probe. Re-read its atomic result under custody.
-                    let bytes = directory
-                        .read_bounded("gc-result.json".as_ref(), 64 * 1024)
-                        .map_err(|error| error.to_string())?;
-                    result = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-                    if matches!(result.state.as_str(), "running" | "queued") {
-                        let error =
-                            "scheduled GC interrupted; next: provenant gc --apply".to_owned();
-                        write_gc_result(directory, now, "failed", Some(error.clone()))?;
-                        return Err(error);
-                    }
-                }
-                let state = match result.state.as_str() {
-                    "running" => "running",
-                    "queued" => "queued",
-                    _ => "not_due",
-                };
-                result.error.map_or(Ok(state), Err)
+) -> Result<GcReport, String> {
+    let cadence = read_cadence(directory).map_err(|error| error.to_string())?;
+    let mut failures = 0;
+    let mut retrying = false;
+    // A result that cannot be read (corrupt, over its cap, or from a newer
+    // writer) must not block collection forever: it is treated as absent and
+    // the queued result written below replaces it.
+    let (previous, unreadable) = match read_gc_result(directory) {
+        Ok(previous) => (previous, None),
+        Err(error) => (None, Some(error)),
+    };
+    if let Some(mut result) = previous {
+        if matches!(result.state.as_str(), "running" | "queued") {
+            match settle_unfinished_gc(directory, now, &result)? {
+                GcUnfinished::Live(state) => return Ok(GcReport::state(state)),
+                GcUnfinished::Interrupted(error) => return Err(error),
+                GcUnfinished::Settled(settled) => result = settled,
             }
-            Err(error) if error.is_not_found() => Ok("not_due"),
-            Err(error) => Err(error.to_string()),
-        };
+        }
+        if result.state == "failed" {
+            let retry_at = gc_retry_at(&result, now)?;
+            if now < retry_at {
+                return Ok(gc_retry_pending(&result, retry_at, now));
+            }
+            failures = result.failures;
+            retrying = true;
+        }
     }
-    write_gc_result(directory, now, "queued", None)?;
+    if !retrying && !gc_due(&cadence, now) {
+        return Ok(GcReport::state("not_due"));
+    }
+    write_gc_result(directory, now, "queued", None, failures)?;
     if let Err(error) = spawn() {
-        write_gc_result(directory, now, "failed", Some(error.clone()))?;
+        write_gc_result(
+            directory,
+            now,
+            "failed",
+            Some(error.clone()),
+            failures.saturating_add(1),
+        )?;
         return Err(error);
     }
+    Ok(GcReport {
+        state: "queued",
+        retry_at: None,
+        note: unreadable.map(|error| {
+            format!(
+                "the previous scheduled GC result was unreadable and was replaced ({})",
+                truncate_bytes(error, MAX_NOTE_CAUSE_BYTES)
+            )
+        }),
+    })
+}
+
+/// Move the daily deadline a day past a completed collection.
+fn advance_gc_cadence(directory: &Directory, completed_at: WallTime) -> Result<(), String> {
+    let _lock = bounded_lock(directory, "cadence.lock")?;
+    let mut cadence = read_cadence(directory).map_err(|error| error.to_string())?;
     cadence.next_gc_at = Some(
-        now.checked_add(
-            DurationMicros::from_seconds(DAY_SECONDS).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?,
+        completed_at
+            .checked_add(
+                DurationMicros::from_seconds(DAY_SECONDS).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
     );
-    let bytes = serde_json::to_vec(&cadence).map_err(|error| error.to_string())?;
-    directory
-        .atomic_write(
-            "cadence.json".as_ref(),
-            "tick-cadence",
-            &bytes,
-            PublishMode::Replace,
-        )
-        .map_err(|error| error.to_string())?;
-    Ok("queued")
+    publish(directory, "cadence.json", "tick-cadence", &cadence)
+}
+
+/// What the worker records once the collection has ended, and whether the seed
+/// pass should follow. The deadline moves only for a complete or partial
+/// collection, and the advance is tried a few times so a busy cadence lock does
+/// not turn a finished collection into a failed one; a deadline that still
+/// could not be advanced is a note on the completed result. A failure counts
+/// toward the retry backoff, and any other outcome resets it. The seed pass
+/// follows only a collection that finished its work.
+fn settle_gc_run(
+    directory: &Directory,
+    now: impl Fn() -> Result<WallTime, String>,
+    failures: u32,
+    collected: Result<GcCompletion, String>,
+    mut advance: impl FnMut(WallTime) -> Result<(), String>,
+) -> Result<bool, String> {
+    match collected {
+        Ok(completion) => {
+            let (state, cause) = match completion {
+                GcCompletion::Complete => ("complete", None),
+                GcCompletion::Partial(note) => ("partial", Some(note)),
+            };
+            let completed_at = now()?;
+            let mut advanced = Ok(());
+            for _ in 0..GC_ADVANCE_ATTEMPTS {
+                advanced = advance(completed_at);
+                if advanced.is_ok() {
+                    break;
+                }
+            }
+            let note = match advanced {
+                Ok(()) => cause,
+                Err(error) => Some(format!(
+                    "{}the daily deadline was not advanced ({error})",
+                    cause.map(|cause| format!("{cause}; ")).unwrap_or_default()
+                )),
+            };
+            write_gc_result(directory, now()?, state, note, 0)?;
+            Ok(true)
+        }
+        Err(error) => {
+            write_gc_result(
+                directory,
+                now()?,
+                "failed",
+                Some(error),
+                failures.saturating_add(1),
+            )?;
+            Ok(false)
+        }
+    }
 }
 
 /// Detached daily collection uses the existing collector and its custody. Its
@@ -216,8 +470,12 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
             Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        write_gc_result(&directory, clock.wall_now()?, "running", None)?;
-        let collected = (|| -> Result<(), String> {
+        let failures = read_gc_result(&directory)
+            .ok()
+            .flatten()
+            .map_or(0, |result| result.failures);
+        write_gc_result(&directory, clock.wall_now()?, "running", None, failures)?;
+        let collected = (|| -> Result<GcCompletion, String> {
             let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")
                 .map_err(|error| error.to_string())?;
             crate::worktrees::scheduled_gc(
@@ -229,27 +487,28 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                 workers,
             )
         })();
-        write_gc_result(
+        let failed = collected.as_ref().err().cloned();
+        let queue_seed_pass = settle_gc_run(
             &directory,
-            clock.wall_now()?,
-            if collected.is_ok() {
-                "complete"
-            } else {
-                "failed"
-            },
-            collected.as_ref().err().cloned(),
+            || clock.wall_now().map_err(|error| error.to_string()),
+            failures,
+            collected,
+            |completed_at| advance_gc_cadence(&directory, completed_at),
         )?;
         // The collection fetched every project's default branch, so any seed
         // that is now behind can be rebuilt. This only queues a detached
-        // worker; a failure to queue is recorded for the tick and never fails
-        // the collection.
-        let _ = queue_seed(
-            &directory,
-            clock.wall_now()?,
-            Some(SeedRequest::full()),
-            || spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home),
-        );
-        collected.map_err(Into::into)
+        // worker, and only after a collection that finished its work; a
+        // failure to queue is recorded for the tick and never fails the
+        // collection.
+        if queue_seed_pass {
+            let _ = queue_seed(
+                &directory,
+                clock.wall_now()?,
+                Some(SeedRequest::full()),
+                || spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home),
+            );
+        }
+        failed.map_or(Ok(()), |error| Err(error.into()))
     })();
     match result {
         Ok(()) => 0,
@@ -265,7 +524,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
 
 const SEED_RESULT: &str = "seed-result.json";
 
-fn seed_queue_lock(directory: &Directory) -> Result<LockGuard, String> {
+fn bounded_lock(directory: &Directory, name: &str) -> Result<LockGuard, String> {
     let clock = SystemClock;
     let budget = WaitBudget::up_to(
         clock.mono_now(),
@@ -273,13 +532,17 @@ fn seed_queue_lock(directory: &Directory) -> Result<LockGuard, String> {
     );
     directory
         .lock(
-            "seed-queue.lock".as_ref(),
+            name.as_ref(),
             LockMode::Exclusive,
             budget,
             &provenant_core::CancelToken::new(),
             &clock,
         )
         .map_err(|error| error.to_string())
+}
+
+fn seed_queue_lock(directory: &Directory) -> Result<LockGuard, String> {
+    bounded_lock(directory, "seed-queue.lock")
 }
 
 fn read_seed_queue(directory: &Directory) -> Result<SeedQueue, String> {
@@ -307,39 +570,13 @@ fn merge_seed_requests(left: Option<SeedRequest>, right: SeedRequest) -> SeedReq
     let Some(left) = left else {
         return right;
     };
-    if matches!(&left.scope, SeedScope::Full) || matches!(&right.scope, SeedScope::Full) {
-        // Full work reevaluates every project, so stale retry errors must not
-        // survive as if the full pass had failed.
-        return SeedRequest::full();
-    }
+    // Full work reevaluates every project, so it dominates any busy retry.
     let (SeedScope::Busy(left_keys), SeedScope::Busy(right_keys)) = (left.scope, right.scope)
     else {
-        unreachable!("full scopes returned above");
+        return SeedRequest::full();
     };
-    let mut keys = BTreeSet::new();
-    keys.extend(left_keys);
-    keys.extend(right_keys);
-    let omitted_keys = keys.len().saturating_sub(MAX_BUSY_SEED_PROJECTS);
-    let mut project_keys = Vec::new();
-    for key in keys {
-        if project_keys.len() == MAX_BUSY_SEED_PROJECTS {
-            break;
-        }
-        project_keys.push(key);
-    }
-    let mut prior_error = match (left.prior_error, right.prior_error) {
-        (Some(left), Some(right)) if left == right => Some(left),
-        (Some(left), Some(right)) => Some(join_seed_errors(Some(&left), &right)),
-        (Some(error), None) | (None, Some(error)) => Some(error),
-        (None, None) => None,
-    };
-    if omitted_keys > 0 {
-        prior_error = Some(join_seed_errors(
-            prior_error.as_deref(),
-            "more than 512 busy seed projects are pending; excess projects wait for the next full pass",
-        ));
-    }
-    SeedRequest::busy(project_keys, prior_error)
+    let keys: BTreeSet<String> = left_keys.into_iter().chain(right_keys).collect();
+    SeedRequest::busy(keys.into_iter().take(MAX_BUSY_SEED_PROJECTS).collect())
 }
 
 impl SeedQueue {
@@ -397,11 +634,11 @@ fn queue_seed(
             queue.launch_at = None;
             queue.active_at = None;
         }
-        let Some(pending) = queue.pending.as_ref() else {
+        if queue.pending.is_none() {
             write_seed_queue(directory, &queue)?;
             drop(worker_lock);
             return Ok(());
-        };
+        }
         if queue.launch_at.is_some_and(|at| {
             now.as_micros().saturating_sub(at.as_micros()) < SEED_WORK_RETRY_MICROS
         }) {
@@ -409,31 +646,15 @@ fn queue_seed(
             drop(worker_lock);
             return Ok(());
         }
-        let error = pending.prior_error.clone();
         queue.pending_at.get_or_insert(now);
         queue.launch_at = Some(now);
         write_seed_queue(directory, &queue)?;
-        write_result(
-            directory,
-            SEED_RESULT,
-            "tick-seed",
-            now,
-            "queued",
-            error.clone(),
-        )?;
+        write_seed_progress(directory, now, "queued", None)?;
         // Keep the queue lock while releasing the probe lock and spawning:
         // the child waits for the queue lock before claiming the request.
         drop(worker_lock);
-        if let Err(spawn_error) = spawn() {
-            let error = join_seed_errors(error.as_deref(), &spawn_error);
-            write_result(
-                directory,
-                SEED_RESULT,
-                "tick-seed",
-                now,
-                "failed",
-                Some(error.clone()),
-            )?;
+        if let Err(error) = spawn() {
+            write_seed_progress(directory, now, "failed", Some(error.clone()))?;
             queue.pending_at = Some(now);
             queue.launch_at = None;
             write_seed_queue(directory, &queue)?;
@@ -456,16 +677,6 @@ fn spawn_seed_worker(state: &std::path::Path, home: &std::path::Path) -> Result<
         "tick-seed".into(),
     ];
     provenant_os::exec::spawn_detached(&argv, home).map_err(|error| error.to_string())
-}
-
-fn join_seed_errors(previous: Option<&str>, next: &str) -> String {
-    truncate_bytes(
-        match previous.filter(|error| !error.is_empty()) {
-            Some(previous) => format!("{previous}; {next}"),
-            None => next.to_owned(),
-        },
-        MAX_SEED_RESULT_ERROR_BYTES,
-    )
 }
 
 fn truncate_bytes(message: String, limit: usize) -> String {
@@ -494,21 +705,176 @@ fn seed_retry_due(directory: &Directory, now: WallTime) -> bool {
     })
 }
 
-/// What one pass over the registered projects did.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct SeedPass {
-    built: usize,
-    current: usize,
-    busy: usize,
-    /// Projects with no selected Cargo manifest, which have nothing to seed.
-    skipped: usize,
-    errors: Vec<String>,
-    busy_project_keys: Vec<String>,
+/// What one project's refresh came to. Only a failure fails the pass; a skip
+/// names a repair the project's owner can make and leaves every other project's
+/// seed alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum SeedProjectOutcome {
+    Built,
+    Current,
+    Busy,
+    /// No selected Cargo manifest: nothing to seed.
+    NotCargo,
+    Skipped {
+        reason: crate::target_seed_build::SkipReason,
+        detail: String,
+        repair: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
-#[derive(Debug)]
-struct SeedOutcome {
+impl SeedProjectOutcome {
+    fn skipped(skip: &crate::target_seed_build::SeedSkip) -> Self {
+        Self::Skipped {
+            reason: skip.reason,
+            detail: truncate_seed_error(skip.to_string()),
+            repair: skip.reason.repair().to_owned(),
+        }
+    }
+
+    fn failed(message: String) -> Self {
+        Self::Failed {
+            error: truncate_seed_error(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SeedProjectRecord {
+    project: String,
+    project_key: String,
+    #[serde(flatten)]
+    outcome: SeedProjectOutcome,
+}
+
+impl SeedProjectRecord {
+    fn new(project: &SeedProject, outcome: SeedProjectOutcome) -> Self {
+        Self {
+            project: truncate_bytes(
+                project.root.display().to_string(),
+                MAX_SEED_PROJECT_PATH_BYTES,
+            ),
+            project_key: project.project_key.clone(),
+            outcome,
+        }
+    }
+}
+
+/// The last seed pass: its state and every registered project's own outcome.
+/// A scoped retry replaces only its projects' records, so one project's result
+/// never hides another's.
+#[derive(Serialize, Deserialize)]
+struct SeedResult {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
+    state: String,
+    at: WallTime,
+    /// A cause that belongs to no project, such as an unreadable registry.
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    projects: Vec<SeedProjectRecord>,
+    /// Records beyond `MAX_SEED_PROJECT_RECORDS` that were not kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    omitted_projects: usize,
+}
+
+impl SeedResult {
+    fn new(
+        at: WallTime,
+        state: &str,
+        error: Option<String>,
+        mut projects: Vec<SeedProjectRecord>,
+    ) -> Self {
+        // Records are kept in order while they fit the record count and the
+        // bytes left under the read cap, so a result is always readable.
+        let error = error.map(truncate_seed_error);
+        let mut room = MAX_SEED_RESULT_BYTES
+            .saturating_sub(SEED_RESULT_SLACK_BYTES)
+            .saturating_sub(error.as_ref().map_or(0, |error| error.len() as u64 * 6));
+        let keep = projects
+            .iter()
+            .take(MAX_SEED_PROJECT_RECORDS)
+            .take_while(|record| {
+                let size =
+                    serde_json::to_vec(record).map_or(u64::MAX, |bytes| bytes.len() as u64 + 1);
+                let fits = size <= room;
+                room = room.saturating_sub(size);
+                fits
+            })
+            .count();
+        let omitted_projects = projects.len() - keep;
+        projects.truncate(keep);
+        Self {
+            extra: Default::default(),
+            state: state.into(),
+            at,
+            error,
+            projects,
+            omitted_projects,
+        }
+    }
+
+    /// Count records an earlier result had already left out.
+    fn with_omitted_before(mut self, before: usize) -> Self {
+        self.omitted_projects = self.omitted_projects.saturating_add(before);
+        self
+    }
+
+    /// A finished pass is failed when anything failed, else busy while any
+    /// project's build lock was held, else complete. A skip is none of these.
+    fn finished(at: WallTime, error: Option<String>, projects: Vec<SeedProjectRecord>) -> Self {
+        let any = |wanted: fn(&SeedProjectOutcome) -> bool| {
+            projects.iter().any(|record| wanted(&record.outcome))
+        };
+        let state = if error.is_some()
+            || any(|outcome| matches!(outcome, SeedProjectOutcome::Failed { .. }))
+        {
+            "failed"
+        } else if any(|outcome| matches!(outcome, SeedProjectOutcome::Busy)) {
+            "busy"
+        } else {
+            "complete"
+        };
+        Self::new(at, state, error, projects)
+    }
+}
+
+fn read_seed_result(directory: &Directory) -> Result<Option<SeedResult>, String> {
+    match directory.read_bounded(SEED_RESULT.as_ref(), MAX_SEED_RESULT_BYTES) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn write_seed_result(directory: &Directory, result: &SeedResult) -> Result<(), String> {
+    publish(directory, SEED_RESULT, "tick-seed", result)
+}
+
+/// Record that work is queued, running or could not start. The projects' last
+/// outcomes stay visible while it happens.
+fn write_seed_progress(
+    directory: &Directory,
+    at: WallTime,
+    state: &str,
+    error: Option<String>,
+) -> Result<(), String> {
+    let prior = read_seed_result(directory).ok().flatten();
+    let omitted = prior.as_ref().map_or(0, |result| result.omitted_projects);
+    let projects = prior.map(|result| result.projects).unwrap_or_default();
+    write_seed_result(
+        directory,
+        &SeedResult::new(at, state, error, projects).with_omitted_before(omitted),
+    )
+}
+
+#[derive(Debug, Default)]
+struct SeedOutcome {
     busy_project_keys: Vec<String>,
 }
 
@@ -521,7 +887,20 @@ struct SeedProject {
 #[derive(Debug, Default)]
 struct SeedDiscoveryError {
     project_key: String,
+    project: String,
     message: String,
+}
+
+impl SeedDiscoveryError {
+    fn into_record(self) -> SeedProjectRecord {
+        SeedProjectRecord {
+            project: truncate_bytes(self.project, MAX_SEED_PROJECT_PATH_BYTES),
+            project_key: self.project_key,
+            outcome: SeedProjectOutcome::Failed {
+                error: self.message,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -547,11 +926,12 @@ impl SeedDiscovery {
         }
     }
 
-    fn record_error(&mut self, project_key: String, message: String) {
+    fn record_error(&mut self, project_key: String, project: String, message: String) {
         if self.errors.len() < MAX_SEED_DISCOVERY_ERRORS {
             let message = truncate_seed_error(message);
             self.errors.push(SeedDiscoveryError {
                 project_key,
+                project,
                 message,
             });
         } else {
@@ -561,60 +941,43 @@ impl SeedDiscovery {
 }
 
 fn truncate_seed_error(message: String) -> String {
-    if message.len() <= MAX_SEED_ERROR_BYTES {
-        return message;
-    }
-    let mut end = MAX_SEED_ERROR_BYTES;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &message[..end])
+    truncate_bytes(message, MAX_SEED_ERROR_BYTES)
 }
 
-/// Refresh each project in turn. A busy build is a no-op and one project's
-/// failure never stops the others.
+/// Refresh each project in turn and record each one's own outcome. A busy build
+/// is a no-op, an unresolved verify base is a skip, and no project's failure
+/// stops the others.
 fn refresh_projects(
     projects: &[SeedProject],
     host_state: &std::path::Path,
     refresh: impl Fn(
         &std::path::Path,
     ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
-) -> SeedPass {
+) -> Vec<SeedProjectRecord> {
     use crate::target_seed_build::Refresh;
-    let mut pass = SeedPass::default();
-    for project in projects {
-        match provenant_run::target_seed::cargo_build_directory(&project.root, host_state) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                pass.skipped += 1;
-                continue;
-            }
-            Err(error) => {
-                pass.errors
-                    .push(format!("{}: {error}", project.root.display()));
-                continue;
-            }
-        }
-        match refresh(&project.root) {
-            Ok(Refresh::Built(_)) => pass.built += 1,
-            Ok(Refresh::NotCargo) => pass.skipped += 1,
-            Ok(Refresh::Current) => pass.current += 1,
-            Ok(Refresh::Busy) => {
-                pass.busy += 1;
-                if pass.busy_project_keys.len() < MAX_BUSY_SEED_PROJECTS {
-                    pass.busy_project_keys.push(project.project_key.clone());
-                } else if pass.busy == MAX_BUSY_SEED_PROJECTS + 1 {
-                    pass.errors.push(format!(
-                        "more than {MAX_BUSY_SEED_PROJECTS} project seeds are busy; excess projects wait for the next daily refresh"
-                    ));
-                }
-            }
-            Err(error) => pass
-                .errors
-                .push(format!("{}: {error}", project.root.display())),
-        }
-    }
-    pass
+    projects
+        .iter()
+        .map(|project| {
+            let outcome = match provenant_run::target_seed::cargo_build_directory(
+                &project.root,
+                host_state,
+            ) {
+                Ok(None) => SeedProjectOutcome::NotCargo,
+                Err(error) => SeedProjectOutcome::failed(error.to_string()),
+                Ok(Some(_)) => match refresh(&project.root) {
+                    Ok(Refresh::Built(_)) => SeedProjectOutcome::Built,
+                    Ok(Refresh::NotCargo) => SeedProjectOutcome::NotCargo,
+                    Ok(Refresh::Current) => SeedProjectOutcome::Current,
+                    Ok(Refresh::Busy) => SeedProjectOutcome::Busy,
+                    Err(error) => match crate::target_seed_build::skip_of(error.as_ref()) {
+                        Some(skip) => SeedProjectOutcome::skipped(skip),
+                        None => SeedProjectOutcome::failed(error.to_string()),
+                    },
+                },
+            };
+            SeedProjectRecord::new(project, outcome)
+        })
+        .collect()
 }
 
 /// Run one single-flight pass under `seed-worker.lock`. A second worker, or a
@@ -656,76 +1019,74 @@ fn seed_pass_locked(
 ) -> Result<SeedOutcome, String> {
     let at = || clock.wall_now().map_err(|error| error.to_string());
     let retry_project_keys = request.project_keys();
-    let prior_error = request.prior_error.clone();
     if !enabled {
-        write_result(directory, SEED_RESULT, "tick-seed", at()?, "disabled", None)?;
-        return Ok(SeedOutcome {
-            error: None,
-            busy_project_keys: Vec::new(),
-        });
+        write_seed_result(
+            directory,
+            &SeedResult::new(at()?, "disabled", None, Vec::new()),
+        )?;
+        return Ok(SeedOutcome::default());
     }
-    write_result(
-        directory,
-        SEED_RESULT,
-        "tick-seed",
-        at()?,
-        "running",
-        prior_error.clone(),
-    )?;
-    let outcome = projects().map(|mut discovery| {
-        if !retry_project_keys.is_empty() {
-            discovery
-                .projects
-                .retain(|project| retry_project_keys.contains(&project.project_key));
-            discovery
-                .errors
-                .retain(|error| retry_project_keys.contains(&error.project_key));
-        }
-        let mut pass = refresh_projects(&discovery.projects, host_state, refresh);
-        pass.errors
-            .extend(discovery.errors.into_iter().map(|error| error.message));
-        if discovery.omitted_errors > 0 {
-            pass.errors.push(format!(
-                "{} additional registered project layout error(s) omitted",
-                discovery.omitted_errors
-            ));
-        }
-        pass
-    });
-    let (state, error, busy_project_keys) = match outcome {
-        Ok(pass) => {
-            let mut error = prior_error;
-            for message in &pass.errors {
-                error = Some(join_seed_errors(error.as_deref(), message));
+    let (prior, prior_omitted) = read_seed_result(directory)
+        .ok()
+        .flatten()
+        .map(|result| (result.projects, result.omitted_projects))
+        .unwrap_or_default();
+    write_seed_progress(directory, at()?, "running", None)?;
+    let (records, error, busy_project_keys) = match projects() {
+        Ok(mut discovery) => {
+            if !retry_project_keys.is_empty() {
+                discovery
+                    .projects
+                    .retain(|project| retry_project_keys.contains(&project.project_key));
+                discovery
+                    .errors
+                    .retain(|error| retry_project_keys.contains(&error.project_key));
             }
-            let has_failure = error.is_some();
-            let state = if has_failure {
-                "failed"
-            } else if pass.busy > 0 {
-                "busy"
-            } else {
-                "complete"
-            };
-            (state, error, pass.busy_project_keys)
+            let mut fresh = refresh_projects(&discovery.projects, host_state, refresh);
+            fresh.extend(
+                discovery
+                    .errors
+                    .into_iter()
+                    .map(SeedDiscoveryError::into_record),
+            );
+            let error = (discovery.omitted_errors > 0).then(|| {
+                format!(
+                    "{} additional registered project layout error(s) omitted",
+                    discovery.omitted_errors
+                )
+            });
+            let busy_project_keys = fresh
+                .iter()
+                .filter(|record| matches!(record.outcome, SeedProjectOutcome::Busy))
+                .map(|record| record.project_key.clone())
+                .take(MAX_BUSY_SEED_PROJECTS)
+                .collect();
+            // A scoped retry answers only for its own projects; the others
+            // keep the outcome the last full pass recorded.
+            let mut records: Vec<SeedProjectRecord> = prior
+                .into_iter()
+                .filter(|record| {
+                    !retry_project_keys.is_empty()
+                        && !retry_project_keys.contains(&record.project_key)
+                })
+                .collect();
+            records.extend(fresh);
+            (records, error, busy_project_keys)
         }
-        Err(error) => (
-            "failed",
-            Some(join_seed_errors(prior_error.as_deref(), &error)),
-            Vec::new(),
-        ),
+        Err(error) => (prior, Some(error), Vec::new()),
     };
-    write_result(
+    // A full pass answers for every project; a scoped one keeps the records an
+    // earlier result had to leave out.
+    let omitted_before = if retry_project_keys.is_empty() {
+        0
+    } else {
+        prior_omitted
+    };
+    write_seed_result(
         directory,
-        SEED_RESULT,
-        "tick-seed",
-        at()?,
-        state,
-        error.clone(),
+        &SeedResult::finished(at()?, error, records).with_omitted_before(omitted_before),
     )?;
-    Ok(SeedOutcome {
-        error,
-        busy_project_keys,
-    })
+    Ok(SeedOutcome { busy_project_keys })
 }
 
 fn claim_seed_job(
@@ -761,14 +1122,7 @@ fn claim_seed_job(
     queue.active = Some(request.clone());
     queue.active_at = Some(now);
     write_seed_queue(directory, &queue)?;
-    write_result(
-        directory,
-        SEED_RESULT,
-        "tick-seed",
-        now,
-        "running",
-        request.prior_error.clone(),
-    )?;
+    write_seed_progress(directory, now, "running", None)?;
     drop(_queue_lock);
     Ok(Some((worker_lock, request)))
 }
@@ -801,11 +1155,10 @@ fn finish_seed_job_with_lock(
         queue.retry = None;
         queue.retry_at = None;
     } else {
-        let retry = SeedRequest::busy(outcome.busy_project_keys, outcome.error);
+        let retry = SeedRequest::busy(outcome.busy_project_keys);
         match queue.pending.take() {
             Some(pending) if matches!(&pending.scope, SeedScope::Full) => {
-                // The full pass covers this busy result and supersedes its
-                // errors, which will be recomputed by that pass.
+                // The full pass covers this busy result.
                 queue.pending = Some(pending);
                 queue.pending_at.get_or_insert(now);
                 queue.retry = None;
@@ -833,14 +1186,7 @@ fn finish_seed_job_with_lock(
         queue.active = Some(next.clone());
         queue.active_at = Some(now);
         write_seed_queue(directory, &queue)?;
-        write_result(
-            directory,
-            SEED_RESULT,
-            "tick-seed",
-            now,
-            "running",
-            next.prior_error.clone(),
-        )?;
+        write_seed_progress(directory, now, "running", None)?;
         Ok(Some(next))
     } else {
         write_seed_queue(directory, &queue)?;
@@ -879,6 +1225,7 @@ fn registered_seed_projects(
             Err(error) => {
                 discovery.record_error(
                     project_key,
+                    common.display().to_string(),
                     format!(
                         "cannot verify registered Git directory {}: {error}",
                         common.display()
@@ -969,20 +1316,6 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
     }
 }
 
-/// The last seed pass, for the tick's report. Failures stay visible; full
-/// collection retries them daily, while scoped Busy work retries on the tick.
-#[cfg(test)]
-fn seed_state(directory: &Directory) -> &'static str {
-    match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
-        Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
-            Ok(result) => seed_result_state(&result.state),
-            Err(_) => "last_failed",
-        },
-        Err(error) if error.is_not_found() => "idle",
-        Err(_) => "last_failed",
-    }
-}
-
 fn seed_result_state(state: &str) -> &'static str {
     match state {
         "queued" => "queued",
@@ -1020,33 +1353,96 @@ fn safe_seed_failure_diagnostic(error: Option<&str>) -> &'static str {
     }
 }
 
-fn target_seed_task(directory: &Directory) -> Task {
-    match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
-        Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
-            Ok(result) => {
-                let state = seed_result_state(&result.state);
-                if state == "last_failed" {
-                    Task::idle_with_diagnostic(
-                        "target_seed",
-                        state,
-                        safe_seed_failure_diagnostic(result.error.as_deref()),
-                    )
-                } else {
-                    Task::idle("target_seed", state)
-                }
-            }
-            Err(_) => Task::idle_with_diagnostic(
-                "target_seed",
-                "last_failed",
-                "The local seed result could not be read. Run `provenant worktree seed-build` in the affected repository for current details.",
+/// The tick's one-line account of the last seed pass. A finished pass reports
+/// how many projects ended each way, so a skipped or failed project never hides
+/// the ones that were seeded.
+fn seed_summary(result: &SeedResult) -> String {
+    let word = seed_result_state(&result.state);
+    if matches!(word, "queued" | "running" | "disabled") || result.projects.is_empty() {
+        return word.to_owned();
+    }
+    let (mut ok, mut skipped, mut busy, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    for record in &result.projects {
+        match record.outcome {
+            SeedProjectOutcome::Built | SeedProjectOutcome::Current => ok += 1,
+            SeedProjectOutcome::Skipped { .. } => skipped += 1,
+            SeedProjectOutcome::Busy => busy += 1,
+            SeedProjectOutcome::Failed { .. } => failed += 1,
+            SeedProjectOutcome::NotCargo => {}
+        }
+    }
+    failed += usize::from(result.error.is_some());
+    let parts: Vec<String> = [
+        ("ok", ok, true),
+        ("skipped", skipped, false),
+        ("busy", busy, false),
+        ("failed", failed, false),
+    ]
+    .into_iter()
+    .filter(|(_, count, always)| *count > 0 || (*always && ok + skipped + busy + failed == 0))
+    .map(|(name, count, _)| format!("{name}:{count}"))
+    .collect();
+    parts.join(" ")
+}
+
+fn push_distinct(notes: &mut Vec<String>, note: String) {
+    if !notes.contains(&note) {
+        notes.push(note);
+    }
+}
+
+/// What an operator does next, from the typed outcomes and the safe projection
+/// of each failure. Project paths and command output stay in the result file.
+fn seed_diagnostic(result: &SeedResult) -> Option<String> {
+    let mut notes = Vec::new();
+    let failures = result
+        .projects
+        .iter()
+        .filter_map(|record| match &record.outcome {
+            SeedProjectOutcome::Failed { error } => Some(error.as_str()),
+            _ => None,
+        })
+        .chain(result.error.as_deref());
+    for failure in failures {
+        push_distinct(
+            &mut notes,
+            safe_seed_failure_diagnostic(Some(failure)).to_owned(),
+        );
+    }
+    if result.state == "failed" && notes.is_empty() {
+        push_distinct(&mut notes, safe_seed_failure_diagnostic(None).to_owned());
+    }
+    let mut skipped = std::collections::BTreeMap::new();
+    for record in &result.projects {
+        if let SeedProjectOutcome::Skipped { reason, .. } = &record.outcome {
+            *skipped.entry(*reason).or_insert(0usize) += 1;
+        }
+    }
+    for (reason, count) in skipped {
+        push_distinct(
+            &mut notes,
+            format!(
+                "{count} project{} skipped because {}. {}",
+                if count == 1 { "" } else { "s" },
+                reason.cause(),
+                reason.repair()
             ),
-        },
-        Err(error) if error.is_not_found() => Task::idle("target_seed", "idle"),
-        Err(_) => Task::idle_with_diagnostic(
+        );
+    }
+    (!notes.is_empty()).then(|| notes.join(" "))
+}
+
+const SEED_RESULT_UNREADABLE: &str = "The local seed result could not be read. Run `provenant worktree seed-build` in the affected repository for current details.";
+
+fn target_seed_task(directory: &Directory) -> Task {
+    match read_seed_result(directory) {
+        Ok(Some(result)) => Task::reported(
             "target_seed",
-            "last_failed",
-            "The local seed result could not be read. Run `provenant worktree seed-build` in the affected repository for current details.",
+            seed_summary(&result),
+            seed_diagnostic(&result),
         ),
+        Ok(None) => Task::idle("target_seed", "idle"),
+        Err(_) => Task::idle_with_diagnostic("target_seed", "last_failed", SEED_RESULT_UNREADABLE),
     }
 }
 
@@ -1060,49 +1456,49 @@ pub(crate) struct Graphs {
 #[derive(Serialize)]
 struct Task {
     task: &'static str,
-    state: &'static str,
+    state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    diagnostic: Option<&'static str>,
+    diagnostic: Option<String>,
 }
 
 impl Task {
     fn run(task: &'static str, action: impl FnOnce() -> Result<&'static str, String>) -> Self {
         match action() {
-            Ok(state) => Self {
-                task,
-                state,
-                error: None,
-                diagnostic: None,
-            },
-            Err(error) => Self {
-                task,
-                state: "failed",
-                error: Some(error),
-                diagnostic: None,
-            },
+            Ok(state) => Self::idle(task, state),
+            Err(error) => Self::failed(task, error),
         }
     }
-    fn idle(task: &'static str, state: &'static str) -> Self {
+    fn failed(task: &'static str, error: String) -> Self {
         Self {
             task,
-            state,
-            error: None,
+            state: "failed".into(),
+            error: Some(error),
             diagnostic: None,
         }
     }
-    fn idle_with_diagnostic(
-        task: &'static str,
-        state: &'static str,
-        diagnostic: &'static str,
-    ) -> Self {
+    /// A check whose success carries a note. Only a failure found by this
+    /// check is an error; an old one the report merely mentions is not.
+    fn gc(action: impl FnOnce() -> Result<GcReport, String>) -> Self {
+        match action() {
+            Ok(report) => Self::reported("gc", report.state, report.note),
+            Err(error) => Self::failed("gc", error),
+        }
+    }
+    fn reported(task: &'static str, state: impl Into<String>, diagnostic: Option<String>) -> Self {
         Self {
             task,
-            state,
+            state: state.into(),
             error: None,
-            diagnostic: Some(diagnostic),
+            diagnostic,
         }
+    }
+    fn idle(task: &'static str, state: &'static str) -> Self {
+        Self::reported(task, state, None)
+    }
+    fn idle_with_diagnostic(task: &'static str, state: &'static str, diagnostic: &str) -> Self {
+        Self::reported(task, state, Some(diagnostic.to_owned()))
     }
 }
 
@@ -1229,7 +1625,7 @@ fn tick(
     let gc = if !config.gc.schedule {
         Task::idle("gc", "disabled")
     } else {
-        Task::run("gc", || -> Result<&'static str, String> {
+        Task::gc(|| -> Result<GcReport, String> {
             let directory = provenant_config::private_directory(
                 &resolved.roots.state.as_path().join("tick"),
                 true,
@@ -1238,7 +1634,7 @@ fn tick(
             let _lock = match directory.try_lock("cadence.lock".as_ref(), LockMode::Exclusive) {
                 Ok(lock) => lock,
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
-                    return Ok("busy; next tick retries");
+                    return Ok(GcReport::state("busy; next tick retries"));
                 }
                 Err(error) => return Err(error.to_string()),
             };
@@ -1337,6 +1733,7 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                 }))
                 .chain(data.tasks.iter().filter_map(|task| {
                     task.diagnostic
+                        .as_ref()
                         .map(|diagnostic| format!("note: {}: {diagnostic}", task.task))
                 }))
                 .collect();
@@ -1524,50 +1921,444 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
+    fn after(time: WallTime, seconds: u64) -> WallTime {
+        time.checked_add(DurationMicros::from_seconds(seconds).unwrap())
+            .unwrap()
+    }
+
+    #[allow(dead_code)]
+    fn gc_directory(temp: &tempfile::TempDir) -> Directory {
+        provenant_config::private_directory(temp.path(), true).unwrap()
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
     #[test]
-    fn daily_cadence_survives_restart_and_fires_at_the_deadline() {
+    fn the_daily_gc_deadline_advances_only_when_a_collection_completes() {
         let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
-        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        let directory = gc_directory(&temp);
         let now = WallTime::from_micros(1_000_000).unwrap();
-        let cadence = read_cadence(&directory).unwrap();
-        assert!(gc_due(&cadence, now));
-        assert!(queue_gc(&directory, now, || Err("spawn failed".into())).is_err());
+        assert!(gc_due(&read_cadence(&directory).unwrap(), now));
+        assert_eq!(
+            queue_gc(&directory, now, || Ok(())).unwrap(),
+            GcReport::state("queued")
+        );
+        assert!(
+            gc_due(&read_cadence(&directory).unwrap(), now),
+            "launching a worker is not completing a collection"
+        );
+
+        write_gc_result(&directory, now, "running", None, 0).unwrap();
+        let worker = directory
+            .try_lock("gc-worker.lock".as_ref(), LockMode::Exclusive)
+            .unwrap();
+        assert_eq!(
+            queue_gc(&directory, now, || Err("duplicate launch".into()))
+                .unwrap()
+                .state,
+            "running",
+            "a running collection is never launched twice"
+        );
+        drop(worker);
+
+        write_gc_result(&directory, now, "complete", None, 0).unwrap();
+        advance_gc_cadence(&directory, now).unwrap();
+        let deadline = after(now, DAY_SECONDS);
+        let reopened = Directory::open_anchor(temp.path()).unwrap();
+        let restored = read_cadence(&reopened).unwrap();
+        assert!(!gc_due(&restored, now), "the deadline survives a restart");
+        assert!(gc_due(&restored, deadline));
+        assert_eq!(
+            queue_gc(&reopened, now, || Err("not due".into()))
+                .unwrap()
+                .state,
+            "not_due"
+        );
+        assert_eq!(
+            queue_gc(&reopened, deadline, || Ok(())).unwrap().state,
+            "queued"
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn an_interrupted_gc_retries_with_a_bounded_backoff_instead_of_waiting_a_day() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let launched = WallTime::from_micros(10_000_000_000).unwrap();
+        queue_gc(&directory, launched, || Ok(())).unwrap();
+        let saved = |directory: &Directory| {
+            let result = read_gc_result(directory).unwrap().unwrap();
+            (result.state, result.failures)
+        };
+
+        // A worker that has not yet taken its lock gets a grace period.
+        assert_eq!(
+            queue_gc(&directory, after(launched, 30), || Err("early".into()))
+                .unwrap()
+                .state,
+            "queued"
+        );
+
+        // No worker holds the lock: the result is a lie and the first retry is
+        // fifteen minutes away. Only this finding is an error.
+        let found = after(launched, 61);
+        assert!(queue_gc(&directory, found, || Err("not yet".into())).is_err());
+        assert_eq!(saved(&directory), ("failed".to_owned(), 1));
+        assert!(
+            gc_due(&read_cadence(&directory).unwrap(), found),
+            "an interruption keeps the day due"
+        );
+
+        let retry = after(found, 15 * 60);
+        let report = queue_gc(&directory, after(found, 14 * 60), || Err("early".into())).unwrap();
+        assert_eq!(report.state, "retry_pending");
+        assert_eq!(report.retry_at, Some(retry));
+        assert_eq!(saved(&directory), ("failed".to_owned(), 1));
+
+        let mut launches = 0;
+        assert_eq!(
+            queue_gc(&directory, retry, || {
+                launches += 1;
+                Ok(())
+            })
+            .unwrap()
+            .state,
+            "queued"
+        );
+        assert_eq!(launches, 1);
+        assert_eq!(
+            saved(&directory),
+            ("queued".to_owned(), 1),
+            "a retry carries its failures so the next one backs off"
+        );
+
+        // Interrupted again: the second delay is an hour.
+        let second = after(retry, 61);
+        assert!(queue_gc(&directory, second, || Err("not yet".into())).is_err());
+        assert_eq!(saved(&directory), ("failed".to_owned(), 2));
+        let report = queue_gc(&directory, after(second, 3_599), || Err("early".into())).unwrap();
+        assert_eq!(report.state, "retry_pending");
+        assert_eq!(report.retry_at, Some(after(second, 3_600)));
+        assert_eq!(
+            queue_gc(&directory, after(second, 3_600), || Ok(()))
+                .unwrap()
+                .state,
+            "queued"
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn gc_retry_delays_grow_but_never_pass_the_daily_cadence() {
+        let seconds: Vec<u64> = [0, 1, 2, 3, 4, 5, 6, u32::MAX]
+            .into_iter()
+            .map(gc_retry_delay_seconds)
+            .collect();
+        assert_eq!(
+            seconds,
+            [900, 900, 3_600, 14_400, 57_600, 86_400, 86_400, 86_400]
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_failed_spawn_or_collection_is_retried_and_a_stale_failure_is_not_a_fresh_one() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        assert_eq!(
+            queue_gc(&directory, now, || Err("spawn failed".into())).unwrap_err(),
+            "spawn failed"
+        );
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!(
+            (
+                result.state.as_str(),
+                result.failures,
+                result.error.as_deref()
+            ),
+            ("failed", 1, Some("spawn failed"))
+        );
         assert!(
             gc_due(&read_cadence(&directory).unwrap(), now),
             "spawn failure must remain retryable"
         );
-        assert_eq!(queue_gc(&directory, now, || Ok(())).unwrap(), "queued");
-        let deadline = now
-            .checked_add(DurationMicros::from_seconds(DAY_SECONDS).unwrap())
-            .unwrap();
-        let reopened = Directory::open_anchor(temp.path()).unwrap();
-        let restored = read_cadence(&reopened).unwrap();
-        assert!(!gc_due(&restored, now));
-        assert!(gc_due(&restored, deadline));
+
+        // The next tick reports the old failure as waiting for its retry; it is
+        // not an error, so it does not fail every tick.
+        let task = Task::gc(|| queue_gc(&directory, after(now, 600), || Err("early".into())));
+        assert_eq!(task.state, "retry_pending");
+        assert!(task.error.is_none(), "{:?}", task.error);
+        assert!(task.diagnostic.is_some());
+
+        // A worker that fails its collection backs off the same way.
+        let failed = after(now, 3_000);
+        write_gc_result(&directory, failed, "failed", Some("busy graph".into()), 3).unwrap();
+        let report = queue_gc(&directory, after(failed, 4 * 3_600 - 1), || Ok(())).unwrap();
+        assert_eq!(report.state, "retry_pending");
+        assert_eq!(report.retry_at, Some(after(failed, 4 * 3_600)));
         assert_eq!(
-            queue_gc(&reopened, now, || Err("duplicate launch".into())).unwrap(),
+            queue_gc(&directory, after(failed, 4 * 3_600), || Ok(()))
+                .unwrap()
+                .state,
             "queued"
         );
-        write_gc_result(&reopened, now, "running", None).unwrap();
-        let worker = reopened
-            .try_lock("gc-worker.lock".as_ref(), LockMode::Exclusive)
+        assert_eq!(read_gc_result(&directory).unwrap().unwrap().failures, 3);
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_future_dated_gc_result_is_stale_and_cannot_block_collection() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+
+        // A queued result from a clock that has since moved back gets no grace.
+        write_gc_result(&directory, after(now, 3_600), "queued", None, 0).unwrap();
+        assert!(queue_gc(&directory, now, || Err("not yet".into())).is_err());
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!((result.state.as_str(), result.failures), ("failed", 1));
+        assert_eq!(result.at, now, "the finding is dated by the current clock");
+
+        // A failure dated in the future is retried at once, not after a delay
+        // counted from a time that has not come.
+        write_gc_result(&directory, after(now, DAY_SECONDS), "failed", None, 4).unwrap();
+        let mut launches = 0;
+        let report = queue_gc(&directory, now, || {
+            launches += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((report.state, launches), ("queued", 1));
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!(
+            (result.state.as_str(), result.failures, result.at),
+            ("queued", 4, now)
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn an_unreadable_gc_result_is_replaced_instead_of_blocking_collection() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        let oversized = vec![b' '; MAX_GC_RESULT_BYTES as usize + 1];
+        for bytes in [
+            b"{not json".to_vec(),
+            br#"{"state":5,"at":"x"}"#.to_vec(),
+            oversized,
+        ] {
+            directory
+                .atomic_write(GC_RESULT.as_ref(), "test", &bytes, PublishMode::Replace)
+                .unwrap();
+            assert!(read_gc_result(&directory).is_err());
+            let mut launches = 0;
+            let report = queue_gc(&directory, now, || {
+                launches += 1;
+                Ok(())
+            })
             .unwrap();
-        assert_eq!(
-            queue_gc(&reopened, now, || Err("duplicate launch".into())).unwrap(),
-            "running"
-        );
-        drop(worker);
+            assert_eq!((report.state, launches), ("queued", 1));
+            assert!(report.note.is_some(), "the replacement is reported once");
+            let result = read_gc_result(&directory).unwrap().unwrap();
+            assert_eq!(result.state, "queued");
+            assert_eq!(
+                queue_gc(&directory, now, || Err("duplicate".into()))
+                    .unwrap()
+                    .note,
+                None,
+                "once replaced, it is not reported again"
+            );
+        }
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_saved_gc_cause_is_bounded_and_the_result_keeps_its_shape() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(1_000_000).unwrap();
+        write_gc_result(&directory, now, "failed", Some("x".repeat(100_000)), 1).unwrap();
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert!(result.error.unwrap().len() <= MAX_RESULT_ERROR_BYTES + '…'.len_utf8());
+
+        write_gc_result(&directory, now, "complete", None, 0).unwrap();
+        let bytes = directory.read_bounded(GC_RESULT.as_ref(), 4096).unwrap();
+        assert!(!String::from_utf8(bytes).unwrap().contains("failures"));
+        write_gc_result(&directory, now, "failed", Some("x".into()), 2).unwrap();
+        let bytes = directory.read_bounded(GC_RESULT.as_ref(), 4096).unwrap();
+        assert!(String::from_utf8(bytes).unwrap().contains("\"failures\":2"));
+
+        let old: TaskResult = serde_json::from_slice(
+            br#"{"state":"failed","at":"2026-11-18T10:50:19.012844Z","error":"scheduled GC interrupted"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.failures, 0, "an older result counts no failures");
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_finished_gc_advances_the_deadline_and_seeds_while_a_failed_one_does_neither() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        let clock = || Ok(now);
+        let settle = |failures: u32, collected: Result<GcCompletion, String>| {
+            settle_gc_run(&directory, clock, failures, collected, |at| {
+                advance_gc_cadence(&directory, at)
+            })
+            .unwrap()
+        };
+        let saved = || {
+            let result = read_gc_result(&directory).unwrap().unwrap();
+            (result.state, result.failures)
+        };
+
         assert!(
-            queue_gc(&reopened, now, || Err("duplicate launch".into()))
-                .unwrap_err()
-                .contains("interrupted")
+            !settle(0, Err("busy graph".into())),
+            "no seed after a failure"
         );
-        write_gc_result(&reopened, now, "failed", Some("collection failed".into())).unwrap();
+        assert_eq!(saved(), ("failed".to_owned(), 1));
+        assert!(!settle(1, Err("busy graph".into())));
+        assert_eq!(saved(), ("failed".to_owned(), 2));
+        assert!(
+            gc_due(&read_cadence(&directory).unwrap(), now),
+            "a failure leaves the day due"
+        );
+
+        assert!(settle(2, Ok(GcCompletion::Partial("budget".into()))));
         assert_eq!(
-            queue_gc(&reopened, now, || Err("duplicate launch".into())).unwrap_err(),
-            "collection failed"
+            saved(),
+            ("partial".to_owned(), 0),
+            "partial is not a failure"
         );
-        assert_eq!(queue_gc(&reopened, deadline, || Ok(())).unwrap(), "queued");
+        let cadence = read_cadence(&directory).unwrap();
+        assert!(
+            !gc_due(&cadence, now),
+            "a partial sweep advances the cadence"
+        );
+        assert!(gc_due(&cadence, after(now, DAY_SECONDS)));
+        assert_eq!(
+            queue_gc(&directory, after(now, 3_600), || Err("not due".into()))
+                .unwrap()
+                .state,
+            "not_due",
+            "a partial result is neither pending nor retried"
+        );
+
+        write_gc_result(&directory, now, "failed", None, 3).unwrap();
+        assert!(settle(3, Ok(GcCompletion::Complete)));
+        assert_eq!(
+            saved(),
+            ("complete".to_owned(), 0),
+            "completion resets the count"
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_completed_gc_is_not_recorded_failed_when_its_deadline_cannot_be_advanced() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        let mut attempts = 0;
+        let seed = settle_gc_run(
+            &directory,
+            || Ok(now),
+            2,
+            Ok(GcCompletion::Complete),
+            |_| {
+                attempts += 1;
+                if attempts < GC_ADVANCE_ATTEMPTS {
+                    Err("cadence lock busy".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+        assert!(seed);
+        assert_eq!(attempts, GC_ADVANCE_ATTEMPTS, "the advance is retried");
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!((result.state.as_str(), result.failures), ("complete", 0));
+        assert!(result.error.is_none());
+
+        let seed = settle_gc_run(
+            &directory,
+            || Ok(now),
+            0,
+            Ok(GcCompletion::Complete),
+            |_| Err("cadence lock busy".into()),
+        )
+        .unwrap();
+        assert!(seed);
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!((result.state.as_str(), result.failures), ("complete", 0));
+        assert!(result.error.is_some(), "the missed advance is noted");
+    }
+
+    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    #[test]
+    fn a_skip_reason_from_a_newer_writer_does_not_make_the_seed_result_unreadable() {
+        use crate::target_seed_build::SkipReason;
+        let newer = br#"{"state":"complete","at":"2026-11-19T01:00:00.000000Z","error":null,"projects":[
+            {"project":"/a","project_key":"a","state":"skipped","reason":"from_a_newer_build","detail":"d","repair":"r"},
+            {"project":"/b","project_key":"b","state":"built"}]}"#;
+        let result: SeedResult = serde_json::from_slice(newer).unwrap();
+        assert!(matches!(
+            &result.projects[0].outcome,
+            SeedProjectOutcome::Skipped {
+                reason: SkipReason::Unrecognised,
+                ..
+            }
+        ));
+        assert_eq!(seed_summary(&result), "ok:1 skipped:1");
+        assert!(!SkipReason::Unrecognised.repair().is_empty());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn a_seed_result_stays_under_its_read_cap_and_keeps_its_omitted_count() {
+        let fat = |index: usize| SeedProjectRecord {
+            project: format!("/repo/{index}"),
+            project_key: format!("{index}"),
+            outcome: SeedProjectOutcome::Failed {
+                // Control characters escape to six bytes each in JSON.
+                error: "\u{1}".repeat(MAX_SEED_ERROR_BYTES),
+            },
+        };
+        let projects: Vec<_> = (0..MAX_SEED_PROJECT_RECORDS + 10).map(fat).collect();
+        let at = WallTime::from_micros(1_000_000).unwrap();
+        let result = SeedResult::new(at, "failed", Some("e".repeat(100_000)), projects);
+        let bytes = serde_json::to_vec(&result).unwrap();
+        assert!(
+            (bytes.len() as u64) < MAX_SEED_RESULT_BYTES,
+            "{} bytes",
+            bytes.len()
+        );
+        assert!(result.omitted_projects >= 10);
+        assert_eq!(
+            result.projects.len() + result.omitted_projects,
+            MAX_SEED_PROJECT_RECORDS + 10,
+            "every dropped record is counted"
+        );
+        assert!(result.error.unwrap().len() <= MAX_SEED_ERROR_BYTES + '…'.len_utf8());
+
+        // Progress rewrites keep the count of what an earlier pass left out.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        write_seed_result(
+            &directory,
+            &SeedResult::new(at, "complete", None, vec![fat(0)]).with_omitted_before(7),
+        )
+        .unwrap();
+        write_seed_progress(&directory, at, "running", None).unwrap();
+        let progress = read_seed_result(&directory).unwrap().unwrap();
+        assert_eq!(progress.omitted_projects, 7);
+        assert_eq!(progress.projects.len(), 1);
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
@@ -1576,12 +2367,19 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn seed_state_of(directory: &Directory) -> (&'static str, Option<String>) {
-        let bytes = directory
-            .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
-            .unwrap();
-        let result: GcResult = serde_json::from_slice(&bytes).unwrap();
+    fn seed_state(directory: &Directory) -> String {
+        target_seed_task(directory).state
+    }
+
+    #[allow(dead_code)]
+    fn seed_state_of(directory: &Directory) -> (String, Option<String>) {
+        let result = read_seed_result(directory).unwrap().unwrap();
         (seed_state(directory), result.error)
+    }
+
+    #[allow(dead_code)]
+    fn seed_records(directory: &Directory) -> Vec<SeedProjectRecord> {
+        read_seed_result(directory).unwrap().unwrap().projects
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
@@ -1590,22 +2388,28 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        write_result(
+        let private = "/private/sensitive/repo: command failed: [\"cargo\", \"--token\", \"do-not-print\"] API_KEY=secret-value";
+        write_seed_result(
             &directory,
-            SEED_RESULT,
-            "tick-seed",
-            WallTime::from_micros(1_000_000).unwrap(),
-            "failed",
-            Some(
-                "/private/sensitive/repo: command failed: [\"cargo\", \"--token\", \"do-not-print\"] API_KEY=secret-value".into(),
+            &SeedResult::new(
+                WallTime::from_micros(1_000_000).unwrap(),
+                "failed",
+                None,
+                vec![SeedProjectRecord {
+                    project: "/private/sensitive/repo".into(),
+                    project_key: "key".into(),
+                    outcome: SeedProjectOutcome::Failed {
+                        error: private.into(),
+                    },
+                }],
             ),
         )
         .unwrap();
 
         let task = target_seed_task(&directory);
-        assert_eq!(task.state, "last_failed");
+        assert_eq!(task.state, "failed:1");
         assert!(task.error.is_none(), "a seed note must not fail the tick");
-        let diagnostic = task.diagnostic.unwrap();
+        let diagnostic = task.diagnostic.clone().unwrap();
         assert!(diagnostic.contains("Cargo or Git command failed"));
         assert!(diagnostic.contains("provenant worktree seed-build"));
 
@@ -1650,7 +2454,10 @@ mod tests {
         assert_eq!(error, "no process budget");
         assert_eq!(
             seed_state_of(&directory),
-            ("last_failed", Some("no process budget".into()))
+            (
+                "last_failed".to_owned(),
+                Some("no process budget".to_owned())
+            )
         );
         assert!(seed_retry_due(
             &directory,
@@ -1666,10 +2473,7 @@ mod tests {
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_000_000).unwrap();
         let queue = SeedQueue {
-            retry: Some(SeedRequest::busy(
-                vec!["project-a".into()],
-                Some("project-b failed previously".into()),
-            )),
+            retry: Some(SeedRequest::busy(vec!["project-a".into()])),
             retry_at: Some(
                 WallTime::from_micros(now.as_micros() - SEED_WORK_RETRY_MICROS).unwrap(),
             ),
@@ -1694,7 +2498,7 @@ mod tests {
         assert_eq!(
             queue.pending,
             Some(SeedRequest::full()),
-            "full scope must dominate the stale busy snapshot and clear its error"
+            "full scope must dominate the stale busy snapshot"
         );
         let (_, request) = claim_seed_job(&directory, now).unwrap().unwrap();
         assert_eq!(request, SeedRequest::full());
@@ -1702,16 +2506,13 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn a_full_request_queued_during_busy_work_clears_the_busy_error_snapshot() {
+    fn a_full_request_queued_during_busy_work_supersedes_the_busy_retry() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_500_000).unwrap();
         let queue = SeedQueue {
-            active: Some(SeedRequest::busy(
-                vec!["project-a".into()],
-                Some("project-b failed".into()),
-            )),
+            active: Some(SeedRequest::busy(vec!["project-a".into()])),
             active_at: Some(now),
             ..Default::default()
         };
@@ -1731,7 +2532,6 @@ mod tests {
             now,
             &mut worker,
             SeedOutcome {
-                error: Some("project-b failed".into()),
                 busy_project_keys: vec!["project-a".into()],
             },
         )
@@ -1782,7 +2582,7 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn stale_busy_job_recovery_keeps_its_project_keys_and_prior_error() {
+    fn stale_busy_job_recovery_keeps_its_project_keys() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
@@ -1790,18 +2590,12 @@ mod tests {
         queue_seed(
             &directory,
             started,
-            Some(SeedRequest::busy(
-                vec!["project-a".into()],
-                Some("project-b failed".into()),
-            )),
+            Some(SeedRequest::busy(vec!["project-a".into()])),
             || Ok(()),
         )
         .unwrap();
         let (worker, request) = claim_seed_job(&directory, started).unwrap().unwrap();
-        assert_eq!(
-            request,
-            SeedRequest::busy(vec!["project-a".into()], Some("project-b failed".into()))
-        );
+        assert_eq!(request, SeedRequest::busy(vec!["project-a".into()]));
         drop(worker); // Simulate a crash after the request became active.
 
         let stale =
@@ -1812,10 +2606,7 @@ mod tests {
         assert_eq!(queue.active, None);
         assert_eq!(
             queue.pending,
-            Some(SeedRequest::busy(
-                vec!["project-a".into()],
-                Some("project-b failed".into())
-            ))
+            Some(SeedRequest::busy(vec!["project-a".into()]))
         );
     }
 
@@ -1834,7 +2625,7 @@ mod tests {
             ..Default::default()
         };
         write_seed_queue(&directory, &queue).unwrap();
-        write_result(&directory, SEED_RESULT, "tick-seed", now, "running", None).unwrap();
+        write_seed_progress(&directory, now, "running", None).unwrap();
         let worker = directory
             .try_lock("seed-worker.lock".as_ref(), LockMode::Exclusive)
             .unwrap();
@@ -1858,10 +2649,7 @@ mod tests {
                     queue_lock,
                     now,
                     &mut worker,
-                    SeedOutcome {
-                        error: None,
-                        busy_project_keys: Vec::new(),
-                    },
+                    SeedOutcome::default(),
                 )
                 .unwrap()
                 .is_none()
@@ -1878,7 +2666,7 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn seed_retry_retries_only_busy_projects_and_preserves_other_failures() {
+    fn a_busy_retry_replaces_only_its_projects_and_keeps_every_other_outcome() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
         // macOS temp roots sit behind a /var symlink, which private_directory refuses.
@@ -1907,51 +2695,43 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(outcome.busy_project_keys, vec![busy_key.clone()]);
         assert!(
             finish_seed_job(&directory, wall, &mut worker, outcome)
                 .unwrap()
                 .is_none()
         );
-        // The failure is logged in the result and visible to the tick, which
-        // is not itself failed: the later projects still ran.
-        let (state, error) = seed_state_of(&directory);
-        assert_eq!(state, "last_failed");
-        assert!(
-            error
-                .as_deref()
-                .unwrap()
-                .contains(&format!("{}: origin/main missing", projects[1].display()))
-        );
-        let pass = refresh_projects(&entries, &root, |project| {
-            match project.file_name().unwrap().to_str().unwrap() {
-                "a" => Ok(Refresh::Busy),
-                "b" => Err("origin/main missing".into()),
-                "c" => Ok(Refresh::Built("generation".into())),
-                _ => Ok(Refresh::Current),
-            }
-        });
+        // One failed project does not hide the two that were seeded or the one
+        // that is waiting for its build lock; the tick is not itself failed.
+        assert_eq!(seed_state(&directory), "ok:2 busy:1 failed:1");
+        let outcomes: Vec<_> = seed_records(&directory)
+            .into_iter()
+            .map(|record| record.outcome)
+            .collect();
         assert_eq!(
-            (
-                pass.built,
-                pass.current,
-                pass.busy,
-                pass.errors.len(),
-                pass.busy_project_keys
-            ),
-            (1, 1, 1, 1, vec![busy_key.clone()])
+            outcomes,
+            vec![
+                SeedProjectOutcome::Busy,
+                SeedProjectOutcome::Failed {
+                    error: "origin/main missing".into()
+                },
+                SeedProjectOutcome::Built,
+                SeedProjectOutcome::Current,
+            ]
         );
+        assert!(target_seed_task(&directory).error.is_none());
+
         assert!(!seed_retry_due(&directory, wall), "just written: not due");
         let far = WallTime::from_micros(wall.as_micros() + SEED_WORK_RETRY_MICROS + 1).unwrap();
         assert!(seed_retry_due(&directory, far), "busy is retried next tick");
         let retry = read_seed_queue(&directory).unwrap().retry.unwrap();
         assert_eq!(retry.scope, SeedScope::Busy(vec![busy_key.clone()]));
-        let previous_error = retry.prior_error.unwrap();
-        assert!(previous_error.contains("origin/main missing"));
         queue_seed(&directory, far, None, || Ok(())).unwrap();
         let queued = read_seed_queue(&directory).unwrap();
-        let request = queued.pending.unwrap();
-        assert_eq!(request.scope, SeedScope::Busy(vec![busy_key.clone()]));
-        assert_eq!(request.prior_error, Some(previous_error.clone()));
+        assert_eq!(
+            queued.pending,
+            Some(SeedRequest::busy(vec![busy_key.clone()]))
+        );
         assert!(queued.retry.is_none());
         let (worker_lock, request) = claim_seed_job(&directory, far).unwrap().unwrap();
         let mut worker_lock = Some(worker_lock);
@@ -1976,9 +2756,11 @@ mod tests {
                 .is_none()
         );
         assert_eq!(*retried.borrow(), vec![projects[0].clone()]);
-        let (state, error) = seed_state_of(&directory);
-        assert_eq!(state, "last_failed", "the failed project remains visible");
-        assert!(error.unwrap().contains("origin/main missing"));
+        assert_eq!(
+            seed_state(&directory),
+            "ok:3 failed:1",
+            "the retry kept the failed project and the seeded ones"
+        );
         assert!(
             !seed_retry_due(&directory, far),
             "resolved busy work is not retried"
@@ -1994,7 +2776,7 @@ mod tests {
             |_| Ok(Refresh::Current),
         )
         .unwrap();
-        assert_eq!(seed_state_of(&directory), ("complete", None));
+        assert_eq!(seed_state_of(&directory), ("ok:4".to_owned(), None));
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
@@ -2022,21 +2804,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*called.borrow(), vec![broken.clone()], "bare is skipped");
-        let (state, note) = seed_state_of(&directory);
-        assert_eq!(state, "last_failed");
-        assert!(note.unwrap().contains("temporary Git spawn failure"));
-        let pass = refresh_projects(
+        let records = seed_records(&directory);
+        assert_eq!(records[0].outcome, SeedProjectOutcome::NotCargo);
+        assert!(matches!(
+            &records[1].outcome,
+            SeedProjectOutcome::Failed { error } if error.contains("temporary Git spawn failure")
+        ));
+        assert_eq!(
+            seed_state(&directory),
+            "failed:1",
+            "a project with nothing to seed is not counted"
+        );
+        let outcomes = refresh_projects(
             &SeedDiscovery::from_paths(vec![bare]).projects,
             &root,
             |_| panic!("no manifest, no refresh"),
         );
-        assert_eq!(
-            pass,
-            SeedPass {
-                skipped: 1,
-                ..Default::default()
-            }
-        );
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].outcome, SeedProjectOutcome::NotCargo);
         seed_pass(
             &directory,
             &root,
@@ -2047,7 +2832,130 @@ mod tests {
             |_| Ok(Refresh::Built("generation".into())),
         )
         .unwrap();
-        assert_eq!(seed_state_of(&directory), ("complete", None));
+        assert_eq!(seed_state_of(&directory), ("ok:1".to_owned(), None));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn a_project_whose_verify_base_cannot_be_resolved_is_skipped_without_hiding_another_seed() {
+        use crate::target_seed_build::{Refresh, SeedSkip, SkipReason};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        let unresolved = seed_project(&root, "unresolved", true);
+        let healthy = seed_project(&root, "healthy", true);
+        let called = std::cell::RefCell::new(Vec::new());
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            true,
+            &SeedRequest::full(),
+            || {
+                Ok(SeedDiscovery::from_paths(vec![
+                    unresolved.clone(),
+                    healthy.clone(),
+                ]))
+            },
+            |project| {
+                called.borrow_mut().push(project.to_owned());
+                if project == unresolved {
+                    Err(SeedSkip::new(
+                        SkipReason::VerifyBaseUnresolved,
+                        "verify base origin/main does not resolve to a commit in this repository",
+                    )
+                    .into())
+                } else {
+                    Ok(Refresh::Built("generation".into()))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *called.borrow(),
+            vec![unresolved.clone(), healthy],
+            "a skip stops no other project"
+        );
+        let result = read_seed_result(&directory).unwrap().unwrap();
+        assert_eq!(result.state, "complete", "a skip is not a failed pass");
+        assert!(result.error.is_none());
+        assert!(matches!(
+            &result.projects[0].outcome,
+            SeedProjectOutcome::Skipped { reason: SkipReason::VerifyBaseUnresolved, repair, .. }
+                if repair.contains("seed-build")
+        ));
+        assert_eq!(result.projects[1].outcome, SeedProjectOutcome::Built);
+
+        let task = target_seed_task(&directory);
+        assert_eq!(task.state, "ok:1 skipped:1");
+        assert!(task.error.is_none());
+        let note = task.diagnostic.unwrap();
+        assert!(note.contains("1 project skipped"), "{note}");
+        assert!(
+            note.contains(SkipReason::VerifyBaseUnresolved.repair()),
+            "{note}"
+        );
+        assert!(
+            !note.contains(unresolved.to_str().unwrap()),
+            "the note names the repair, not the repository path"
+        );
+        let much_later = after(seed_clock().wall_now().unwrap(), 10 * DAY_SECONDS);
+        assert!(
+            !seed_retry_due(&directory, much_later),
+            "a skip leaves no work to retry"
+        );
+    }
+
+    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    #[test]
+    fn the_seed_result_records_typed_per_project_outcomes_and_reads_an_older_result() {
+        use crate::target_seed_build::SkipReason;
+        let record = |key: &str, outcome| SeedProjectRecord {
+            project: format!("/repo/{key}"),
+            project_key: key.into(),
+            outcome,
+        };
+        let result = SeedResult::finished(
+            WallTime::from_micros(1_000_000).unwrap(),
+            None,
+            vec![
+                record("built", SeedProjectOutcome::Built),
+                record(
+                    "skipped",
+                    SeedProjectOutcome::Skipped {
+                        reason: SkipReason::VerifyBaseUnset,
+                        detail: "verify.base is unset".into(),
+                        repair: SkipReason::VerifyBaseUnset.repair().into(),
+                    },
+                ),
+                record(
+                    "failed",
+                    SeedProjectOutcome::Failed {
+                        error: "command failed".into(),
+                    },
+                ),
+            ],
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["state"], "failed");
+        assert_eq!(json["projects"][0]["state"], "built");
+        assert_eq!(json["projects"][1]["state"], "skipped");
+        assert_eq!(json["projects"][1]["reason"], "verify_base_unset");
+        assert_eq!(json["projects"][1]["project_key"], "skipped");
+        assert_eq!(json["projects"][2]["state"], "failed");
+        assert_eq!(seed_summary(&result), "ok:1 skipped:1 failed:1");
+        let round_trip: SeedResult = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip.projects, result.projects);
+
+        // A result written before per-project records has none; its state and
+        // cause still read, and the tick does not invent counts.
+        let older: SeedResult = serde_json::from_slice(
+            br#"{"state":"failed","at":"2026-11-17T12:49:25.659684Z","error":"/repo: resolving verify base: worktree or branch was not found"}"#,
+        )
+        .unwrap();
+        assert!(older.projects.is_empty());
+        assert_eq!(seed_summary(&older), "last_failed");
+        assert!(seed_diagnostic(&older).unwrap().contains("verify base"));
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
@@ -2127,7 +3035,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             seed_state_of(&directory),
-            ("last_failed", Some("registry unreadable".into()))
+            (
+                "last_failed".to_owned(),
+                Some("registry unreadable".to_owned())
+            )
         );
     }
 }

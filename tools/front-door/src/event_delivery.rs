@@ -24,6 +24,24 @@ pub(crate) fn warn(message: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
 }
+/// Warn once per process for each distinct message. A wait is one process, so a
+/// condition that repeats on every poll is reported once per wait.
+pub(crate) fn warn_once(message: &str) {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if SEEN
+        .lock()
+        .is_ok_and(|mut seen| remember(&mut seen, message))
+    {
+        warn(message);
+    }
+}
+/// Whether `message` is new. A bounded set keeps a stream of distinct errors
+/// from growing without limit; a full set reports nothing further.
+fn remember(seen: &mut std::collections::BTreeSet<String>, message: &str) -> bool {
+    const MAX_REMEMBERED: usize = 64;
+    seen.len() < MAX_REMEMBERED && seen.insert(message.to_owned())
+}
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const LIMIT: u64 = 4 * 1024 * 1024;
 const REPLAY_PAGE: u64 = 100;
@@ -670,8 +688,14 @@ fn continue_after_index<T>(
     forge: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if let Err(error) = graphs() {
+        let quarantined = error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>();
         warn(&format!(
-            "graph observation indexing failed for {project}: {error}; will retry"
+            "graph observation indexing failed for {project}: {error}{}",
+            if quarantined {
+                "; quarantined, skipped on later ticks"
+            } else {
+                "; will retry"
+            }
         ));
     }
     if let Err(error) = notes() {
@@ -1188,6 +1212,22 @@ fn index_notes(roots: &Roots, project: ProjectId) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_warning_is_reported_once_and_the_memory_is_bounded() {
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(remember(&mut seen, "Actions runs unavailable"));
+        assert!(!remember(&mut seen, "Actions runs unavailable"));
+        assert!(remember(&mut seen, "another condition"));
+        for n in 0..200 {
+            remember(&mut seen, &format!("distinct {n}"));
+        }
+        assert!(seen.len() <= 64, "{}", seen.len());
+        assert!(!remember(
+            &mut seen,
+            "never seen before, but the set is full"
+        ));
+    }
 
     #[allow(dead_code)] // The custom worktree driver compiles without a test harness.
     fn fixture() -> (tempfile::TempDir, Roots, ProjectId) {

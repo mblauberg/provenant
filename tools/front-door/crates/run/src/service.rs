@@ -37,6 +37,7 @@ impl Service<'_> {
                     | WriteSource::ToolWrite
                     | WriteSource::ReadOnlyException
                     | WriteSource::LaneCache
+                    | WriteSource::GitState
             )
         });
         if Self::has_writes(writer || explicit_writes, write_roots) {
@@ -571,25 +572,61 @@ impl<'a> Service<'a> {
         if matches!(record.state, AttemptState::Terminal { .. }) {
             record.custody_pending =
                 Some(!self.store.custody_released(&record, call).unwrap_or(false));
-            let restored = self
+            let merge_retained = self
                 .store
                 .attempt_dir(record.attempt_id, false)
                 .ok()
                 .and_then(|attempt| {
                     crate::artifacts::read_sealed_observed(
                         &attempt,
-                        "merge-restored.json",
+                        "private-merge-retained.json",
                         crate::RECORD_LIMIT,
                     )
                     .ok()
                     .flatten()
                 })
-                .and_then(|raw| crate::db::decode::<crate::writer::MergeRestored>(&raw).ok())
+                .and_then(|raw| crate::db::decode::<crate::writer::PrivateMergeRetained>(&raw).ok())
                 .is_some_and(|marker| {
                     marker.schema_version == 1 && marker.scope == crate::RunStore::scope(&record)
                 });
-            if restored && let AttemptState::Terminal { reason, .. } = &mut record.state {
-                let note = "merge index, parents and working files were retained in the worktree";
+            let out_of_sync = self
+                .store
+                .attempt_dir(record.attempt_id, false)
+                .ok()
+                .and_then(|attempt| {
+                    crate::artifacts::read_sealed_observed(
+                        &attempt,
+                        crate::writer::INDEX_OUT_OF_SYNC,
+                        crate::RECORD_LIMIT,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .and_then(|raw| crate::db::decode::<crate::writer::IndexOutOfSyncNotice>(&raw).ok())
+                .filter(|notice| {
+                    notice.schema_version == 1 && notice.scope == crate::RunStore::scope(&record)
+                });
+            if let Some(notice) = out_of_sync
+                && let AttemptState::Terminal { reason, .. } = &mut record.state
+            {
+                let paths = if notice.paths.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (check these paths first: {})", notice.paths.join(", "))
+                };
+                let note = format!(
+                    "index_out_of_sync: the worktree's native Git index was left unchanged and may not follow the published branch tip: {}; to resync it run in that worktree{paths}: {}",
+                    notice.reason,
+                    crate::objects::NATIVE_INDEX_REMEDY
+                );
+                *reason = Some(
+                    reason
+                        .take()
+                        .map_or_else(|| note.clone(), |old| format!("{old}; {note}")),
+                );
+            }
+            if merge_retained && let AttemptState::Terminal { reason, .. } = &mut record.state {
+                let note = "merge index and parents were retained in attempt-private Git; working files remain in the worktree";
                 *reason = Some(
                     reason
                         .take()
@@ -901,6 +938,7 @@ impl From<&RunError> for ErrorKind {
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::LaneTipUnrooted { .. } => Self::LaneTipUnrooted,
+            RunError::PublicationDiverged => Self::Conflict,
             RunError::Validation(_)
             | RunError::Handoff(_)
             | RunError::WriterLineage(_)

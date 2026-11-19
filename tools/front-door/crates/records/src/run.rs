@@ -278,6 +278,10 @@ pub struct LaneAccess {
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub capability_sources: CapabilitySources,
+    /// Host-granted shared writer incarnation, retained through preparation
+    /// and checked again after acquiring worktree occupancy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_worktree: Option<crate::custody::Subject>,
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
@@ -712,6 +716,26 @@ pub struct RouteRecord {
     pub sandbox_admission: Option<SandboxAdmissionReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_grant_limit: Option<WriteGrantLimitReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_config: Option<GitConfigReceipt>,
+}
+
+/// How a sandboxed lane's private Git configuration was built from the
+/// host's: the key names the allowlist withheld (subsections redacted, never
+/// values) and the person's extra allowlist with its source.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfigReceipt {
+    #[serde(default)]
+    pub dropped: Vec<String>,
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub origin: OriginReceipt,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1071,6 +1095,42 @@ impl From<RouteRecord> for crate::RouteFact {
         }
     }
 }
+impl UsageRecord {
+    /// Fresh tokens the writer token budget counts: uncached input, cache
+    /// writes and output (including reasoning). Cache reads are excluded
+    /// because each call re-reads the whole context, so counting them would
+    /// exhaust the budget on rereads instead of new work. `None` means the
+    /// provider reported none of these categories, which is not zero.
+    pub fn fresh_tokens(&self) -> Option<u64> {
+        [
+            self.uncached_input,
+            self.cache_write,
+            self.output_excluding_reasoning,
+            self.reasoning,
+        ]
+        .into_iter()
+        .try_fold(None, |sum: Option<u64>, part| match part {
+            Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+            None => Some(sum),
+        })
+        .flatten()
+    }
+
+    /// Input the provider reported, including cached reads and writes. This
+    /// is the provider's own cumulative input figure, not the budget's unit;
+    /// it is reported beside the counted figure so the units cannot be
+    /// confused. `None` when the provider reported no input categories.
+    pub fn input_including_cache(&self) -> Option<u64> {
+        [self.uncached_input, self.cache_read, self.cache_write]
+            .into_iter()
+            .try_fold(None, |sum: Option<u64>, part| match part {
+                Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+                None => Some(sum),
+            })
+            .flatten()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(flatten)]
@@ -1328,6 +1388,9 @@ pub enum TerminalCause {
     LaneTokenLost,
     /// The host interrupted this attempt to deliver a queued steering turn.
     Steered,
+    /// A refused attempt whose record names no cause. The host states that
+    /// the cause is unknown rather than naming one it did not observe.
+    Unrecorded,
 }
 
 impl TerminalCause {
@@ -1374,6 +1437,7 @@ impl TerminalCause {
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
             Self::Steered => "steering interruption; provenant output ID",
+            Self::Unrecorded => "refused, cause not recorded; provenant output ID",
         }
     }
 
@@ -1490,6 +1554,9 @@ impl TerminalCause {
             }
             Self::Steered => {
                 "the host interrupted this attempt for a queued steering turn; continuation requires the retained session for this provider, model and account"
+            }
+            Self::Unrecorded => {
+                "the lane was refused and its record names no cause; inspect the attempt's local launch evidence and request before retrying"
             }
         }
     }
@@ -1834,6 +1901,7 @@ pub enum WriteSource {
     PrivateState,
     ReadOnlyException,
     LaneCache,
+    GitState,
 }
 
 /// Evidence on which a terminal decision was based.
@@ -3169,6 +3237,13 @@ mod tests {
                 "write_grant_limit",
                 serde_json::json!({
                     "key":"domains.run.write_grant_limit_bytes","value":1048576,"origin":"compiled_default"
+                }),
+            ),
+            (
+                "git_config",
+                serde_json::json!({
+                    "dropped":["credential.helper","http.*.extraheader"],"allow":["push.default"],
+                    "key":"domains.lanes.git_config_allow","origin":{"kind":"compiled"}
                 }),
             ),
         ];

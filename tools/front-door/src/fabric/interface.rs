@@ -62,6 +62,11 @@ fn implementation_warnings(
     }).map(|node| format!("unbounded_brief_junior_writer: {} (brief source: launch input) has no plan input or write scope; use --plan to size the brief", node.id)).collect()
 }
 
+/// A `wait_seconds` that is not a usable wait budget.
+fn wait_seconds_invalid() -> FacadeError {
+    FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
+}
+
 fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
@@ -704,6 +709,9 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
     }
 }
 
+/// Launch controls that bind a writer; a composite template can take none of them.
+const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
+
 /// Apply plain-task execution controls before template lowering and patch admission.
 fn bind_launch_controls(
     input: &Value,
@@ -960,8 +968,10 @@ impl Factory {
         route: Option<&RouteChoice>,
         review_range: Option<(&str, &str)>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
-        let config = provenant_cli::config_reads::read_for(&self.context.roots, "run")
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let config =
+            provenant_cli::config_reads::read_for(&self.context.roots, "run").map_err(|error| {
+                FacadeError::invalid(InvalidInputDetail::Configuration(error.to_string()))
+            })?;
         // An unknown tier is refused before panel resolution, so advisory and
         // strict diversity both give this usage error instead of a compile error.
         for name in route
@@ -993,8 +1003,7 @@ impl Factory {
         if let Some(tier) = route.and_then(|route| route.tier_for("review")) {
             resolver_document["review_tier_override"] = json!(tier);
         }
-        let document: GraphDocument = serde_json::from_value(resolver_document)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let document: GraphDocument = decode_input(resolver_document, "document")?;
         let mut resolvers = provenant_cli::fabric::graph_relay::launch_resolvers_at_roots(
             &self.context.roots,
             &self.cwd,
@@ -1065,7 +1074,7 @@ impl Factory {
                     .map(|wait| wait.cap_at(budget.deadline().as_mono_time()))
             })
             .transpose()
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(|_| wait_seconds_invalid())?;
         let launch = match &request {
             provenant_fabric_runtime::graph::relay::RelayOp::Add(child) if child.has_writers() => {
                 let writer = provenant_cli::fabric::graph_relay::writer_launch_budget(
@@ -1446,7 +1455,7 @@ impl Factory {
             &self.context.config.graph.allowed_read_roots,
         );
         crate::graph_support::confine_pattern_roots(node, &policy)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("read_roots".into())))?;
         if let Some(roots) = node.get_mut("read_roots").and_then(Value::as_array_mut) {
             for root in roots {
                 let given = root.as_str().ok_or_else(|| {
@@ -1458,11 +1467,9 @@ impl Factory {
                 } else {
                     self.cwd.join(path)
                 };
-                *root = encode(
-                    policy
-                        .confine(&path)
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?,
-                )?;
+                *root = encode(policy.confine(&path).map_err(|_| {
+                    FacadeError::invalid(InvalidInputDetail::Field("read_roots".into()))
+                })?)?;
             }
         }
         for pointer in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
@@ -1542,11 +1549,8 @@ impl Factory {
             return Err(FacadeError::invalid(InvalidInputDetail::OperationIdRetired));
         }
         if let Some(wait) = input.get("wait_seconds") {
-            let seconds = wait.as_u64().ok_or_else(|| {
-                FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
-            })?;
-            WaitBudget::cli(self.clock.mono_now(), seconds)
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            let seconds = wait.as_u64().ok_or_else(wait_seconds_invalid)?;
+            WaitBudget::cli(self.clock.mono_now(), seconds).map_err(|_| wait_seconds_invalid())?;
         }
         if self.context.inspection_only
             && (matches!(operation, "edit" | "stop" | "retry")
@@ -1572,8 +1576,7 @@ impl Factory {
                 return self.relay_document(&input, budget, cancel);
             }
             if operation == "edit" {
-                let patch: Patch = serde_json::from_value(input["patch"].clone())
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                let patch: Patch = decode_input(input["patch"].clone(), "patch")?;
                 let op = provenant_fabric_runtime::graph::relay::RelayOp::Edit {
                     id: required(&input, "id")?.to_owned(),
                     patch,
@@ -1611,7 +1614,7 @@ impl Factory {
                         Ok(json!({
                             "name":name,
                             "layer":library.layer(name),
-                            "template":library.resolve(name).map_err(|_| FacadeError::InvalidInput { detail: None })?,
+                            "template":library.resolve(name).map_err(graph_input_reason)?,
                         }))
                     })
                     .collect::<Result<Vec<_>, FacadeError>>()?;
@@ -1909,18 +1912,40 @@ impl Factory {
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(graph_input_reason)?;
+            let bundled_smoke =
+                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Bundled);
+            // Launch controls bind to one leaf. A composite has no single
+            // worktree to bind, so name the first control it cannot take.
+            let first_control = LAUNCH_CONTROLS
+                .iter()
+                .find(|field| input.get(**field).is_some_and(|value| !value.is_null()));
             if template.is_composite()
-                && ["access", "worktree", "branch", "base", "write_scope"]
-                    .iter()
-                    .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+                && !bundled_smoke
+                && let Some(field) = first_control
             {
                 return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                    "launch controls require a leaf template".into(),
+                    (*field).into(),
                 )));
+            }
+            // The smoke template binds its controls to its write node only,
+            // so they are bound onto a scratch node and carried as parameters.
+            let mut smoke_writer = json!({});
+            if bundled_smoke {
+                for field in ["access", "write_scope"] {
+                    if input.get(field).is_some_and(|value| !value.is_null()) {
+                        return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                            field.into(),
+                        )));
+                    }
+                }
             }
             bind_launch_controls(
                 input,
-                &mut node,
+                if bundled_smoke {
+                    &mut smoke_writer
+                } else {
+                    &mut node
+                },
                 &self.cwd,
                 &self.context.project_root,
                 &self.context.port_table,
@@ -1984,33 +2009,60 @@ impl Factory {
             if bundled_batch && let Some(branch) = &integration_branch {
                 parameters["integration_branch"] = branch.clone();
             }
-            let bundled_smoke =
-                node["use"] == "smoke" && library.layer("smoke") == Some(Layer::Bundled);
             if bundled_smoke {
                 let is_remote = input
                     .get("host")
                     .and_then(Value::as_str)
                     .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
+                let controls = smoke_writer
+                    .as_object()
+                    .is_some_and(|node| !node.is_empty());
+                if controls {
+                    // A remote graph must not retain or transmit a caller path.
+                    if let Some(field) = first_control.filter(|_| is_remote) {
+                        return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                            (*field).into(),
+                        )));
+                    }
+                    // A control and a `--set` of the same binding are two
+                    // answers to one question.
+                    if ["worktree", "write_attempt"]
+                        .iter()
+                        .any(|name| overrides.get(*name).is_some())
+                    {
+                        return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                            "set".into(),
+                        )));
+                    }
+                    parameters["worktree"] = smoke_writer["worktree"].clone();
+                    if let Some(attempt) = smoke_writer.get("attempt") {
+                        parameters["write_attempt"] = attempt.clone();
+                    }
+                }
                 if is_remote {
                     // A remote graph must not retain or transmit a caller path,
                     // even though the writer is skipped by its launch condition.
                     parameters["worktree"] = json!("");
                 }
-                if parameters.get("smoke-write").is_none() {
+                let requested = parameters.get("smoke-write").is_some();
+                if !requested {
                     let worktree = parameters
                         .get("worktree")
                         .and_then(Value::as_str)
                         .unwrap_or("");
-                    let enabled = !is_remote && !worktree.is_empty();
-                    parameters["smoke-write"] = json!(enabled);
-                    if !enabled {
-                        let reason = if is_remote {
-                            "remote placement does not accept caller paths"
-                        } else {
-                            "no writer worktree supplied"
-                        };
-                        warn_operator(format!("smoke write node skipped: {reason}"));
-                    }
+                    parameters["smoke-write"] = json!(!is_remote && !worktree.is_empty());
+                }
+                if parameters["smoke-write"] != json!(true) {
+                    let reason = if is_remote {
+                        "remote placement does not accept caller paths"
+                    } else if requested {
+                        "smoke-write is not enabled"
+                    } else {
+                        "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
+                    };
+                    input_warnings.push(format!(
+                        "smoke skipped node write: {reason}; read and review nodes still run"
+                    ));
                 }
             }
             node["with"] = parameters;
@@ -2061,8 +2113,7 @@ impl Factory {
                     compiled[key] = value.clone();
                 }
             }
-            document = serde_json::from_value(compiled)
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            document = decode_input(compiled, "document")?;
         }
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
@@ -2113,8 +2164,7 @@ impl Factory {
         // Template binding can assemble a credential from individually safe
         // inputs. Check the bound launch before submission normalises its text.
         input_warnings.extend(self.graph_input_warnings(&bound)?);
-        document = serde_json::from_value(bound)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        document = decode_input(bound, "document")?;
         if let Some(warning) = review_subject
             .as_ref()
             .and_then(|subject| subject.warning.as_ref())
@@ -2490,8 +2540,7 @@ impl Factory {
             Some(target) => target.graph,
             None => self.resolve_graph(selector)?.0,
         };
-        let patch: Patch = serde_json::from_value(input["patch"].clone())
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let patch: Patch = decode_input(input["patch"].clone(), "patch")?;
         let mut journal = FileJournal::open(
             &self.context.roots.state,
             self.context.identity.project,
@@ -2582,7 +2631,7 @@ impl Factory {
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("extend".into())))?
             .unwrap_or_default();
         if !extend.is_empty()
             && (target.node.is_some() || input.get("brief").is_some_and(|value| !value.is_null()))
@@ -2757,7 +2806,7 @@ impl Factory {
         let mut remote_read_allowed = true;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             let wait = WaitBudget::cli(self.clock.mono_now(), seconds)
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                .map_err(|_| wait_seconds_invalid())?
                 .cap_at(budget.deadline().as_mono_time());
             let cadence = self.wait_cadence()?;
             let mut observation = self.local_graph_observation(&target.graph, cadence);
@@ -2923,9 +2972,9 @@ impl Factory {
         let now = self.clock.mono_now();
         let deadline = now
             .checked_add(budget.remaining(now))
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(|_| wait_seconds_invalid())?;
         let wait = WaitBudget::cli(now, seconds)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?
+            .map_err(|_| wait_seconds_invalid())?
             .cap_at(deadline);
         let cadence = self.wait_cadence()?;
         let mut observation = self.local_graph_observation(&run.checkpoint.graph_id, cadence);
@@ -3130,12 +3179,12 @@ fn bind_read_roots(
 ) -> Result<(), FacadeError> {
     if let Some(roots) = value.get("read_roots") {
         node.read_roots = serde_json::from_value(roots.clone())
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("read_roots".into())))?;
     }
     if let Some(plan) = value.get("plan") {
         node.plan = Some(
             serde_json::from_value(plan.clone())
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?,
+                .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("plan".into())))?,
         );
     }
     if let Some(composite) = &mut node.composite {
@@ -6747,6 +6796,7 @@ mod tests {
             {
                 Ok(Some(graph::WriterWorktreeBinding {
                     extra: Default::default(),
+                    shared_worktree: None,
                     source_directory_identity: None,
                     worktree: worktree.into(),
                     head: self.source.clone(),

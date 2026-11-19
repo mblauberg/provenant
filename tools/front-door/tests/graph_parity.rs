@@ -87,6 +87,7 @@ impl AttemptOwner for Provider {
             .as_ref()
             .map(|head| graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                shared_worktree: None,
                 source_directory_identity: None,
                 worktree: worktree.into(),
                 head: head.clone(),
