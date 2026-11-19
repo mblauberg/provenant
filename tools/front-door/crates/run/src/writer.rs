@@ -1144,32 +1144,10 @@ struct GitPins {
     base: GitOid,
 }
 
-/// Where the primary checkout's HEAD stood. A lane bound to a linked worktree
-/// that works in the primary checkout instead moves it (#3611).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct PrimaryPosition {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    head_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    head: Option<GitOid>,
-}
-
-impl PrimaryPosition {
-    fn describe(&self) -> String {
-        let branch = self.head_ref.as_deref().map_or("detached HEAD", |name| {
-            name.strip_prefix("refs/heads/").unwrap_or(name)
-        });
-        match self.head {
-            Some(head) => format!(
-                "{branch} at {}",
-                head.to_string().chars().take(12).collect::<String>()
-            ),
-            None => format!("{branch} with no commit"),
-        }
-    }
-}
-
-/// The primary checkout as launch found it, sealed beside the attempt.
+/// The primary checkout as launch found it, sealed beside the attempt: the
+/// branch it sat on and every local and remote-tracking branch tip. A lane bound
+/// to a linked worktree that works in the primary checkout instead leaves
+/// commits or a branch there that this record does not account for (#3611).
 const PRIMARY_PIN: &str = "primary-checkout.json";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1179,46 +1157,120 @@ struct PrimaryPin {
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     checkout: String,
-    position: PrimaryPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_ref: Option<String>,
+    refs: std::collections::BTreeMap<String, GitOid>,
 }
 
 /// Work a writer made outside its bound worktree, seen at settlement.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StrayWork {
-    /// The finding: where the primary checkout moved and what the bound branch holds.
+    /// The finding: the stray branch or commits and where they were made.
     pub note: String,
-    /// False when the bound branch gained no commits, so the lane's work is elsewhere.
-    pub bound_has_commits: bool,
 }
 
-impl StrayWork {
-    /// None while the primary checkout stands where launch found it.
-    fn found(
-        checkout: &str,
-        before: &PrimaryPosition,
-        now: &PrimaryPosition,
-        branch: &str,
-        worktree: &Path,
-        bound_has_commits: bool,
-    ) -> Option<Self> {
-        if before == now {
+/// Commits the report lists and the cap on how many Git is asked for.
+const STRAY_COMMITS_LISTED: usize = 5;
+const STRAY_COMMITS_COUNTED: usize = 20;
+
+/// What to ask Git about the primary checkout, from its launch record and its
+/// state now. Stray work is either (a) the primary sitting on a branch that did
+/// not exist at launch, or (b) commits reachable from its HEAD or from new or
+/// advanced local branches that no launch tip, no remote-tracking tip that
+/// existed at launch (a pull's fetch moves those) and no other linked worktree
+/// HEAD (the bound branch and other lanes' branches) reaches.
+struct StrayPlan {
+    new_branch: Option<String>,
+    tips: Vec<GitOid>,
+    tip_names: Vec<String>,
+    excluded: Vec<GitOid>,
+}
+
+fn short_branch(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").unwrap_or(name)
+}
+
+impl StrayPlan {
+    fn new(
+        launch_head: Option<&str>,
+        launch: &std::collections::BTreeMap<String, GitOid>,
+        now: &crate::objects::PrimaryRefs,
+    ) -> Self {
+        let new_branch = now
+            .head_ref
+            .as_deref()
+            .filter(|name| name.starts_with("refs/heads/"))
+            .filter(|name| !launch.contains_key(*name) && launch_head != Some(*name))
+            .map(|name| short_branch(name).to_owned());
+        let mut tips = Vec::new();
+        let mut tip_names = Vec::new();
+        if let Some(head) = now.head {
+            tips.push(head);
+            tip_names.push(
+                now.head_ref
+                    .as_deref()
+                    .map_or("a detached HEAD".to_owned(), |name| {
+                        short_branch(name).to_owned()
+                    }),
+            );
+        }
+        for (name, tip) in &now.refs {
+            if name.starts_with("refs/heads/") && launch.get(name) != Some(tip) {
+                tips.push(*tip);
+                if !tip_names.iter().any(|seen| seen == short_branch(name)) {
+                    tip_names.push(short_branch(name).to_owned());
+                }
+            }
+        }
+        let mut excluded: Vec<GitOid> = launch.values().copied().collect();
+        excluded.extend(
+            now.refs
+                .iter()
+                .filter(|(name, _)| name.starts_with("refs/remotes/") && launch.contains_key(*name))
+                .map(|(_, tip)| *tip),
+        );
+        Self {
+            new_branch,
+            tips,
+            tip_names,
+            excluded,
+        }
+    }
+
+    /// None when neither signal fired.
+    fn report(&self, checkout: &str, worktree: &Path, commits: &[GitOid]) -> Option<StrayWork> {
+        if self.new_branch.is_none() && commits.is_empty() {
             return None;
         }
-        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-        let note = format!(
-            "primary checkout {checkout} moved during the attempt ({} -> {}) while bound branch {branch} {} in {}; the lane may have worked in the primary checkout instead of its bound worktree",
-            before.describe(),
-            now.describe(),
-            if bound_has_commits {
-                "gained commits"
+        let mut findings = Vec::new();
+        if let Some(branch) = &self.new_branch {
+            findings.push(format!(
+                "it now sits on branch {branch}, which did not exist at launch"
+            ));
+        }
+        if !commits.is_empty() {
+            let count = if commits.len() > STRAY_COMMITS_COUNTED {
+                format!("{STRAY_COMMITS_COUNTED}+")
             } else {
-                "gained no commits"
-            },
-            worktree.display(),
-        );
-        Some(Self {
-            note,
-            bound_has_commits,
+                commits.len().to_string()
+            };
+            let listed = commits
+                .iter()
+                .take(STRAY_COMMITS_LISTED)
+                .map(|commit| commit.to_string().chars().take(12).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ");
+            findings.push(format!(
+                "{count} commit(s) ({listed}) on {} that no launch ref, fetched remote-tracking ref or other worktree reaches",
+                self.tip_names.join(", ")
+            ));
+        }
+        Some(StrayWork {
+            note: format!(
+                "stray work in the primary checkout {checkout}: {}; the lane worked outside its bound worktree {}",
+                findings.join("; "),
+                worktree.display()
+            ),
         })
     }
 }
@@ -2560,59 +2612,138 @@ mod cargo_setup_tests {
         Ok(true)
     }
 
-    fn position(branch: &str, hex: char) -> PrimaryPosition {
-        PrimaryPosition {
-            head_ref: Some(format!("refs/heads/{branch}")),
-            head: GitOid::parse(&hex.to_string().repeat(40)).ok(),
+    fn oid(digit: char) -> GitOid {
+        GitOid::parse(&digit.to_string().repeat(40)).unwrap()
+    }
+
+    fn refs(entries: &[(&str, char)]) -> std::collections::BTreeMap<String, GitOid> {
+        entries
+            .iter()
+            .map(|(name, digit)| ((*name).to_owned(), oid(*digit)))
+            .collect()
+    }
+
+    fn primary(
+        head_ref: &str,
+        head: char,
+        entries: &[(&str, char)],
+    ) -> crate::objects::PrimaryRefs {
+        crate::objects::PrimaryRefs {
+            head_ref: Some(head_ref.to_owned()),
+            head: Some(oid(head)),
+            refs: refs(entries),
         }
     }
 
+    const MAIN: &str = "refs/heads/main";
+    const ORIGIN_MAIN: &str = "refs/remotes/origin/main";
+
     // Spec: docs/specs/run-settlement.md#stray-lane-work
     #[test]
-    fn stray_work_is_reported_only_when_the_primary_checkout_moved() {
+    fn a_branch_that_did_not_exist_at_launch_is_stray_work() {
+        let launch = refs(&[(MAIN, 'a'), (ORIGIN_MAIN, 'a')]);
         let worktree = Path::new("/repo/.worktrees/lane");
-        let launch = position("main", 'a');
-        let found = |now: &PrimaryPosition, commits| {
-            StrayWork::found(
-                "/repo",
-                &launch,
-                now,
-                "refs/heads/fix/lane",
-                worktree,
-                commits,
-            )
-        };
-        assert_eq!(
-            found(&launch, false),
-            None,
-            "an unmoved primary is no finding"
+        let on_new = primary(
+            "refs/heads/stray",
+            'a',
+            &[(MAIN, 'a'), ("refs/heads/stray", 'a'), (ORIGIN_MAIN, 'a')],
         );
-        assert_eq!(found(&launch, true), None);
-        let moved = position("fix/lane", 'b');
-        let empty = found(&moved, false).expect("a moved primary is a finding");
-        assert!(
-            !empty.bound_has_commits,
-            "no new commit means the work is elsewhere"
-        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &on_new);
+        assert_eq!(plan.new_branch.as_deref(), Some("stray"));
+        let found = plan
+            .report("/repo", worktree, &[])
+            .expect("sitting on a new branch is a finding with no commits at all");
         for fragment in [
             "/repo",
-            "main at aaaaaaaaaaaa",
-            "fix/lane at bbbbbbbbbbbb",
-            "gained no commits",
+            "branch stray",
+            "did not exist at launch",
             "/repo/.worktrees/lane",
         ] {
-            assert!(empty.note.contains(fragment), "{fragment}: {}", empty.note);
+            assert!(found.note.contains(fragment), "{fragment}: {}", found.note);
         }
-        let committed = found(&moved, true).expect("still reported");
-        assert!(committed.bound_has_commits, "real commits only warn");
-        assert!(committed.note.contains("gained commits"));
+        // A new branch left behind with nothing on it, and not checked out, is no work.
+        let left = primary(
+            MAIN,
+            'a',
+            &[(MAIN, 'a'), ("refs/heads/stray", 'a'), (ORIGIN_MAIN, 'a')],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &left);
+        assert_eq!(plan.new_branch, None);
+        assert_eq!(plan.report("/repo", worktree, &[]), None);
+        // The branch the primary sat on at launch is never new, even when unborn.
+        let unborn = primary(MAIN, 'a', &[]);
+        assert_eq!(
+            StrayPlan::new(Some(MAIN), &std::collections::BTreeMap::new(), &unborn).new_branch,
+            None
+        );
     }
 
     // Spec: docs/specs/run-settlement.md#stray-lane-work
     #[test]
-    fn primary_position_follows_the_primary_checkout_not_the_bound_worktree() -> FixtureResult<()> {
+    fn commits_on_new_or_advanced_branches_are_candidates_even_after_switching_back() {
+        let launch = refs(&[(MAIN, 'a'), (ORIGIN_MAIN, 'a')]);
+        let switched_back = primary(
+            MAIN,
+            'a',
+            &[(MAIN, 'a'), ("refs/heads/stray", 'b'), (ORIGIN_MAIN, 'a')],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &switched_back);
+        assert_eq!(plan.new_branch, None);
+        assert!(
+            plan.tips.contains(&oid('b')),
+            "the new branch tip is asked about"
+        );
+        assert!(
+            !plan.excluded.contains(&oid('b')),
+            "nothing accounts for it"
+        );
+        let found = plan
+            .report("/repo", Path::new("/w"), &[oid('b')])
+            .expect("commits outside every known ref are a finding");
+        assert!(found.note.contains("1 commit(s)"), "{}", found.note);
+        assert!(found.note.contains("stray"), "{}", found.note);
+        let advanced = primary(MAIN, 'c', &[(MAIN, 'c'), (ORIGIN_MAIN, 'a')]);
+        let plan = StrayPlan::new(Some(MAIN), &launch, &advanced);
+        assert!(plan.tips.contains(&oid('c')));
+        assert!(plan.tip_names.iter().any(|name| name == "main"));
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn a_pull_fast_forward_is_not_stray_work() {
+        let launch = refs(&[(MAIN, 'a'), (ORIGIN_MAIN, 'a')]);
+        // The fetch moved origin/main and the merge carried main to it.
+        let pulled = primary(
+            MAIN,
+            'b',
+            &[
+                (MAIN, 'b'),
+                (ORIGIN_MAIN, 'b'),
+                ("refs/remotes/origin/new", 'c'),
+            ],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &pulled);
+        assert_eq!(plan.new_branch, None);
+        assert!(
+            plan.excluded.contains(&oid('b')),
+            "the current tip of a remote-tracking ref that existed at launch accounts for it"
+        );
+        assert!(
+            !plan.excluded.contains(&oid('c')),
+            "a remote-tracking ref created after launch accounts for nothing"
+        );
+        assert!(
+            !plan.tips.contains(&oid('c')),
+            "remote-tracking refs are never the lane's work"
+        );
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn git_separates_a_pull_and_lane_commits_from_work_left_in_the_primary_checkout()
+    -> FixtureResult<()> {
         if clean_environment_child(stringify!(
-            primary_position_follows_the_primary_checkout_not_the_bound_worktree
+            git_separates_a_pull_and_lane_commits_from_work_left_in_the_primary_checkout
         ))? {
             return Ok(());
         }
@@ -2622,6 +2753,8 @@ mod cargo_setup_tests {
         let git_dir = root.join("metadata/project.git");
         let caller = root.join("caller");
         let writer = project.join(".worktrees/writer");
+        let origin = root.join("origin.git");
+        let other = root.join("other");
         let home = root.join("home");
         let state = root.join("state");
         for path in [
@@ -2650,14 +2783,17 @@ mod cargo_setup_tests {
             }
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
+        let path_text = |path: &Path| -> FixtureResult<String> {
+            Ok(path.to_str().ok_or("fixture path")?.to_owned())
+        };
         run_git(
             &root,
             &[
                 "init",
                 "-q",
                 "--separate-git-dir",
-                git_dir.to_str().ok_or("git dir path")?,
-                project.to_str().ok_or("project path")?,
+                &path_text(&git_dir)?,
+                &path_text(&project)?,
             ],
         )?;
         run_git(&project, &["config", "user.name", "Fixture"])?;
@@ -2666,16 +2802,15 @@ mod cargo_setup_tests {
             &["config", "user.email", "fixture@example.invalid"],
         )?;
         run_git(&project, &["commit", "--allow-empty", "-qm", "initial"])?;
+        let main = run_git(&project, &["symbolic-ref", "--short", "HEAD"])?;
+        run_git(&root, &["init", "-q", "--bare", &path_text(&origin)?])?;
+        run_git(&project, &["remote", "add", "origin", &path_text(&origin)?])?;
+        run_git(&project, &["push", "-q", "origin", &main])?;
+        run_git(&project, &["fetch", "-q", "origin"])?;
         for (branch, path) in [("chore/caller", &caller), ("chore/writer", &writer)] {
             run_git(
                 &project,
-                &[
-                    "worktree",
-                    "add",
-                    "-qb",
-                    branch,
-                    path.to_str().ok_or("path")?,
-                ],
+                &["worktree", "add", "-qb", branch, &path_text(path)?],
             )?;
         }
         let mut roots = provenant_core::RootInputs::new(home.clone(), project.clone());
@@ -2689,33 +2824,75 @@ mod cargo_setup_tests {
         let request = resolve_writer(&state, &caller, Path::new(".worktrees/writer"))?;
         let launch = prepare_writer(&request, &state, binding.project_id())?;
 
-        let primary_branch = run_git(&project, &["symbolic-ref", "HEAD"])?;
-        let (checkout, launched) = launch.primary_position(&git).ok_or("primary position")?;
+        let (checkout, at_launch) = launch.primary_state(&git)?.ok_or("primary state")?;
         assert_eq!(checkout, project.display().to_string());
-        assert_eq!(launched.head_ref.as_deref(), Some(primary_branch.as_str()));
-        assert_eq!(
-            launched.head,
-            Some(GitOid::parse(&run_git(&project, &["rev-parse", "HEAD"])?)?)
-        );
+        let (launch_head, launch_refs) = (at_launch.head_ref, at_launch.refs);
+        let origin_main = format!("refs/remotes/origin/{main}");
+        assert!(launch_refs.contains_key(&origin_main), "{launch_refs:?}");
+        let assess = || -> FixtureResult<Option<StrayWork>> {
+            Ok(launch.assess_primary(&git, launch_head.as_deref(), &launch_refs)?)
+        };
+        assert_eq!(assess()?, None, "nothing has happened yet");
 
         // A commit in the bound worktree is the lane doing its job.
-        run_git(&writer, &["config", "user.name", "Fixture"])?;
-        run_git(
-            &writer,
-            &["config", "user.email", "fixture@example.invalid"],
-        )?;
         run_git(&writer, &["commit", "--allow-empty", "-qm", "lane work"])?;
-        let (_, after_lane_commit) = launch.primary_position(&git).ok_or("primary position")?;
-        assert_eq!(after_lane_commit, launched);
+        assert_eq!(assess()?, None, "the bound branch is accounted for");
 
-        // A commit in the primary checkout is the lane working in the wrong place.
-        run_git(&project, &["commit", "--allow-empty", "-qm", "stray work"])?;
-        let (_, after_stray) = launch.primary_position(&git).ok_or("primary position")?;
-        assert_ne!(after_stray, launched);
+        // The chair pulls: origin/main and main both move, and nothing is stray.
+        run_git(
+            &root,
+            &["clone", "-q", &path_text(&origin)?, &path_text(&other)?],
+        )?;
+        run_git(
+            &other,
+            &[
+                "-c",
+                "user.name=Other",
+                "-c",
+                "user.email=other@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "upstream",
+            ],
+        )?;
+        run_git(&other, &["push", "-q", "origin", &main])?;
+        run_git(&project, &["fetch", "-q", "origin"])?;
+        run_git(
+            &project,
+            &["merge", "-q", "--ff-only", &format!("origin/{main}")],
+        )?;
         assert_eq!(
-            after_stray.head,
-            Some(GitOid::parse(&run_git(&project, &["rev-parse", "HEAD"])?)?)
+            assess()?,
+            None,
+            "a pull fast-forward is not the lane's work"
         );
+
+        // A commit made directly in the primary checkout is.
+        run_git(&project, &["commit", "--allow-empty", "-qm", "stray"])?;
+        let found = assess()?.ok_or("a primary commit is a finding")?;
+        assert!(found.note.contains("1 commit(s)"), "{}", found.note);
+        assert!(found.note.contains(&main), "{}", found.note);
+        run_git(
+            &project,
+            &["reset", "-q", "--hard", &format!("origin/{main}")],
+        )?;
+        assert_eq!(assess()?, None, "back on the fetched tip");
+
+        // A branch the primary sits on that did not exist at launch is.
+        run_git(&project, &["checkout", "-qb", "stray"])?;
+        let found = assess()?.ok_or("a new branch is a finding")?;
+        assert!(found.note.contains("branch stray"), "{}", found.note);
+
+        // Commits on it are found even after switching back.
+        run_git(
+            &project,
+            &["commit", "--allow-empty", "-qm", "stray on branch"],
+        )?;
+        run_git(&project, &["checkout", "-q", &main])?;
+        let found = assess()?.ok_or("commits on a new branch are a finding")?;
+        assert!(found.note.contains("1 commit(s)"), "{}", found.note);
+        assert!(found.note.contains("stray"), "{}", found.note);
         Ok(())
     }
 
@@ -4601,38 +4778,37 @@ fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> R
 }
 
 impl WriterLaunch {
-    /// The primary checkout and where its HEAD stands now. None for a bare
-    /// repository, which has no primary checkout, or when HEAD cannot be read.
-    fn primary_position(&self, git: &Path) -> Option<(String, PrimaryPosition)> {
-        let checkout = self.project_root()?;
-        let (head_ref, head) = crate::objects::primary_head(git, self.worktree.repo());
-        (head_ref.is_some() || head.is_some()).then(|| {
-            (
-                checkout.display().to_string(),
-                PrimaryPosition { head_ref, head },
-            )
-        })
+    /// The primary checkout and what it holds now. None for a bare repository,
+    /// which has no primary checkout.
+    fn primary_state(&self, git: &Path) -> Result<Option<(String, crate::objects::PrimaryRefs)>> {
+        let Some(checkout) = self.project_root() else {
+            return Ok(None);
+        };
+        let state = crate::objects::primary_refs(git, self.worktree.repo())?;
+        Ok(Some((checkout.display().to_string(), state)))
     }
 
-    /// Record the primary checkout's HEAD at launch so settlement can tell
-    /// whether the lane moved it. Best effort: a warning, never a refusal.
+    /// Record the primary checkout's branch and ref tips at launch so
+    /// settlement can tell what the lane added there. Best effort: a warning,
+    /// never a refusal.
     fn record_primary_position(
         &self,
         git: &Path,
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
     ) {
-        let Some((checkout, position)) = self.primary_position(git) else {
-            return;
-        };
-        let sealed = crate::db::bytes(&PrimaryPin {
-            extra: Default::default(),
-            schema_version: 1,
-            scope,
-            checkout,
-            position,
-        })
-        .and_then(|bytes| {
+        let sealed = self.primary_state(git).and_then(|state| {
+            let Some((checkout, state)) = state else {
+                return Ok(());
+            };
+            let bytes = crate::db::bytes(&PrimaryPin {
+                extra: Default::default(),
+                schema_version: 1,
+                scope,
+                checkout,
+                head_ref: state.head_ref,
+                refs: state.refs,
+            })?;
             crate::artifacts::seal(attempt, PRIMARY_PIN, &bytes, crate::RECORD_LIMIT)
         });
         if let Err(error) = sealed {
@@ -4643,14 +4819,14 @@ impl WriterLaunch {
         }
     }
 
-    /// Compare the primary checkout with its launch position. `Some` when it
-    /// moved during the attempt, with whether the bound branch gained commits.
-    /// Call it after `terminal` succeeds; no recorded position means no finding.
+    /// Whether the lane left work in the primary checkout: it sits on a branch
+    /// that did not exist at launch, or holds commits no launch ref, fetched
+    /// remote-tracking ref or other worktree reaches. No recorded launch
+    /// position means no finding.
     pub(crate) fn stray_work(
         &self,
         attempt: &Directory,
         state: &Path,
-        custody: &provenant_supervisor::custody::Recovery,
     ) -> Result<Option<StrayWork>> {
         let Some(raw) = crate::artifacts::read_sealed(attempt, PRIMARY_PIN, crate::RECORD_LIMIT)?
         else {
@@ -4658,32 +4834,36 @@ impl WriterLaunch {
         };
         let pin: PrimaryPin = crate::db::decode(&raw)?;
         let utility = runtime(state)?;
-        let git = utility.git_program_path();
-        let Some((checkout, now)) = self.primary_position(git) else {
+        self.assess_primary(
+            utility.git_program_path(),
+            pin.head_ref.as_deref(),
+            &pin.refs,
+        )
+    }
+
+    fn assess_primary(
+        &self,
+        git: &Path,
+        launch_head: Option<&str>,
+        launch_refs: &std::collections::BTreeMap<String, GitOid>,
+    ) -> Result<Option<StrayWork>> {
+        let Some((checkout, now)) = self.primary_state(git)? else {
             return Ok(None);
         };
-        if now == pin.position {
-            return Ok(None);
-        }
-        let base = custody
-            .writer_base(
-                self.worktree.repo().root_dir(),
-                self.worktree.repo().private_dir(),
-                self.branch.as_str(),
-            )
-            .map_err(error(
-                "read writer custody base",
-                Some(self.worktree.path()),
-            ))?;
-        let tip = crate::objects::resolve_ref(git, self.worktree.repo(), self.branch.as_str())?;
-        Ok(StrayWork::found(
-            &checkout,
-            &pin.position,
-            &now,
-            self.branch.as_str(),
-            self.worktree.path(),
-            tip != base,
-        ))
+        let plan = StrayPlan::new(launch_head, launch_refs, &now);
+        let repo = self.worktree.repo();
+        let mut excluded = plan.excluded.clone();
+        excluded.extend(crate::objects::linked_worktree_heads(git, repo)?);
+        // The bound branch is the lane's own, whatever its worktree lists.
+        excluded.extend(now.refs.get(self.branch.as_str()).copied());
+        let commits = crate::objects::commits_outside(
+            git,
+            repo,
+            &plan.tips,
+            &excluded,
+            STRAY_COMMITS_COUNTED + 1,
+        )?;
+        Ok(plan.report(&checkout, self.worktree.path(), &commits))
     }
 
     /// A diagnostic naming the edits a writer left uncommitted, or `None` when

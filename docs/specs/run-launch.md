@@ -167,8 +167,8 @@ primary checkout (also an absolute path, when the project has one) is not the
 lane's working copy: run commands, edit, branch and commit only in the bound
 worktree. The paragraph is advice, never a fence, and it says an absolute path
 elsewhere in the lane's context does not override it. Launch also records the
-primary checkout's HEAD (`primary-checkout.json` beside the attempt) so
-settlement can detect stray work (see run-settlement, Stray lane work).
+primary checkout's branch and ref tips (`primary-checkout.json` beside the
+attempt) so settlement can detect stray work (see run-settlement, Stray lane work).
 - Why: opencode's system prompt names the Git common directory's project, the
   primary checkout, as the workspace root of a linked worktree. A brief that said
   only "your worktree" lost to that absolute path, and Hy 4 lanes edited,

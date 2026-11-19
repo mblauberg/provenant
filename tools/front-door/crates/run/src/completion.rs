@@ -346,7 +346,7 @@ impl LaneLocation {
             })
             .unwrap_or_default();
         format!(
-            "Lane location: your working copy is the bound worktree {worktree} on branch {branch}, started from base {base}. Set the working directory of every shell command to {worktree}, edit files only under it, and commit on {branch}.{primary} An absolute path elsewhere in your context does not override this. Settlement compares the bound branch with its base and the primary checkout with its launch position: a moved primary checkout is reported, and a lane whose branch gained no commits while the primary moved needs review instead of succeeding.\n",
+            "Lane location: your working copy is the bound worktree {worktree} on branch {branch}, started from base {base}. Set the working directory of every shell command to {worktree}, edit files only under it, and commit on {branch}.{primary} An absolute path elsewhere in your context does not override this.\n",
             worktree = self.worktree.display(),
             base = self.base,
         )

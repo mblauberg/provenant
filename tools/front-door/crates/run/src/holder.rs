@@ -1867,8 +1867,7 @@ impl RunStore {
         })
     }
 
-    /// Whether the lane worked outside its bound worktree: the primary
-    /// checkout moved since launch. Observation only.
+    /// Whether the lane left work in the primary checkout. Observation only.
     fn writer_stray(
         &self,
         record: &AttemptRecord,
@@ -1876,7 +1875,6 @@ impl RunStore {
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
         cancel: CancelToken,
-        recovery: Option<&custody::Recovery>,
     ) -> Result<Option<crate::writer::StrayWork>> {
         let launch = crate::prepare_writer_with_facts(
             writer,
@@ -1885,11 +1883,7 @@ impl RunStore {
             &self.repo_facts,
         )?;
         crate::settlement::with_cancellation(attempt, scope, &cancel, || {
-            launch.stray_work(
-                attempt,
-                self.context.state_root.as_path(),
-                recovery.ok_or(RunError::Validation("writer terminal custody missing"))?,
-            )
+            launch.stray_work(attempt, self.context.state_root.as_path())
         })
     }
 
@@ -2958,10 +2952,10 @@ impl RunStore {
                             None => note,
                         });
                     }
-                    // Work made outside the bound worktree is not a success:
-                    // a moved primary checkout with no new commit on the bound
-                    // branch needs review. A moved primary beside real commits
-                    // only warns. Nothing here refuses the lane.
+                    // Work left in the primary checkout (a branch that did not
+                    // exist at launch, or commits nothing else accounts for) is
+                    // not a success, whatever the bound branch holds. Nothing
+                    // here refuses the lane.
                     if decoded.outcome == Outcome::Succeeded {
                         let stray = self.writer_stray(
                             &record,
@@ -2971,15 +2965,12 @@ impl RunStore {
                             settlement
                                 .as_ref()
                                 .map_or_else(CancelToken::new, |driver| driver.cancellation()),
-                            recovery,
                         );
                         let finding = match stray {
                             Ok(None) => None,
                             Ok(Some(stray)) => {
-                                if !stray.bound_has_commits {
-                                    decoded.outcome = Outcome::ReviewRequired;
-                                    stray_work = true;
-                                }
+                                decoded.outcome = Outcome::ReviewRequired;
+                                stray_work = true;
                                 Some(stray.note)
                             }
                             Err(error) => {
