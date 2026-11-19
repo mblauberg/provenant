@@ -1487,7 +1487,7 @@ pub(crate) fn unified_graph_command(
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = (|| -> Result<(Value, String), Box<dyn std::error::Error>> {
+    let result = (|| -> Result<(Value, String, Option<String>), Box<dyn std::error::Error>> {
         // A lane reads through the host, which holds the configuration.
         let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
         let factory = if lane_read {
@@ -1567,6 +1567,7 @@ pub(crate) fn unified_graph_command(
         let cancel = CancelToken::new();
         let mut documents = Vec::new();
         let mut human = String::new();
+        let mut superseded_next: Option<String> = None;
         for (selector, graph) in selectors {
             let mut input = json!({"op":name,"id":selector});
             match &command {
@@ -1612,6 +1613,7 @@ pub(crate) fn unified_graph_command(
                 )
             {
                 human.push_str(&superseded_notice(name, &newest, "status"));
+                superseded_next.get_or_insert(format!("provenant status {newest}"));
             }
             data["digests"] = json!(super::graph_status::node_digests(rows));
             if matches!(command, GraphCommand::Stop { .. })
@@ -1630,10 +1632,10 @@ pub(crate) fn unified_graph_command(
             Ok([only]) => only,
             Err(documents) => json!({"targets":documents}),
         };
-        Ok((data, human))
+        Ok((data, human, superseded_next))
     })();
     match result {
-        Ok((data, human)) => {
+        Ok((data, human, superseded_next)) => {
             let summary = if matches!(command, GraphCommand::Status) {
                 let rows: Vec<Value> =
                     if let Some(targets) = data.get("targets").and_then(Value::as_array) {
@@ -1649,7 +1651,13 @@ pub(crate) fn unified_graph_command(
                             .cloned()
                             .unwrap_or_default()
                     };
-                Some(status_summary(&rows))
+                let mut summary = status_summary(&rows);
+                // A superseded name points at the newer handle, not at the
+                // older graph's own next step.
+                if superseded_next.is_some() {
+                    summary.next = superseded_next;
+                }
+                Some(summary)
             } else {
                 None
             };
@@ -2245,49 +2253,14 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
-            if !listing.admission_waiters.is_empty() || !listing.admission_holders.is_empty() {
+            let admission = admission_lines(&listing, now);
+            if !admission.is_empty() {
                 if !listing.rows.is_empty() {
                     human.push('\n');
                 }
-                human.push_str("admission:\n");
-                let now_sec = (now.max(0) / 1_000_000) as u64;
-                for waiter in &listing.admission_waiters {
-                    let elapsed = now_sec.saturating_sub(waiter.start_unix_seconds);
-                    let holders = listing
-                        .admission_holders
-                        .iter()
-                        .filter(|h| h.class == waiter.class)
-                        .collect::<Vec<_>>();
-                    if holders.is_empty() {
-                        human.push_str(&format!(
-                            "  {} waiter: {} ({}s)\n",
-                            waiter.class,
-                            admission_waiter_description(waiter),
-                            elapsed
-                        ));
-                    } else {
-                        let holders_desc = holders
-                            .iter()
-                            .map(|h| provenant_cli::run::admission_holder_description(h))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        human.push_str(&format!(
-                            "  {} waiter: {} ({}s; held by {})\n",
-                            waiter.class,
-                            admission_waiter_description(waiter),
-                            elapsed,
-                            holders_desc
-                        ));
-                    }
-                }
-                for holder in &listing.admission_holders {
-                    let elapsed = now_sec.saturating_sub(holder.start_unix_seconds);
-                    human.push_str(&format!(
-                        "  {} holder: {} ({}s)\n",
-                        holder.class,
-                        provenant_cli::run::admission_holder_description(holder),
-                        elapsed
-                    ));
+                for line in &admission {
+                    human.push_str(line);
+                    human.push('\n');
                 }
             }
             let more = if command.all || globals.full {
@@ -2318,7 +2291,7 @@ pub(crate) fn graph_listing(
                     })
                 })
                 .collect();
-            let summary = listing_summary(&listing, command.limit);
+            let summary = listing_summary(&listing, command.limit, now);
             let mut data = json!({
                 "graphs": rows,
                 "omitted": listing.omitted,
@@ -2346,7 +2319,57 @@ pub(crate) fn graph_listing(
     }
 }
 
-fn listing_summary(listing: &Listing, command_limit: u64) -> provenant_cli::Summary {
+/// The `admission:` section of a status listing: the waiters, each with the
+/// holders of its class, then the holders. Shared by the full human view and
+/// the compact summary so both name the same queue.
+fn admission_lines(listing: &Listing, now_micros: i64) -> Vec<String> {
+    if listing.admission_waiters.is_empty() && listing.admission_holders.is_empty() {
+        return Vec::new();
+    }
+    let now_sec = (now_micros.max(0) / 1_000_000) as u64;
+    let mut lines = vec!["admission:".to_owned()];
+    for waiter in &listing.admission_waiters {
+        let elapsed = now_sec.saturating_sub(waiter.start_unix_seconds);
+        let holders = listing
+            .admission_holders
+            .iter()
+            .filter(|h| h.class == waiter.class)
+            .map(provenant_cli::run::admission_holder_description)
+            .collect::<Vec<_>>();
+        if holders.is_empty() {
+            lines.push(format!(
+                "  {} waiter: {} ({}s)",
+                waiter.class,
+                admission_waiter_description(waiter),
+                elapsed
+            ));
+        } else {
+            lines.push(format!(
+                "  {} waiter: {} ({}s; held by {})",
+                waiter.class,
+                admission_waiter_description(waiter),
+                elapsed,
+                holders.join(", ")
+            ));
+        }
+    }
+    for holder in &listing.admission_holders {
+        let elapsed = now_sec.saturating_sub(holder.start_unix_seconds);
+        lines.push(format!(
+            "  {} holder: {} ({}s)",
+            holder.class,
+            provenant_cli::run::admission_holder_description(holder),
+            elapsed
+        ));
+    }
+    lines
+}
+
+fn listing_summary(
+    listing: &Listing,
+    command_limit: u64,
+    now_micros: i64,
+) -> provenant_cli::Summary {
     let tally = ranked_tally(listing.rows.iter().map(|g| g.state.as_str()));
     let headline = if tally.is_empty() {
         "no graphs".to_string()
@@ -2402,7 +2425,10 @@ fn listing_summary(listing: &Listing, command_limit: u64) -> provenant_cli::Summ
         .map(|cursor| format!("provenant status --all --limit {command_limit} --cursor {cursor}"));
 
     provenant_cli::Summary {
-        lines: std::iter::once(headline).chain(summary_rows).collect(),
+        lines: std::iter::once(headline)
+            .chain(summary_rows)
+            .chain(admission_lines(listing, now_micros))
+            .collect(),
         next,
         omitted,
     }
@@ -5055,7 +5081,7 @@ mod tests {
             admission_holders: Vec::new(),
             admission_waiters: Vec::new(),
         };
-        let list_sum = listing_summary(&listing, 50);
+        let list_sum = listing_summary(&listing, 50, 0);
         let list_res =
             provenant_records::CommandResult::new("status", provenant_records::Outcome::Ok, ());
         let mut out = Vec::new();

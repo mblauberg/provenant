@@ -574,7 +574,7 @@ fn launch_repair(
         .or_else(|_| std::env::current_exe())?;
     let executable_str = executable
         .to_str()
-        .ok_or("provenant executable path is not UTF-8")?;
+        .ok_or("the running executable path is not UTF-8")?;
     let worktree_str = worktree.to_str().ok_or("worktree path is not UTF-8")?;
     let brief = format!(
         "Merge {base_ref} at {base_head} into this pull request worktree, resolve conflicted paths {conflicts}, commit the resolution, and leave the worktree clean."
