@@ -168,6 +168,39 @@ no CPU between events.
 - Why: detached services must not hold a lease or cause unsafe release.
 - Why: retained custody can last hours, and one guardian runs per lane (#3560).
 
+The guardian's reactor latches every kqueue edge it drains (supervisor signal,
+cancellation change, process event) until the loop that acts on it takes it,
+and a supervisor signal stays visible to every later loop. A pacing or retry
+pause therefore cannot drop one. A supervisor signal during cleanup or
+retention gets one more bounded stop (TERM, the descendant grace, KILL); then
+the guardian ends retention and exits.
+- Why: kqueue reports each edge once. A v2.2.0 guardian discarded a SIGTERM
+  this way and held a lane's writer lock for 2h43m (#3572, #3585).
+
+Retention is bounded by `domains.run.retained_custody_seconds` (1..=604800 s,
+default 3600). The launcher resolves it, because the guardian cannot read
+config. `provenant config show --full` shows the value and its source, and
+unreadable run settings warn and keep the default
+(`LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT`). The unresolved exit carries
+a `retention` record: the holding guardian's identity, when retention began
+and the limit. `provenant status` names that guardian's PID and age. When
+retention ends with the exit still unresolved, whether by signal or by limit,
+the guardian adds `retention.ended` to the record. This records the reason, the
+time retained and the blocker (`stop_refused`, `protected_owner`,
+`census_incomplete`, `survived_stop` or `settlement_unproven`) beside the
+unresolved PIDs. Past the limit it then exits with the typed
+`RetentionLimit` failure. Ending retention signals nothing and removes nothing.
+The unresolved exit and reservation keep the writer fenced. Once the guardian
+is gone, `provenant reconcile` ends only proven orphans, through the orphan
+recovery path.
+- Why: an orphaned guardian must not hold a lane indefinitely, and the fence,
+  not the guardian, is what protects the worktree.
+
+Reaping the leader under the fenced lease backs off from 25 ms to 1 s and stops
+after about 5 s. The provider group is then dropped unsignalled, and its
+bounded reaper permit takes over.
+- Why: a retry loop with no bound or backoff could keep a guardian alive.
+
 ### Durable exit publication
 
 The initial exit record is published without replacing an existing one, after
