@@ -66,6 +66,58 @@ fn fixture_plan_digest(document: &GraphDocument) -> String {
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn save_decodes_each_checkpoint_at_most_once_and_checks_blobs() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture = stored_fixture();
+    fixture.execution.directory = inputs.checkout;
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    for expected in [1, 2] {
+        super::journal::CHECKPOINT_DECODES.with(|count| count.set(0));
+        journal.save(&fixture.checkpoint).unwrap();
+        assert_eq!(
+            super::journal::CHECKPOINT_DECODES.with(|count| count.get()),
+            expected
+        );
+    }
+    let directory = journal.directory.current_path().unwrap();
+    let checkpoint_path = directory.join(journal.checkpoint_name());
+    let before = std::fs::read(&checkpoint_path).unwrap();
+    let blob = std::fs::read_dir(directory)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("graph-g-test.prompt-")
+        })
+        .unwrap()
+        .path();
+    std::fs::write(blob, b"corrupt").unwrap();
+    let mut invalid = fixture.checkpoint.clone();
+    invalid.schema_version = 99;
+    assert!(matches!(
+        journal.save(&invalid).unwrap_err().root_cause(),
+        JournalError::Decode(_)
+    ));
+    assert!(matches!(
+        journal.save(&fixture.checkpoint).unwrap_err().root_cause(),
+        JournalError::BadDigest
+    ));
+    assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
 // Check every intermediate publication, not just the final advance result.
 struct ReadableJournal(FileJournal);
 

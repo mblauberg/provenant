@@ -152,6 +152,18 @@ pub(super) fn rehydrate<'a>(
     }
     let mut value: Value = serde_json::from_slice(bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    rehydrate_value(directory, id, &mut value)?;
+    serde_json::to_vec(&value)
+        .map(Cow::Owned)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+}
+
+/// Restore and verify references in an already parsed checkpoint.
+pub(super) fn rehydrate_value(
+    directory: &Directory,
+    id: &str,
+    value: &mut Value,
+) -> Result<(), JournalError> {
     if let Some(references) = value
         .as_object_mut()
         .and_then(|root| root.remove(STORED_TEXT))
@@ -169,9 +181,7 @@ pub(super) fn rehydrate<'a>(
             )?);
         }
     }
-    serde_json::to_vec(&value)
-        .map(Cow::Owned)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+    Ok(())
 }
 
 fn read_text(directory: &Directory, id: &str, digest: &str) -> Result<String, JournalError> {
