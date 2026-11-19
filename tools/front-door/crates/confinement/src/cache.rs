@@ -1411,10 +1411,6 @@ impl std::fmt::Display for CargoLockProbe {
     }
 }
 
-/// Most entries a profile directory may hold before the probe gives up; a
-/// target root holds a handful of profiles and triples.
-const MAX_LOCK_PROBE_ENTRIES: usize = 1000;
-
 /// Hold all Cargo profile and target owner locks under one cache root. Shared
 /// project targets use the same probe as private lane caches.
 pub fn lock_cargo_profiles(
@@ -1464,16 +1460,13 @@ pub fn lock_cargo_profiles(
         if (profile && depth > 0) || depth == 2 {
             return Ok(());
         }
+        // Depth and the caller's deadline bound the walk. An entry count cap
+        // would fail every probe of a target whose root holds a large output
+        // directory, keeping that target for ever.
         let entries = dir.entries().map_err(|error| failed(path, error))?;
-        for (count, entry) in entries.enumerate() {
+        for entry in entries {
             if !keep_going() {
                 return Err(CargoLockProbe::Stopped);
-            }
-            if count >= MAX_LOCK_PROBE_ENTRIES {
-                return Err(failed(
-                    path,
-                    format!("more than {MAX_LOCK_PROBE_ENTRIES} entries"),
-                ));
             }
             let name = entry.map_err(|error| failed(path, error))?;
             let child_path = path.join(&name);

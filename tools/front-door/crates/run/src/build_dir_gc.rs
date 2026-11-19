@@ -242,8 +242,10 @@ impl serde::Serialize for Candidate {
         tuple.serialize_element(&self.newest)?;
         tuple.serialize_element(&self.target_modified_ns)?;
         tuple.serialize_element(&self.identity)?;
-        tuple.serialize_element(&self.owner)?;
-        tuple.serialize_element(&self.last_use)?;
+        // One digit each: names would grow a 100k-key census past its
+        // sidecar limit.
+        tuple.serialize_element(&owner_code(self.owner))?;
+        tuple.serialize_element(&last_use_code(self.last_use))?;
         tuple.end()
     }
 }
@@ -290,11 +292,27 @@ impl<'de> serde::Deserialize<'de> for Candidate {
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(6, &self))?;
                 let owner = sequence
-                    .next_element()?
-                    .ok_or_else(|| A::Error::invalid_length(7, &self))?;
+                    .next_element::<u8>()?
+                    .ok_or_else(|| A::Error::invalid_length(7, &self))
+                    .and_then(|code| {
+                        owner_from_code(code).ok_or_else(|| {
+                            A::Error::invalid_value(
+                                serde::de::Unexpected::Unsigned(code.into()),
+                                &"an owner code from 0 to 4",
+                            )
+                        })
+                    })?;
                 let last_use = sequence
-                    .next_element()?
-                    .ok_or_else(|| A::Error::invalid_length(8, &self))?;
+                    .next_element::<u8>()?
+                    .ok_or_else(|| A::Error::invalid_length(8, &self))
+                    .and_then(|code| {
+                        last_use_from_code(code).ok_or_else(|| {
+                            A::Error::invalid_value(
+                                serde::de::Unexpected::Unsigned(code.into()),
+                                &"a last-use code of 0 or 1",
+                            )
+                        })
+                    })?;
                 Ok(Candidate {
                     kind,
                     cache,
@@ -312,6 +330,37 @@ impl<'de> serde::Deserialize<'de> for Candidate {
 
         deserializer.deserialize_tuple(9, CandidateVisitor)
     }
+}
+
+const OWNER_CODES: [Option<OwnerStatus>; 5] = [
+    None,
+    Some(OwnerStatus::Live),
+    Some(OwnerStatus::Foreign),
+    Some(OwnerStatus::Replaced),
+    Some(OwnerStatus::Gone),
+];
+const LAST_USE_CODES: [LastUse; 2] = [LastUse::FileTimes, LastUse::Stamp];
+
+fn owner_code(owner: Option<OwnerStatus>) -> u8 {
+    match owner {
+        None => 0,
+        Some(OwnerStatus::Live) => 1,
+        Some(OwnerStatus::Foreign) => 2,
+        Some(OwnerStatus::Replaced) => 3,
+        Some(OwnerStatus::Gone) => 4,
+    }
+}
+
+fn owner_from_code(code: u8) -> Option<Option<OwnerStatus>> {
+    OWNER_CODES.get(usize::from(code)).copied()
+}
+
+fn last_use_code(last_use: LastUse) -> u8 {
+    u8::from(last_use == LastUse::Stamp)
+}
+
+fn last_use_from_code(code: u8) -> Option<LastUse> {
+    LAST_USE_CODES.get(usize::from(code)).copied()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4202,6 +4251,18 @@ mod tests {
 
         assert_eq!(decoded.completed.len(), 100_002);
         assert!(encoded.len() < SURVEY_SNAPSHOT_LIMIT as usize);
+        for owner in OWNER_CODES {
+            for last_use in LAST_USE_CODES {
+                let candidate = Candidate {
+                    owner,
+                    last_use,
+                    ..snapshot.completed[0].clone()
+                };
+                let decoded: Candidate =
+                    serde_json::from_slice(&serde_json::to_vec(&candidate).unwrap()).unwrap();
+                assert_eq!((decoded.owner, decoded.last_use), (owner, last_use));
+            }
+        }
     }
 
     #[test]
