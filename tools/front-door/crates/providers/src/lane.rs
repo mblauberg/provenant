@@ -610,10 +610,9 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     let mut bytes = b"#!/bin/sh\n".to_vec();
     if options.scrub {
         if let Some(bound) = &options.bound {
-            let exports = bound_exports(bound, Path::new(std::ffi::OsStr::from_bytes(git)))
-                .map_err(|_| {
-                    wrapper_error("the private Git binding cannot be represented in the wrapper")
-                })?;
+            let exports = bound_exports(bound).map_err(|_| {
+                wrapper_error("the private Git binding cannot be represented in the wrapper")
+            })?;
             bytes.extend_from_slice(exports.as_bytes());
         }
         let global = if let Some(config) = &options.identity_config {
@@ -1099,17 +1098,18 @@ fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
 }
 
 /// Shell that applies the private binding only when Git acts on the lane
-/// checkout itself, and otherwise passes the environment and arguments through.
-/// Git acts on
-/// the checkout when its physical working directory (moved by any leading
-/// `-C`) lies inside the worktree and the nearest `.git` entry walking up from
-/// there is the worktree's own marker. Repository-creating and transport
-/// commands name their own targets, so they never bind. The leading global
-/// options are Git's own list (`git help
-/// git`); an option the parser does not know, or a missing value, means it
-/// cannot tell where the subcommand starts, so it does not bind.
-fn bound_exports(bound: &BoundGit, git: &Path) -> Result<String, ProviderError> {
-    let git = shell_quote_os(git.as_os_str())?;
+/// checkout itself, and otherwise leaves the Git selectors and arguments as
+/// the caller gave them. Either way the wrapper's own scrub that follows
+/// (global and system configuration, credential helpers, exec path) still
+/// applies, so a command for another repository never inherits the host's
+/// credentials or identity. Git acts on the checkout when its physical working
+/// directory (moved by any leading `-C`) lies inside the worktree and the
+/// nearest `.git` entry walking up from there is the worktree's own marker.
+/// Repository-creating and transport commands name their own targets, so they
+/// never bind. The leading global options are Git's own list (`git help git`);
+/// an option the parser does not know, or a missing value, means it cannot
+/// tell where the subcommand starts, so it does not bind.
+fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
     let worktree = shell_quote_os(bound.worktree.as_os_str())?;
     let mut exports = String::new();
     let mut names = Vec::new();
@@ -1152,11 +1152,9 @@ fn bound_exports(bound: &BoundGit, git: &Path) -> Result<String, ProviderError> 
             "if lane_git_bound \"$@\"; then\n",
             "  unset {}\n",
             "{}",
-            "else\n",
-            "  exec {} \"$@\"\n",
             "fi\n",
         ),
-        worktree, others, exports, git,
+        worktree, others, exports,
     ))
 }
 
