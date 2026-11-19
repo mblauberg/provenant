@@ -316,7 +316,7 @@ pub(super) fn materialise(
                             remaining,
                         )
                     })(),
-                    Err(_) => Err(FacadeError::InvalidInput { detail: None }),
+                    Err(_) => Err(FacadeError::field("host")),
                 }
             }
         };

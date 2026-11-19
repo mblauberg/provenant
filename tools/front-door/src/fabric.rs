@@ -193,8 +193,8 @@ impl Factory {
         facts: &provenant_confinement::worktrees::RepoFacts,
         cancel: &CancelToken,
     ) -> Result<provenant_core::GitOid, FacadeError> {
-        let git = provenant_os::git::git_executable()
-            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        let git =
+            provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("locate git"))?;
         provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
             .map_err(|error| match error {
                 provenant_run::RunError::Writer(error) => git_facts::repository_fact_error(error),
@@ -220,8 +220,8 @@ impl Factory {
         if base == subject {
             return Err(empty());
         }
-        let git = provenant_os::git::git_executable()
-            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        let git =
+            provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("locate git"))?;
         let base = provenant_run::review_merge_base_between(&git, directory, subject, base)
             .map_err(run_error)?;
         if base == subject {
@@ -829,7 +829,7 @@ pub fn events(
     let result = (|| -> Result<(EventsResult, bool), Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
         if page.limit > factory.context.config.limits.page_rows {
-            return Err(FacadeError::InvalidInput { detail: None }.into());
+            return Err(FacadeError::field("limit").into());
         }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait.unwrap_or(30))?;

@@ -1328,6 +1328,9 @@ pub enum TerminalCause {
     LaneTokenLost,
     /// The host interrupted this attempt to deliver a queued steering turn.
     Steered,
+    /// A refused attempt whose record names no cause. The host states that
+    /// the cause is unknown rather than naming one it did not observe.
+    Unrecorded,
 }
 
 impl TerminalCause {
@@ -1374,6 +1377,7 @@ impl TerminalCause {
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
             Self::Steered => "steering interruption; provenant output ID",
+            Self::Unrecorded => "refused, cause not recorded; provenant output ID",
         }
     }
 
@@ -1490,6 +1494,9 @@ impl TerminalCause {
             }
             Self::Steered => {
                 "the host interrupted this attempt for a queued steering turn; continuation requires the retained session for this provider, model and account"
+            }
+            Self::Unrecorded => {
+                "the lane was refused and its record names no cause; inspect the attempt's local launch evidence and request before retrying"
             }
         }
     }

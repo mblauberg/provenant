@@ -1614,6 +1614,167 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
+/// The bundled `smoke` graph is what `upgrade --verify` runs, so it must run its
+/// read-only nodes wherever a read-only lane runs, and say what it skipped.
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn bundled_smoke_runs_from_a_primary_checkout_and_a_linked_worktree() -> Result {
+    let rig = GraphProject::new()?;
+    prepare_state(&rig)?;
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2\n",
+    )?;
+    let linked = rig.temp.path().join("linked");
+    let git = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args(["worktree", "add", "-b", "topic/linked"])
+        .arg(&linked)
+        .arg("HEAD")
+        .output()?;
+    assert!(git.status.success(), "{git:?}");
+    for (name, directory) in [
+        ("smoke-primary", rig.project.clone()),
+        ("smoke-linked", linked),
+    ] {
+        let output = rig
+            .command()
+            .current_dir(&directory)
+            .args(["run", "smoke", "--explain"])
+            .output()?;
+        let explained: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{name}: {explained}");
+        assert!(
+            explained["data"]["warnings"]
+                .as_array()
+                .ok_or("warnings")?
+                .iter()
+                .any(|warning| warning.as_str().is_some_and(|text| {
+                    text.contains("smoke skipped node write")
+                        && text.contains("no writer worktree supplied")
+                })),
+            "{name} states the skipped node and why: {explained}"
+        );
+        // The launch itself must not need writer scope for the node it skips.
+        let output = rig
+            .command()
+            .current_dir(&directory)
+            .args(["run", "smoke", "--name", name])
+            .output()?;
+        let launched: Value = serde_json::from_slice(&output.stdout)?;
+        let code = launched["error"]["code"].as_str().unwrap_or_default();
+        assert!(
+            !matches!(code, "WRITER_SCOPE" | "invalid_input"),
+            "{name}: {launched}"
+        );
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn bundled_smoke_binds_branch_and_worktree_controls_to_its_write_node() -> Result {
+    let rig = GraphProject::new()?;
+    let (_, explained) = rig.run(&[
+        "run",
+        "smoke",
+        "--explain",
+        "--branch",
+        "smoke/x",
+        "--base",
+        "HEAD",
+    ])?;
+    let write = explained["data"]["document"]["nodes"][0]["composite"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "write"))
+        .ok_or_else(|| format!("write node: {explained}"))?;
+    assert_eq!(write["attempt"]["new_worktree"]["branch"], "smoke/x");
+    assert_eq!(write["attempt"]["new_worktree"]["base"], "HEAD");
+    assert!(
+        !explained["data"]["warnings"]
+            .to_string()
+            .contains("smoke skipped"),
+        "{explained}"
+    );
+
+    let (_, explained) = rig.run(&["run", "smoke", "--explain", "--worktree", "elsewhere"])?;
+    let write = explained["data"]["document"]["nodes"][0]["composite"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "write"))
+        .ok_or_else(|| format!("write node: {explained}"))?;
+    assert!(
+        write["worktree"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).is_absolute() && path.ends_with("elsewhere")),
+        "{write}"
+    );
+    Ok(())
+}
+
+/// A refusal of a launch input names its field, never a bare "invalid input".
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn refused_launch_controls_name_their_field() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("pair.toml"),
+        "nodes = [\n  { id = 'a', use = 'task', prompt = 'first' },\n  { id = 'b', use = 'task', prompt = 'second' },\n]\n",
+    )?;
+    for (args, field) in [
+        (
+            vec![
+                "run",
+                "pair",
+                "--explain",
+                "--branch",
+                "b/x",
+                "--base",
+                "HEAD",
+            ],
+            "branch",
+        ),
+        (
+            vec!["run", "pair", "--explain", "--worktree", "w"],
+            "worktree",
+        ),
+        (
+            vec!["run", "pair", "--explain", "--mode", "read-only"],
+            "access",
+        ),
+        (
+            vec!["run", "smoke", "--explain", "--mode", "read-only"],
+            "access",
+        ),
+        (
+            vec!["run", "smoke", "--explain", "--write-scope", "src"],
+            "write_scope",
+        ),
+        (
+            vec![
+                "run",
+                "smoke",
+                "--explain",
+                "--branch",
+                "bad name",
+                "--base",
+                "HEAD",
+            ],
+            "branch",
+        ),
+    ] {
+        let (output, reply) = rig.run(&args)?;
+        assert!(!output.status.success(), "{args:?}: {reply}");
+        let message = reply["error"]["message"].as_str().ok_or("message")?;
+        assert!(
+            message.contains(&format!("invalid input field `{field}`")),
+            "{args:?}: {reply}"
+        );
+    }
+    Ok(())
+}
+
 /// One state directory that a compile failure can be observed against.
 fn prepare_state(rig: &GraphProject) -> Result {
     std::fs::create_dir_all(rig.state())?;
