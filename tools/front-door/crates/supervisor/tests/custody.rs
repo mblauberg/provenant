@@ -2726,7 +2726,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
                 &fixture::RecordedBootObserver,
                 || Ok(true),
             )?
-            .is_none(),
+            .is_err(),
         "a surviving provider prevents same-boot loss proof"
     );
     assert!(!root.join("crash-attempt/process-exit.json").exists());
@@ -2756,7 +2756,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         || Ok(true),
     )?;
     assert!(
-        proof.is_some(),
+        proof.is_ok(),
         "the kernel releases the guardian life lock after its death"
     );
     drop(proof);

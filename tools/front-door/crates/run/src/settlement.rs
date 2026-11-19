@@ -186,7 +186,7 @@ pub(crate) fn blocked(
         return Ok(());
     }
     journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
-    journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
+    journal.record_blocking(provenant_core::bounded_line(reason, 4096), now);
     journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
     journal.lock_wait_since_ms = 0;
     write(attempt, &journal)
@@ -240,7 +240,7 @@ fn record_lock_wait(journal: &mut Journal, reason: &str, guardian_live: bool, no
     } else {
         reason.to_owned()
     };
-    journal.blocking_reason = Some(provenant_core::bounded_line(&reason, 4096));
+    journal.record_blocking(provenant_core::bounded_line(&reason, 4096), now);
 }
 
 /// Read-only, scope-checked diagnostic for status. The guardian records this
@@ -294,6 +294,26 @@ pub(crate) fn clear_blocked(attempt: &Directory, scope: Scope) -> Result<()> {
         write(attempt, &journal)?;
     }
     Ok(())
+}
+
+/// A journal's blocking reason was recorded by a settlement worker or an
+/// earlier reconcile. Report it as that past evidence, with its age and
+/// recorder, never as what the current reconcile observed.
+fn recorded_evidence(journal: &Journal, now: u64) -> Option<String> {
+    let reason = journal.blocking_reason.as_deref()?;
+    let mut evidence = String::from("recorded");
+    if journal.blocking_recorded_ms > 0 {
+        evidence.push_str(&format!(
+            " {}s ago",
+            now.saturating_sub(journal.blocking_recorded_ms) / 1000
+        ));
+    } else {
+        evidence.push_str(" earlier");
+    }
+    if journal.blocking_recorded_by > 0 {
+        evidence.push_str(&format!(" by process {}", journal.blocking_recorded_by));
+    }
+    Some(format!("{evidence}: {reason}"))
 }
 
 fn now_ms(clock: &dyn Clock) -> Result<u64> {
@@ -713,7 +733,7 @@ impl Driver<'_> {
                 record_lock_wait(journal, &reason, *guardian_live, now);
                 return Ok(());
             }
-            journal.blocking_reason = Some(provenant_core::bounded_line(&reason, 4096));
+            journal.record_blocking(provenant_core::bounded_line(&reason, 4096), now);
             journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
             journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
             journal.lock_wait_since_ms = 0;
@@ -1851,6 +1871,8 @@ mod tests {
     fn fence_listing_failure_is_reported_and_bounded() -> TestResult {
         let temp = tempfile::tempdir()?;
         let mut clock = clock();
+        // Wall time 0 means a reason was never stamped.
+        advance_to(&mut clock, 1000)?;
         let cancel = CancelToken::new();
         let registry = temp.path().join("registry");
         std::fs::create_dir(&registry)?;
@@ -1892,8 +1914,16 @@ mod tests {
             let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("retry must be delayed")
             })?;
+            // A recorded reason is reported as past evidence with its age
+            // and recorder, never as what this reconcile observed.
+            let evidence = format!(
+                "recorded 0s ago by process {}: {}",
+                std::process::id(),
+                journal.blocking_reason.clone().unwrap()
+            );
             assert!(
-                matches!(queued.as_slice(), [(_, crate::Reconciled::Uncertain { reason })] if reason.to_string() == journal.blocking_reason.clone().unwrap())
+                matches!(queued.as_slice(), [(_, crate::Reconciled::Uncertain { reason })] if reason.to_string() == evidence),
+                "{queued:?}"
             );
             advance_to(&mut clock, journal.retry_after_ms)?;
         }
@@ -1911,6 +1941,58 @@ mod tests {
         )?;
         assert!(spawned);
         assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_reason_recorded_before_the_reconcile_is_never_reported_as_current() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let mut clock = clock();
+        let cancel = CancelToken::new();
+        let store = crate::RunStore::open(
+            &crate::tests::context(temp.path())?,
+            &crate::tests::call(&clock, &cancel),
+        )?;
+        let run = crate::tests::input();
+        let call = crate::tests::call(&clock, &cancel);
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let attempt = store.attempt_dir(id, false)?;
+        let scope = crate::RunStore::scope(&store.record(id, &call)?);
+        advance_to(&mut clock, 1000)?;
+        blocked(&attempt, scope, "failed after 0 ns", &clock)?;
+        let journal = read(&attempt, scope)?;
+        assert_eq!(journal.blocking_recorded_ms, 1000);
+        assert_eq!(journal.blocking_recorded_by, std::process::id());
+        // The reconcile request comes later; the old reason is evidence.
+        advance_to(&mut clock, 46_000)?;
+        let call = crate::tests::call(&clock, &cancel);
+        for explicit in [false, true] {
+            let found = store.queue_reconcile_mode(id, &call, |_, _| Ok(()), explicit)?;
+            let [(_, crate::Reconciled::Uncertain { reason })] = found.as_slice() else {
+                panic!("{found:?}");
+            };
+            assert_eq!(
+                reason.to_string(),
+                format!(
+                    "recorded 45s ago by process {}: failed after 0 ns",
+                    std::process::id()
+                )
+            );
+        }
+        let settling = settling(&attempt, scope, &clock)?;
+        assert!(
+            matches!(&settling, crate::Reconciled::Settling { blocking_reason: Some(reason), .. } if reason.starts_with("recorded 45s ago by process ")),
+            "{settling:?}"
+        );
         Ok(())
     }
 
@@ -2649,6 +2731,8 @@ mod tests {
             retry_after_ms: 0,
             recovery_failures: 0,
             blocking_reason: None,
+            blocking_recorded_ms: 0,
+            blocking_recorded_by: 0,
             lock_wait_since_ms: 0,
             abandonment: Some(Abandonment {
                 reason: "fixture".into(),
@@ -2763,14 +2847,19 @@ pub(crate) fn complete(attempt: &Directory, scope: Scope) -> Result<()> {
     journal.owner = None;
     journal.blocking_reason = None;
     journal.recovery_failures = 0;
+    journal.lock_wait_since_ms = 0;
     write(attempt, &journal)
 }
 
-pub(crate) fn settling(attempt: &Directory, scope: Scope) -> Result<crate::Reconciled> {
+pub(crate) fn settling(
+    attempt: &Directory,
+    scope: Scope,
+    clock: &dyn Clock,
+) -> Result<crate::Reconciled> {
     let journal = read(attempt, scope)?;
     Ok(crate::Reconciled::Settling {
         phase: format!("{:?}", journal.phase).to_ascii_lowercase(),
-        blocking_reason: journal.blocking_reason,
+        blocking_reason: recorded_evidence(&journal, now_ms(clock)?),
     })
 }
 
@@ -2823,6 +2912,11 @@ struct QueuedAbandonment {
 pub enum AbandonmentRefusal {
     #[error("attempt {scope:?} presence is live")]
     Live { scope: Scope },
+    #[error("attempt {scope:?} custody is not proven gone: {blocker}")]
+    HolderNotProvenGone {
+        scope: Scope,
+        blocker: provenant_supervisor::custody::LossUnproven,
+    },
     #[error("writer exclusion is unavailable: {evidence}")]
     WriterLease { evidence: String },
     #[error("worktree {path:?} is {state:?}: {evidence}")]
@@ -2835,6 +2929,44 @@ pub enum AbandonmentRefusal {
 
 fn abandon_refused(evidence: AbandonmentRefusal) -> RunError {
     RunError::AbandonBlocked(Box::new(evidence))
+}
+
+impl crate::RunStore {
+    /// Same-boot guardian loss for an abandonment whose custody is not
+    /// observed absent: the proof makes the recovery quiescent, and an
+    /// unproven loss refuses with its blocker, naming any live PID.
+    fn prove_guardian_loss(
+        &self,
+        recovery: provenant_supervisor::custody::Recovery,
+        record: &crate::AttemptRecord,
+        attempt: &Directory,
+        workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+        call: &crate::Request<'_>,
+        observer: &dyn provenant_supervisor::census::ProcessObserver,
+    ) -> Result<provenant_supervisor::custody::Recovery> {
+        let request = self.request(record.attempt_id, call)?;
+        let proof = recovery
+            .after_guardian_loss(attempt, observer, || {
+                let Some(writer) = request.task.writer.as_ref() else {
+                    return Ok(true);
+                };
+                workers.invalidate();
+                Ok(workers
+                    .observe_roots(std::slice::from_ref(&writer.worktree))
+                    .get(&writer.worktree)
+                    .is_some_and(|state| state.is_available()))
+            })
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        match proof {
+            Ok(proof) => proof
+                .into_recovery()
+                .map_err(|error| RunError::Io(std::io::Error::other(error))),
+            Err(blocker) => Err(abandon_refused(AbandonmentRefusal::HolderNotProvenGone {
+                scope: Self::scope(record),
+                blocker,
+            })),
+        }
+    }
 }
 
 impl crate::RunStore {
@@ -3042,13 +3174,16 @@ impl crate::RunStore {
             if recovery.scope() != scope {
                 return Err(RunError::Conflict);
             }
-            if !declare_lost
-                && recovery.observe() != provenant_supervisor::custody::RecoveryState::Absent
+            let recovery = if declare_lost
+                || recovery.observe() == provenant_supervisor::custody::RecoveryState::Absent
             {
-                return Err(RunError::Validation(
-                    "abandonment requires absent writer custody",
-                ));
-            }
+                recovery
+            } else {
+                // A durable unresolved fence outlives its guardian. Prove the
+                // loss from the free guardian locks, a fresh census and
+                // worktree non-occupancy, or name what still blocks it.
+                self.prove_guardian_loss(recovery, &record, &attempt, workers, call, observer)?
+            };
             Some(recovery)
         } else if declare_lost {
             let slot = self.attempt_writer_slot(id, call)?;
@@ -3456,7 +3591,7 @@ impl crate::RunStore {
                 }
                 let state = if queued {
                     crate::Reconciled::Queued
-                } else if let Some(error) = journal.blocking_reason {
+                } else if let Some(error) = recorded_evidence(&journal, now) {
                     if journal.phase == Phase::Publish {
                         crate::Reconciled::Settling {
                             phase: "publish".into(),
@@ -3795,11 +3930,15 @@ fn resume_reconcile(
     }
     let _lock = journal_lock(attempt)?;
     let mut journal = read(attempt, scope)?;
-    if !owner_active(attempt, &journal, now_ms(clock)?)? {
+    let now = now_ms(clock)?;
+    if !owner_active(attempt, &journal, now)? {
         journal.recovery_failures = LIMIT;
-        journal.blocking_reason.get_or_insert_with(|| {
-            "settlement retry budget exhausted; retained for explicit reconciliation".into()
-        });
+        if journal.blocking_reason.is_none() {
+            journal.record_blocking(
+                "settlement retry budget exhausted; retained for explicit reconciliation".into(),
+                now,
+            );
+        }
         write(attempt, &journal)?;
     }
     Ok(())

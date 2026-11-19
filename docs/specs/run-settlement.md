@@ -25,9 +25,9 @@ before a driver is claimed.
 - Why: a retained writer must not contend with itself or spend CPU retrying an
   unchanged failure indefinitely.
 
-Settlement of an exited attempt waits for its writer lock within the store's
-lock budget (the SQLite busy timeout, 30 s by default) and wakes as soon as the
-lock is released. Contention that outlives the wait is `WriterExclusionBusy`,
+The detached settlement worker waits for an exited attempt's writer lock,
+when it takes recovery custody, within the store's lock budget (the SQLite busy
+timeout, 30 s by default) and wakes as soon as the lock is released. Contention that outlives the wait is `WriterExclusionBusy`,
 reported as `waiting for writer lock <path>, held by <holder>`, where the
 holder names each attempt reserved in the slot and whether its guardian is
 live. The holder list labels the waiting attempt's own reservation. Contention sets
@@ -39,16 +39,27 @@ lock: settlement is recorded blocked, and the reason names `provenant
 reconcile <lane>` and `provenant reconcile --abandon <lane> --reason <text>`.
 An explicit reconcile clears the block and restarts the wait.
 
-Only settlement waits on a writer lock. Request paths (queued withdrawal,
-terminal replay and publication, loss) try it once: when it is busy they
-leave the cleanup effect pending and retain the attempt, and the settlement
-worker retries the cleanup of every unlaunched writer whose cleanup is not
-done. Probes of a live attempt also take the lock once without waiting.
+Only that acquisition waits. Every other path, including cleanup inside the
+worker and request paths (queued withdrawal, terminal replay and publication,
+loss), tries the lock once: when it is busy it leaves the cleanup effect
+pending without counting a failure and retains the attempt, and the
+settlement worker retries the cleanup of every terminal unlaunched writer
+whose cleanup is not done. Probes of a live attempt also take the lock once.
 - Why: another settler or a releasing guardian holding the lock is progress,
   not failure; counting it blocked settlement and left steered nodes running
   with no successor (#3572). A request must not stall on another holder, and a
   lock no live process will release must reach an operator rather than wait
-  forever.
+  forever. Recovery in the same process may hold the lock through another file
+  description, so a wait anywhere but the worker's own acquisition stalls for
+  the whole budget.
+
+Every recorded blocking reason is stamped with the wall time it was recorded
+and the process ID of the worker or reconcile that recorded it. Reconcile and
+settling reports show it as past evidence, `recorded <N>s ago by process
+<pid>: <reason>` (`recorded earlier` for an unstamped legacy reason), never as
+an observation of the current request.
+- Why: a reason recorded by an earlier worker read as a current failure and
+  misled recovery.
 
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
@@ -217,6 +228,13 @@ The capability itself neither commits a Run outcome nor changes read-only
 presence classification. The Run settlement driver owns its consumption and
 the separate EOF outcome and quiescent import/release transactions. Manual
 `reconcile --abandon` remains the explicit escape when proof is unavailable.
+Abandonment of custody that is not observed absent, such as a dead guardian
+that left its cleanup unresolved, first tries the same guardian-loss proof
+from a fresh census. A proof makes custody quiescent and abandonment proceeds;
+otherwise it refuses and names the blocker, including any live or
+unidentifiable PID. The census-free absence classification is unchanged: an
+unresolved cleanup without that proof stays unknown, because an escaped
+process is excluded only by the proof's worktree non-occupancy check.
 
 ## Continuation
 

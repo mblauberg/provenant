@@ -4225,7 +4225,7 @@ impl RunStore {
                     .is_some_and(|state| state.is_available()))
             })
             .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
-        let Some(proof) = proof else {
+        let Ok(proof) = proof else {
             return Ok(None);
         };
         let handle = custody::reattach(attempt.try_clone()?, scope)
@@ -4258,7 +4258,9 @@ impl RunStore {
         )? {
             Ok(Some(Reconciled::Finished))
         } else {
-            Ok(Some(crate::settlement::settling(&attempt, scope)?))
+            Ok(Some(crate::settlement::settling(
+                &attempt, scope, call.clock,
+            )?))
         }
     }
     /// Settle a missing exit only under native death proof and writer exclusion.
@@ -4347,7 +4349,7 @@ impl RunStore {
                         .is_some_and(|state| state.is_available()))
                 })
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
-            let Some(proof) = proof else {
+            let Ok(proof) = proof else {
                 return Ok(None);
             };
             self.commit_lost(scope,
@@ -6377,7 +6379,9 @@ impl RunStore {
                 }
                 let current = self.record(id, call)?;
                 if !self.import_release_permitted(&current, call)? {
-                    return Ok(Some(crate::settlement::settling(&directory, scope)?));
+                    return Ok(Some(crate::settlement::settling(
+                        &directory, scope, call.clock,
+                    )?));
                 }
             }
             let current = self.record(id, call)?;

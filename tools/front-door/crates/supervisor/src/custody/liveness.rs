@@ -126,6 +126,26 @@ impl LossLocks {
     }
 }
 
+/// Why same-boot guardian loss is not proven. Each names the evidence an
+/// operator can check; a live or unidentifiable process names its PID.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LossUnproven {
+    #[error("guardian loss evidence does not match this attempt")]
+    Evidence,
+    #[error("the guardian still holds its lifetime lock")]
+    GuardianHeld,
+    #[error("the attempt custody lock is still held")]
+    CustodyHeld,
+    #[error("the process census is incomplete")]
+    CensusIncomplete,
+    #[error("process {pid} of the attempt is still live")]
+    Live { pid: i64 },
+    #[error("process {pid} of the attempt cannot be identified")]
+    Unidentifiable { pid: i64 },
+    #[error("the writer worktree is still occupied")]
+    WorktreeOccupied,
+}
+
 /// Same-boot loss capability. All three original lock inodes remain held while
 /// Run commits its canonical Lost outcome; dropping this retains the fence.
 pub struct GuardianLossRecovery {
@@ -175,11 +195,13 @@ impl Recovery {
         attempt: &Directory,
         observer: &dyn ProcessObserver,
         worktree_is_free: impl FnOnce() -> Result<bool>,
-    ) -> Result<Option<GuardianLossRecovery>> {
+    ) -> Result<std::result::Result<GuardianLossRecovery, LossUnproven>> {
         validate_anchor(&self.directory, &self.reservation)?;
         let record: GuardianLock = match read_record(&self.directory, RECORD, RECORD_LIMIT) {
             Ok(record) => record,
-            Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+                return Ok(Err(LossUnproven::Evidence));
+            }
             Err(error) => return Err(error),
         };
         let metadata = attempt.metadata()?;
@@ -210,35 +232,32 @@ impl Recovery {
                 .is_some_and(|metadata| record.writer.matches_lock(metadata))
             || observer.boot_identity().ok().as_ref() != Some(&self.reservation.boot)
         {
-            return Ok(None);
+            return Ok(Err(LossUnproven::Evidence));
         }
         let guardian = match self
             .directory
             .try_lock_existing(OsStr::new(LOCK), LockMode::Exclusive)
         {
             Ok(lock) => lock,
-            Err(error) if error.is_not_found() || matches!(error, FsError::LockTimeout { .. }) => {
-                return Ok(None);
-            }
+            Err(error) if error.is_not_found() => return Ok(Err(LossUnproven::Evidence)),
+            Err(FsError::LockTimeout { .. }) => return Ok(Err(LossUnproven::GuardianHeld)),
             Err(error) => return Err(error.into()),
         };
-        let custody = match attempt
-            .try_lock_existing(OsStr::new("custody.lock"), LockMode::Exclusive)
-        {
-            Ok(lock) => lock,
-            Err(error) if error.is_not_found() || matches!(error, FsError::LockTimeout { .. }) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let custody =
+            match attempt.try_lock_existing(OsStr::new("custody.lock"), LockMode::Exclusive) {
+                Ok(lock) => lock,
+                Err(error) if error.is_not_found() => return Ok(Err(LossUnproven::Evidence)),
+                Err(FsError::LockTimeout { .. }) => return Ok(Err(LossUnproven::CustodyHeld)),
+                Err(error) => return Err(error.into()),
+            };
         if !record.guardian.matches_lock(guardian.metadata()?)
             || !record.custody.matches_lock(custody.metadata()?)
         {
-            return Ok(None);
+            return Ok(Err(LossUnproven::Evidence));
         }
         let census = match observer.census(crate::census::MAX_CENSUS_ENTRIES) {
             Ok(census) if census.is_complete() => census,
-            _ => return Ok(None),
+            _ => return Ok(Err(LossUnproven::CensusIncomplete)),
         };
         // Check live roots and every retained descendant as well as their
         // sessions/groups. PID reuse supplies no death evidence: the lock and
@@ -252,27 +271,33 @@ impl Recovery {
         // A complete census lists every live process, so a recorded pid that is
         // not listed is absent; only a pid the census names as undescribable is
         // unknown (`Census::process` also reports unlisted pids as unknown).
-        if identities
+        if let Some(identity) = identities
             .iter()
-            .any(|identity| census.unknown_pids().contains_key(&identity.pid))
-            || census.facts().any(|fact| {
-                !fact.zombie
-                    && identities.iter().any(|identity| {
-                        fact.identity == **identity
-                            || fact.identity.session_id == identity.session_id
-                            || fact.identity.group_id == identity.group_id
-                    })
-            })
-            || !worktree_is_free()?
+            .find(|identity| census.unknown_pids().contains_key(&identity.pid))
         {
-            return Ok(None);
+            return Ok(Err(LossUnproven::Unidentifiable { pid: identity.pid }));
+        }
+        if let Some(fact) = census.facts().find(|fact| {
+            !fact.zombie
+                && identities.iter().any(|identity| {
+                    fact.identity == **identity
+                        || fact.identity.session_id == identity.session_id
+                        || fact.identity.group_id == identity.group_id
+                })
+        }) {
+            return Ok(Err(LossUnproven::Live {
+                pid: fact.identity.pid,
+            }));
+        }
+        if !worktree_is_free()? {
+            return Ok(Err(LossUnproven::WorktreeOccupied));
         }
         // An unlinked/replaced name cannot prove exclusion even while its old
         // descriptor remains locked. Revalidate after the external census.
         if !record.names_match(&self, attempt)? {
-            return Ok(None);
+            return Ok(Err(LossUnproven::Evidence));
         }
-        Ok(Some(GuardianLossRecovery {
+        Ok(Ok(GuardianLossRecovery {
             recovery: self,
             attempt: attempt.try_clone()?,
             record,

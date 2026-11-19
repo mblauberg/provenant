@@ -1496,6 +1496,8 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "wrong_scope",
         "incomplete_census",
         "live_provider",
+        "live_descendant",
+        "unresolved_cleanup",
         "worktree_not_free",
         "replaced_during_census",
         "replaced_after_proof",
@@ -1626,7 +1628,27 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 )?
                 .require_durable()?;
             }
-            "live_provider" => world.census_facts.push(process_fact(provider)),
+            "live_provider" => world.census_facts.push(process_fact(provider.clone())),
+            // An unrecorded descendant still in the provider's session.
+            "live_descendant" => world.census_facts.push(process_fact(ProcessIdentity {
+                boot: BOOT.into(),
+                pid: 4242,
+                native_start: 9,
+                group_id: 4242,
+                session_id: provider.session_id,
+            })),
+            // The guardian died before resolving its cleanup; the census and
+            // free locks still prove every recorded process gone.
+            "unresolved_cleanup" => {
+                recovery.reservation.unresolved_cleanup = true;
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
             _ => {}
         }
         if case != "guardian_held" {
@@ -1642,7 +1664,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             Ok(case != "worktree_not_free")
         })?;
         assert_eq!(
-            proof.is_some(),
+            proof.is_ok(),
             matches!(
                 case,
                 "free"
@@ -1652,11 +1674,41 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     | "drop_without_commit"
                     | "replaced_after_proof"
                     | "retain_through_settlement"
+                    | "unresolved_cleanup"
             ),
             "{case}"
         );
-        if let Some(proof) = proof {
+        // An unproven loss names its blocker, including the live PID.
+        match case {
+            "live_provider" => assert_eq!(
+                proof.as_ref().err(),
+                Some(&LossUnproven::Live { pid: provider.pid })
+            ),
+            "live_descendant" => {
+                let refusal = proof.as_ref().err().ok_or("live descendant")?;
+                assert_eq!(refusal, &LossUnproven::Live { pid: 4242 });
+                assert!(refusal.to_string().contains("4242"), "{refusal}");
+            }
+            "guardian_held" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::GuardianHeld));
+            }
+            "incomplete_census" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::CensusIncomplete));
+            }
+            "worktree_not_free" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::WorktreeOccupied))
+            }
+            _ => {}
+        }
+        if let Ok(proof) = proof {
             assert_eq!(proof.scope(), scope());
+            if case == "unresolved_cleanup" {
+                // A proven loss settles despite the durable unresolved fence.
+                let mut recovery = proof.into_recovery()?;
+                assert_eq!(recovery.observe_with(&world), RecoveryState::Absent);
+                recovery.prepare_settlement()?;
+                continue;
+            }
             for (directory, name) in [(&evidence, "guardian.lock"), (&attempt, "custody.lock")] {
                 assert!(
                     matches!(

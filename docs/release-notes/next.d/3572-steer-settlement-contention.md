@@ -11,6 +11,11 @@ writer's continuation waits for custody release instead of being dropped, and
 shown. Commands that settle a lane's cleanup no longer wait on another holder's
 lock; they leave it to the settlement worker. A lock held for three minutes
 with no live guardian is reported as blocked and names the recovery commands.
+Reconcile now shows a recorded settlement failure as past evidence with its age
+and recording process (`recorded 45s ago by process <pid>: ...`), never as a
+current failure. `provenant reconcile --abandon` now releases a node whose
+guardian died with its cleanup unresolved once a fresh census proves every
+recorded process gone; otherwise it refuses and names the live PID.
 
 Nodes blocked by lock contention before this release keep their blocked state.
 Run `provenant reconcile <lane>`, or a bare `provenant reconcile` to sweep

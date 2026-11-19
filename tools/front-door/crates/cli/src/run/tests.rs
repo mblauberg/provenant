@@ -1207,9 +1207,10 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         json["data"]["runs"][0]["attempts"][0]["found"]["phase"],
                         "publish"
                     );
+                    // An unstamped journal reason is still past evidence.
                     assert_eq!(
                         json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
-                        "lane Git import failed"
+                        "recorded earlier: lane Git import failed"
                     );
                     assert!(reported.human.contains("lane Git import failed"));
                 }

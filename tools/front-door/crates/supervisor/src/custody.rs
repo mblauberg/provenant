@@ -4,7 +4,7 @@ use crate::census::{
     CensusError, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
 use crate::machine::StopReason;
-pub use liveness::GuardianLossRecovery;
+pub use liveness::{GuardianLossRecovery, LossUnproven};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
     exec::{CapturedStream, Termination},
