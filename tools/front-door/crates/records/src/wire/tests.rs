@@ -56,6 +56,7 @@ fn row() -> LaneRow {
         title: None,
         requested_priority: None,
         limits: None,
+        budget_usage: None,
         provider_seconds: None,
         handoff: None,
         provider_error: None,

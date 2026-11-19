@@ -956,6 +956,11 @@ mod tests {
             (max_targets.min, max_targets.max, &max_targets.default),
             (Some(1), Some(1024), &json!(64))
         );
+        let pr_complete = field("domains.wait.pr_complete_timeout_seconds");
+        assert_eq!(
+            (pr_complete.min, pr_complete.max, &pr_complete.default),
+            (Some(1), Some(u32::MAX as i64), &json!(3600))
+        );
         let pr_read = field("domains.wait.pr_read_timeout_seconds");
         assert_eq!(
             (pr_read.min, pr_read.max, &pr_read.default),

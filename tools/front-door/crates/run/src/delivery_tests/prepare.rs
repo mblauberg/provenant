@@ -534,13 +534,11 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
         )
     );
     // Upgrades may leave the old lock inodes. New commands must not hold them.
-    for name in [
-        provenant_confinement::worktrees::REPOSITORY_LOCK,
-        &integrate,
-    ] {
-        if directory.metadata_at(OsStr::new(name), false).is_err() {
-            directory.create_new(OsStr::new(name))?;
-        }
+    if directory
+        .metadata_at(OsStr::new(&integrate), false)
+        .is_err()
+    {
+        directory.create_new(OsStr::new(&integrate))?;
     }
     std::fs::write(&armed, b"ready")?;
     std::thread::scope(
@@ -564,12 +562,7 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
                 },
             );
             let available = matches!(&pipe, Ok(Ok(_)))
-                && [
-                    provenant_confinement::worktrees::REPOSITORY_LOCK,
-                    &integrate,
-                ]
-                .iter()
-                .all(|name| {
+                && [&integrate].iter().all(|name| {
                     directory
                         .try_lock_existing(OsStr::new(name), LockMode::Exclusive)
                         .is_ok()
@@ -707,14 +700,29 @@ fn publication_cleanup_never_removes_another_import_pin()
         &cancel,
         &clock,
     )?;
-    let reference = format!("refs/provenant/import/{head}");
+    let reference = crate::objects::import_pin(scope.attempt, head);
     fixture.git(&["update-ref", &reference, &head.to_string()])?;
     let attempt = store.attempt_dir(id, false)?;
     let mut driver = crate::settlement::Guard::claim(&attempt, RunStore::scope(&record), &clock)?
         .ok_or("old driver")?;
     driver.set_head(head)?;
     drop(driver);
+    // The live lease holds the writer lock; cleanup tries it once and refuses.
     assert!(store.retry_git_cleanup(&record, &call).is_err());
+    fixture.git(&["show-ref", "--verify", &reference])?;
+    // A request path never waits on the writer lock, whatever the lock
+    // budget: it leaves the cleanup pending and retains the attempt for the
+    // settlement worker.
+    store.set_temporary_retained(id, false, &call)?;
+    provenant_sqlite::with_busy_timeout(std::time::Duration::from_secs(3600), || {
+        store.settle_cleanup(&record, None, &call);
+    });
+    let retained: bool = store.db.query_row(
+        "SELECT tmp_retained FROM attempts WHERE id=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(retained, "a busy writer lock defers cleanup to the worker");
     fixture.git(&["show-ref", "--verify", &reference])?;
     lease.withdraw_unlaunched()?;
     assert!(matches!(

@@ -47,10 +47,10 @@ SKILL.md.
   same pull request, or report it if out of scope. A stale rule misleads every
   later agent; an unknown reason or an inconvenience is not a lapse.
 - **Git.** Implementation branches, linked worktrees, and commits, pushes and
-  pull requests from those branches are pre-authorised, with one writer per
-  worktree. Merge through the repository's own workflow; an authorised merge
-  prunes its own worktree and merged refs. A writer may rebase, rewrite and
-  force-push with lease its own unmerged branches. The chair removes other
+  pull requests from those branches are pre-authorised. A worktree's owning
+  lane decides who else writes in it. Merge through the repository's own
+  workflow; an authorised merge prunes its own worktree and merged refs. A writer
+  may rebase, rewrite and force-push with lease its own unmerged branches. The chair removes other
   branches and worktrees, unmerged ones included, once their work has landed or
   been superseded or abandoned; record each removed tip and never remove one a
   live writer holds or one with uncommitted edits. Rewriting, deleting or pushing to a shared branch

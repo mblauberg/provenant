@@ -289,7 +289,11 @@ start fresh. Injecting a turn into an already-running provider process without
 a restart is not implemented: it needs a persistent, authenticated bidirectional
 channel per adapter, which none of the adapters expose. The resume-capable
 providers are the ones that could support it; until then the session-preserving
-restart is the delivery path. Steered lanes that settle close together claim a
+restart is the delivery path. A writer's continuation reuses the retained
+worktree, so its admission waits until settlement releases the steered
+attempt's custody: the steering stays queued and the settlement reaction is
+retried, never dropped. A stop of a terminal steered attempt resolves queued
+steering at once as not continued, cause `terminal_stop`. Steered lanes that settle close together claim a
 restart slot from
 a host-state gate spaced by domains.fabric.steer.restart_spacing_ms (default
 2000 ms; 0 disables), which bounds concurrent restarts instead of racing the
@@ -550,7 +554,11 @@ and the base plan digest, so publication and landing review reads reject the sam
 corrupt state. Save validates the inline checkpoint before externalising text,
 then verifies that durable blobs reconstruct the same representation before
 publication. The observation index uses the validated published value; recovery
-independently loads and validates the committed checkpoint.
+independently loads and validates the committed checkpoint. A host tick read of
+a checkpoint that fails validation quarantines its exact bytes once with the
+typed reason, reports it once, and skips identical bytes on later ticks; changed
+bytes or an explicit retire reopen the report. Status and strict reads still
+surface the corrupt record.
 `graph::checkpoint_digest` owns the envelope payload and domain;
 `graph::graph_plan_digest` derives the shared plan identity from a persisted
 document. Hand-built journal fixtures use `FileJournal::prepare_fixture_checkpoint`

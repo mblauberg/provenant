@@ -185,6 +185,7 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
         descendants: vec![],
         census_incomplete: true,
         omitted_descendants: 0,
+        sandboxed: false,
         extra: Default::default(),
     };
     let reservation_path = evidence_path.join("reservation.json");
@@ -298,8 +299,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
             &clock,
         )
     };
-    assert!(matches!(admit(), Err(CustodyError::Busy)));
-    drop(first);
     let second = admit()?;
     assert!(matches!(
         slot.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
@@ -322,6 +321,7 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
     );
     second.withdraw_unlaunched()?;
     assert_eq!(std::fs::read(&first_path)?, first_bytes);
+    drop(first);
     let recovery = acquire_recovery(
         slot.try_clone()?,
         scope(),
@@ -446,11 +446,9 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         // A retention record that ended counts against the same bound.
         retention: Some(Retention {
             guardian: identity.clone(),
-            // The latest wall time from_micros accepts, 9999-12-30T22:00:00Z;
-            // the wire's six fractional digits keep its length at the maximum.
-            since: Some(provenant_core::WallTime::from_micros(
-                253_402_207_200_000_000,
-            )?),
+            // The latest representable wall time; the wire's six fractional
+            // digits keep its length at the maximum.
+            since: Some(provenant_core::WallTime::MAX),
             limit_ms: u64::MAX,
             ended: Some(RetentionEnd {
                 reason: RetentionEndReason::LimitReached,
@@ -527,6 +525,233 @@ fn acquire(root: &std::path::Path) -> Result<CustodyLease> {
         &clock,
     )
 }
+
+#[test]
+fn shared_occupancy_admits_siblings_while_exclusive_removal_waits() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let first_scope = scope();
+    let second_scope = Scope {
+        attempt: AttemptId::from_bytes([3; 16]),
+        generation: 1,
+    };
+    let mut first = crate::fixture::acquire_writer(
+        directory.try_clone()?,
+        first_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    first.reservation.launch_state = LaunchState::HandingOff;
+    first.reservation.attempt_device = Some(1);
+    first.reservation.attempt_inode = Some(2);
+    Publication::require_durable(write_record(
+        &first.directory,
+        "reservation.json",
+        &first.reservation,
+        PublishMode::Replace,
+    )?)?;
+    let second = crate::fixture::acquire_writer(
+        directory.try_clone()?,
+        second_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+
+    let removal = lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    );
+    assert!(matches!(
+        removal,
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    drop(first);
+    let removal = lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    );
+    assert!(matches!(
+        removal,
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    drop(second);
+    drop(lock_writer_exclusion(
+        &directory,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn holder_history_stays_shared_after_a_sibling_settles() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let first_scope = scope();
+    let second_scope = Scope {
+        attempt: AttemptId::from_bytes([3; 16]),
+        generation: 1,
+    };
+    let first = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        first_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(!worktree_was_shared(
+        &slot,
+        &first_scope.attempt.to_string()
+    )?);
+
+    let second = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        second_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(worktree_was_shared(
+        &slot,
+        &second_scope.attempt.to_string()
+    )?);
+    let second_evidence = second.directory.try_clone()?;
+    drop(second);
+    clear_reservation(&second_evidence, second_scope)?;
+
+    assert!(worktree_was_shared(
+        &slot,
+        &first_scope.attempt.to_string()
+    )?);
+    drop(first);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn holder_history_keeps_a_lone_attempt_unshared() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let current = scope();
+    let holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        current,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+
+    assert!(!worktree_was_shared(&slot, &current.attempt.to_string())?);
+    let evidence = slot.open_verified_directory(OsStr::new(&current.attempt.to_string()))?;
+    evidence.unlink(OsStr::new(HOLDER_ADMISSION))?;
+    assert!(worktree_was_shared(&slot, &current.attempt.to_string()).is_err());
+    drop(holder);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn worktree_sharing_guard_blocks_a_new_sibling_until_release() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let current = scope();
+    let holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        current,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+
+    let sharing = worktree_sharing_guard(&slot, &current.attempt.to_string())?;
+    assert!(!sharing.was_shared());
+    let sibling = Scope {
+        attempt: AttemptId::from_bytes([4; 16]),
+        generation: 1,
+    };
+    assert!(matches!(
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            sibling,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &cancel,
+            &clock,
+        ),
+        Err(CustodyError::Busy)
+    ));
+    drop(sharing);
+
+    let sibling_holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        sibling,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(worktree_was_shared(&slot, &current.attempt.to_string())?);
+    drop(sibling_holder);
+    drop(holder);
+    Ok(())
+}
+
+#[test]
+fn unrelated_attempt_custody_lock_does_not_prove_live_slot_holder() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut first = crate::fixture::acquire_writer(
+        directory.try_clone()?,
+        scope(),
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    first.reservation.launch_state = LaunchState::HandingOff;
+    first.reservation.attempt_device = Some(1);
+    first.reservation.attempt_inode = Some(2);
+    Publication::require_durable(write_record(
+        &first.directory,
+        "reservation.json",
+        &first.reservation,
+        PublishMode::Replace,
+    )?)?;
+    let unrelated_attempt_lock = first
+        .directory
+        .try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?;
+    drop(first);
+
+    let error = crate::fixture::acquire_writer(
+        directory,
+        Scope {
+            attempt: AttemptId::from_bytes([4; 16]),
+            generation: 1,
+        },
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )
+    .expect_err("a busy Run attempt custody lock is not supervisor slot holder proof");
+    assert!(matches!(error, CustodyError::Fenced));
+    drop(unrelated_attempt_lock);
+    Ok(())
+}
+
 #[test]
 fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -1491,6 +1716,17 @@ fn spawned_reboot_recovery(
     writer.into_recovery()
 }
 
+/// Marks the listed PIDs as inside the attempt's sandbox; never signals.
+struct Sandbox(Vec<i64>);
+impl orphans::OrphanProbe for Sandbox {
+    fn in_attempt_sandbox(&self, pid: i64, asked: &Scope) -> bool {
+        *asked == scope() && self.0.contains(&pid)
+    }
+    fn signal(&self, _: &ProcessIdentity, _: bool) -> bool {
+        false
+    }
+}
+
 #[test]
 fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestResult {
     // Spec: docs/specs/run-settlement.md#guardian-loss-proof
@@ -1505,12 +1741,21 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "custody_held",
         "lease_missing",
         "guardian_replaced",
+        "holder_replaced",
+        "legacy_holder_record",
+        "holder_proof_missing_after_exclusive_recovery",
         "custody_replaced",
         "writer_replaced",
         "record_missing",
         "wrong_scope",
         "incomplete_census",
         "live_provider",
+        "live_descendant",
+        "omitted_descendants",
+        "recorded_census_incomplete",
+        "recorded_census_incomplete_sandboxed",
+        "sandboxed_escapee",
+        "unresolved_exit_identity",
         "worktree_not_free",
         "replaced_during_census",
         "replaced_after_proof",
@@ -1522,6 +1767,17 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         let attempt = Directory::open_anchor(attempt_root.path())?;
         let mut recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
         let evidence = recovery.directory.try_clone()?;
+        // A guardian lost mid-run has completed a census within seconds, which
+        // clears its incomplete flag: that is the ordinary lost-guardian state.
+        // The cases below that need an incomplete record set it themselves.
+        recovery.reservation.census_incomplete = false;
+        write_record(
+            &evidence,
+            "reservation.json",
+            &recovery.reservation,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
         let mut custody = Some(attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?);
         liveness::prepare_guardian_lifetime(
             &evidence,
@@ -1529,6 +1785,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             scope(),
             recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
             custody.as_ref().ok_or(CustodyError::Fenced)?,
+            recovery.holder.as_ref().ok_or(CustodyError::Fenced)?,
         )?;
         let mut guardian = if case == "before_identity_publication" {
             // The guardian has acquired the prepared inode but has not yet
@@ -1548,6 +1805,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     .ok_or(CustodyError::InvalidRecord)?,
                 recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
                 custody.as_ref().ok_or(CustodyError::Fenced)?,
+                recovery.holder.as_ref().ok_or(CustodyError::Fenced)?,
             )?)
         };
         let provider = recovery
@@ -1605,6 +1863,45 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 .require_durable()?;
             }
             "guardian_replaced" => replace_lock(&evidence, "guardian.lock")?,
+            "holder_replaced" => replace_lock(&evidence, "holder.lock")?,
+            "legacy_holder_record" => {
+                let mut record: serde_json::Value =
+                    read_record(&evidence, "guardian-lock.json", RECORD_LIMIT)?;
+                record
+                    .as_object_mut()
+                    .ok_or(CustodyError::InvalidRecord)?
+                    .remove("holder");
+                record["schema_version"] = 1.into();
+                write_record(
+                    &evidence,
+                    "guardian-lock.json",
+                    &record,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+                // Evidence from before per-attempt holder locks is refused and
+                // reported, never read as a half-proof.
+                assert!(liveness::is_legacy_record(&evidence)?);
+                assert!(
+                    recovery
+                        .after_guardian_loss(&attempt, &world, || Ok(true))
+                        .is_err()
+                );
+                continue;
+            }
+            "holder_proof_missing_after_exclusive_recovery" => {
+                drop(recovery.lease.take());
+                let clock = SystemClock::new();
+                recovery.lease = Some(lock_writer_exclusion(
+                    &recovery.lock_directory,
+                    WaitBudget::cli(clock.mono_now(), 1)?,
+                    &CancelToken::new(),
+                    &clock,
+                )?);
+                // Recovery without its own holder lock never substitutes the
+                // shared occupancy it now holds.
+                drop(recovery.holder.take());
+            }
             "custody_replaced" => replace_lock(&attempt, "custody.lock")?,
             "writer_replaced" => replace_lock(&recovery.lock_directory, "writer.lock")?,
             "lease_missing" => drop(recovery.lease.take()),
@@ -1625,6 +1922,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                             .ok_or(CustodyError::InvalidRecord)?,
                         recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
                         custody.as_ref().ok_or(CustodyError::Fenced)?,
+                        recovery.holder.as_ref().ok_or(CustodyError::Fenced)?,
                     )
                     .is_err()
                 );
@@ -1641,7 +1939,79 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 )?
                 .require_durable()?;
             }
-            "live_provider" => world.census_facts.push(process_fact(provider)),
+            // The census observes the provider live, so it is not also absent.
+            "live_provider" => {
+                world.observations.insert(
+                    provider.pid,
+                    ProcessObservation::Present(process_fact(provider.clone())),
+                );
+            }
+            // An unrecorded descendant still in the provider's session.
+            "live_descendant" => world.census_facts.push(process_fact(ProcessIdentity {
+                boot: BOOT.into(),
+                pid: 4242,
+                native_start: 9,
+                group_id: 4242,
+                session_id: provider.session_id,
+            })),
+            // A setsid escapee the guardian never recorded, outside the
+            // worktree, still carries the attempt's sandbox mark.
+            "sandboxed_escapee" => world.census_facts.push(process_fact(ProcessIdentity {
+                boot: BOOT.into(),
+                pid: 5151,
+                native_start: 9,
+                group_id: 5151,
+                session_id: 5151,
+            })),
+            // A published exit named a descendant it could not end.
+            "unresolved_exit_identity" => {
+                let escapee = ProcessIdentity {
+                    boot: BOOT.into(),
+                    pid: 6161,
+                    native_start: 9,
+                    group_id: 6161,
+                    session_id: 6161,
+                };
+                attempt
+                    .atomic_write(
+                        OsStr::new("process-exit.json"),
+                        ".exit-",
+                        &serde_json::to_vec(&serde_json::json!({
+                            "scope": scope(),
+                            "unresolved_cleanup": true,
+                            "unresolved_identities": [escapee],
+                        }))?,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+                world.census_facts.push(process_fact(escapee));
+            }
+            // The guardian's descendant record omitted identities whose
+            // sessions and groups no census can check.
+            // The guardian never completed a census of its tree. Whether the
+            // fresh scan may stand in depends on the sandbox mark having been
+            // in effect for the attempt.
+            "recorded_census_incomplete" | "recorded_census_incomplete_sandboxed" => {
+                recovery.reservation.census_incomplete = true;
+                recovery.reservation.sandboxed = case == "recorded_census_incomplete_sandboxed";
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
+            "omitted_descendants" => {
+                recovery.reservation.omitted_descendants = 1;
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
             _ => {}
         }
         if case != "guardian_held" {
@@ -1650,17 +2020,24 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         if case != "custody_held" {
             drop(custody.take());
         }
-        let proof = recovery.after_guardian_loss(&attempt, &world, || {
+        if case == "free" {
+            // The real lost-guardian state: a complete recorded census.
+            assert!(!recovery.reservation.census_incomplete);
+            assert!(!recovery.reservation.sandboxed);
+        }
+        let probe = Sandbox(vec![5151]);
+        let proof = recovery.after_guardian_loss_with(&attempt, &world, &probe, || {
             if case == "replaced_during_census" {
                 replace_lock(&evidence, "guardian.lock")?;
             }
             Ok(case != "worktree_not_free")
         })?;
         assert_eq!(
-            proof.is_some(),
+            proof.is_ok(),
             matches!(
                 case,
                 "free"
+                    | "recorded_census_incomplete_sandboxed"
                     | "before_reservation_publication"
                     | "before_identity_publication"
                     | "before_guardian_spawn"
@@ -1670,7 +2047,51 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             ),
             "{case}"
         );
-        if let Some(proof) = proof {
+        // An unproven loss names its blocker, including the live PID.
+        match case {
+            "live_provider" => assert_eq!(
+                proof.as_ref().err(),
+                Some(&LossUnproven::Live { pid: provider.pid })
+            ),
+            "live_descendant" => {
+                let refusal = proof.as_ref().err().ok_or("live descendant")?;
+                assert_eq!(refusal, &LossUnproven::Live { pid: 4242 });
+                assert!(refusal.to_string().contains("4242"), "{refusal}");
+            }
+            "sandboxed_escapee" => {
+                assert_eq!(
+                    proof.as_ref().err(),
+                    Some(&LossUnproven::Live { pid: 5151 })
+                );
+            }
+            "unresolved_exit_identity" => {
+                assert_eq!(
+                    proof.as_ref().err(),
+                    Some(&LossUnproven::Live { pid: 6161 })
+                );
+            }
+            "omitted_descendants" => {
+                let refusal = proof.as_ref().err().ok_or("omitted descendants")?;
+                assert_eq!(refusal, &LossUnproven::DescendantsOmitted { omitted: 1 });
+                assert!(refusal.to_string().contains("omitted 1"), "{refusal}");
+            }
+            "recorded_census_incomplete" => {
+                let refusal = proof.as_ref().err().ok_or("incomplete guardian census")?;
+                assert_eq!(refusal, &LossUnproven::GuardianCensusIncomplete);
+                assert!(refusal.to_string().contains("sandbox mark"), "{refusal}");
+            }
+            "guardian_held" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::GuardianHeld));
+            }
+            "incomplete_census" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::CensusIncomplete));
+            }
+            "worktree_not_free" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::WorktreeOccupied))
+            }
+            _ => {}
+        }
+        if let Ok(proof) = proof {
             assert_eq!(proof.scope(), scope());
             for (directory, name) in [(&evidence, "guardian.lock"), (&attempt, "custody.lock")] {
                 assert!(

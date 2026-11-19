@@ -62,6 +62,19 @@ A value that can normalise two ways is rejected at the wire boundary.
 - Why: two spellings let one record alias another.
 - Owner: `crates/core/src/`
 
+### Wall time has one stated bound
+
+`WallTime::MAX` is the single greatest instant the wire accepts:
+`253_402_207_200_000_000` microseconds (`9999-12-30T22:00:00.000000Z`).
+Jiff's `Timestamp::MAX` carries nanoseconds past that whole second, so the
+bound comes from the constant and not a documented spelling; anything above it
+is out of range. A consumer that needs the latest representable instant,
+including the graph checkpoint envelope, derives it from `WallTime::MAX` and
+has no epoch fallback.
+- Why: a bound naming a value the constructor rejects invites silent fallbacks
+  that hide the mismatch.
+- Owner: `crates/core/src/time.rs`, `crates/fabric-runtime/src/graph/envelope.rs`
+
 ### Graph names retain one identity
 
 A graph name identifies one graph generation for its project's lifetime.
@@ -81,10 +94,14 @@ checkpoint and execution, externalises text without changing its bytes, and
 validates the reconstructed result before atomic publication. Landing review queries retain valid settlements while reporting
 unreadable graph sources by graph ID. Readers of an atomic checkpoint see one
 complete published record. Every corrupt checkpoint stays visible as unreadable
-through status and each tick, with its graph ID. Pending-index recovery never
-uses unverified lifecycle fields to classify a corrupt record as settled.
+through status, with its graph ID and typed reason. The first tick read reports
+a corrupt checkpoint and records its file digest and typed reason in a quarantine
+marker; later ticks over identical bytes skip it, changed bytes are reported
+again, and `provenant stop -- NAME` retires the record. Pending-index recovery
+never uses unverified lifecycle fields to classify a corrupt record as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
-  independent review evidence in another.
+  independent review evidence in another or flood every tick with the same
+  unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
 
 ## SQLite stores

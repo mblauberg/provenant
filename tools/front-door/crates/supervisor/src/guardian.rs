@@ -270,9 +270,11 @@ fn cancel_poll_interval(watched: bool) -> u64 {
     }
 }
 
-/// Clone failure must leave the driver's writer lease available for recovery.
+/// Clone failure must leave the driver's occupancy and holder locks available
+/// for recovery.
 fn settlement_recovery(
     writer: &mut Option<provenant_os::fs::LockGuard>,
+    holder: &mut Option<provenant_os::fs::LockGuard>,
     directory: Directory,
     lock_directory: provenant_os::fs::Result<Directory>,
     reservation: &Reservation,
@@ -287,6 +289,7 @@ fn settlement_recovery(
         directory,
         lock_directory,
         lease: Some(writer.take().ok_or(CustodyError::Fenced)?),
+        holder: Some(holder.take().ok_or(CustodyError::Fenced)?),
         reservation: reservation.clone(),
         guardian_quiescent: true,
         loss_locks: None,
@@ -392,8 +395,10 @@ pub(crate) fn handoff(
     crate::process_os::handoff::spawn(
         &owned.lease.lock_directory,
         &publication.directory,
+        &owned.lease.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
+        owned.lease.holder.as_ref().ok_or(CustodyError::Fenced)?,
         owned
             .command
             .profile_file
@@ -654,6 +659,12 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     };
     message.capture.validate()?;
     let evidence = crate::custody::attempt_evidence(&inherited.writer_directory, message.scope)?;
+    if !evidence
+        .metadata()?
+        .same_identity(&inherited.evidence_directory.metadata()?)
+    {
+        return Err(CustodyError::Fenced);
+    }
     let mut reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
     if message.priority > 19 || !valid_resolved_route(&message.resolved_route) {
@@ -700,6 +711,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         &guardian,
         &inherited.writer,
         &inherited.custody,
+        &inherited.holder,
     )?;
     Publication::require_durable(write_record(
         &evidence,
@@ -813,6 +825,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         #[cfg(target_os = "macos")]
         writer_retirement_probe,
         _custody: Some(inherited.custody),
+        _holder: Some(inherited.holder),
         guardian,
         requester: message.requester,
         reactor,
@@ -847,6 +860,7 @@ struct Driver<'a> {
     #[cfg(target_os = "macos")]
     writer_retirement_probe: Option<provenant_os::fs::FileHandle>,
     _custody: Option<provenant_os::fs::LockGuard>,
+    _holder: Option<provenant_os::fs::LockGuard>,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
     reactor: crate::process_os::provider::GuardianReactor,
@@ -1197,6 +1211,8 @@ impl Driver<'_> {
             );
         }
         self.reservation.launch_state = LaunchState::Spawned;
+        // Without a profile the lane has no sandbox mark for a later scan.
+        self.reservation.sandboxed = self.profile_file.is_some();
         self.reservation.provider = child.identity().cloned();
         let mut memory = memory_path
             .as_ref()
@@ -2516,16 +2532,19 @@ impl Driver<'_> {
         };
         let mut recovery = settlement_recovery(
             &mut self.writer,
+            &mut self._holder,
             directory,
             self.lock_dir.try_clone(),
             &self.reservation,
         )?;
         if recovery.prepare_settlement().is_err() {
             self.writer = recovery.lease.take();
+            self._holder = recovery.holder.take();
             return Ok(());
         }
         drop(self._custody.take());
-        // Worktree exclusion spans settlement retries; attempt custody is free.
+        // Worktree occupancy and the slot-local holder proof span settlement;
+        // only this attempt's custody lock is free.
         let settled = (|| {
             let terminal = holder
                 .outcome(&self.holder_context, &self.attempt, &exit, Some(&recovery))

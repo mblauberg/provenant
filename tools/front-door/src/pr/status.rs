@@ -86,6 +86,10 @@ pub(crate) struct Line {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default, deserialize_with = "display_default")]
     failing_checks: Vec<String>,
+    /// Names of checks still running on this head, shown when a wait times out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "display_default")]
+    pending_checks: Vec<String>,
     /// Links from the same observation, retained for completion reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     failed_check_details: Vec<FailedCheck>,
@@ -131,6 +135,7 @@ impl Line {
         self.checks_failed = None;
         self.checks_pending = None;
         self.failing_checks.clear();
+        self.pending_checks.clear();
         self.failed_check_details.clear();
     }
     /// Whether a waiter should hold this reading through a grace period: it
@@ -253,6 +258,10 @@ impl Line {
             }
             if pending > 0 {
                 line.push_str(&format!(" pending={pending}"));
+                let names = self.pending_checks.join(",");
+                if !names.is_empty() {
+                    line.push_str(&format!(" pending_names={names}"));
+                }
             }
         } else {
             line.push_str(" checks=unavailable");
@@ -896,6 +905,12 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
             .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
             .map(|check| display_check_name(&check.name))
             .collect(),
+        pending_checks: checks
+            .unwrap_or(&[])
+            .iter()
+            .filter(|check| check.bucket == "pending")
+            .map(|check| display_check_name(&check.name))
+            .collect(),
         failed_check_details: checks
             .unwrap_or(&[])
             .iter()
@@ -1010,6 +1025,7 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 checks_pending: None,
                 active_workflows: None,
                 failing_checks: Vec::new(),
+                pending_checks: Vec::new(),
                 failed_check_details: Vec::new(),
                 merge: "unknown".into(),
                 review: "unknown".into(),
@@ -1151,6 +1167,7 @@ mod tests {
             checks_pending: Some(0),
             active_workflows: None,
             failing_checks: Vec::new(),
+            pending_checks: Vec::new(),
             failed_check_details: Vec::new(),
             merge: "clean".into(),
             review: "approved".into(),
@@ -1196,6 +1213,46 @@ mod tests {
         );
         let json = serde_json::to_value(line).unwrap();
         assert_eq!(json["failed_check_details"][1]["url"], "https://ci/two");
+    }
+
+    #[test]
+    fn pending_check_names_survive_the_status_line_and_render() {
+        let check = |name: &str, bucket: &str| super::super::observer::Check {
+            head: "head".into(),
+            name: name.into(),
+            bucket: bucket.into(),
+            app: None,
+            app_slug: None,
+            conclusion: None,
+            registered: None,
+            url: None,
+            excerpt: String::new(),
+        };
+        let view = super::View {
+            state: "OPEN".into(),
+            head: "head".into(),
+            merge: "clean".into(),
+            review: Some("approved".into()),
+            draft: false,
+            url: String::new(),
+        };
+        let checks = [
+            check("build", "pass"),
+            check("lint", "pending"),
+            check("deploy", "pending"),
+        ];
+        let line = super::status_line(7, view, Some(&checks));
+        assert_eq!(line.pending_checks, ["lint", "deploy"]);
+        let text = line.text();
+        assert!(text.contains("pending=2"), "{text}");
+        assert!(text.contains("pending_names=lint,deploy"), "{text}");
+        let json = serde_json::to_value(&line).unwrap();
+        assert_eq!(json["pending_checks"][0], "lint");
+        // A new head has no checks yet, so no stale pending name survives.
+        let mut waiting = line;
+        waiting.await_head("new");
+        assert!(waiting.pending_checks.is_empty());
+        assert!(!waiting.text().contains("pending_names="));
     }
 
     #[test]

@@ -1610,7 +1610,9 @@ impl BinaryRunOwner<'_> {
                     .map(PathBuf::from)
             })
             .unwrap_or_else(|| self.factory.cwd.clone());
-        let submitted = {
+        // Keep the assembled task off the launch frame: a debug build copies
+        // this large value into every temporary on the submit path (#3542).
+        let submitted = Box::new({
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 false,
@@ -1645,7 +1647,7 @@ impl BinaryRunOwner<'_> {
                 worktree: task.worktree.map(PathBuf::from),
                 access: access.clone(),
             }
-        };
+        });
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let mut host_launch = match &self.factory.host_launch {
@@ -1678,7 +1680,7 @@ impl BinaryRunOwner<'_> {
                 Submission {
                     chair: self.chair.clone(),
                     operation_id: operation_id.clone(),
-                    task: submitted,
+                    task: *submitted,
                     knobs,
                 },
                 &call,

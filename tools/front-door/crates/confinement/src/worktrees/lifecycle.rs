@@ -39,9 +39,9 @@ pub enum WriterEdits {
 }
 
 /// Advance a free, registered linked worktree to a pinned descendant commit.
-/// Writer exclusion covers verification and mutation. Local edits, divergence
-/// and ignored files that would be overwritten always refuse the handoff. A
-/// checkout already ahead of the pin is left as it is.
+/// An actual advance holds exclusive occupancy and refuses local edits,
+/// divergence and ignored files that would be overwritten. An already
+/// satisfied pin observes the checkout without excluding its shared holders.
 pub fn fast_forward(
     context: &WorktreeContext<'_>,
     path: &Path,
@@ -69,6 +69,20 @@ pub fn fast_forward(
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let entry_head = entry.head.ok_or(WorktreeError::InvalidOutput)?;
+    let canonical = canonicalize(&entry.path)?;
+    // Observing an already satisfied pin has no checkout effect when another
+    // occupancy holder is live. Shared holders may keep editing or committing;
+    // without a live holder, ordinary reuse must verify cleanliness under exclusive custody.
+    if !entry.locked
+        && !entry.prunable
+        && (entry_head == head || is_ancestor(context, head, entry_head, cancel)?)
+        && disk_writer_state(context.project_state, &canonical) == Occupancy::Held
+    {
+        let tree = verify_worktree(context.repo, &path)?;
+        tree.repo().revalidate_identity()?;
+        check_writer_terminal(tree.repo())?;
+        return Ok(());
+    }
     // Inventory is advisory until this worktree's writer custody is held.
     let locked = lock_worktree_for_launch(context, entry, cancel)?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
@@ -209,16 +223,15 @@ fn list_impl(
     matches: impl Fn(&Path, Option<&str>) -> bool,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
-    let entries = {
-        let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
-        context.repo.revalidate()?;
-        match reuse_inventory
-            .then(|| context.facts.cached_inventory(context))
-            .flatten()
-        {
-            Some(entries) => entries,
-            None => context.facts.capture_inventory(context, cancel)?,
-        }
+    // Git's worktree registry and refs use their own lock files. Capture a
+    // consistent inventory without serialising unrelated repository work.
+    context.repo.revalidate()?;
+    let entries = match reuse_inventory
+        .then(|| context.facts.cached_inventory(context))
+        .flatten()
+    {
+        Some(entries) => entries,
+        None => context.facts.capture_inventory(context, cancel)?,
     };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries
@@ -413,8 +426,8 @@ fn list_impl(
     Ok(result)
 }
 
-/// Create a clean linked checkout at a pinned commit. A failed or killed
-/// `worktree add` is rolled back (see `roll_back_failed_add`). Failed
+/// Create a clean linked checkout at a pinned commit. The destination's
+/// custody is acquired before registration and collision checks. Failed
 /// verification after Git succeeds leaves a visible tree for inspection.
 pub fn create(
     context: &WorktreeContext<'_>,
@@ -507,10 +520,9 @@ fn create_with_default(
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let facts = context.facts;
-    let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
-    // Another setup may have changed configuration while this caller waited.
-    // Retain structural custody, then take the dependent snapshots under the
-    // mutation owner instead of rejecting a legitimate sibling's config write.
+    // Reopen the verified repository before using configuration snapshots.
+    // Git replaces config atomically and locks each ref/registration mutation,
+    // so independent worktree creation can proceed in parallel.
     context.repo.revalidate_identity()?;
     let repo = context.utility.open_repo(
         context.executor,
@@ -529,7 +541,60 @@ fn create_with_default(
         ..*context
     };
     context.repo.revalidate()?;
+
+    // Derive the allocation before observing branch or registration state, then
+    // take its exclusive custody before any check that decides whether it is
+    // free. A second creator must recheck only after the first releases it.
+    let current = context
+        .project_state
+        .current_path()
+        .map_err(|_| WorktreeError::InvalidRequest)?;
+    let state = current
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let ports = provenant_config::PortTable::read_for(context.layout.project(), state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let target_relative = ports
+        .managed_writer_path(&request.branch)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let parent_relative = target_relative
+        .parent()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let path_name = target_relative
+        .file_name()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let layout_device = context.layout.directory().metadata()?.device;
+    let worktree_parent = open_or_create_layout_directory(
+        context.layout.directory(),
+        parent_relative,
+        true,
+        layout_device,
+    )?;
+    let parent_identity = worktree_parent.metadata()?;
+    let target = context.layout.root().join(&target_relative);
+    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
+    context.repo.revalidate()?;
+    let named_parent = open_or_create_layout_directory(
+        context.layout.directory(),
+        parent_relative,
+        false,
+        layout_device,
+    )?;
+    if !parent_identity.same_identity(&named_parent.metadata()?) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    match worktree_parent.metadata_at(path_name, false) {
+        Ok(_) => return Err(WorktreeError::InvalidRequest),
+        Err(error) if error.is_not_found() => {}
+        Err(_) => return Err(WorktreeError::UnknownWriter),
+    }
     let entries = context.facts.fresh_inventory(context, cancel)?;
+    for (path, _) in canonical_worktree_paths(&entries)? {
+        if path == target {
+            return Err(WorktreeError::UnknownWriter);
+        }
+    }
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
@@ -573,10 +638,12 @@ fn create_with_default(
     }
     let create_branch = existing.is_none();
     if create_branch && request.base.is_none() && default.is_none() {
-        // Network discovery does not own the repository registry. Re-enter all
+        // Network discovery does not own Git mutations. Re-enter all
         // inventory, collision and branch checks after it completes, retaining
         // only the exact commit the remote fetch proved.
-        drop(_lock);
+        // Network discovery does not need to hold this worktree's custody.
+        // The recursive call reacquires it before repeating every collision check.
+        drop(_writer);
         let default = default_creation_base(context, facts, cancel)?;
         return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
@@ -609,54 +676,6 @@ fn create_with_default(
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
-    let current = context
-        .project_state
-        .current_path()
-        .map_err(|_| WorktreeError::InvalidRequest)?;
-    let state = current
-        .parent()
-        .and_then(Path::parent)
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let ports = provenant_config::PortTable::read_for(context.layout.project(), state)
-        .map_err(WorktreeError::PortConfiguration)?;
-    let target_relative = ports
-        .managed_writer_path(&request.branch)
-        .map_err(WorktreeError::PortConfiguration)?;
-    let parent_relative = target_relative
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let path_name = target_relative
-        .file_name()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let layout_device = context.layout.directory().metadata()?.device;
-    let worktree_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        true,
-        layout_device,
-    )?;
-    let parent_identity = worktree_parent.metadata()?;
-    let target = context.layout.root().join(&target_relative);
-    match worktree_parent.metadata_at(path_name, false) {
-        Ok(_) => return Err(WorktreeError::InvalidRequest),
-        Err(error) if error.is_not_found() => {}
-        Err(_) => return Err(WorktreeError::UnknownWriter),
-    }
-    for (path, _) in canonical_worktree_paths(&entries)? {
-        if path == target {
-            return Err(WorktreeError::UnknownWriter);
-        }
-    }
-    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
-    let named_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        false,
-        layout_device,
-    )?;
-    if !parent_identity.same_identity(&named_parent.metadata()?) {
-        return Err(WorktreeError::UnknownWriter);
-    }
     let common_head = common_head(context, facts, cancel)?;
     if let Err(cause) = execute_mutation(
         context,
@@ -668,7 +687,7 @@ fn create_with_default(
         },
         cancel,
     ) {
-        let rolled_back = roll_back_failed_add(
+        let artifacts_absent = failed_add_artifacts_absent(
             context,
             &target,
             create_branch.then_some((&branch, base)),
@@ -676,7 +695,7 @@ fn create_with_default(
         );
         return Err(WorktreeError::CreateFailed {
             cause: Box::new(cause),
-            rolled_back,
+            artifacts_absent,
         });
     }
     // Creating a linked worktree must leave the primary's HEAD, branch or
@@ -708,9 +727,9 @@ fn create_with_default(
     // Release the verified checkout descriptors before allowing a sibling
     // launcher to inspect this newly created worktree.
     drop(verified);
-    // Still under the registry lock, so no sibling create can interleave
-    // between the ref mutation and its ownership record. A failed record
-    // leaves the branch unobserved, which only ever retains it.
+    // Git locks the ref mutation itself. A sibling may create another branch
+    // here; a failed ownership record leaves this branch unobserved, which
+    // only ever retains it.
     let mut warnings = naming_warnings;
     if let Err(error) = creation_record {
         warnings.push(format!(
@@ -727,8 +746,7 @@ fn create_with_default(
         ));
     }
     // The mutation and registration checks are complete. The advisory census
-    // must not keep other branches from acquiring the repository registry.
-    drop(_lock);
+    // does not hold repository-wide custody.
     warnings.extend(setup::run(context, &target, branch.as_str(), cancel));
     // Setup may leave build output or local edits; report those honestly
     // without turning an advisory setup failure into a creation refusal.
@@ -805,82 +823,63 @@ pub(super) fn write_default_base_warning(
     writeln!(output, "warning: {}", default_base_warning(oid))
 }
 
-/// Undo a `worktree add` that failed or was killed part-way. Only what this
-/// call made is touched: `target` was verified absent before the add, its
-/// admin entry is found by the `gitdir` file that points at it, and the branch
-/// goes only when this call created it, it still points at `base` and no
-/// worktree has it checked out. Anything that cannot be confirmed is left and
-/// reported as not rolled back. Returns whether nothing of ours remains.
-pub(super) fn roll_back_failed_add(
+/// Report whether a failed `worktree add` left no observable artifacts.
+///
+/// The command can fail after another creator has populated the destination.
+/// A prior absence check cannot identify who created files after the check, so
+/// ambiguous destination, registration and branch artifacts are retained for
+/// inspection instead of recursively deleting them.
+pub(super) fn failed_add_artifacts_absent(
     context: &WorktreeContext<'_>,
     target: &Path,
     created_branch: Option<(&GitRefName, GitOid)>,
     cancel: &CancelToken,
 ) -> bool {
-    let mut clean = remove_admin_entry(context.repo.common_git_dir(), target);
-    clean &= match std::fs::remove_dir_all(target) {
-        Ok(()) => true,
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    let target_absent = match std::fs::symlink_metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Ok(_) | Err(_) => false,
     };
-    let Some((branch, base)) = created_branch else {
-        return clean;
+    let admin_absent = match has_admin_entry_for_target(context.repo.common_git_dir(), target) {
+        Some(present) => !present,
+        None => false,
     };
-    let Ok(entries) = context.facts.fresh_inventory(context, cancel) else {
-        return false;
+    let branch_absent = match created_branch {
+        None => true,
+        Some((branch, _)) => read_branch_tips(context, cancel)
+            .map(|tips| !tips.contains_key(branch))
+            .unwrap_or(false),
     };
-    if entries
-        .iter()
-        .any(|entry| entry.branch.as_ref() == Some(branch))
-    {
-        return false;
-    }
-    match read_branch_tips(context, cancel) {
-        Ok(tips) => match tips.get(branch) {
-            None => clean,
-            Some(tip) if *tip == base => {
-                clean
-                    && execute_mutation(
-                        context,
-                        GitMutation::DeleteRef {
-                            name: branch.clone(),
-                            expected_old_oid: base,
-                        },
-                        cancel,
-                    )
-                    .is_ok()
-            }
-            Some(_) => false,
-        },
-        Err(_) => false,
-    }
+    target_absent && admin_absent && branch_absent
 }
 
-/// Remove the `<common git dir>/worktrees/<name>` entry whose `gitdir` names
-/// `target`. Returns false when a matching entry could not be removed.
-pub(super) fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
-    let wanted = target.join(".git");
-    let Ok(entries) = std::fs::read_dir(common_git_dir.join("worktrees")) else {
-        return true;
+/// Return whether a worktree admin entry names `target`; unreadable state is
+/// unknown so callers retain all artifacts.
+fn has_admin_entry_for_target(common_git_dir: &Path, target: &Path) -> Option<bool> {
+    let directory = common_git_dir.join("worktrees");
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
     };
-    let Ok(entries) = entries
+    let entries = entries
         .take(MAX_WORKTREES + 1)
         .collect::<std::io::Result<Vec<_>>>()
-    else {
-        return false;
-    };
+        .ok()?;
     if entries.len() > MAX_WORKTREES {
-        return false;
+        return None;
     }
-    let mut removed = true;
+    let wanted = target.join(".git");
     for entry in entries {
-        let Ok(text) = std::fs::read(entry.path().join("gitdir")) else {
-            continue;
+        let bytes = match std::fs::read(entry.path().join("gitdir")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
         };
-        if text.trim_ascii_end() == wanted.as_os_str().as_encoded_bytes() {
-            removed &= std::fs::remove_dir_all(entry.path()).is_ok();
+        if bytes.trim_ascii_end() == wanted.as_os_str().as_encoded_bytes() {
+            return Some(true);
         }
     }
-    removed
+    Some(false)
 }
 
 /// The shared common-directory `HEAD` file and, when symbolic, the commit it
@@ -999,6 +998,22 @@ pub(super) fn execute_mutation(
     // A failed or timed-out mutation may still have changed repository state.
     let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
+    if let GitMutation::DeleteRef {
+        name,
+        expected_old_oid,
+    } = &mutation
+        && name.as_str().starts_with("refs/heads/")
+    {
+        return match delete_ref_leased(context, name, *expected_old_oid, cancel)? {
+            RefDeletion::Removed => Ok(()),
+            RefDeletion::Absent => Err(WorktreeError::NotFound),
+            RefDeletion::CheckedOut => Err(WorktreeError::CheckedOut),
+            RefDeletion::Changed => Err(WorktreeError::MutationFailed {
+                operation: GitMutationOperation::DeleteRef,
+                lock_failure: false,
+            }),
+        };
+    }
     let operation = match &mutation {
         GitMutation::BundleCreate { .. } => GitMutationOperation::BundleCreate,
         GitMutation::CreatePreservationRef { .. } => GitMutationOperation::PreserveRef,
@@ -1040,21 +1055,6 @@ pub(super) struct RemovedTree {
     pub(super) info: WorktreeInfo,
     pub(super) lane_cache: Option<PathBuf>,
     pub(super) _writer: LockGuard,
-    /// Held when removal took the repository lock itself, so the caller can
-    /// settle the branch under it.
-    pub(super) repository: Option<LockGuard>,
-}
-
-/// How `remove_tree_when_before_delete` meets the repository lock.
-#[derive(Clone, Copy)]
-pub(super) enum Repository {
-    /// The caller holds it throughout.
-    Held,
-    /// Ordinary removal refreshes the census before locking, then rechecks
-    /// ownership under the repository lock.
-    Remove,
-    /// Explicit destructive authority, requiring an archive before mutation.
-    Discard,
 }
 
 /// The registration still names this tree with its branch and head, unheld.
@@ -1141,7 +1141,7 @@ fn preserve_unsubsumed_tip(
 }
 
 /// The same fenced removal core with one durable-authority callback after the
-/// final worktree and repository checks and immediately before Git mutation.
+/// final worktree checks and immediately before Git mutation.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn remove_tree_when_before_delete(
     context: &WorktreeContext<'_>,
@@ -1150,7 +1150,7 @@ pub(super) fn remove_tree_when_before_delete(
     cancel: &CancelToken,
     eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
-    repository: Repository,
+    discard: bool,
     before_delete: impl FnOnce(
         &VerifiedWorktree,
         &Path,
@@ -1182,7 +1182,7 @@ pub(super) fn remove_tree_when_before_delete(
         cancel,
         eligible,
         output,
-        repository,
+        discard,
         None,
         before_delete,
     )
@@ -1204,7 +1204,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
     cancel: &CancelToken,
     eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
-    repository: Repository,
+    discard: bool,
     before_output: Option<BeforeOutput<'_>>,
     before_delete: impl FnOnce(
         &VerifiedWorktree,
@@ -1243,7 +1243,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
     }
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
-    if prepared && !matches!(repository, Repository::Discard) {
+    if prepared && !discard {
         let settings = output.cloned().unwrap_or_default();
         gc::prepare_removal(
             context,
@@ -1252,36 +1252,22 @@ pub(super) fn remove_tree_when_before_delete_locked(
             &settings.keep,
             cancel,
         )?;
-        if matches!(
-            repository,
-            Repository::Held | Repository::Remove | Repository::Discard
-        ) {
-            refresh_census_under_custody(context, &canonical)?;
-        }
+        refresh_census_under_custody(context, &canonical)?;
     }
     // Output preparation can take time. Recheck registration, head and lane
-    // eligibility before removing the tree while writer exclusion is held.
-    let repository_guard = match repository {
-        Repository::Held => None,
-        Repository::Remove | Repository::Discard => {
-            // Any slow census happens before the repository lock is taken.
-            if prepared {
-                eligible(true)?;
-            }
-            Some(repository_lock(context, LockMode::Exclusive, cancel)?)
-        }
-    };
+    // eligibility before removing the tree while exclusive worktree custody is held.
+    if prepared {
+        eligible(true)?;
+    }
     context.repo.revalidate()?;
     tree_unchanged(
         &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
-    // The repository lock may be ours: only the cheap fence reruns under it.
-    eligible(repository_guard.is_none())?;
-    let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
+    eligible(true)?;
+    let submodules = verify_removal_submodules(context, locked.verified.repo(), cancel)?;
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
-    let discard = matches!(repository, Repository::Discard);
     removal_verdict(&cleanliness, discard, false)?;
     // Explicit discard always has a durable archive before its retirement intent
     // and Git mutation; the archive id and exact tip become the S2 proof.
@@ -1347,7 +1333,6 @@ pub(super) fn remove_tree_when_before_delete_locked(
         info,
         lane_cache: cargo_cache,
         _writer: writer,
-        repository: repository_guard,
     })
 }
 
@@ -1640,8 +1625,12 @@ pub(super) fn settle_branch(
         .resolve_commit(context, branch.clone(), cancel)
     {
         Ok(current) if current == tip => {}
-        Ok(_) | Err(WorktreeError::NotFound) => {
+        Ok(_) => {
             retain(outcome, branch, RetainReason::Changed);
+            return Ok(None);
+        }
+        Err(WorktreeError::NotFound) => {
+            retain(outcome, branch, RetainReason::RefAbsent);
             return Ok(None);
         }
         Err(error) => {
@@ -1654,31 +1643,39 @@ pub(super) fn settle_branch(
         revalidate_landing_evidence_with_forge(context, tip, evidence, forge, cancel)?;
     }
     let _ = context.facts.take_inventory(context);
-    let deleted = execute_git_mutation(
-        context.executor,
-        context.repo,
-        context.utility,
+    let deleted = execute_mutation(
+        context,
         GitMutation::DeleteRef {
             name: branch.clone(),
             expected_old_oid: tip,
         },
-        context.mutation_budget,
         cancel,
     );
-    if deleted.is_ok_and(|result| exit_code(&result).ok() == Some(0)) {
-        let short = branch.short_name().to_owned();
-        if discard {
-            outcome.discarded.push(DiscardedRef {
-                branch: short,
-                head: tip,
-            });
-        } else {
-            outcome.pruned_refs.push(short);
+    match deleted {
+        Ok(()) => {
+            let short = branch.short_name().to_owned();
+            if discard {
+                outcome.discarded.push(DiscardedRef {
+                    branch: short,
+                    head: tip,
+                });
+            } else {
+                outcome.pruned_refs.push(short);
+            }
+            Ok(completion)
         }
-        Ok(completion)
-    } else {
-        retain(outcome, branch, RetainReason::Changed);
-        Ok(None)
+        Err(WorktreeError::NotFound) => {
+            retain(outcome, branch, RetainReason::RefAbsent);
+            Ok(None)
+        }
+        Err(WorktreeError::CheckedOut) => {
+            retain(outcome, branch, RetainReason::CheckedOut);
+            Ok(None)
+        }
+        Err(error) => {
+            retain(outcome, branch, retain_reason(&error));
+            Ok(None)
+        }
     }
 }
 
@@ -1730,15 +1727,8 @@ pub(super) fn remove_merged_candidate(
                 },
             },
         );
-    // A ref-only retirement has no worktree writer lock to keep the local
-    // generation stable. Take repository custody before its durable intent and
-    // hold it through the exact-tip branch settlement below.
-    let repository = if entry.is_none() {
-        Some(repository_lock(context, LockMode::Exclusive, cancel)?)
-    } else {
-        None
-    };
-    // Held until the ref is settled, so the writer lock covers the deletion.
+    // A removed worktree remains protected by its retained writer lease while
+    // the branch is settled. Ref-only deletion uses Git's expected-tip lock.
     let mut record = None;
     let mut held = match entry {
         None => {
@@ -1778,7 +1768,7 @@ pub(super) fn remove_merged_candidate(
                 cancel,
                 &eligible,
                 Some(output),
-                Repository::Remove,
+                false,
                 |verified, path, _archive| {
                     if path != canonical {
                         return Err(WorktreeError::IdentityChanged);
@@ -1831,13 +1821,11 @@ pub(super) fn remove_merged_candidate(
                 ) {
                     Ok(finished) => record = Some(finished),
                     Err(error) => {
-                        removed.repository = None;
                         detached.push(removed);
                         return Err(error);
                     }
                 }
             } else if retirement.is_some() {
-                removed.repository = None;
                 detached.push(removed);
                 return Err(WorktreeError::RegistrationUnconfirmed);
             }
@@ -1882,9 +1870,7 @@ pub(super) fn remove_merged_candidate(
         (Some(_), None) => Some(Err(WorktreeError::RegistrationUnconfirmed)),
         (None, _) => None,
     };
-    drop(repository);
-    if let Some(mut removed) = held.take() {
-        removed.repository = None;
+    if let Some(removed) = held.take() {
         detached.push(removed);
     }
     result?;
@@ -2068,7 +2054,7 @@ pub fn remove_with_retirement(
 }
 
 /// Remove a freshly created lane only while it is still owned by this operation.
-/// The owner is checked again under repository and writer custody.
+/// The owner is checked again under writer custody.
 #[cfg(test)]
 pub fn remove_created_by_operation(
     context: &WorktreeContext<'_>,
@@ -2166,11 +2152,7 @@ fn remove_with_owner(
                         cancel,
                         &eligible,
                         Some(output),
-                        if discard {
-                            Repository::Discard
-                        } else {
-                            Repository::Remove
-                        },
+                        discard,
                         |verified, path, archive| {
                             if let Some((port, authority)) = retirement {
                                 if path != canonical {
@@ -2306,7 +2288,6 @@ fn remove_with_owner(
                         outcome.archives.push(archive);
                     }
                     outcome.removed.push(removed.info.clone());
-                    removed.repository = None;
                     detached.push(removed);
                     if let Some(error) = finish_error {
                         return Err(error);
@@ -2367,7 +2348,6 @@ fn remove_with_owner(
                 }
                 outcome.removed.push(removed.info.clone());
                 if let Some(error) = finish_error {
-                    removed.repository = None;
                     detached.push(removed);
                     return Err(error);
                 }
@@ -2416,7 +2396,6 @@ fn remove_with_owner(
                     (Some(_), _, _) => Some(Err(WorktreeError::RegistrationUnconfirmed)),
                     (None, _, _) => None,
                 };
-                removed.repository = None;
                 detached.push(removed);
                 settled?;
                 if let Some(update) = retirement_update {

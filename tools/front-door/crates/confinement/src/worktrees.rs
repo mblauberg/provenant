@@ -67,7 +67,7 @@ use crate::repo::{
 use crate::status::{StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
     GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
-    run_utility,
+    execute_git_prepared_ref_delete, run_utility,
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
@@ -98,26 +98,6 @@ use thiserror::Error;
 const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
-/// The single common-directory protocol for repository mutations and the Git
-/// snapshots they depend on. Acquisition waits within the caller's budget, so
-/// concurrent launches queue rather than fail (#3393); a repository holder may
-/// only try a writer lock without waiting. Release
-/// this owner before network discovery, slow census, or provider execution.
-pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
-
-/// Coordinate all checkouts, independently of their state registry or caller.
-/// Shared holders read Git configuration; exclusive holders mutate Git state.
-pub fn lock_repository(
-    common: &Directory,
-    mode: LockMode,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<LockGuard, FsError> {
-    // Protect creation/removal, registration, and coherent Git config snapshots.
-    // Never retain this hold across provider work or network discovery.
-    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
-}
 const WRITER_LOCK: &str = "writer.lock";
 
 /// The configured path for a writer created from a validated branch name.
@@ -320,14 +300,14 @@ pub enum WorktreeError {
     PathEncoding,
     #[error("durable retirement authority could not be read or advanced")]
     Retirement(#[source] Box<dyn std::error::Error + Send + Sync>),
-    #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
-        "the partial checkout and new branch were removed, so it is safe to retry"
+    #[error("worktree creation failed: {cause}; {}", if *.artifacts_absent {
+        "no checkout or new branch remains, so it is safe to retry"
     } else {
-        "the partial checkout or branch it made could not be fully removed; inspect the configured worktree layout and branch before retrying"
+        "checkout or branch state remains or could not be verified; inspect the configured worktree layout and branch before retrying"
     })]
     CreateFailed {
         cause: Box<WorktreeError>,
-        rolled_back: bool,
+        artifacts_absent: bool,
     },
     #[error(transparent)]
     Filesystem(#[from] FsError),
@@ -863,6 +843,7 @@ pub enum RetainReason {
     Changed,
     GitFailure,
     Unregistered,
+    RefAbsent,
     LockedOrPrunable,
     /// Provenant did not create the branch, or cannot observe that it did.
     NotCreated,
@@ -1036,31 +1017,6 @@ mod tests {
             WorktreeError::InvalidRequest.admission_cause(),
             Some(AdmissionCause::PermanentFailure)
         );
-    }
-
-    #[test]
-    fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let common = temporary.path();
-        let admin = common.join("worktrees");
-        std::fs::create_dir(&admin)?;
-        let target = common.join("target");
-        for index in 0..1024 {
-            let entry = admin.join(format!("entry-{index:04}"));
-            std::fs::create_dir(&entry)?;
-            std::fs::write(
-                entry.join("gitdir"),
-                target.join(".git").as_os_str().as_encoded_bytes(),
-            )?;
-        }
-        let keep = admin.join("keep");
-        std::fs::create_dir(&keep)?;
-        std::fs::write(keep.join("gitdir"), b"/another/worktree/.git")?;
-        assert!(remove_admin_entry(common, &target));
-        assert_eq!(std::fs::read_dir(&admin)?.count(), 1);
-        assert!(keep.is_dir());
-        Ok(())
     }
 
     const WORKTREE_LIST: &str = include_str!(concat!(

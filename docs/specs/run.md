@@ -136,11 +136,23 @@ The host pushes the lane's own branch only when the persisted `lanes.publish`
 grant is enabled and the launch-bound host transport is available. A failed or
 unavailable push leaves the committed head and unpushed count visible.
 
+`status` and `result` report the budget's unit beside the provider's totals: the
+unit name (`fresh_tokens`: uncached input, cache writes and output/reasoning,
+with cache reads excluded because each call rereads the context), the limit's
+value and the layer that set it, the fresh tokens counted for the attempt and
+the provider's cumulative input including cache reads for comparison. Codex
+totals are session-wide unless an attempt marks them per-attempt, so a counted
+or reported figure can be absent; absence is never a guessed zero. An adapter
+that cannot interrupt a turn names that caveat in the same receipt, and the
+receipt is projected from the same limit and usage record enforcement reads,
+so the two outputs cannot disagree about the unit.
+
 | Record field | Reader compatibility |
 | --- | --- |
 | `AttemptRecord.stop_work` | Optional; older records read as absent, and older readers retain it as an unknown field. |
+| `status.budget_usage`, `result.budget_usage` | Optional; older readers retain them as unknown fields. |
 
-- Why: budget enforcement must preserve completed work and report its evidence.
+- Why: budget enforcement must preserve completed work and report its evidence; a budget that excludes cache reads must not look unenforced beside a larger provider-reported input.
 
 ## Lane verification and build admission
 
@@ -158,15 +170,50 @@ layer.
 - Why: a value reported under the wrong source sends the operator to the wrong
   place to change it.
 
+## Provider config notices are warnings
+
+A provider's own configuration-deprecation notice (a deprecated key in the
+config the account home inherits, such as Codex's `[features].multi_agent`)
+is advice for the user, not a failed provider turn. The adapter classifies it
+at the decode site as a warning carrying the provider's text and the config
+file it names; it never sets the stream's error flag or fails the lane. The
+same notice on stderr is likewise held out of the attempt's provider-error
+headline. Each distinct notice is shown once per attempt beside the applied
+route, names `config.toml` when the message gives no fuller path and points at
+`providers.codex.clean_config` as the way to stop inheriting stale keys.
+- Why: a stale inherited key must be actionable for the user without being
+  reported as a provider failure, and two copies of the same notice must not
+  read as two errors.
+- Owner: `crates/providers/src/codex.rs`, `crates/providers/src/stream.rs`,
+  `crates/cli/src/run.rs`, `crates/cli/src/run/output.rs`
+
 ## Lane Git and import
 
-Writers use private Git state; the host does not execute with lane-mutable Git
-configuration. For sandboxed lanes, confinement protects shared Git state.
-Import uses Git's quarantined receive and verification; publication compares
-against the pinned base. The base remains pinned until publication.
+Writers of one verified worktree incarnation share its files and hold
+occupancy together. Each attempt has its own private Git state (HEAD, index,
+refs, objects, configuration and credential setup) in its attempt directory,
+so siblings never see each other's staging or unpublished commits. Contexts
+outlive attempt scratch, and later admissions never reset live Git state.
+The host does not execute with lane-mutable Git configuration. For sandboxed
+lanes, confinement protects the repository's shared Git state.
+Import uses Git's quarantined receive and verification; publication
+compare-and-swaps the host branch against the tip it observed. A lane whose
+history forked from the branch is refused at once and its private Git is
+retained for recovery. The base remains pinned until publication.
+The worktree's native index follows the branch from a recorded commit and the
+digest of the index Provenant left, advanced under a per-worktree native-index
+lock (never the admission gate) after each publication and repeated on every
+settlement or resume until it matches the tip. The advance is advisory and
+never fails settlement. If Git refuses it, the index changed since the record,
+or the record or index cannot be read, the index and record are left unchanged
+and status reports `index_out_of_sync` with the reason, the paths and one
+command that resets the index and the record together.
+Import retention refs belong to each attempt, even for an identical commit;
+publication and cleanup remove only that attempt's pins.
 Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
 (such as `hint:` lines) is filtered from stderr before warning so advice lines
 never surface as Provenant warnings.
+
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.

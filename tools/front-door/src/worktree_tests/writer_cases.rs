@@ -83,7 +83,7 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
     Ok(())
 }
 
-pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
+pub(super) fn shared_holders_both_launch_and_removal_refused_while_holder_is_live() -> Result {
     if !writer_backend_available()? {
         return Ok(());
     }
@@ -153,22 +153,24 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
         &holder,
         &call,
     )?;
-    assert!(matches!(
-        started.as_slice(),
-        [provenant_run::Started::Refused { attempt, kind: provenant_run::RefusalKind::WorktreeBusy, .. }]
-            if *attempt == second_attempt
-    ));
+    // Worktree occupancy is a shared lease: both holders launch concurrently.
+    assert!(
+        matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == second_attempt),
+        "{started:?}"
+    );
+
+    // Removal and GC refuse while any holder is live (exclusive removal custody).
+    let refused = command(&rig, &["worktree", "remove", "writer", "--json"])?;
+    let refusal = json(&refused)?;
+    assert_eq!(refusal["status"], "refused", "{refusal}");
+    assert_eq!(refusal["error"]["code"], "WORKTREE_LOCK_BUSY", "{refusal}");
+
+    let second_terminal = await_terminal(&store, second_attempt, &call)?;
+    assert_terminal_outcome(&second_terminal, provenant_run::Outcome::Succeeded)?;
 
     fs::write(&release, b"release")?;
     let first_terminal = await_terminal(&store, first_attempt, &call)?;
     assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
-    assert!(matches!(
-        store.record(second_attempt, &call)?.state,
-        provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::Rejected,
-            ..
-        }
-    ));
     wait_for_writer_release(&store)?;
     cleanup.disarm();
     Ok(())
@@ -244,7 +246,7 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
         .join("attempts")
         .join(attempt.to_string())
         .join("tmp/candidate-0");
-    let lane = |args: &[&str]| lane_git(&rig, &scratch, &path, args);
+    let lane = |args: &[&str]| lane_git(&rig, &context, attempt, &path, args);
     fs::write(path.join("writer.txt"), b"writer change")?;
     lane(&["add", "writer.txt"])?;
     lane(&["commit", "-qm", "Writer change"])?;
@@ -422,16 +424,16 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
         || ready.exists(),
         |exists| *exists,
     )?;
-    // A lane now rewinds its private ref. Rewinding the shared ref instead is
-    // a competing host update, which correctly blocks CAS publication.
+    // Rewind the lane's shared Git view, keeping the host ref separate until
+    // settlement verifies and publishes it.
     let previous = git(&rig, &["-C", path_text, "rev-parse", "HEAD^"])?;
-    let scratch = context
-        .state_root
-        .as_path()
-        .join("attempts")
-        .join(attempt.to_string())
-        .join("tmp/candidate-0");
-    lane_git(&rig, &scratch, &path, &["reset", "--hard", &previous])?;
+    lane_git(
+        &rig,
+        &context,
+        attempt,
+        &path,
+        &["reset", "--hard", &previous],
+    )?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Succeeded)?;

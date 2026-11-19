@@ -2921,6 +2921,24 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let clock = SystemClock::new();
     // Guardian loss frees the kernel lease, but never clears the durable fence.
     let writer_path = root.join("crash-writer");
+    // An unsandboxed lane is proven gone only after its guardian completed a
+    // census of the tree, which a running guardian does within seconds. Wait
+    // for that record, so the loss below is the ordinary mid-run one.
+    let reservation = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read(&reservation)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value["census_incomplete"] == false)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the guardian never completed a census"
+        );
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
         Directory::open_anchor(&writer_path)?,
@@ -2941,7 +2959,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
                 &fixture::RecordedBootObserver,
                 || Ok(true),
             )?
-            .is_none(),
+            .is_err(),
         "a surviving provider prevents same-boot loss proof"
     );
     assert!(!root.join("crash-attempt/process-exit.json").exists());
@@ -2971,7 +2989,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         || Ok(true),
     )?;
     assert!(
-        proof.is_some(),
+        proof.is_ok(),
         "the kernel releases the guardian life lock after its death"
     );
     drop(proof);
@@ -3089,7 +3107,7 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
     Ok(())
 }
 
-// Medium: intentionally omit the sixth descriptor at the real first exec.
+// Medium: intentionally omit the profile descriptor at the real first exec.
 // This does not require Seatbelt; refusal happens before the native backend.
 fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");

@@ -392,6 +392,10 @@ pub struct SealedTask {
     pub request_digest: provenant_core::Digest,
     pub effective_network: NetworkAccess,
     pub effective_database_ipc: bool,
+    /// Exact checkout incarnation this guardian is authorised to share with
+    /// nested writer attempts. A path alone cannot survive removal/recreation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_worktree: Option<provenant_records::custody::Subject>,
 }
 impl SealedTask {
     /// Restore host-sealed launch policy before validating the next generation.
@@ -602,6 +606,16 @@ fn seal_import_refusal(
         })?,
         RECORD_LIMIT,
     )
+}
+
+/// A refused import keeps its private Git whole, so a step that only guards
+/// removal of that Git is reported, not fatal.
+fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: {what}; retaining the private Git: {error}"
+    );
 }
 
 pub(crate) fn object_import_refused(
@@ -1046,7 +1060,7 @@ impl RunStore {
     pub(crate) fn settle_recovered(
         &self,
         attempt: &Directory,
-        recovery: custody::Recovery,
+        mut recovery: custody::Recovery,
     ) -> Result<()> {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -1055,7 +1069,134 @@ impl RunStore {
         if !self.import_release_permitted(&record, &call)? {
             return Err(RunError::Validation("writer import remains unresolved"));
         }
-        if object_import_refused(attempt, recovery.scope())?.is_some() {
+        // A refused import keeps its private Git as evidence whatever the
+        // index holds, and its tip may be absent from the objects.
+        let import_refused = object_import_refused(attempt, recovery.scope())?.is_some();
+        let request = self.request(record.attempt_id, &call)?;
+        let launch = request
+            .task
+            .writer
+            .as_ref()
+            // A removed checkout has no repository to register or retire an
+            // attempt index in; its work went with the directory.
+            .filter(|writer| !crate::writer::worktree_removed(writer))
+            .map(|writer| {
+                crate::prepare_writer_with_facts(
+                    writer,
+                    &self.writer_registry,
+                    record.project_id,
+                    &self.repo_facts,
+                )
+            })
+            .transpose();
+        let launch = match launch {
+            Ok(launch) => launch,
+            // The private Git is retained whole, and refusal already settled
+            // the import without the worktree: a checkout that cannot be
+            // prepared (rebuilt, unbound) must not keep it unsettled forever.
+            Err(error) if import_refused => {
+                warn_retained_private_git(
+                    "writer not prepared for attempt index registration",
+                    &error,
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let retired = launch
+            .as_ref()
+            .and_then(|writer| writer.custody.as_ref())
+            .map(|(slot, _)| custody::attempt_index_retired(slot, recovery.scope()))
+            .transpose();
+        let retired = match retired {
+            Ok(retired) => retired.unwrap_or(false),
+            Err(error) if import_refused => {
+                warn_retained_private_git("attempt index state unreadable", &error);
+                false
+            }
+            Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
+        };
+        let source = match crate::objects::bound_source(attempt) {
+            Ok(source) => source,
+            Err(RunError::Filesystem(error)) if retired && error.is_not_found() => None,
+            // A refused import releases without reading the private Git, so
+            // a binding that no longer verifies must not keep it unsettled.
+            Err(error) if import_refused => {
+                warn_retained_private_git("private Git binding unreadable", &error);
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(writer) = &launch
+            && let Some(source) = &source
+            && let Some((slot, _)) = &writer.custody
+        {
+            let refs = source.refs.current_path()?;
+            let candidate = refs
+                .parent()
+                .and_then(std::path::Path::file_name)
+                .and_then(std::ffi::OsStr::to_str)
+                .ok_or(RunError::Validation("private Git candidate identity"))?;
+            let registered = custody::register_attempt_index(
+                slot,
+                recovery.scope(),
+                attempt,
+                candidate,
+                writer.branch.as_str(),
+            );
+            match registered {
+                Ok(()) => {}
+                // The private Git is retained whole, so an index that cannot be
+                // registered must not keep a refused import unsettled forever.
+                Err(error) if import_refused => {
+                    warn_retained_private_git("private attempt index not registered", &error);
+                }
+                Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
+            }
+        }
+        // Staged paths that cannot be read (a tip missing from the objects, say)
+        // are not proof of a clean index: keep the private Git rather than
+        // discard what may hold staged work.
+        let mut unreadable = false;
+        let staged_paths = match (&launch, source) {
+            (Some(writer), Some(_)) if !import_refused => {
+                match writer.private_staged_paths(attempt) {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "warning: private Git staged paths unreadable; retaining it: {error}"
+                        );
+                        unreadable = true;
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        let merge_retained =
+            crate::artifacts::read_sealed(attempt, "private-merge-retained.json", RECORD_LIMIT)?
+                .is_some();
+        let already_retained =
+            crate::artifacts::read_sealed(attempt, "retained-index.json", RECORD_LIMIT)?.is_some();
+        if !already_retained && (!staged_paths.is_empty() || merge_retained) {
+            crate::artifacts::seal(
+                attempt,
+                "retained-index.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": recovery.scope(), "paths": staged_paths,
+                    "operation": merge_retained.then_some("merge"),
+                }))?,
+                RECORD_LIMIT,
+            )?;
+        }
+        if already_retained
+            || !staged_paths.is_empty()
+            || merge_retained
+            || import_refused
+            || unreadable
+        {
             custody::publish_release(attempt, recovery.scope())
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
             let commit = recovery
@@ -1083,6 +1224,11 @@ impl RunStore {
         let commit = recovery
             .verify_settlement(attempt)
             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        if launch.is_some() {
+            recovery
+                .retire_attempt_index(&commit)
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        }
         let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
         recovery
             .settle(commit, &mut scratch)
@@ -1180,7 +1326,7 @@ impl RunStore {
                 )
             });
             if let Err(error) = &imported {
-                driver.record_failure(&error.to_string())?;
+                driver.record_failure(error)?;
             }
             match imported {
                 Ok(_) => {
@@ -1192,7 +1338,17 @@ impl RunStore {
                         call,
                     )?;
                 }
-                Err(error) if driver.exhausted() => {
+                // A diverged or unrooted lane tip cannot publish on retry, and the
+                // retry cycles would leave the worktree fenced meanwhile.
+                Err(error) if error.is_publication_refusal() => {
+                    let reason = format!(
+                        "publication refused; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                }
+                // Contention never seals the import: even a lock escalated to
+                // blocked stays recoverable by an explicit reconcile.
+                Err(error) if driver.exhausted() && !error.is_writer_contention() => {
                     let reason = format!(
                         "settlement exhausted three attempts; private Git retained for host recovery: {error}"
                     );
@@ -1436,8 +1592,11 @@ impl RunStore {
                 .ok_or(RunError::Validation("graph continuation work key"))?,
         );
         let request = self.request(id, call)?;
+        // The successor reuses the predecessor's worktree. It waits for
+        // settlement to release custody; the steering stays queued, and this
+        // durable reaction stays pending and is retried.
         if request.task.writer.is_some() && !self.custody_released(&record, call)? {
-            return Err(RunError::Contention);
+            return Err(RunError::SteerAwaitingCustody);
         }
         context.writer_predecessor = request.task.writer.as_ref().map(|_| id);
         let operation_id = OperationId::parse(&format!("graph-steer-{id}"))
@@ -2565,7 +2724,7 @@ impl RunStore {
             if let Err(error) = &check
                 && let Some(driver) = &mut settlement
             {
-                driver.record_failure(&error.to_string())?;
+                driver.record_failure(error)?;
             }
             let last_failure = check.as_ref().err().map(ToString::to_string);
             match crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), false) {
@@ -3415,6 +3574,15 @@ fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
         }
     } else {
         text.push_str(&format!("{note}.\n"));
+        if let Some(paths) = record["leftover"]["paths"].as_array() {
+            text.push_str("Left intact:\n");
+            for path in paths.iter().filter_map(serde_json::Value::as_str) {
+                text.push_str(&format!(
+                    "- {}\n",
+                    crate::writer::path_list(&[path.to_owned()], 1)[0]
+                ));
+            }
+        }
     }
     text.push_str("What remains is unknown; inspect the branch.\n\n");
     let handoff = serde_json::json!({
@@ -4341,7 +4509,263 @@ mod writer_recovery_tests {
     #[test]
     fn settlement_finish_cleans_writer_pins_with_recovery_held()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_finish_case(false)
+    }
+
+    #[test]
+    fn settlement_finish_preserves_private_staged_snapshot_through_payload_gc()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_finish_case(true)
+    }
+
+    fn settlement_finish_case(
+        private_staged: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{
+            ffi::{OsStr, OsString},
+            time::Duration,
+        };
+
+        let case = if private_staged {
+            "private_staged"
+        } else {
+            "clean"
+        };
+        let fixture = PrepareFixture::new()?;
+        let base_contents = "base contents\n";
+        let staged_contents = "private staged snapshot\n";
+        if private_staged {
+            std::fs::write(fixture.writer.worktree.join("base.txt"), base_contents)?;
+            fixture.lane_git(&["add", "base.txt"])?;
+            fixture.commit(&fixture.writer.worktree, "add base file")?;
+        }
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = input();
+        run.request.task.writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let private_git =
+            |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+                let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                    .chain(args.iter().map(|arg| OsString::from(*arg)))
+                    .collect();
+                let mut environment: Vec<(OsString, OsString)> = [
+                    ("PATH", "/usr/bin:/bin"),
+                    ("GIT_CONFIG_NOSYSTEM", "1"),
+                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect();
+                environment.extend([
+                    (
+                        "GIT_DIR".into(),
+                        candidate.join("git-common").into_os_string(),
+                    ),
+                    (
+                        "GIT_COMMON_DIR".into(),
+                        candidate.join("git-common").into_os_string(),
+                    ),
+                    (
+                        "GIT_OBJECT_DIRECTORY".into(),
+                        candidate.join("git-objects").into_os_string(),
+                    ),
+                ]);
+                let mut options =
+                    ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
+                options.env = Some(&environment);
+                let output = SystemExecutor::new(1)?.execute(options)?;
+                assert!(
+                    output.termination == Termination::Exit(0),
+                    "{case}: {}",
+                    String::from_utf8_lossy(&output.stderr.bytes)
+                );
+                Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+            };
+        let staged_file = fixture.writer.worktree.join("base.txt");
+        if private_staged {
+            std::fs::write(&staged_file, staged_contents)?;
+            let staged_blob = private_git(&["hash-object", "-w", "base.txt"])?;
+            let cacheinfo = format!("100644,{staged_blob},base.txt");
+            private_git(&["update-index", "--add", "--cacheinfo", &cacheinfo])?;
+            std::fs::write(&staged_file, base_contents)?;
+            assert_eq!(
+                private_git(&["show", "HEAD:base.txt"])?,
+                base_contents.trim()
+            );
+            assert_eq!(private_git(&["show", ":base.txt"])?, staged_contents.trim());
+        }
+        let native_status = || -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let argv: Vec<OsString> = [
+                git.as_os_str().to_owned(),
+                "-C".into(),
+                fixture.writer.worktree.as_os_str().to_owned(),
+                "status".into(),
+                "--porcelain".into(),
+                "-z".into(),
+            ]
+            .into();
+            let mut options =
+                ExecOptions::new(&argv, &fixture.writer.project, Duration::from_secs(5));
+            options.env = Some(&fixture.environment);
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert!(
+                output.termination == Termination::Exit(0),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            Ok(output.stdout.bytes)
+        };
+        assert!(
+            native_status()?.is_empty(),
+            "{case}: native Git state must be clean"
+        );
+
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        let finished = store.finish(
+            id,
+            &attempt,
+            &observed,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+        )?;
+        let receipts = finished.settlement_receipts.unwrap();
+        assert_eq!(receipts.git_import, EffectDisposition::Done, "{case}");
+        assert_eq!(
+            receipts.cleanup_custody_release,
+            EffectDisposition::Done,
+            "{case}"
+        );
+        assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin).is_err());
+        let journal: serde_json::Value = crate::db::decode(
+            &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+        )?;
+        assert_eq!(journal["phase"], "complete", "{case}");
+        let db = rusqlite::Connection::open(execution.state_root.as_path().join("run.sqlite3"))?;
+        let retained: bool = db.query_row(
+            "SELECT tmp_retained FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert!(candidate.exists(), "{case}: private candidate was cleaned");
+        if private_staged {
+            assert!(!retained, "staged private Git is not cleanup debt");
+            let retained_index =
+                crate::artifacts::read_sealed(&attempt, "retained-index.json", RECORD_LIMIT)?
+                    .ok_or("staged index marker")?;
+            let retained_index: serde_json::Value = serde_json::from_slice(&retained_index)?;
+            assert_eq!(retained_index["paths"], serde_json::json!(["base.txt"]));
+            assert_eq!(private_git(&["show", ":base.txt"])?, staged_contents.trim());
+            assert_eq!(std::fs::read_to_string(&staged_file)?, base_contents);
+            // Pressure collection measures evictable provider state, while
+            // private Git lives in tmp. Give the collector actual payload to
+            // evict unless the retained-index marker pins the whole attempt.
+            let payload = attempt.current_path()?.join("provider-state/candidate-0");
+            std::fs::create_dir_all(&payload)?;
+            let probe = vec![7_u8; 262_144];
+            std::fs::write(payload.join("blob"), &probe)?;
+            let collection_time = clock
+                .wall_now()?
+                .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86_400)?)?;
+            let collection = store.gc_payloads(
+                &Directory::open_anchor(execution.state_root.as_path())?,
+                0,
+                collection_time,
+                false,
+                true,
+                None,
+                &call,
+                &crate::retention::RetentionScan::default(),
+            )?;
+            assert!(collection.errors.is_empty(), "{collection:?}");
+            assert!(collection.evicted.is_empty(), "{collection:?}");
+            assert!(
+                collection.pinned_bytes > 0,
+                "private Git must stay pinned: {collection:?}"
+            );
+            assert!(candidate.is_dir(), "payload collection removed private Git");
+            assert_eq!(std::fs::read(payload.join("blob"))?, probe);
+            assert_eq!(private_git(&["show", ":base.txt"])?, staged_contents.trim());
+            assert_eq!(std::fs::read_to_string(&staged_file)?, base_contents);
+        } else {
+            assert!(
+                retained,
+                "unfinished clean work retains scratch after release"
+            );
+        }
+        assert!(
+            native_status()?.is_empty(),
+            "{case}: native Git state must stay clean"
+        );
+        Ok(())
+    }
+    #[test]
+    fn clean_settlement_retry_accepts_deleted_private_view_with_retirement_receipt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -4384,9 +4808,12 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
-        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        assert!(launch.private_staged_paths(&attempt)?.is_empty());
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let slot = directory.try_clone()?;
+        let recovery_directory = directory.try_clone()?;
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
             directory,
             scope,
@@ -4398,6 +4825,17 @@ mod writer_recovery_tests {
         drop(provenant_supervisor::fixture::bind_writer_attempt(
             lease, &attempt,
         )?);
+        provenant_supervisor::custody::register_attempt_index(
+            &slot,
+            scope,
+            &attempt,
+            "candidate-0",
+            launch.branch.as_str(),
+        )?;
+        let mut recovery = store
+            .recover_writer_exit(recovery_directory.try_clone()?, scope, &call)?
+            .ok_or("prepared writer recovery")?;
+        recovery.prepare_settlement()?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -4409,32 +4847,73 @@ mod writer_recovery_tests {
             )?,
             RECORD_LIMIT,
         )?;
-        let finished = store.finish(
+        let finished = store.drive_settlement(
             id,
             &attempt,
             &observed,
+            Completion::Recovered(Some(&recovery)),
             &crate::dispatch_tests::Fake::default(),
             &call,
         )?;
+        assert!(finished.release_permitted);
         assert_eq!(
-            finished
-                .settlement_receipts
-                .unwrap()
-                .cleanup_custody_release,
+            finished.record.settlement_receipts.unwrap().git_import,
             EffectDisposition::Done
         );
-        assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin).is_err());
-        let db = rusqlite::Connection::open(execution.state_root.as_path().join("run.sqlite3"))?;
-        let retained: bool = db.query_row(
-            "SELECT tmp_retained FROM attempts WHERE id=?1",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
+
+        // Match the durable prefix of settle_recovered, then model a crash after
+        // private scratch removal but before the still-live reservation is cleared.
+        crate::writer::settle_launch_staging(&attempt)?;
+        provenant_supervisor::custody::publish_release(&attempt, scope)?;
+        crate::settlement::complete(&attempt, scope)?;
+        let commit = recovery
+            .verify_settlement(&attempt)
+            .map_err(|e| format!("verify clean release: {e}"))?;
+        recovery
+            .retire_attempt_index(&commit)
+            .map_err(|e| format!("retire clean index: {e}"))?;
+        let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
+        scratch.settle()?;
+        std::fs::remove_dir_all(attempt.current_path()?.join("tmp"))?;
+        assert!(!candidate.exists());
+        assert!(provenant_supervisor::custody::attempt_index_retired(
+            &slot, scope
+        )?);
+        let reservation = slot
+            .current_path()?
+            .join(id.to_string())
+            .join("reservation.json");
         assert!(
-            retained,
-            "unfinished work retains scratch after custody release"
+            reservation.is_file(),
+            "reservation remains the removal fence"
         );
-        assert!(candidate.exists());
+        assert!(!store.writer_fences()?.is_empty());
+        drop(scratch);
+        drop(commit);
+        drop(recovery);
+
+        let mut retry = store
+            .recover_writer_exit(recovery_directory, scope, &call)?
+            .ok_or("reservation must remain recoverable")?;
+        retry
+            .prepare_settlement()
+            .map_err(|e| format!("prepare retry: {e}"))?;
+        store
+            .settle_recovered(&attempt, retry)
+            .map_err(|e| format!("settle retry: {e}"))?;
+        assert!(store.writer_fences()?.is_empty());
+        assert!(!reservation.exists());
+        assert!(
+            slot.current_path()?
+                .join(id.to_string())
+                .join("settlement.json")
+                .is_file()
+        );
+        assert!(provenant_supervisor::custody::attempt_index_retired(
+            &slot, scope
+        )?);
+        assert!(!attempt.current_path()?.join("tmp").exists());
+        assert!(store.custody_released(&store.record(id, &call)?, &call)?);
         Ok(())
     }
 
@@ -4664,7 +5143,7 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let pin = format!("refs/provenant/import/{}", launch.base);
+            let pin = crate::objects::import_pin(scope.attempt, launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let mut lease = provenant_supervisor::custody::acquire_writer(
@@ -4805,22 +5284,23 @@ mod writer_recovery_tests {
                 ])?;
                 let head = std::str::from_utf8(&head)?.trim();
                 if shared {
-                    // A native writer may commit file changes through the shared
-                    // worktree while the private candidate remains at the base.
+                    // A native writer edits files in the shared worktree and commits
+                    // them with ordinary Git, which lands in its private history.
                     std::fs::write(
                         fixture.writer.worktree.join("shared-work.txt"),
                         "committed native work",
                     )?;
-                    fixture.lane_git(&["add", "shared-work.txt"])?;
-                    fixture.lane_git(&["commit", "-m", "Shared commit"])?;
-                    shared_head = Some(
-                        std::str::from_utf8(&provenant_os::fixture::run_git(
-                            &fixture.writer.worktree,
-                            &["rev-parse", "HEAD"],
-                        )?)?
-                        .trim()
-                        .parse::<provenant_core::GitOid>()?,
-                    );
+                    let native = provenant_os::git::resolve_git_executable(None)
+                        .ok_or("native Git unavailable")?;
+                    let native_private = |args: &[&str]| {
+                        crate::delivery_tests::private_git(&fixture, &candidate, &native, args)
+                    };
+                    native_private(&["add", "shared-work.txt"])?;
+                    native_private(&["commit", "-m", "Shared commit"])?;
+                    shared_head = Some(crate::objects::private_tip(
+                        &crate::objects::bound_source(&attempt)?.ok_or("private source")?,
+                        launch.branch.as_str(),
+                    )?);
                 } else {
                     private_git(&[
                         "update-ref".into(),
@@ -5361,7 +5841,7 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let pin = format!("refs/provenant/import/{}", launch.base);
+            let pin = crate::objects::import_pin(scope.attempt, launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -5764,7 +6244,7 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
         fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -5856,7 +6336,7 @@ mod writer_recovery_tests {
     }
 
     #[test]
-    fn strict_write_scope_keeps_budget_commit_private_until_scope_is_resolved()
+    fn strict_write_scope_keeps_outside_budget_edits_uncommitted()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         budget_stop_case(BudgetStopCase::StrictScope)
     }
@@ -5912,7 +6392,7 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let pin = format!("refs/provenant/import/{}", launch.base);
+            let pin = crate::objects::import_pin(scope.attempt, launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -6152,7 +6632,7 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
         fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
@@ -6240,7 +6720,14 @@ mod writer_recovery_tests {
                     ..Default::default()
                 },
             )?;
-            fixture.lane_git(&["add", "budget-work.txt"])?;
+            // Stage in the attempt's private index: it, not the host's native
+            // index, is the writer's staging area.
+            crate::delivery_tests::private_git(
+                &fixture,
+                &candidate,
+                &git,
+                &["add", "budget-work.txt"],
+            )?;
             std::fs::remove_file(fixture.writer.worktree.join("budget-work.txt"))?;
             assert!(
                 !launch.budget_clean_point(&attempt)?,
@@ -6254,10 +6741,18 @@ mod writer_recovery_tests {
             BudgetStopCase::Clean => Some(false),
             _ => None,
         } {
-            fixture.lane_git(&["add", "budget-work.txt"])?;
-            fixture.lane_git(&["commit", "-m", "Native lane work"])?;
-            let head =
-                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+            // The lane commits in its private Git, as a native session does.
+            let native =
+                provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
+            let private = |args: &[&str]| {
+                crate::delivery_tests::private_git(&fixture, &candidate, &native, args)
+            };
+            private(&["add", "budget-work.txt"])?;
+            private(&["commit", "-m", "Native lane work"])?;
+            let head = crate::objects::private_tip(
+                &crate::objects::bound_source(&attempt)?.ok_or("private source")?,
+                launch.branch.as_str(),
+            )?;
             if !dirty {
                 // The clean-point contract uses locally recorded push evidence.
                 // A real local bare remote exercises native Git's tracking ref.
@@ -6266,7 +6761,7 @@ mod writer_recovery_tests {
                     .as_str()
                     .strip_prefix("refs/heads/")
                     .ok_or("local branch")?;
-                fixture.lane_git(&["push", "--set-upstream", "origin", branch])?;
+                private(&["push", "--set-upstream", "origin", branch])?;
             }
             if dirty {
                 std::fs::write(
@@ -6347,13 +6842,24 @@ mod writer_recovery_tests {
             );
             let source = crate::objects::bound_source(&attempt)?.ok_or("private source")?;
             let private_tip = crate::objects::private_tip(&source, launch.branch.as_str())?;
-            assert_ne!(private_tip, launch.base);
+            // Scoped budget commits must not capture edits outside the claim.
+            // Strict scope still refuses settlement and preserves those edits.
+            assert_eq!(private_tip, launch.base);
             let disposition: serde_json::Value = serde_json::from_slice(
                 &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?
                     .ok_or("budget commit disposition")?,
             )?;
-            let committed = disposition["commit"].as_str().ok_or("commit")?;
-            assert!(!committed.is_empty() && private_tip.to_string().starts_with(committed));
+            assert!(disposition.get("commit").is_none());
+            assert!(
+                disposition["note"]
+                    .as_str()
+                    .is_some_and(|note| note.contains("outside declared paths"))
+            );
+            assert!(
+                report["out_of_scope_paths"]
+                    .to_string()
+                    .contains("budget-work.txt")
+            );
             assert_eq!(
                 std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?,
                 "uncommitted work before budget stop\n"
@@ -7016,12 +7522,15 @@ mod writer_recovery_tests {
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver,
             )?;
-            assert!(matches!(
-                found.as_slice(),
-                [
-                    (attempt, crate::Reconciled::WriterLeaseReleased { locks })
-                ] if *attempt == id && !locks.is_empty()
-            ));
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [
+                        (attempt, crate::Reconciled::WriterLeaseReleased { locks })
+                    ] if *attempt == id && !locks.is_empty()
+                ),
+                "{found:?}"
+            );
             let record = store.record(id, &call)?;
             assert!(
                 matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
@@ -7217,6 +7726,7 @@ mod writer_recovery_tests {
                 None
             };
             let mut published_head = None;
+            let mut advanced_tip = None;
             if mode.starts_with("publish_") {
                 fixture.commit(&fixture.writer.worktree, "Lane head")?;
                 let head = crate::objects::resolve_ref(
@@ -7229,8 +7739,23 @@ mod writer_recovery_tests {
                     candidate.join("git-common/refs/heads/lane"),
                     format!("{head}\n"),
                 )?;
-                fixture.lane_git(&["reset", "--hard", &launch.base.to_string()])?;
-                fixture.commit(&fixture.writer.worktree, "Competing branch")?;
+                if mode == "publish_advanced" {
+                    // The host branch already holds the lane tip and later work.
+                    std::fs::write(
+                        fixture.writer.worktree.join("later.txt"),
+                        "later lane contents\n",
+                    )?;
+                    fixture.lane_git(&["add", "later.txt"])?;
+                    fixture.commit(&fixture.writer.worktree, "Later lane")?;
+                    advanced_tip = Some(crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str(),
+                    )?);
+                } else {
+                    fixture.lane_git(&["reset", "--hard", &launch.base.to_string()])?;
+                    fixture.commit(&fixture.writer.worktree, "Competing branch")?;
+                }
             }
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let lock_directory = directory.try_clone()?;
@@ -7374,6 +7899,89 @@ mod writer_recovery_tests {
                     "drive held-Recovery settlement import and effects: {error}"
                 ))
             })?;
+            if mode == "publish_advanced" {
+                // A host branch that already contains the lane tip needs no
+                // forced publication: the import completes and the fence clears.
+                assert!(first.release_permitted);
+                assert_eq!(
+                    first
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .ok_or("settlement receipts")?
+                        .git_import,
+                    EffectDisposition::Done
+                );
+                store.settle_recovered(&attempt, recovery)?;
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    advanced_tip.ok_or("advanced tip")?
+                );
+                assert!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        &crate::objects::import_pin(id, published_head.ok_or("lane head")?)
+                    )
+                    .is_err()
+                );
+                let journal: serde_json::Value = crate::db::decode(
+                    &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+                )?;
+                assert_eq!(journal["phase"], "complete");
+                assert!(journal["blocking_reason"].is_null());
+                assert_eq!(
+                    std::fs::read_to_string(fixture.writer.worktree.join("later.txt"))?,
+                    "later lane contents\n"
+                );
+                assert!(store.writer_fences()?.is_empty());
+                continue;
+            }
+            if mode == "publish_diverged" {
+                // A forked lane cannot publish on any retry. It is refused at
+                // once, its custody is released and its commits stay in the
+                // attempt's private Git for the host to recover.
+                assert!(
+                    first.release_permitted,
+                    "{:?}",
+                    first.record.settlement_receipts
+                );
+                assert!(matches!(
+                    first
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .ok_or("settlement receipts")?
+                        .git_import,
+                    EffectDisposition::Failed { retryable: false, ref reason }
+                        if reason.contains("diverged from the host branch")
+                ));
+                let refusal = object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
+                assert!(refusal.contains("lane history diverged"), "{refusal}");
+                assert!(
+                    crate::objects::publish_branch(
+                        &git,
+                        launch.worktree.repo(),
+                        crate::objects::BranchPublication {
+                            branch: launch.branch.as_str(),
+                            base: launch.base,
+                            launch_ref: None,
+                            head: published_head.ok_or("lane head")?,
+                            attempt: id,
+                        },
+                        &provenant_records::policy::Policy::default(),
+                    )
+                    .is_err()
+                );
+                store.settle_recovered(&attempt, recovery)?;
+                assert!(store.writer_fences()?.is_empty());
+                assert!(candidate.join("git-common/HEAD").is_file());
+                continue;
+            }
             if mode == "held_import_success" {
                 assert!(
                     first.release_permitted,
@@ -7719,104 +8327,6 @@ mod writer_recovery_tests {
                 );
                 continue;
             }
-            let mut advanced_tip = None;
-            if let Some(head) = published_head {
-                let journal: serde_json::Value = crate::db::decode(
-                    &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
-                )?;
-                assert_eq!(journal["phase"], "publish");
-                assert_eq!(
-                    journal["blocking_reason"],
-                    "invalid run record: lane Git import failed"
-                );
-                let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| Ok(()))?;
-                let json = serde_json::to_value(&queued)?;
-                assert!(
-                    json.to_string().contains("lane Git import failed"),
-                    "{json}"
-                );
-                if mode == "publish_diverged" {
-                    assert!(!store.writer_fences()?.is_empty());
-                    assert!(
-                        crate::objects::publish_branch(
-                            &git,
-                            launch.worktree.repo(),
-                            launch.branch.as_str(),
-                            launch.base,
-                            None,
-                            head,
-                            &provenant_records::policy::Policy::default(),
-                        )
-                        .is_err()
-                    );
-                    // Reproduce an attempt retained before errors were journalled.
-                    let name = OsStr::new("settlement-progress.json");
-                    let mut journal: serde_json::Value =
-                        crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
-                    journal["blocking_reason"] = serde_json::Value::Null;
-                    journal["retry_after_ms"] = 0.into();
-                    attempt
-                        .atomic_write(
-                            name,
-                            ".retry-fixture-",
-                            &crate::db::bytes(&journal)?,
-                            provenant_os::fs::PublishMode::Replace,
-                        )?
-                        .require_durable()?;
-                    store.finish(id, &attempt, &observed, &providers, &call)?;
-                    let found = store.reconcile_with_observer(
-                        run.attempt_id,
-                        &providers,
-                        &call,
-                        &provenant_supervisor::census::SystemProcessObserver,
-                    )?;
-                    assert!(
-                        found.iter().any(|(attempt, state)| {
-                            *attempt == id
-                                && matches!(
-                                    state,
-                                    crate::Reconciled::Finished
-                                        | crate::Reconciled::WriterLeaseReleased { .. }
-                                )
-                        }),
-                        "{found:?}"
-                    );
-                    assert!(
-                        matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
-                        EffectDisposition::Failed { retryable: false, ref reason }
-                        if reason.contains("lane Git import failed"))
-                    );
-                    assert!(store.writer_fences()?.is_empty());
-                    assert_eq!(
-                        read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
-                        decision
-                    );
-                    assert!(candidate.join("git-common/HEAD").is_file());
-                    assert!(
-                        store
-                            .reconcile_with_observer(
-                                run.attempt_id,
-                                &providers,
-                                &call,
-                                &provenant_supervisor::census::SystemProcessObserver
-                            )?
-                            .is_empty()
-                    );
-                    continue;
-                }
-                fixture.lane_git(&["reset", "--hard", &head.to_string()])?;
-                std::fs::write(
-                    fixture.writer.worktree.join("later.txt"),
-                    "later lane contents\n",
-                )?;
-                fixture.lane_git(&["add", "later.txt"])?;
-                fixture.commit(&fixture.writer.worktree, "Later lane")?;
-                advanced_tip = Some(crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str(),
-                )?);
-            }
             if mode == "archived_fault" {
                 // A retryable import failure keeps its fence even though a
                 // manifest already exists; clear it so the retry can seal.
@@ -7920,33 +8430,6 @@ mod writer_recovery_tests {
                 completed.settlement_receipts.unwrap().git_import,
                 EffectDisposition::Done
             ));
-            if let Some(tip) = advanced_tip {
-                assert_eq!(
-                    crate::objects::resolve_ref(
-                        &git,
-                        launch.worktree.repo(),
-                        launch.branch.as_str()
-                    )?,
-                    tip
-                );
-                assert!(
-                    crate::objects::resolve_ref(
-                        &git,
-                        launch.worktree.repo(),
-                        &format!("refs/provenant/import/{}", published_head.unwrap())
-                    )
-                    .is_err()
-                );
-                let journal: serde_json::Value = crate::db::decode(
-                    &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
-                )?;
-                assert_eq!(
-                    std::fs::read_to_string(fixture.writer.worktree.join("later.txt"))?,
-                    "later lane contents\n"
-                );
-                assert_eq!(journal["phase"], "complete");
-                assert!(journal["blocking_reason"].is_null());
-            }
             assert!(store.writer_fences()?.is_empty());
         }
         Ok(())

@@ -793,6 +793,13 @@ pub enum UncertainReason {
     WriterCustodyUnconfirmed { reservation: std::path::PathBuf },
     /// A writer reservation outlived the attempt's terminal commit.
     WriterReservationRetained { reservation: std::path::PathBuf },
+    /// Another holder kept the writer lock past settlement's bounded wait.
+    /// Settlement retries; contention never consumes the recovery budget.
+    WriterLockBusy {
+        lock: std::path::PathBuf,
+        holder: String,
+        holder_live: bool,
+    },
 }
 /// The source of an unavailable reboot proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -854,6 +861,11 @@ impl std::fmt::Display for UncertainReason {
                 f,
                 "writer reservation retained after terminal commit: {}; chair recovery required",
                 reservation.display()
+            ),
+            Self::WriterLockBusy { lock, holder, .. } => write!(
+                f,
+                "waiting for writer lock {}, held by {holder}",
+                lock.display()
             ),
         }
     }
@@ -1067,10 +1079,11 @@ mod reboot_tests {
             &evidence,
             "guardian-lock.json",
             &serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1, "scope": scope, "guardian_process": null,
+                "schema_version": 2, "scope": scope, "guardian_process": null,
                 "attempt": identity(attempt.metadata()?), "guardian": identity(guardian.metadata()?),
                 "writer": identity(attempt.metadata_at(std::ffi::OsStr::new("writer.lock"), false)?),
-                "custody": identity(native_custody.metadata()?)
+                "custody": identity(native_custody.metadata()?),
+                "holder": identity(evidence.metadata_at(std::ffi::OsStr::new("holder.lock"), false)?)
             }))?,
             RECORD_LIMIT,
         )?;
@@ -2792,8 +2805,133 @@ pub(crate) fn retry_reconcile<T>(
     action()
 }
 
+/// Map a failed writer-exclusion acquisition. Contention, at the lock or its
+/// observation gate, is typed and names the recorded holder; anything else
+/// stays an I/O failure.
+pub(crate) fn writer_exclusion_error(
+    store: &RunStore,
+    slot: &provenant_os::fs::Directory,
+    own: Scope,
+    error: CustodyError,
+    call: &Request<'_>,
+) -> RunError {
+    let lock = match error {
+        CustodyError::Filesystem(provenant_os::fs::FsError::LockTimeout { path, .. }) => path,
+        CustodyError::Busy => slot
+            .current_path()
+            .map_or_else(|_| "writer.lock".into(), |path| path.join("writer.lock")),
+        other => return RunError::Io(std::io::Error::other(other.to_string())),
+    };
+    let (holder, holder_live) = writer_lock_holder(store, slot, own, call);
+    RunError::WriterExclusionBusy {
+        lock,
+        holder,
+        holder_live,
+    }
+}
+
+/// Name the attempts whose reservations occupy a writer slot, for status, and
+/// whether any holder may still release the lock. A flock has no owner record,
+/// so the slot's reservations are the evidence: a reserved attempt may still
+/// release it while its guardian is live or unobservable, or while its
+/// settlement owner is live (a settlement worker can hold the lock through a
+/// long import after the guardian exits). An unidentified holder, or one whose
+/// settlement owner cannot be read, keeps the wait going. The caller's own
+/// reservation is labelled; the caller is its settlement owner.
+fn writer_lock_holder(
+    store: &RunStore,
+    slot: &provenant_os::fs::Directory,
+    own: Scope,
+    call: &Request<'_>,
+) -> (String, bool) {
+    let Ok(listing) = custody::list_writer_reservations_in_slot(slot) else {
+        return (
+            "an unidentified holder (slot reservations unreadable)".into(),
+            true,
+        );
+    };
+    if listing.reservations.is_empty() {
+        return (
+            "an unidentified holder (no reservation recorded in the slot)".into(),
+            true,
+        );
+    }
+    let mut holder_live = false;
+    let holder = listing
+        .reservations
+        .iter()
+        .map(|reservation| {
+            let own_reservation = reservation.scope == own;
+            let (may_release, liveness) =
+                reservation_may_release(own_reservation, reservation.live, || {
+                    store
+                        .attempt_dir(reservation.scope.attempt, false)
+                        .ok()
+                        .and_then(|attempt| {
+                            crate::settlement::settlement_owner_live(
+                                &attempt,
+                                reservation.scope,
+                                call.clock,
+                            )
+                        })
+                });
+            holder_live |= may_release;
+            let whose = if own_reservation {
+                "this attempt's own reservation"
+            } else {
+                "attempt"
+            };
+            format!(
+                "{whose} {} ({liveness}, reserved {} ago)",
+                reservation.scope.attempt,
+                reservation.age.as_deref().unwrap_or("an unknown time")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    (holder, holder_live)
+}
+
+/// Whether one reserved attempt may still release a writer lock, and its
+/// liveness for status. A live or unobservable guardian may; so may another
+/// attempt's live or unreadable settlement owner. The waiter is its own
+/// reservation's settlement owner, so only its guardian counts there.
+fn reservation_may_release(
+    own: bool,
+    guardian: Option<bool>,
+    settlement_owner: impl FnOnce() -> Option<bool>,
+) -> (bool, &'static str) {
+    match guardian {
+        Some(true) => (true, "guardian live"),
+        None => (true, "guardian unobservable"),
+        Some(false) if own => (false, "guardian exited"),
+        Some(false) => match settlement_owner() {
+            Some(true) => (true, "guardian exited, settlement owner live"),
+            Some(false) => (false, "guardian exited, no settlement owner"),
+            None => (true, "guardian exited, settlement owner unknown"),
+        },
+    }
+}
+
 // A lock timeout can race a terminal commit by another settlement owner.
+// Writer contention that did not race one is a wait, never a failure.
 fn reconcile_failure(error: RunError, terminal: impl FnOnce() -> bool) -> Reconciled {
+    if let RunError::WriterExclusionBusy {
+        lock,
+        holder,
+        holder_live,
+    } = error
+    {
+        return if terminal() {
+            Reconciled::Finished
+        } else {
+            Reconciled::uncertain(UncertainReason::WriterLockBusy {
+                lock,
+                holder,
+                holder_live,
+            })
+        };
+    }
     let timed_out = match &error {
         RunError::Contention
         | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. }) => true,
@@ -2834,6 +2972,22 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
         reconcile_failure(RunError::Validation("other failure"), || true),
         Reconciled::Uncertain { .. }
     ));
+    let busy = || RunError::WriterExclusionBusy {
+        lock: "writer.lock".into(),
+        holder: "attempt X (guardian live, reserved 2s ago)".into(),
+        holder_live: true,
+    };
+    assert_eq!(reconcile_failure(busy(), || true), Reconciled::Finished);
+    assert_eq!(
+        reconcile_failure(busy(), || false),
+        Reconciled::Uncertain {
+            reason: UncertainReason::WriterLockBusy {
+                lock: "writer.lock".into(),
+                holder: "attempt X (guardian live, reserved 2s ago)".into(),
+                holder_live: true,
+            }
+        }
+    );
 }
 
 impl RunStore {
@@ -4028,12 +4182,15 @@ impl RunStore {
             ) && record.exit_evidence.is_none())
     }
 
-    /// Writer exclusion for an attempt, taken without waiting: failure means a
-    /// guardian (or an inheritor of its lease) still holds custody.
+    /// Writer exclusion for an attempt within `budget`. A live attempt probes
+    /// once: a held lock means its guardian (or an inheritor of its lease)
+    /// still holds custody. Settlement of an exited attempt waits a bounded
+    /// time; contention past it is `WriterExclusionBusy`, naming the holder.
     fn orphan_recovery(
         &self,
         record: &AttemptRecord,
         attempt: provenant_os::fs::Directory,
+        budget: provenant_core::WaitBudget,
         call: &Request<'_>,
     ) -> Result<custody::Recovery> {
         let request = self.request(record.attempt_id, call)?;
@@ -4060,14 +4217,15 @@ impl RunStore {
                 None => attempt,
             },
         };
+        let slot = directory.try_clone()?;
         custody::acquire_recovery(
             directory,
             Self::scope(record),
-            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            budget,
             call.cancel,
             call.clock,
         )
-        .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
+        .map_err(|error| writer_exclusion_error(self, &slot, Self::scope(record), error, call))
     }
     /// A durable provider exit survives guardian loss; only cleanup is recovered.
     fn settle_proven_guardian_exit(
@@ -4116,7 +4274,7 @@ impl RunStore {
                     .is_some_and(|state| state.is_available()))
             })
             .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
-        let Some(proof) = proof else {
+        let Ok(proof) = proof else {
             return Ok(None);
         };
         let handle = custody::reattach(attempt.try_clone()?, scope)
@@ -4149,7 +4307,9 @@ impl RunStore {
         )? {
             Ok(Some(Reconciled::Finished))
         } else {
-            Ok(Some(crate::settlement::settling(&attempt, scope)?))
+            Ok(Some(crate::settlement::settling(
+                &attempt, scope, call.clock,
+            )?))
         }
     }
     /// Settle a missing exit only under native death proof and writer exclusion.
@@ -4238,7 +4398,7 @@ impl RunStore {
                         .is_some_and(|state| state.is_available()))
                 })
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
-            let Some(proof) = proof else {
+            let Ok(proof) = proof else {
                 return Ok(None);
             };
             self.commit_lost(scope,
@@ -4445,24 +4605,34 @@ impl RunStore {
                 // This is an owner intent only. It remains distinct from the
                 // guardian's stop reason and signal-delivery evidence; the
                 // locked continuation gate will observe it and refuse a child.
-                if current.superseded_by.is_none()
+                let steer_queued = current.superseded_by.is_none()
                     && current.steering.as_ref().is_some_and(|steering| {
                         steering.state == provenant_records::run::SteeringState::Queued
-                    })
-                    && let Err(error) = custody::request_stop(
+                    });
+                if steer_queued {
+                    if let Err(error) = custody::request_stop(
                         dir.try_clone()?,
                         Self::scope(&current),
                         current.verified_owner.unwrap_or(self.context.actor_id),
                         StopReason::ExplicitCancellation,
-                    )
-                {
-                    drop(publication);
-                    return Ok((
+                    ) {
+                        drop(publication);
+                        return Ok((
+                            id,
+                            CancelReceipt::Unobservable {
+                                reason: error.to_string(),
+                            },
+                        ));
+                    }
+                    // Resolve the steering now, under the fence that orders
+                    // continuation admission: a continuation still waiting
+                    // for the steered writer's custody release must not leave
+                    // the stopped node queued behind it.
+                    self.record_steer_not_continued(
                         id,
-                        CancelReceipt::Unobservable {
-                            reason: error.to_string(),
-                        },
-                    ));
+                        provenant_records::run::SteeringCause::TerminalStop,
+                        call,
+                    )?;
                 }
                 self.record_cancellation(
                     id,
@@ -5676,6 +5846,17 @@ impl RunStore {
             let scope = Self::scope(&self.record(id, call)?);
             let directory = self.attempt_dir(id, false)?;
             match &state {
+                // Contention names its holder for status without consuming
+                // the recovery budget; the holder is still progressing.
+                Reconciled::Uncertain {
+                    reason: reason @ UncertainReason::WriterLockBusy { holder_live, .. },
+                } => crate::settlement::waiting(
+                    &directory,
+                    scope,
+                    &reason.to_string(),
+                    *holder_live,
+                    call.clock,
+                ),
                 Reconciled::Uncertain { reason } => {
                     crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
                 }
@@ -5968,18 +6149,16 @@ impl RunStore {
             }
             None => {}
         }
-        let pending_writer = record.provider_launched == Some(false)
-            && matches!(
-                record.state,
-                AttemptState::Terminal {
-                    outcome: Outcome::Rejected,
-                    ..
-                }
-            )
+        // Any terminal writer whose cleanup is not done: a refusal defers it,
+        // and a path that found the writer lock busy left it, launched or not.
+        // A refused import ends automatic cleanup instead: its Git pins and
+        // scratch are recovery evidence, never cleanup debt.
+        let pending_writer = matches!(record.state, AttemptState::Terminal { .. })
             && self.request(record.attempt_id, call)?.task.writer.is_some()
             && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
                 matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
-            });
+            })
+            && crate::holder::object_import_refused(&directory, scope)?.is_none();
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
             let temporary = self.attempt_dir(id, false).and_then(|attempt| {
@@ -6010,19 +6189,22 @@ impl RunStore {
         // until the independently retried effect actually succeeds.
         if pending_writer {
             let attempt = self.attempt_dir(id, false)?;
-            if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
-                return Ok(Some(Reconciled::TemporaryRetained {
-                    path,
-                    reason: "Git object import was refused; retain its evidence".into(),
-                }));
-            }
             if !self.import_release_permitted(record, call)? {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
                     reason: "Git import still holds custody".into(),
                 }));
             }
-            let receipts = self.retry_git_cleanup(record, call)?;
+            // A busy writer lock leaves the cleanup pending, naming its holder.
+            let receipts = match self.retry_git_cleanup(record, call) {
+                Err(error) if error.is_writer_contention() => {
+                    return Ok(Some(Reconciled::TemporaryRetained {
+                        path,
+                        reason: error.to_string().into(),
+                    }));
+                }
+                receipts => receipts?,
+            };
             if !matches!(receipts.cleanup_custody_release, EffectDisposition::Done) {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
@@ -6089,8 +6271,8 @@ impl RunStore {
                 }));
             }
         };
-        // Released refused-import scratch is recovery evidence, even for a
-        // launched writer settled after reboot. It is no longer cleanup debt.
+        // Released refused-import scratch is recovery evidence, launched or
+        // not, even when settled after reboot. It is never cleanup debt.
         if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);
@@ -6227,14 +6409,24 @@ impl RunStore {
                     custody::observe(&handle, call.lock_budget(), call.cancel, call.clock)
                         .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
                 {
-                    let recovery = self.orphan_recovery(&record, directory.try_clone()?, call)?;
+                    // The provider exited. The settlement worker waits boundedly
+                    // for another holder of its writer lock; contention is never
+                    // counted as failure.
+                    let recovery = self.orphan_recovery(
+                        &record,
+                        directory.try_clone()?,
+                        self.writer_lock_wait(call),
+                        call,
+                    )?;
                     self.finish_recovered_terminal(
                         id, &directory, &exit, recovery, providers, call,
                     )?;
                 }
                 let current = self.record(id, call)?;
                 if !self.import_release_permitted(&current, call)? {
-                    return Ok(Some(crate::settlement::settling(&directory, scope)?));
+                    return Ok(Some(crate::settlement::settling(
+                        &directory, scope, call.clock,
+                    )?));
                 }
             }
             let current = self.record(id, call)?;
@@ -6291,7 +6483,9 @@ impl RunStore {
                         };
                         // The writer lock is free only when no guardian remains
                         // to settle this exit, so recovery ends the orphans.
-                        let Ok(mut recovery) = self.orphan_recovery(record, dir()?, call) else {
+                        let probe = provenant_core::WaitBudget::nonblocking(call.clock.mono_now());
+                        let Ok(mut recovery) = self.orphan_recovery(record, dir()?, probe, call)
+                        else {
                             return Ok(still_named());
                         };
                         match recovery.end_orphans(&dir()?, ORPHAN_PATIENCE) {
@@ -6381,6 +6575,40 @@ mod tests {
     use super::*;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn a_writer_lock_holder_with_a_live_settlement_owner_is_never_escalated() {
+        let owner = |live: Option<bool>| move || live;
+        let unreachable = || -> Option<bool> { panic!("guardian decides") };
+        assert_eq!(
+            reservation_may_release(false, Some(true), unreachable),
+            (true, "guardian live")
+        );
+        assert_eq!(
+            reservation_may_release(false, None, unreachable),
+            (true, "guardian unobservable")
+        );
+        // Another attempt's settle worker can hold the lock after its
+        // guardian exits; an unreadable owner is not proof of absence.
+        assert_eq!(
+            reservation_may_release(false, Some(false), owner(Some(true))),
+            (true, "guardian exited, settlement owner live")
+        );
+        assert_eq!(
+            reservation_may_release(false, Some(false), owner(None)),
+            (true, "guardian exited, settlement owner unknown")
+        );
+        assert_eq!(
+            reservation_may_release(false, Some(false), owner(Some(false))),
+            (false, "guardian exited, no settlement owner")
+        );
+        // The waiter owns its own reservation's settlement.
+        assert_eq!(
+            reservation_may_release(true, Some(false), unreachable),
+            (false, "guardian exited")
+        );
+    }
 
     #[test]
     fn interrupted_writer_preparation_projects_typed_rejection()
@@ -8259,6 +8487,18 @@ mod tests {
                 assert_eq!(request.scope, RunStore::scope(&running));
                 assert_eq!(request.requester, context.actor_id);
                 assert_eq!(request.reason, StopReason::ExplicitCancellation);
+                // The stop resolves the steering at once, cause shown; it
+                // never waits on a continuation reaction that may be parked
+                // behind the steered writer's custody release.
+                let resolved = store.record(parent, &call)?.steering.ok_or("steering")?;
+                assert_eq!(
+                    resolved.state,
+                    provenant_records::run::SteeringState::NotContinued
+                );
+                assert_eq!(
+                    resolved.cause,
+                    Some(provenant_records::run::SteeringCause::TerminalStop)
+                );
                 assert_eq!(
                     store.prepare_steer_continuation(parent, &call)?,
                     None,
@@ -8274,6 +8514,152 @@ mod tests {
                     status.cause,
                     Some(provenant_records::run::SteeringCause::TerminalStop)
                 );
+            }
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn writer_lock_contention_waits_without_blocking_settlement() -> TestResult {
+        use provenant_core::Clock as _;
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let diagnostic = || -> std::result::Result<String, Box<dyn std::error::Error>> {
+            Ok(crate::settlement::diagnostic_for(
+                context.state_root.as_path(),
+                &store.record(id, &call)?,
+                Some(clock.wall_now()?),
+            )
+            .ok_or("settlement diagnostic")?)
+        };
+        let busy = Reconciled::Uncertain {
+            reason: UncertainReason::WriterLockBusy {
+                lock: "/slot/writer.lock".into(),
+                holder: "attempt X (guardian live, reserved 2s ago)".into(),
+                holder_live: true,
+            },
+        };
+        for _ in 0..=crate::settlement::LIMIT {
+            assert_eq!(
+                store.track_reconcile_progress(id, busy.clone(), &call),
+                busy
+            );
+        }
+        let reason = diagnostic()?;
+        assert!(!reason.contains("settlement blocked"), "{reason}");
+        assert!(reason.contains("retry pending"), "{reason}");
+        assert!(reason.contains("held by attempt X"), "{reason}");
+        // A real failure still spends the budget and blocks at the limit.
+        let failed = Reconciled::Uncertain {
+            reason: UncertainReason::ReconcileFailed {
+                error: "custody reattach failed".into(),
+            },
+        };
+        for _ in 0..crate::settlement::LIMIT {
+            store.track_reconcile_progress(id, failed.clone(), &call);
+        }
+        assert!(diagnostic()?.contains("settlement blocked"));
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steered_writer_continuation_waits_for_custody_and_stop_resolves_it() -> TestResult {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_records::run::{SteeringCause, SteeringState};
+        for stop in [false, true] {
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = crate::tests::input();
+            run.request.task.writer = Some(fixture.writer.clone());
+            let parent = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(parent, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store
+                .claim(parent, &clock, &call)?
+                .ok_or("writer not admitted")?;
+            assert!(matches!(
+                store.steer(
+                    parent,
+                    OperationId::parse("steer-retained-writer")?,
+                    "Continue in the retained worktree.",
+                    &call,
+                )?,
+                SteerReceipt::Queued { .. }
+            ));
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let mut publication = crate::tests::publication();
+            publication.started_at = running.started_at;
+            publication.finished_at = call.clock.wall_now()?;
+            publication.session = Some("fixture-session".into());
+            store.publish_terminal(parent, running.revision, &publication, &exit, &call)?;
+
+            // Settlement has not released the retained worktree's custody.
+            let attempt = store.attempt_dir(parent, false)?;
+            let custody = attempt.try_lock(
+                std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            assert!(matches!(
+                store.prepare_steer_continuation(parent, &call),
+                Err(RunError::SteerAwaitingCustody)
+            ));
+            let waiting = store.record(parent, &call)?;
+            assert!(
+                waiting
+                    .steering
+                    .as_ref()
+                    .is_some_and(|steering| steering.state == SteeringState::Queued),
+                "a continuation waiting on custody keeps the accepted steering"
+            );
+            assert_eq!(waiting.superseded_by, None);
+
+            if stop {
+                let (cancelled, receipt) =
+                    store.cancel_graph(parent, "stop the steered writer", &call)?;
+                assert_eq!(cancelled, parent);
+                assert_eq!(receipt, CancelReceipt::AlreadyTerminal);
+                let resolved = store.record(parent, &call)?.steering.ok_or("steering")?;
+                assert_eq!(resolved.state, SteeringState::NotContinued);
+                assert_eq!(resolved.cause, Some(SteeringCause::TerminalStop));
+                drop(custody);
+                assert_eq!(store.prepare_steer_continuation(parent, &call)?, None);
+                assert_eq!(store.record(parent, &call)?.superseded_by, None);
+            } else {
+                drop(custody);
+                let child = store
+                    .prepare_steer_continuation(parent, &call)?
+                    .ok_or("continuation not admitted after custody release")?;
+                assert_eq!(store.record(parent, &call)?.superseded_by, Some(child));
             }
         }
         Ok(())

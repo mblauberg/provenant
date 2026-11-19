@@ -1676,14 +1676,12 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             _ => {}
         }
         let value = land(&landing)?;
-        let removed = matches!(case, "abandoned" | "allowed_output" | "historical_binding");
-        assert_eq!(
-            status(&value, "worktree")?,
-            if removed { "done" } else { "refused" },
-            "{case}: {value}"
-        );
-        assert_eq!(landing.worktree.exists(), !removed);
-        assert_eq!(branch_exists(&landing.rig, "feat")?, !removed);
+        // A reservation is unresolved custody until Run reconciles it: a
+        // terminal outcome, a dead holder or a stale binding never authorises
+        // removal, so every case keeps its checkout, branch and evidence.
+        assert_eq!(status(&value, "worktree")?, "refused", "{case}: {value}");
+        assert!(landing.worktree.exists(), "{case}: {value}");
+        assert!(branch_exists(&landing.rig, "feat")?, "{case}: {value}");
         if case == "historical_binding" {
             let record = store.record(prepared.attempt_id, &call)?;
             assert!(matches!(
@@ -1712,7 +1710,14 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             )?,
             reservation
         );
-        if !removed {
+        {
+            if case == "allowed_output" {
+                assert_eq!(
+                    fs::read_to_string(landing.worktree.join("target/artifact"))?,
+                    "regenerable",
+                    "a refused removal cleans nothing"
+                );
+            }
             if case == "dirty" {
                 assert_eq!(
                     fs::read_to_string(landing.worktree.join("notes.txt"))?,
@@ -1911,10 +1916,13 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
                 == Some(&true)
         );
         let value = land(&landing)?;
-        assert_eq!(status(&value, "worktree")?, "done", "{value}");
-        assert_eq!(status(&value, "branch")?, "done", "{value}");
-        assert!(!landing.worktree.exists());
-        assert!(!branch_exists(rig, "feat")?);
+        // The terminal record does not resolve the reservation: removal
+        // requires Run's reconciliation, so landing keeps the checkout and
+        // branch beside the evidence.
+        assert_eq!(status(&value, "worktree")?, "refused", "{value}");
+        assert_eq!(status(&value, "branch")?, "skipped", "{value}");
+        assert!(landing.worktree.exists());
+        assert!(branch_exists(rig, "feat")?);
         assert_eq!(fs::read(&reservation)?, serde_json::to_vec(&fence)?);
         assert!(!attempt.join("release.json").exists());
         assert_eq!(

@@ -34,7 +34,7 @@ pub(crate) trait OrphanProbe {
     fn signal(&self, identity: &ProcessIdentity, escalation: bool) -> bool;
 }
 
-struct SystemProbe;
+pub(super) struct SystemProbe;
 impl OrphanProbe for SystemProbe {
     #[cfg(target_os = "macos")]
     fn in_attempt_sandbox(&self, pid: i64, scope: &Scope) -> bool {

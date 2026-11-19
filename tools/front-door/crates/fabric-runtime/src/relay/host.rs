@@ -49,10 +49,20 @@ fn request_max_seconds(request: &Request) -> u64 {
 /// Relay frame for a lane adding to its own graph. It is not a coordination
 /// tool: the host resolves the parent node from the attempt the relay serves.
 pub const GRAPH_TOOL: &str = "graph";
-
 /// Host handler for graph frames: arguments, cancellation, caller budget.
 pub trait GraphHandler:
     Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync
+{
+}
+
+/// Host graph handler that also receives the kernel supplied peer PID. Use it
+/// when the graph operation can admit work or otherwise carries lane authority.
+pub trait PeerGraphHandler:
+    Fn(Value, Option<i64>, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync
+{
+}
+impl<T: Fn(Value, Option<i64>, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync>
+    PeerGraphHandler for T
 {
 }
 impl<T: Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync> GraphHandler
@@ -169,6 +179,25 @@ impl HostRelay {
         + 'static,
         graph: impl GraphHandler + Send + 'static,
     ) -> io::Result<Self> {
+        Self::start_with_peer_graph(
+            path,
+            limits,
+            handler,
+            move |arguments, _, cancel, within| graph(arguments, cancel, within),
+        )
+    }
+
+    /// As [`Self::start_with_graph`], passing the kernel supplied client PID to
+    /// the graph handler. Use this for lane-owned graph admission.
+    pub fn start_with_peer_graph(
+        path: PathBuf,
+        limits: provenant_records::Limits,
+        handler: impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError>
+        + Send
+        + Sync
+        + 'static,
+        graph: impl PeerGraphHandler + Send + 'static,
+    ) -> io::Result<Self> {
         let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
         match std::fs::DirBuilder::new().mode(0o700).create(parent) {
             Ok(()) => {}
@@ -207,8 +236,9 @@ impl HostRelay {
                     while !cancel.is_cancelled() {
                         match listener.accept() {
                             Ok((stream, _)) => {
-                                if let Err(mpsc::TrySendError::Full(mut stream)) =
-                                    send.try_send(stream)
+                                let peer_pid = provenant_os::pid::unix_peer_pid(&stream).ok();
+                                if let Err(mpsc::TrySendError::Full((mut stream, _))) =
+                                    send.try_send((stream, peer_pid))
                                 {
                                     let _ = write(
                                         &mut stream,
@@ -238,11 +268,11 @@ impl HostRelay {
 fn serve_connections(
     limits: provenant_records::Limits,
     handler: &(impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync),
-    graph: &impl GraphHandler,
+    graph: &impl PeerGraphHandler,
     cancel: &CancelToken,
-    accept: impl FnOnce(mpsc::SyncSender<UnixStream>),
+    accept: impl FnOnce(mpsc::SyncSender<(UnixStream, Option<i64>)>),
 ) {
-    let (send, receive) = mpsc::sync_channel::<UnixStream>(32);
+    let (send, receive) = mpsc::sync_channel::<(UnixStream, Option<i64>)>(32);
     let receive = Mutex::new(receive);
     let publication = provenant_redact::capture_publication_scope();
     thread::scope(|scope| {
@@ -257,8 +287,15 @@ fn serve_connections(
                         Err(_) => break,
                     };
                     match received {
-                        Ok(mut stream) => {
-                            let _ = serve_one_with(&mut stream, limits, handler, graph, cancel);
+                        Ok((mut stream, peer_pid)) => {
+                            let _ = serve_one_with_peer(
+                                &mut stream,
+                                limits,
+                                handler,
+                                graph,
+                                peer_pid,
+                                cancel,
+                            );
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -426,11 +463,30 @@ fn reply(result: Result<Value, ServiceError>) -> Reply {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn serve_one_with(
     stream: &mut UnixStream,
     limits: provenant_records::Limits,
     handler: &impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError>,
     graph: &impl GraphHandler,
+    cancel: &CancelToken,
+) -> io::Result<()> {
+    serve_one_with_peer(
+        stream,
+        limits,
+        handler,
+        &|arguments, _, cancel, within| graph(arguments, cancel, within),
+        None,
+        cancel,
+    )
+}
+
+fn serve_one_with_peer(
+    stream: &mut UnixStream,
+    limits: provenant_records::Limits,
+    handler: &impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError>,
+    graph: &impl PeerGraphHandler,
+    peer_pid: Option<i64>,
     cancel: &CancelToken,
 ) -> io::Result<()> {
     stream.set_nonblocking(true)?;
@@ -440,7 +496,7 @@ pub(crate) fn serve_one_with(
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
     let reply = if request.tool == GRAPH_TOOL {
         let within = confirm_budget(stream, deadline, cancel, request_max_seconds(&request))?;
-        reply(graph(request.arguments, cancel, within))
+        reply(graph(request.arguments, peer_pid, cancel, within))
     } else {
         match ToolCall::parse(&request.tool, request.arguments) {
             Ok(call) => {
@@ -524,6 +580,59 @@ pub fn graph(
         cancel,
         within,
     )
+}
+
+/// Send a graph frame only after proving the connected relay server is an
+/// ancestor of this process. This check precedes writing the proposal bytes.
+pub fn graph_authenticated(
+    path: &Path,
+    arguments: Value,
+    cancel: &CancelToken,
+    within: Duration,
+    verify_server: impl FnOnce(i64) -> bool,
+) -> Result<Value, ServiceError> {
+    let request = Request {
+        tool: GRAPH_TOOL.into(),
+        arguments,
+    };
+    let started = Instant::now();
+    let within = within.min(Duration::from_secs(request_max_seconds(&request)));
+    let mut stream = provenant_os::sys::connect_unix_within(path, started + within, cancel)
+        .map_err(|error| {
+            if cancel.is_cancelled() {
+                ServiceError::Facade(FacadeError::Cancelled)
+            } else if error.kind() == io::ErrorKind::TimedOut {
+                ServiceError::Facade(FacadeError::Timeout)
+            } else {
+                ServiceError::FabricOwnerUnavailable
+            }
+        })?;
+    exchange_authenticated(
+        &mut stream,
+        &request,
+        cancel,
+        within.saturating_sub(started.elapsed()),
+        verify_server,
+    )
+}
+
+fn exchange_authenticated(
+    stream: &mut UnixStream,
+    request: &Request,
+    cancel: &CancelToken,
+    within: Duration,
+    verify_server: impl FnOnce(i64) -> bool,
+) -> Result<Value, ServiceError> {
+    let server_pid = provenant_os::pid::unix_peer_pid(stream)
+        .map_err(|_| ServiceError::FabricOwnerUnavailable)?;
+    if !verify_server(server_pid) {
+        return Err(ServiceError::Cli {
+            code: "relay_peer_refused".into(),
+            message: "graph relay is not hosted by this lane's guardian".into(),
+            data: Value::Null,
+        });
+    }
+    exchange_within(stream, request, cancel, within)
 }
 
 #[cfg(test)]
@@ -811,6 +920,63 @@ mod tests {
             call("fix", &no_graph)?.unwrap_err().code(),
             "graph_relay_unavailable"
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    #[test]
+    fn graph_peer_handler_receives_kernel_peer_pid() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, mut server) = UnixStream::pair()?;
+        let expected = i64::from(std::process::id());
+        thread::scope(|scope| {
+            let serving = scope.spawn(|| {
+                serve_one_with_peer(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| Err(FacadeError::StateCorrupt.into()),
+                    &|_, peer_pid, _, _| {
+                        assert_eq!(peer_pid, Some(expected));
+                        Ok(serde_json::json!({"accepted":true}))
+                    },
+                    Some(expected),
+                    &CancelToken::new(),
+                )
+            });
+            let received = exchange(
+                &mut client,
+                &Request {
+                    tool: GRAPH_TOOL.into(),
+                    arguments: serde_json::json!({"op":"children"}),
+                },
+                &CancelToken::new(),
+            )?;
+            assert_eq!(received["accepted"], true);
+            serving.join().unwrap()?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    #[test]
+    fn graph_client_refuses_replaced_socket_before_sending_proposal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, mut peer) = UnixStream::pair()?;
+        let error = exchange_authenticated(
+            &mut client,
+            &Request {
+                tool: GRAPH_TOOL.into(),
+                arguments: serde_json::json!({"op":"add","prompt":"private proposal"}),
+            },
+            &CancelToken::new(),
+            Duration::from_secs(2),
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "relay_peer_refused");
+        drop(client);
+        let mut byte = [0; 1];
+        assert_eq!(peer.read(&mut byte)?, 0);
         Ok(())
     }
 
@@ -1253,14 +1419,14 @@ mod tests {
         serve_connections(
             provenant_records::Limits::CONFIG,
             &handler,
-            &no_graph,
+            &|arguments, _, cancel: &CancelToken, within| no_graph(arguments, cancel, within),
             &cancel,
             |send| {
                 thread::scope(|scope| {
-                    send.send(waiting_server).unwrap();
+                    send.send((waiting_server, None)).unwrap();
                     let waiting_call = scope.spawn(|| exchange(&mut waiting, &request(), &cancel));
                     wait_started.recv_timeout(IO_TIMEOUT).unwrap();
-                    send.send(mail_server).unwrap();
+                    send.send((mail_server, None)).unwrap();
                     let mail_request = Request {
                         tool: "fabric_mail".into(),
                         arguments: serde_json::json!({"op":"read","after":0,"limit":1}),
