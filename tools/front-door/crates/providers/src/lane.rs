@@ -2030,7 +2030,7 @@ mod tests {
             .filter(|(key, _)| key != "GIT_CONFIG_GLOBAL")
             .cloned()
             .collect::<Vec<_>>();
-        let init = Command::new(&real_git)
+        let init_output = Command::new(&real_git)
             .args(["init", "-q"])
             .current_dir(&no_identity)
             .env_clear()
@@ -2038,7 +2038,7 @@ mod tests {
             .env("GIT_CONFIG_GLOBAL", &identity_config)
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()?;
-        assert!(init.status.success());
+        assert!(init_output.status.success());
         fs::write(no_identity.join("file"), "missing identity")?;
         let add = Command::new(&real_git)
             .args(["add", "file"])
@@ -2110,6 +2110,84 @@ mod tests {
                 .output()?)
         };
         let run = |args: &[&str]| run_at(&repo, args);
+
+        // Model a second attempt on the same checkout. Its worktree is the
+        // same, but every Git selector, including the index, points at its own
+        // private scratch tree.
+        let sibling_scratch = root.join(format!("scratch-sibling-{adapter}"));
+        let mut sibling_permissions = plan.permissions().clone();
+        sibling_permissions.scratch.path = sibling_scratch.clone();
+        let mut sibling_mode = serde_json::to_value(&sibling_permissions.mode)?;
+        sibling_mode["authority"]["git_state"]["path"] = serde_json::to_value(&sibling_scratch)?;
+        sibling_permissions.mode = serde_json::from_value(sibling_mode)?;
+        let sibling_plan = ConfinedPlan::new(PlanRequest {
+            scope: plan.scope(),
+            permissions: sibling_permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })?;
+        let mut sibling_input = crate::tests::fixture_input(
+            &route,
+            &sibling_plan,
+            &prompt,
+            &repo,
+            (adapter == "claude").then_some(&token),
+        );
+        sibling_input.provenant.git = &git;
+        sibling_input.home = &home;
+        sibling_input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        let sibling_spec = registration.adapter.prepare(sibling_input)?;
+        for step in &sibling_spec.setup {
+            match step {
+                SetupStep::CreateDir(path) if path.starts_with(&sibling_scratch) => {
+                    fs::create_dir_all(path)?
+                }
+                SetupStep::WriteFile { path, bytes } if path.starts_with(&sibling_scratch) => {
+                    fs::create_dir_all(path.parent().ok_or("Git setup parent")?)?;
+                    fs::write(path, bytes)?
+                }
+                SetupStep::WriteExecutable { path, bytes }
+                    if path.starts_with(&sibling_scratch) =>
+                {
+                    fs::create_dir_all(path.parent().ok_or("Git setup parent")?)?;
+                    fs::write(path, bytes)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                SetupStep::Symlink { link, target } if link.starts_with(&sibling_scratch) => {
+                    fs::create_dir_all(link.parent().ok_or("Git setup parent")?)?;
+                    std::os::unix::fs::symlink(target, link)?
+                }
+                _ => {}
+            }
+        }
+        init(&sibling_scratch.join("git-common"), true)?;
+        fs::create_dir_all(sibling_scratch.join("git-objects/info"))?;
+        fs::write(
+            sibling_scratch.join("git-objects/info/alternates"),
+            format!("{}\n", repo.join(".git/objects").display()),
+        )?;
+        let sibling_run =
+            |args: &[&str]| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+                Ok(Command::new("/bin/sh")
+                    .args(["-c", "exec git \"$@\"", "sh"])
+                    .args(args)
+                    .current_dir(&repo)
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env(
+                        "PATH",
+                        format!("{}:/usr/bin:/bin", sibling_scratch.join("bin").display()),
+                    )
+                    .envs(sibling_spec.env.iter().cloned())
+                    .output()?)
+            };
+        fs::write(repo.join("sibling-staged"), "belongs to sibling attempt\n")?;
+        assert!(
+            sibling_run(&["add", "--", "sibling-staged"])?
+                .status
+                .success()
+        );
         for args in [&["add", "file"][..], &["commit", "-m", "lane"][..]] {
             let output = run_at(&lane_subdir, args)?;
             assert!(
@@ -2119,6 +2197,28 @@ mod tests {
             );
         }
         assert!(marker.exists(), "{adapter}: pinned Git was not invoked");
+        let sibling_commit = run(&["cat-file", "-e", "HEAD:sibling-staged"])?;
+        assert!(
+            !sibling_commit.status.success(),
+            "{adapter}: a plain commit included the sibling attempt's staged path"
+        );
+        assert_eq!(
+            sibling_run(&["diff", "--cached", "--name-only"])?.stdout,
+            b"sibling-staged
+",
+            "{adapter}: the sibling's staged snapshot must survive the first commit"
+        );
+        assert!(sibling_run(&["commit", "-m", "sibling"])?.status.success());
+        assert!(
+            sibling_run(&["cat-file", "-e", "HEAD:sibling-staged"])?
+                .status
+                .success()
+        );
+        let sibling_index = sibling_scratch.join("git-common/index");
+        assert!(
+            sibling_index.is_file(),
+            "{adapter}: sibling index was not created"
+        );
         assert!(scratch.join("git-common/index").exists());
         assert!(
             scratch

@@ -1055,7 +1055,46 @@ impl RunStore {
         if !self.import_release_permitted(&record, &call)? {
             return Err(RunError::Validation("writer import remains unresolved"));
         }
-        if object_import_refused(attempt, recovery.scope())?.is_some() {
+        let request = self.request(record.attempt_id, &call)?;
+        let launch = request
+            .task
+            .writer
+            .as_ref()
+            .map(|writer| {
+                crate::prepare_writer_with_facts(
+                    writer,
+                    &self.writer_registry,
+                    record.project_id,
+                    &self.repo_facts,
+                )
+            })
+            .transpose()?;
+        let staged_paths = launch
+            .as_ref()
+            .map(|writer| writer.private_staged_paths(attempt))
+            .transpose()?
+            .unwrap_or_default();
+        let merge_retained =
+            crate::artifacts::read_sealed(attempt, "private-merge-retained.json", RECORD_LIMIT)?
+                .is_some();
+        let already_retained =
+            crate::artifacts::read_sealed(attempt, "retained-index.json", RECORD_LIMIT)?.is_some();
+        if !already_retained && (!staged_paths.is_empty() || merge_retained) {
+            crate::artifacts::seal(
+                attempt,
+                "retained-index.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": recovery.scope(), "paths": staged_paths,
+                    "operation": merge_retained.then_some("merge"),
+                }))?,
+                RECORD_LIMIT,
+            )?;
+        }
+        if already_retained
+            || !staged_paths.is_empty()
+            || merge_retained
+            || object_import_refused(attempt, recovery.scope())?.is_some()
+        {
             custody::publish_release(attempt, recovery.scope())
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
             let commit = recovery
@@ -4326,8 +4365,38 @@ mod writer_recovery_tests {
     #[test]
     fn settlement_finish_cleans_writer_pins_with_recovery_held()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_finish_case(false)
+    }
+
+    #[test]
+    fn settlement_finish_preserves_private_staged_snapshot_through_payload_gc()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_finish_case(true)
+    }
+
+    fn settlement_finish_case(
+        private_staged: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{
+            ffi::{OsStr, OsString},
+            time::Duration,
+        };
+
+        let case = if private_staged {
+            "private_staged"
+        } else {
+            "clean"
+        };
         let fixture = PrepareFixture::new()?;
+        let base_contents = "base contents\n";
+        let staged_contents = "private staged snapshot\n";
+        if private_staged {
+            std::fs::write(fixture.writer.worktree.join("base.txt"), base_contents)?;
+            fixture.lane_git(&["add", "base.txt"])?;
+            fixture.commit(&fixture.writer.worktree, "add base file")?;
+        }
         let execution = registered_landed_writer_fixture(&fixture)?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -4369,6 +4438,83 @@ mod writer_recovery_tests {
             launch.branch.as_str(),
             launch.base,
         )?;
+        let private_git =
+            |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+                let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                    .chain(args.iter().map(|arg| OsString::from(*arg)))
+                    .collect();
+                let mut environment: Vec<(OsString, OsString)> = [
+                    ("PATH", "/usr/bin:/bin"),
+                    ("GIT_CONFIG_NOSYSTEM", "1"),
+                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect();
+                environment.extend([
+                    (
+                        "GIT_DIR".into(),
+                        candidate.join("git-common").into_os_string(),
+                    ),
+                    (
+                        "GIT_COMMON_DIR".into(),
+                        candidate.join("git-common").into_os_string(),
+                    ),
+                    (
+                        "GIT_OBJECT_DIRECTORY".into(),
+                        candidate.join("git-objects").into_os_string(),
+                    ),
+                ]);
+                let mut options =
+                    ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
+                options.env = Some(&environment);
+                let output = SystemExecutor::new(1)?.execute(options)?;
+                assert!(
+                    output.termination == Termination::Exit(0),
+                    "{case}: {}",
+                    String::from_utf8_lossy(&output.stderr.bytes)
+                );
+                Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+            };
+        let staged_file = fixture.writer.worktree.join("base.txt");
+        if private_staged {
+            std::fs::write(&staged_file, staged_contents)?;
+            let staged_blob = private_git(&["hash-object", "-w", "base.txt"])?;
+            let cacheinfo = format!("100644,{staged_blob},base.txt");
+            private_git(&["update-index", "--add", "--cacheinfo", &cacheinfo])?;
+            std::fs::write(&staged_file, base_contents)?;
+            assert_eq!(
+                private_git(&["show", "HEAD:base.txt"])?,
+                base_contents.trim()
+            );
+            assert_eq!(private_git(&["show", ":base.txt"])?, staged_contents.trim());
+        }
+        let native_status = || -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let argv: Vec<OsString> = [
+                git.as_os_str().to_owned(),
+                "-C".into(),
+                fixture.writer.worktree.as_os_str().to_owned(),
+                "status".into(),
+                "--porcelain".into(),
+                "-z".into(),
+            ]
+            .into();
+            let mut options =
+                ExecOptions::new(&argv, &fixture.writer.project, Duration::from_secs(5));
+            options.env = Some(&fixture.environment);
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert!(
+                output.termination == Termination::Exit(0),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            Ok(output.stdout.bytes)
+        };
+        assert!(
+            native_status()?.is_empty(),
+            "{case}: native Git state must be clean"
+        );
+
         let pin = crate::objects::import_pin(scope.attempt, launch.base);
         fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
         let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
@@ -4401,28 +4547,75 @@ mod writer_recovery_tests {
             &crate::dispatch_tests::Fake::default(),
             &call,
         )?;
+        let receipts = finished.settlement_receipts.unwrap();
+        assert_eq!(receipts.git_import, EffectDisposition::Done, "{case}");
         assert_eq!(
-            finished
-                .settlement_receipts
-                .unwrap()
-                .cleanup_custody_release,
-            EffectDisposition::Done
+            receipts.cleanup_custody_release,
+            EffectDisposition::Done,
+            "{case}"
         );
         assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin).is_err());
+        let journal: serde_json::Value = crate::db::decode(
+            &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+        )?;
+        assert_eq!(journal["phase"], "complete", "{case}");
         let db = rusqlite::Connection::open(execution.state_root.as_path().join("run.sqlite3"))?;
         let retained: bool = db.query_row(
             "SELECT tmp_retained FROM attempts WHERE id=?1",
             [id.to_string()],
             |row| row.get(0),
         )?;
+        assert!(candidate.exists(), "{case}: private candidate was cleaned");
+        if private_staged {
+            assert!(!retained, "staged private Git is not cleanup debt");
+            let retained_index =
+                crate::artifacts::read_sealed(&attempt, "retained-index.json", RECORD_LIMIT)?
+                    .ok_or("staged index marker")?;
+            let retained_index: serde_json::Value = serde_json::from_slice(&retained_index)?;
+            assert_eq!(retained_index["paths"], serde_json::json!(["base.txt"]));
+            assert_eq!(private_git(&["show", ":base.txt"])?, staged_contents.trim());
+            assert_eq!(std::fs::read_to_string(&staged_file)?, base_contents);
+            // Pressure collection measures evictable provider state, while
+            // private Git lives in tmp. Give the collector actual payload to
+            // evict unless the retained-index marker pins the whole attempt.
+            let payload = attempt.current_path()?.join("provider-state/candidate-0");
+            std::fs::create_dir_all(&payload)?;
+            let probe = vec![7_u8; 262_144];
+            std::fs::write(payload.join("blob"), &probe)?;
+            let collection_time = clock
+                .wall_now()?
+                .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86_400)?)?;
+            let collection = store.gc_payloads(
+                &Directory::open_anchor(execution.state_root.as_path())?,
+                0,
+                collection_time,
+                false,
+                true,
+                None,
+                &call,
+            )?;
+            assert!(collection.errors.is_empty(), "{collection:?}");
+            assert!(collection.evicted.is_empty(), "{collection:?}");
+            assert!(
+                collection.pinned_bytes > 0,
+                "private Git must stay pinned: {collection:?}"
+            );
+            assert!(candidate.is_dir(), "payload collection removed private Git");
+            assert_eq!(std::fs::read(payload.join("blob"))?, probe);
+            assert_eq!(private_git(&["show", ":base.txt"])?, staged_contents.trim());
+            assert_eq!(std::fs::read_to_string(&staged_file)?, base_contents);
+        } else {
+            assert!(
+                retained,
+                "unfinished clean work retains scratch after release"
+            );
+        }
         assert!(
-            retained,
-            "unfinished work retains scratch after custody release"
+            native_status()?.is_empty(),
+            "{case}: native Git state must stay clean"
         );
-        assert!(candidate.exists());
         Ok(())
     }
-
     #[test]
     fn budget_warning_records_the_steer_refusal_for_lane_providers()
     -> std::result::Result<(), Box<dyn std::error::Error>> {

@@ -2,5 +2,5 @@
 
 ### Git and safety
 
-- Authorised lanes can share a worktree and commit disjoint paths without a repository-wide lock. Shared Git views reconcile host advances and nested launches, retain inactive displaced tips for recovery, and refuse only live divergent histories. Lone lanes retain automatic budget commits and failed-publication restoration. Overlapping path claims warn the owning lane; removal and GC preserve worktrees with live holders. See [lane lifecycle](../../runbooks/lane-lifecycle.md). (#3451)
+- Authorised lanes can share worktree files while keeping their staging, commits and credentials in separate attempt-private Git views. Host publication verifies objects and uses compare-and-swap; divergent sibling work is retained for recovery. Overlapping path claims warn the owning lane. See [lane lifecycle](../../runbooks/lane-lifecycle.md). (#3451)
 - Git output forwarding no longer hangs when `tail` reads a FIFO on Ubuntu 26.04, including commands that produce no output. (#3451)

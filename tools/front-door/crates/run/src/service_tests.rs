@@ -79,8 +79,8 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
     let terminal = store.record(id, &call)?;
     crate::artifacts::seal(
         &attempt,
-        "merge-restored.json",
-        &crate::db::bytes(&crate::writer::MergeRestored {
+        "private-merge-retained.json",
+        &crate::db::bytes(&crate::writer::PrivateMergeRetained {
             extra: Default::default(),
             schema_version: 1,
             scope: RunStore::scope(&terminal),
@@ -1141,29 +1141,4 @@ fn route_normalisation_preserves_required_family() -> TestResult {
         assert_eq!(Service::route(route.clone())?, route);
     }
     Ok(())
-}
-
-#[test]
-fn shared_view_refusal_and_reseed_warning_have_actionable_diagnostics() {
-    let error = RunError::SharedViewBaseMismatch;
-    assert_eq!(ErrorKind::from(&error), ErrorKind::SharedViewBaseMismatch);
-    let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
-        repository: None,
-        home: None,
-    });
-    assert_eq!(diagnostic.code, ErrorKind::SharedViewBaseMismatch.code());
-    assert_eq!(diagnostic.category.as_deref(), Some("refused"));
-    assert!(
-        diagnostic
-            .next
-            .as_deref()
-            .is_some_and(|next| next.contains("sibling"))
-    );
-    assert_eq!(
-        error.boundary_class(),
-        provenant_records::diagnostic::BoundaryClass::LaneGit
-    );
-    let warning = ErrorKind::SharedViewTipRetained.diagnostic();
-    assert_eq!(warning.category.as_deref(), Some("warning"));
-    assert!(warning.next.is_some());
 }

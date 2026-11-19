@@ -47,7 +47,7 @@ fn private_view_binding_refuses_replaced_directories_and_foreign_paths() -> Test
 
 #[test]
 fn private_view_refuses_incomplete_identity_versions() -> TestResult {
-    for version in [2, 3] {
+    for version in [1, 2, 3] {
         let temp = tempfile::tempdir()?;
         let path = fs::canonicalize(temp.path())?;
         fs::create_dir_all(path.join("tmp/candidate-0/git-common"))?;
@@ -415,6 +415,13 @@ impl Fixture {
             self.project.join(".git/refs/heads/lane"),
             format!("{}\n", self.base),
         )?;
+        git(
+            &self.git,
+            &self.home,
+            &self.lane,
+            None,
+            &["read-tree", &self.base.to_string()],
+        )?;
         let attempt = self.root.join("attempt");
         let scratch = attempt.join("tmp/candidate-0");
         fs::create_dir_all(&scratch)?;
@@ -436,6 +443,7 @@ impl Fixture {
             scratch.join("git-common/refs/heads/lane"),
             format!("{}\n", self.head),
         )?;
+        self.git_overlay(&scratch, &["read-tree", &self.head.to_string()])?;
         Ok((attempt, scratch))
     }
 
@@ -469,18 +477,24 @@ impl Fixture {
             .output()?)
     }
 
-    fn git_shared(&self, shared_root: &Path, args: &[&str]) -> TestResult<Output> {
-        self.git_shared_with_index(shared_root, None, args)
+    fn prepare_attempt(&self, name: &str, base: GitOid) -> TestResult<(Directory, PathBuf)> {
+        let attempt_path = self.root.join(name);
+        let scratch = attempt_path.join("tmp/candidate-0");
+        fs::create_dir_all(&scratch)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        super::prepare_bound(
+            &self.git,
+            self.worktree.repo(),
+            &attempt,
+            &scratch,
+            "refs/heads/lane",
+            base,
+        )?;
+        Ok((attempt, scratch))
     }
 
-    fn git_shared_with_index(
-        &self,
-        shared_root: &Path,
-        index: Option<&Path>,
-        args: &[&str],
-    ) -> TestResult<Output> {
-        let common = shared_root.join("git-common");
-        let objects = shared_root.join("git-objects");
+    fn git_attempt(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
+        let common = scratch.join("git-common");
         let mut command = provenant_os::fixture::git_command_at(&self.git);
         command
             .env_clear()
@@ -488,20 +502,19 @@ impl Fixture {
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", scratch.join("gitconfig"))
             .env("GIT_DIR", &common)
             .env("GIT_COMMON_DIR", &common)
+            .env("GIT_INDEX_FILE", common.join("index"))
             .env("GIT_WORK_TREE", &self.lane)
-            .env("GIT_OBJECT_DIRECTORY", &objects)
+            .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
             .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
             .args(args)
             .current_dir(&self.lane);
-        if let Some(index) = index {
-            command.env("GIT_INDEX_FILE", index);
-        }
         let output = command.output()?;
         if !output.status.success() {
             return Err(format!(
-                "shared Git {args:?} failed: {}",
+                "attempt Git {args:?} failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             )
             .into());
@@ -672,200 +685,231 @@ fn shared_object_snapshot_bounds_empty_files_and_directories() -> TestResult {
 }
 
 #[test]
-fn shared_bound_view_survives_attempt_cleanup_and_keeps_config_private() -> TestResult {
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn per_attempt_git_views_keep_identity_and_configuration_private() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
+    let (_, first) = fixture.prepare_attempt("private-attempt-1", fixture.base)?;
+    let (_, second) = fixture.prepare_attempt("private-attempt-2", fixture.base)?;
+    let first_common = first.join("git-common");
+    let second_common = second.join("git-common");
+    assert_ne!(first_common, second_common);
+    assert_ne!(first_common.join("index"), second_common.join("index"));
+    assert_ne!(
+        first_common.join("refs/heads/lane"),
+        second_common.join("refs/heads/lane")
+    );
 
-    let shared_root = fixture.root.join("shared-context");
-    fs::create_dir(&shared_root)?;
-    fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
-    for name in ["git-common", "git-objects"] {
-        let path = shared_root.join(name);
-        fs::create_dir(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let prepare = |name: &str, base: GitOid| -> TestResult<(PathBuf, Directory, PathBuf)> {
-        let attempt_path = fixture.root.join(name);
-        let scratch = attempt_path.join("tmp/candidate-0");
-        fs::create_dir_all(&scratch)?;
-        let attempt = Directory::open_anchor(&attempt_path)?;
-        super::prepare_shared_bound(
-            &fixture.git,
-            fixture.worktree.repo(),
-            &attempt,
-            &scratch,
-            "refs/heads/lane",
-            base,
-            crate::objects::SharedViewLaunch {
-                root: &shared_root,
-                custody_slot: None,
-                current_attempt: None,
-            },
-        )?;
-        Ok((attempt_path, attempt, scratch))
-    };
-
-    let (first_path, first_attempt, _) = prepare("shared-attempt-1", fixture.base)?;
-    let first_source = super::bound_source(&first_attempt)?.ok_or("first shared source")?;
-    super::prepare_budget_objects(&first_source.objects, fixture.worktree.repo())?;
-    assert_eq!(
-        first_source.refs.current_path()?,
-        shared_root.join("git-common")
-    );
-    let group_config = fs::read(shared_root.join("git-common/config"))?;
-    assert!(
-        !group_config
-            .windows(b"fixture-private-helper".len())
-            .any(|window| window == b"fixture-private-helper")
-    );
-    assert!(
-        group_config
-            .windows(b"hooksPath = /dev/null".len())
-            .any(|window| window == b"hooksPath = /dev/null")
-    );
-    assert!(
-        group_config
-            .windows(b"fsmonitor = false".len())
-            .any(|window| window == b"fsmonitor = false")
-    );
-    assert_eq!(
-        fs::metadata(shared_root.join("git-common/config"))?.mode() & 0o222,
-        0
-    );
-    let alternates = fs::read(shared_root.join("git-objects/info/alternates"))?;
-    assert_eq!(
-        alternates,
-        format!(
-            "{}\n",
-            super::quote_alternate(&fixture.worktree.repo().common_git_dir().join("objects"))
-        )
-        .as_bytes()
-    );
-    assert_eq!(
-        fs::metadata(shared_root.join("git-objects/info/alternates"))?.mode() & 0o222,
-        0
-    );
-    let private_config_path = first_path.join("tmp/candidate-0/git-common/config");
-    let mut private_config = fs::OpenOptions::new()
-        .append(true)
-        .open(private_config_path)?;
-    use std::io::Write;
-    writeln!(
-        private_config,
-        "\n[credential]\n\thelper = fixture-private-helper"
+    fs::write(
+        first.join("gitconfig"),
+        b"[credential]\n\thelper = fixture-attempt-one\n[user]\n\tname = Attempt One\n",
     )?;
-    drop(private_config);
-    let private_config = fs::read(first_path.join("tmp/candidate-0/git-common/config"))?;
-    assert!(
-        private_config
-            .windows(b"fixture-private-helper".len())
-            .any(|window| window == b"fixture-private-helper")
+    fs::write(
+        second.join("gitconfig"),
+        b"[credential]\n\thelper = fixture-attempt-two\n[user]\n\tname = Attempt Two\n",
+    )?;
+    assert_eq!(
+        fixture
+            .git_attempt(
+                &first,
+                &["config", "--global", "--get", "credential.helper"]
+            )?
+            .stdout,
+        b"fixture-attempt-one\n"
+    );
+    assert_eq!(
+        fixture
+            .git_attempt(
+                &second,
+                &["config", "--global", "--get", "credential.helper"]
+            )?
+            .stdout,
+        b"fixture-attempt-two\n"
+    );
+    assert_eq!(
+        fixture
+            .git_attempt(&first, &["config", "--global", "--get", "user.name"])?
+            .stdout,
+        b"Attempt One\n"
+    );
+    assert_eq!(
+        fixture
+            .git_attempt(&second, &["config", "--global", "--get", "user.name"])?
+            .stdout,
+        b"Attempt Two\n"
     );
 
-    fs::write(fixture.lane.join("file"), "first shared commit\n")?;
-    fixture.git_shared(&shared_root, &["add", "file"])?;
-    fixture.git_shared(&shared_root, &["commit", "-qm", "first shared commit"])?;
-    let first_head = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
-    fixture.git_shared(&shared_root, &["commit-graph", "write", "--reachable"])?;
-    let graph_path = shared_root.join("git-objects/info/commit-graph");
-    let graph = fs::read(&graph_path)?;
-    // A completed writer imports before its sibling continues using the same
-    // Git state. Import must leave that shared context usable after cleanup.
+    fs::write(
+        first_common.join("config"),
+        b"[credential]\n\thelper = private-one\n",
+    )?;
+    let second_config = fs::read(second_common.join("config"))?;
+    assert_eq!(fs::read(second_common.join("config"))?, second_config);
+    assert_eq!(
+        fs::read(first_common.join("config"))?,
+        b"[credential]\n\thelper = private-one\n"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn plain_commit_excludes_a_sibling_attempts_staged_path() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let (_, lane_scratch) = fixture.prepare_attempt("commit-attempt", fixture.base)?;
+    let (_, sibling_scratch) = fixture.prepare_attempt("staged-sibling", fixture.base)?;
+
+    fs::write(
+        fixture.lane.join("sibling-staged"),
+        "sibling staged bytes\n",
+    )?;
+    fixture.git_attempt(&sibling_scratch, &["add", "sibling-staged"])?;
+    let sibling_index = fs::read(sibling_scratch.join("git-common/index"))?;
+
+    fs::write(fixture.lane.join("lane-owned"), "lane owned bytes\n")?;
+    fixture.git_attempt(&lane_scratch, &["add", "lane-owned"])?;
+    // No pathspec: the index itself must define the lane's commit boundary.
+    fixture.git_attempt(&lane_scratch, &["commit", "-qm", "lane commit"])?;
+    let lane_head = oid(fixture.git_attempt(&lane_scratch, &["rev-parse", "HEAD"])?)?;
+    let changed = fixture.git_attempt(
+        &lane_scratch,
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            &lane_head.to_string(),
+        ],
+    )?;
+    assert_eq!(changed.stdout, b"lane-owned\n");
+    assert_eq!(
+        fixture
+            .git_attempt(&sibling_scratch, &["show", ":sibling-staged"])?
+            .stdout,
+        b"sibling staged bytes\n"
+    );
+    assert_eq!(
+        fs::read(sibling_scratch.join("git-common/index"))?,
+        sibling_index
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn launch_at_an_advanced_tip_preserves_a_live_siblings_staged_index() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let (_, sibling_scratch) = fixture.prepare_attempt("live-sibling", fixture.base)?;
+    fs::write(fixture.lane.join("sibling-staged"), "live staged bytes\n")?;
+    fixture.git_attempt(&sibling_scratch, &["add", "sibling-staged"])?;
+    let sibling_index = fs::read(sibling_scratch.join("git-common/index"))?;
+
+    let advanced = child_of(&fixture, fixture.base, "branch advanced")?;
+    update_ref(&fixture, "refs/heads/lane", advanced)?;
+    let (_, launched_scratch) = fixture.prepare_attempt("new-launch", advanced)?;
+    let launched = Directory::open_anchor(&fixture.root.join("new-launch"))?;
+    let source = super::bound_source(&launched)?.ok_or("launched private view")?;
+    assert_eq!(super::private_tip(&source, "refs/heads/lane")?, advanced);
+    assert_eq!(
+        oid(fixture.git_attempt(&launched_scratch, &["write-tree"])?)?,
+        oid(git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.project,
+            None,
+            &["rev-parse", &format!("{advanced}^{{tree}}")]
+        )?)?
+    );
+    assert_eq!(
+        fs::read(sibling_scratch.join("git-common/index"))?,
+        sibling_index
+    );
+    assert_eq!(
+        fixture
+            .git_attempt(&sibling_scratch, &["show", ":sibling-staged"])?
+            .stdout,
+        b"live staged bytes\n"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn private_commits_survive_a_losing_host_settlement_cas() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let (first_attempt, first_scratch) = fixture.prepare_attempt("first-writer", fixture.base)?;
+    let (second_attempt, second_scratch) =
+        fixture.prepare_attempt("second-writer", fixture.base)?;
+
+    fs::write(fixture.lane.join("first-writer-file"), "first commit\n")?;
+    fixture.git_attempt(&first_scratch, &["add", "first-writer-file"])?;
+    fixture.git_attempt(&first_scratch, &["commit", "-qm", "first writer"])?;
+    let first_source = super::bound_source(&first_attempt)?.ok_or("first private source")?;
+    let first_head = super::private_tip(&first_source, "refs/heads/lane")?;
+
+    fs::write(fixture.lane.join("second-writer-file"), "second commit\n")?;
+    fixture.git_attempt(&second_scratch, &["add", "second-writer-file"])?;
+    fixture.git_attempt(&second_scratch, &["commit", "-qm", "second writer"])?;
+    let second_source = super::bound_source(&second_attempt)?.ok_or("second private source")?;
+    let second_head = super::private_tip(&second_source, "refs/heads/lane")?;
+    assert_ne!(first_head, second_head);
+
     super::settle(
         &fixture.git,
         fixture.worktree.repo(),
         Some(&first_source.objects),
         first_head,
     )?;
-    assert_eq!(
-        fs::read(graph_path)?,
-        graph,
-        "a sibling's Git cache survives import"
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: first_head,
+            attempt: AttemptId::from_bytes([1; 16]),
+        },
+        &provenant_records::policy::Policy::default(),
+    )?;
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&second_source.objects),
+        second_head,
+    )?;
+    assert!(
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: second_head,
+                attempt: AttemptId::from_bytes([2; 16]),
+            },
+            &provenant_records::policy::Policy::default(),
+        )
+        .is_err()
     );
-    drop(first_source);
-    drop(first_attempt);
-    fs::remove_dir_all(&first_path)?;
 
-    let (second_path, second_attempt, _second_scratch) = prepare("shared-attempt-2", first_head)?;
-    let second_source = super::bound_source(&second_attempt)?.ok_or("second shared source")?;
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        first_head
+    );
     assert_eq!(
         super::private_tip(&second_source, "refs/heads/lane")?,
-        first_head
-    );
-    fs::write(fixture.lane.join("second-file"), "second shared commit\n")?;
-    fixture.git_shared(&shared_root, &["add", "second-file"])?;
-    fixture.git_shared(&shared_root, &["commit", "-qm", "second shared commit"])?;
-    let second_head = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
-    assert_eq!(
-        oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD^"])?)?,
-        first_head
-    );
-
-    let other_branch_path = fixture.root.join("shared-attempt-other-branch");
-    let other_branch_scratch = other_branch_path.join("tmp/candidate-0");
-    fs::create_dir_all(&other_branch_scratch)?;
-    let other_branch_attempt = Directory::open_anchor(&other_branch_path)?;
-    assert!(
-        super::prepare_shared_bound(
-            &fixture.git,
-            fixture.worktree.repo(),
-            &other_branch_attempt,
-            &other_branch_scratch,
-            "refs/heads/other",
-            fixture.base,
-            crate::objects::SharedViewLaunch {
-                root: &shared_root,
-                custody_slot: None,
-                current_attempt: None
-            },
-        )
-        .is_err()
-    );
-
-    let generation = fixture
-        .worktree
-        .repo()
-        .private_dir()
-        .current_path()?
-        .join("provenant-custody-generation");
-    fs::write(generation, "replacement-incarnation")?;
-    let replacement_path = fixture.root.join("shared-attempt-replacement");
-    let replacement_scratch = replacement_path.join("tmp/candidate-0");
-    fs::create_dir_all(&replacement_scratch)?;
-    let replacement_attempt = Directory::open_anchor(&replacement_path)?;
-    assert!(
-        super::prepare_shared_bound(
-            &fixture.git,
-            fixture.worktree.repo(),
-            &replacement_attempt,
-            &replacement_scratch,
-            "refs/heads/lane",
-            fixture.base,
-            crate::objects::SharedViewLaunch {
-                root: &shared_root,
-                custody_slot: None,
-                current_attempt: None
-            },
-        )
-        .is_err()
-    );
-    assert_eq!(
-        oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
         second_head
     );
-    assert!(
-        second_path
-            .join("tmp/candidate-0/git-common/config")
-            .exists()
+    assert_eq!(
+        fixture
+            .git_attempt(
+                &second_scratch,
+                &["show", &format!("{second_head}:second-writer-file")]
+            )?
+            .stdout,
+        b"second commit\n"
     );
-    drop(second_source);
-    drop(second_attempt);
-    let retired_root = fixture.root.join("retired-shared-context");
-    fs::rename(&shared_root, &retired_root)?;
-    fs::create_dir(&shared_root)?;
-    fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
-    let reopened_attempt = Directory::open_anchor(&second_path)?;
-    assert!(super::bound_source(&reopened_attempt).is_err());
     Ok(())
 }
 
@@ -1804,7 +1848,7 @@ fn receive_pack(fixture: &Fixture, request: &[u8], cap: u64) -> TestResult<Outpu
 }
 
 #[test]
-fn unmerged_private_index_does_not_replace_host_index() -> TestResult {
+fn unmerged_private_index_without_merge_metadata_is_not_publishable() -> TestResult {
     let mut fixture = Fixture::new("sha1")?;
     let (attempt, scratch) = fixture.overlay()?;
     let input = format!(
@@ -1828,7 +1872,7 @@ fn unmerged_private_index_does_not_replace_host_index() -> TestResult {
     let host_index = fixture.worktree.repo().private_git_dir().join("index");
     let before = fs::read(&host_index)?;
     let source = super::bound_source(&attempt)?.ok_or("private source")?;
-    assert!(super::restore_index(&source, fixture.worktree.repo()).is_err());
+    assert!(super::merge_objects(&source, fixture.worktree.repo()).is_err());
     assert_eq!(fs::read(host_index)?, before);
     assert!(
         !fixture
@@ -1942,7 +1986,7 @@ fn buffered_ref_retries_require_one_atomic_delete_transaction() {
 }
 
 #[test]
-fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
+fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> TestResult {
     let mut fixture = Fixture::new("sha1")?;
     fs::write(fixture.project.join("file"), "conflicting main change\n")?;
     git(
@@ -2039,7 +2083,7 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         },
         &provenant_records::policy::Policy::default(),
     )?;
-    super::restore_index(&source, fixture.worktree.repo())?;
+    super::advance_native_index(fixture.worktree.repo(), fixture.base)?;
     let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
     super::clear_import_refs(
         &fixture.git,
@@ -2068,21 +2112,25 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         None,
     )?;
     assert!(host_index.is_file());
-    assert_eq!(
-        fs::read(fixture.worktree.repo().private_git_dir().join("MERGE_HEAD"))?,
-        parent
+    assert!(
+        !fixture
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("MERGE_HEAD")
+            .exists()
     );
-    assert_eq!(
+    assert!(
         super::command(
             &fixture.git,
             fixture.worktree.repo().private_git_dir(),
             &fixture.lane,
             &super::args(&["ls-files", "--unmerged", "-z"]),
             None
-        )?,
-        stages
+        )?
+        .is_empty()
     );
-    assert_eq!(fs::read(metadata)?, parent);
+    assert_eq!(fs::read(&metadata)?, parent);
     assert_eq!(
         fixture
             .git_overlay(&scratch, &["ls-files", "--unmerged", "-z"])?
@@ -2090,6 +2138,7 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         stages
     );
     assert_eq!(fs::read(fixture.lane.join("file"))?, working);
+    let native_before = fs::read(&host_index)?;
     let next_attempt_path = fixture.root.join("continuation");
     let next_scratch = next_attempt_path.join("tmp/candidate-0");
     fs::create_dir_all(&next_scratch)?;
@@ -2102,37 +2151,15 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         "refs/heads/lane",
         fixture.head,
     )?;
-    fixture.source = next_scratch.join("git-objects");
-    assert_eq!(
+    assert!(
         fixture
             .git_overlay(&next_scratch, &["ls-files", "--unmerged", "-z"])?
-            .stdout,
-        stages
+            .stdout
+            .is_empty()
     );
-    fs::write(fixture.lane.join("file"), "resolved\n")?;
-    fixture.git_overlay(&next_scratch, &["add", "file"])?;
-    fixture.git_overlay(&next_scratch, &["commit", "--no-edit"])?;
-    let next = super::bound_source(&next_attempt)?.ok_or("continuation source")?;
-    let tip = super::private_tip(&next, "refs/heads/lane")?;
-    super::settle(
-        &fixture.git,
-        fixture.worktree.repo(),
-        Some(&next.objects),
-        tip,
-    )?;
-    super::publish_branch(
-        &fixture.git,
-        fixture.worktree.repo(),
-        super::BranchPublication {
-            branch: "refs/heads/lane",
-            base: fixture.head,
-            launch_ref: None,
-            head: tip,
-            attempt: fixture.import_attempt,
-        },
-        &provenant_records::policy::Policy::default(),
-    )?;
-    super::restore_index(&next, fixture.worktree.repo())?;
+    assert!(!next_scratch.join("git-common/MERGE_HEAD").exists());
+    assert_eq!(fs::read(&host_index)?, native_before);
+    assert_eq!(fs::read(&metadata)?, parent);
     assert!(
         !fixture
             .worktree
@@ -2141,18 +2168,28 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
             .join("MERGE_HEAD")
             .exists()
     );
+    assert_eq!(
+        super::command(
+            &fixture.git,
+            fixture.worktree.repo().private_git_dir(),
+            &fixture.lane,
+            &super::args(&["ls-files", "--unmerged", "-z"]),
+            None
+        )?,
+        Vec::<u8>::new(),
+    );
     Ok(())
 }
 
 #[test]
-fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestResult {
+fn native_index_advance_keeps_private_flags_and_exposes_worktree_edits() -> TestResult {
     for options in [
         vec!["--skip-worktree"],
         vec!["--assume-unchanged"],
         vec!["--skip-worktree", "--assume-unchanged"],
     ] {
         let mut fixture = Fixture::new("sha1")?;
-        let (attempt, scratch) = fixture.overlay()?;
+        let (_attempt, scratch) = fixture.overlay()?;
         for flag in &options {
             fixture.git_overlay(&scratch, &["update-index", flag, "file"])?;
         }
@@ -2163,7 +2200,6 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
             _ => b"s file\n".as_slice(),
         };
         assert_eq!(hidden.stdout, expected);
-        let source = super::bound_source(&attempt)?.ok_or("private source")?;
         fixture.import()?;
         super::publish_branch(
             &fixture.git,
@@ -2177,7 +2213,11 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
             },
             &provenant_records::policy::Policy::default(),
         )?;
-        super::restore_index(&source, fixture.worktree.repo())?;
+        super::advance_native_index(fixture.worktree.repo(), fixture.base)?;
+        assert_eq!(
+            fixture.git_overlay(&scratch, &["ls-files", "-v"])?.stdout,
+            expected
+        );
         fs::write(fixture.lane.join("file"), "hidden uncommitted edit\n")?;
         let flags = git(
             &fixture.git,
@@ -2195,6 +2235,93 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
             &["status", "--porcelain"],
         )?;
         assert_eq!(status.stdout, b" M file\n");
+    }
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn native_index_advance_preserves_staged_snapshots_on_conflicts_and_disjoint_updates() -> TestResult
+{
+    for (path, advances, busy) in [
+        ("file", false, false),
+        ("native-only", true, false),
+        ("file", false, true),
+    ] {
+        let mut fixture = Fixture::new("sha1")?;
+        let (_attempt, scratch) = fixture.overlay()?;
+        fs::write(fixture.lane.join(path), "native staged snapshot\n")?;
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["add", path],
+        )?;
+        fs::write(fixture.lane.join(path), "working version after staging\n")?;
+        let index = fixture.worktree.repo().private_git_dir().join("index");
+        let staged_index = fs::read(&index)?;
+        let private_index = fs::read(scratch.join("git-common/index"))?;
+        fixture.import()?;
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            super::BranchPublication {
+                branch: "refs/heads/lane",
+                base: fixture.base,
+                launch_ref: None,
+                head: fixture.head,
+                attempt: fixture.import_attempt,
+            },
+            &provenant_records::policy::Policy::default(),
+        )?;
+        let lock = fixture.worktree.repo().private_git_dir().join("index.lock");
+        if busy {
+            fs::write(&lock, "another Git writer owns this lock\n")?;
+        }
+        assert_eq!(
+            super::advance_native_index(fixture.worktree.repo(), fixture.base)?,
+            advances
+        );
+        if !advances {
+            assert_eq!(fs::read(&index)?, staged_index);
+        }
+        if busy {
+            assert_eq!(fs::read(&lock)?, b"another Git writer owns this lock\n");
+        }
+        assert_eq!(fs::read(scratch.join("git-common/index"))?, private_index);
+        assert_eq!(
+            git(
+                &fixture.git,
+                &fixture.home,
+                &fixture.lane,
+                None,
+                &["show", &format!(":{path}")]
+            )?
+            .stdout,
+            b"native staged snapshot\n"
+        );
+        assert_eq!(
+            fixture.git_overlay(&scratch, &["show", ":file"])?.stdout,
+            b"private lane blob\n"
+        );
+        assert_eq!(
+            fs::read(fixture.lane.join(path))?,
+            b"working version after staging\n"
+        );
+        if advances {
+            assert_eq!(
+                git(
+                    &fixture.git,
+                    &fixture.home,
+                    &fixture.lane,
+                    None,
+                    &["show", ":file"]
+                )?
+                .stdout,
+                b"private lane blob\n"
+            );
+        }
     }
     Ok(())
 }
@@ -3065,656 +3192,35 @@ fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResul
     Ok(())
 }
 
+#[test]
 // Spec: docs/specs/run-launch.md#admission-and-custody
-#[test]
-fn shared_view_reconciles_launch_bases_without_losing_commits() -> TestResult {
-    for scenario in [
-        "equal",
-        "host_merge",
-        "child",
-        "diverged_live",
-        "cancelled",
-        "diverged_idle",
-        "missing_object",
-        "interrupted_advance",
-        "interrupted_reseed",
-        "superseded_reset",
-        "reset_interleave",
-        "cas_interleave",
-    ] {
-        let fixture = Fixture::new("sha1")?;
-        git(
-            &fixture.git,
-            &fixture.home,
-            &fixture.lane,
-            None,
-            &["reset", "--hard", &fixture.base.to_string()],
-        )?;
-        provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
-        let shared_root = fixture.root.join("shared-view");
-        fs::create_dir(&shared_root)?;
-        fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
-        for component in ["git-common", "git-objects"] {
-            let path = shared_root.join(component);
-            fs::create_dir(&path)?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        }
-        let slot_path = fixture.root.join("occupancy");
-        fs::create_dir(&slot_path)?;
-        let slot = Directory::open_anchor(&slot_path)?;
-        // The launching child holds occupancy too; it must not count itself.
-        for name in ["child", "parent"] {
-            fs::create_dir(slot_path.join(name))?;
-        }
-        let child = slot.open_verified_directory(OsStr::new("child"))?;
-        let _own = child.try_lock(
-            OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let parent = slot.open_verified_directory(OsStr::new("parent"))?;
-        let live = matches!(
-            scenario,
-            "equal"
-                | "host_merge"
-                | "child"
-                | "diverged_live"
-                | "interrupted_advance"
-                | "superseded_reset"
-                | "reset_interleave"
-                | "cas_interleave"
-        );
-        let _parent_holder = live
-            .then(|| {
-                parent.try_lock(
-                    OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
-                    provenant_os::fs::LockMode::Exclusive,
-                )
-            })
-            .transpose()?;
-        let prepare = |name: &str, base: GitOid| {
-            let attempt_path = fixture.root.join(name);
-            let scratch = attempt_path.join("tmp/candidate-0");
-            fs::create_dir_all(&scratch)?;
-            super::prepare_shared_bound(
-                &fixture.git,
-                fixture.worktree.repo(),
-                &Directory::open_anchor(&attempt_path)?,
-                &scratch,
-                "refs/heads/lane",
-                base,
-                crate::objects::SharedViewLaunch {
-                    root: &shared_root,
-                    custody_slot: Some(&slot),
-                    current_attempt: Some("child"),
-                },
-            )
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })
-        };
-        let first = prepare("first", fixture.base)?;
-        assert_eq!(first.base, fixture.base);
-        assert_eq!(first.recovered, None);
-        let host = |args: &[&str]| git(&fixture.git, &fixture.home, &fixture.project, None, args);
-        let mut shared_tip = fixture.base;
-        let mut base = fixture.base;
-        if scenario != "equal" {
-            fs::write(fixture.lane.join("parent-work"), "parent commit\n")?;
-            fixture.git_shared(&shared_root, &["add", "parent-work"])?;
-            fixture.git_shared(&shared_root, &["commit", "-qm", "parent commit"])?;
-            shared_tip = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
-        }
-        if matches!(
-            scenario,
-            "host_merge"
-                | "interrupted_advance"
-                | "superseded_reset"
-                | "reset_interleave"
-                | "cas_interleave"
-        ) {
-            // Import the shared parent commit, then let the host merge main into
-            // the checked-out lane. The shared view remains at the parent tip.
-            super::settle(
-                &fixture.git,
-                fixture.worktree.repo(),
-                Some(&Directory::open_anchor(&shared_root.join("git-objects"))?),
-                shared_tip,
-            )?;
-            git(
-                &fixture.git,
-                &fixture.home,
-                &fixture.lane,
-                None,
-                &["reset", "--hard", &shared_tip.to_string()],
-            )?;
-            fs::write(fixture.project.join("host-work"), "host branch advanced\n")?;
-            host(&["add", "host-work"])?;
-            host(&["commit", "-qm", "host main commit"])?;
-            git(
-                &fixture.git,
-                &fixture.home,
-                &fixture.lane,
-                None,
-                &["merge", "--no-edit", "main"],
-            )?;
-            base = oid(git(
-                &fixture.git,
-                &fixture.home,
-                &fixture.lane,
-                None,
-                &["rev-parse", "HEAD"],
-            )?)?;
-        } else if scenario.starts_with("diverged") {
-            fs::write(fixture.project.join("host-work"), "divergent host commit\n")?;
-            host(&["add", "host-work"])?;
-            host(&["commit", "-qm", "divergent host base"])?;
-            base = oid(host(&["rev-parse", "HEAD"])?)?;
-        }
-        if scenario == "missing_object" {
-            base = GitOid::parse("1111111111111111111111111111111111111111")?;
-        }
-        // A deliberately different staged index makes reset-vs-preserve visible.
-        fs::write(fixture.lane.join("staged"), "staged sibling work\n")?;
-        fixture.git_shared(&shared_root, &["add", "staged"])?;
-        let staged_tree = oid(fixture.git_shared(&shared_root, &["write-tree"])?)?;
-        let interleaved = std::rc::Rc::new(std::cell::RefCell::new(None));
-        if scenario.starts_with("interrupted")
-            || matches!(scenario, "superseded_reset" | "reset_interleave")
-        {
-            super::view::FAIL_SHARED_INDEX_RESET.with(|fault| fault.set(true));
-            assert!(prepare("interrupted", base).is_err());
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
-                base
-            );
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
-                staged_tree
-            );
-            assert!(shared_root.join("pending-index-reset.json").exists());
-            if scenario == "superseded_reset" {
-                // A live sibling commits before retry. Its new index and tip
-                // supersede the interrupted reset's target.
-                fs::write(
-                    fixture.lane.join("sibling-new"),
-                    "sibling commit after interruption\n",
-                )?;
-                fixture.git_shared(&shared_root, &["add", "sibling-new"])?;
-                fixture.git_shared(&shared_root, &["commit", "-qm", "sibling advanced"])?;
-                base = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
-            }
-        }
-        if matches!(scenario, "reset_interleave" | "cas_interleave") {
-            // Commit after launch sampled the old tip but before read-tree
-            // acquires index.lock. It must resolve the newer HEAD under that lock.
-            let (git, home, lane, root) = (
-                fixture.git.clone(),
-                fixture.home.clone(),
-                fixture.lane.clone(),
-                shared_root.clone(),
-            );
-            let result = interleaved.clone();
-            let cas_interleave = scenario == "cas_interleave";
-            let target = base;
-            let hook: Box<dyn FnOnce()> = Box::new(move || {
-                let run = |arguments: &[&str]| -> TestResult<Output> {
-                    let out = provenant_os::fixture::git_command_at(&git)
-                        .env_clear()
-                        .envs(provenant_os::fixture::fixture_git_settings())
-                        .env("PATH", "/usr/bin:/bin")
-                        .env("HOME", &home)
-                        .env("GIT_DIR", root.join("git-common"))
-                        .env("GIT_COMMON_DIR", root.join("git-common"))
-                        .env("GIT_OBJECT_DIRECTORY", root.join("git-objects"))
-                        .env("GIT_WORK_TREE", &lane)
-                        .current_dir(&lane)
-                        .args(arguments)
-                        .output()?;
-                    if !out.status.success() {
-                        return Err(format!(
-                            "interleaved Git failed: {}",
-                            String::from_utf8_lossy(&out.stderr)
-                        )
-                        .into());
-                    }
-                    Ok(out)
-                };
-                *result.borrow_mut() = Some((|| -> TestResult<GitOid> {
-                    if cas_interleave {
-                        run(&["update-ref", "refs/heads/lane", &target.to_string()])?;
-                    } else {
-                        fs::write(lane.join("interleaved-file"), "live sibling edit\n")?;
-                        run(&["add", "interleaved-file"])?;
-                        run(&["commit", "-qm", "live sibling commit"])?;
-                    }
-                    oid(run(&["rev-parse", "HEAD"])?)
-                })());
-            });
-            if cas_interleave {
-                super::view::BEFORE_SHARED_TIP_CAS.with(|slot| *slot.borrow_mut() = Some(hook));
-            } else {
-                super::view::BEFORE_SHARED_INDEX_RESET.with(|slot| *slot.borrow_mut() = Some(hook));
-            }
-        }
-        let prepared = prepare("second", base);
-        if matches!(scenario, "reset_interleave" | "cas_interleave") {
-            base = interleaved
-                .borrow_mut()
-                .take()
-                .ok_or("interleaved commit did not run")??;
-        }
-        if scenario == "missing_object" {
-            assert!(
-                matches!(prepared, Err(e) if matches!(e.downcast_ref::<crate::RunError>(), Some(crate::RunError::OperationIo { .. })))
-            );
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
-                shared_tip
-            );
-            continue;
-        }
-        if scenario == "diverged_live" {
-            assert!(
-                matches!(prepared, Err(e) if matches!(e.downcast_ref::<crate::RunError>(), Some(crate::RunError::SharedViewBaseMismatch)))
-            );
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
-                shared_tip
-            );
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
-                staged_tree
-            );
-            continue;
-        }
-        let prepared = prepared?;
-        let expected = if scenario == "child" {
-            shared_tip
-        } else {
-            base
-        };
-        assert_eq!(prepared.base, expected, "{scenario}");
-        assert!(!shared_root.join("pending-index-reset.json").exists());
-        assert_eq!(
-            oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?,
-            expected
-        );
-        if matches!(scenario, "equal" | "child") {
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
-                staged_tree
-            );
-        } else {
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
-                oid(fixture
-                    .git_shared(&shared_root, &["rev-parse", &format!("{base}^{{tree}}")])?)?
-            );
-        }
-        if matches!(
-            scenario,
-            "cancelled" | "diverged_idle" | "interrupted_reseed"
-        ) {
-            assert_eq!(prepared.recovered, Some(shared_tip));
-            let reference = format!("refs/provenant/recovery/{shared_tip}");
-            assert_eq!(
-                oid(fixture.git_shared(&shared_root, &["rev-parse", &reference])?)?,
-                shared_tip
-            );
-            // The retained commit and its content remain readable after reseeding.
-            assert_eq!(
-                fixture
-                    .git_shared(&shared_root, &["show", &format!("{reference}:parent-work")])?
-                    .stdout,
-                b"parent commit\n"
-            );
-            // Reseeding the same displaced tip again reuses its recovery pin.
-            fixture.git_shared(
-                &shared_root,
-                &["update-ref", "refs/heads/lane", &shared_tip.to_string()],
-            )?;
-            let retry = prepare("retry", base)?;
-            assert_eq!(retry.recovered, Some(shared_tip));
-        } else {
-            assert_eq!(prepared.recovered, None);
-        }
-        assert_eq!(
-            fs::read(fixture.lane.join("staged"))?,
-            b"staged sibling work\n"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn interrupted_shared_budget_merge_resumes_for_target_and_descendant() -> TestResult {
+fn host_git_uses_the_pinned_attempt_common_directory() -> TestResult {
     let fixture = Fixture::new("sha1")?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["reset", "--hard", &fixture.base.to_string()],
-    )?;
-    provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
-    let shared_root = fixture.root.join("shared-budget-view");
-    fs::create_dir(&shared_root)?;
-    fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
-    for component in ["git-common", "git-objects"] {
-        let path = shared_root.join(component);
-        fs::create_dir(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let attempt_path = fixture.root.join("budget-attempt");
-    let scratch = attempt_path.join("tmp/candidate-0");
-    fs::create_dir_all(&scratch)?;
-    let attempt = Directory::open_anchor(&attempt_path)?;
-    let prepared = super::prepare_shared_bound(
-        &fixture.git,
-        fixture.worktree.repo(),
-        &attempt,
-        &scratch,
-        "refs/heads/lane",
-        fixture.base,
-        crate::objects::SharedViewLaunch {
-            root: &shared_root,
-            custody_slot: None,
-            current_attempt: None,
-        },
-    )
-    .map_err(|error| -> Box<dyn Error> { error.into() })?;
-    assert_eq!(prepared.base, fixture.base);
-    let source = super::bound_source(&attempt)?.ok_or("shared attempt binding")?;
-
-    fs::write(
-        fixture.lane.join("staged-unique"),
-        "staged sibling content\n",
-    )?;
-    fixture.git_shared(&shared_root, &["add", "staged-unique"])?;
-    let staged_tree = oid(fixture.git_shared(&shared_root, &["write-tree"])?)?;
-
-    fs::write(fixture.lane.join("host-advanced"), "host branch content\n")?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["add", "host-advanced"],
-    )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["commit", "-qm", "host branch advance"],
-    )?;
-    let base = oid(git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["rev-parse", "HEAD"],
-    )?)?;
-    assert_ne!(base, fixture.base);
-
-    super::view::FAIL_SHARED_INDEX_RESET.with(|fault| fault.set(true));
-    let interrupted = super::advance_shared_budget_base(
-        &fixture.git,
-        &source,
-        fixture.worktree.repo(),
-        &attempt,
-        crate::objects::SharedBudgetAdvance {
-            branch: "refs/heads/lane",
-            base,
-            custody_slot: None,
-            current_attempt: None,
-        },
-    );
-    assert!(matches!(
-        interrupted,
-        Err(crate::RunError::Validation(
-            "injected shared index reset failure"
-        ))
-    ));
-    assert_eq!(super::private_tip(&source, "refs/heads/lane")?, base);
-    assert_eq!(
-        oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
-        staged_tree
-    );
-    let pending: serde_json::Value =
-        serde_json::from_slice(&fs::read(shared_root.join("pending-index-reset.json"))?)?;
-    let expected_old = fixture.base.to_string();
-    let expected_target = base.to_string();
-    assert_eq!(pending["merge_from"].as_str(), Some(expected_old.as_str()));
-    assert_eq!(pending["target"].as_str(), Some(expected_target.as_str()));
-
-    let retry_path = fixture.root.join("budget-retry");
-    let retry_scratch = retry_path.join("tmp/candidate-0");
-    fs::create_dir_all(&retry_scratch)?;
-    let retry_attempt = Directory::open_anchor(&retry_path)?;
-    let retry = super::prepare_shared_bound(
-        &fixture.git,
-        fixture.worktree.repo(),
-        &retry_attempt,
-        &retry_scratch,
-        "refs/heads/lane",
-        base,
-        crate::objects::SharedViewLaunch {
-            root: &shared_root,
-            custody_slot: None,
-            current_attempt: None,
-        },
-    )
-    .map_err(|error| -> Box<dyn Error> { error.into() })?;
-    assert_eq!(retry.base, base);
-    assert!(!shared_root.join("pending-index-reset.json").exists());
-    assert_eq!(super::private_tip(&source, "refs/heads/lane")?, base);
-    assert_eq!(
-        fixture
-            .git_shared(&shared_root, &["show", ":staged-unique"])?
-            .stdout,
-        b"staged sibling content\n"
-    );
-    assert_eq!(
-        fixture
-            .git_shared(&shared_root, &["show", ":host-advanced"])?
-            .stdout,
-        b"host branch content\n"
-    );
-
-    fs::write(
-        fixture.lane.join("staged-descendant"),
-        "staged descendant content\n",
-    )?;
-    fixture.git_shared(&shared_root, &["add", "staged-descendant"])?;
-    let staged_descendant_tree = oid(fixture.git_shared(&shared_root, &["write-tree"])?)?;
-    fs::write(
-        fixture.lane.join("host-advanced-again"),
-        "second host advance\n",
-    )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["add", "host-advanced-again"],
-    )?;
-    git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["commit", "-qm", "second host branch advance"],
-    )?;
-    let next_base = oid(git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["rev-parse", "HEAD"],
-    )?)?;
-    super::view::FAIL_SHARED_INDEX_RESET.with(|fault| fault.set(true));
-    let interrupted = super::advance_shared_budget_base(
-        &fixture.git,
-        &source,
-        fixture.worktree.repo(),
-        &attempt,
-        crate::objects::SharedBudgetAdvance {
-            branch: "refs/heads/lane",
-            base: next_base,
-            custody_slot: None,
-            current_attempt: None,
-        },
-    );
-    assert!(matches!(
-        interrupted,
-        Err(crate::RunError::Validation(
-            "injected shared index reset failure"
-        ))
-    ));
-    assert_eq!(super::private_tip(&source, "refs/heads/lane")?, next_base);
-    assert_eq!(
-        oid(fixture.git_shared(&shared_root, &["write-tree"])?)?,
-        staged_descendant_tree
-    );
-
-    // Move the shared ref beyond the pending target using an independent index,
-    // leaving the interrupted shared index intact for journal recovery.
-    let sibling_index = fixture.root.join("sibling-index");
-    fixture.git_shared_with_index(&shared_root, Some(&sibling_index), &["read-tree", "HEAD"])?;
-    fs::write(fixture.lane.join("sibling-later"), "sibling descendant\n")?;
-    fixture.git_shared_with_index(
-        &shared_root,
-        Some(&sibling_index),
-        &["add", "sibling-later"],
-    )?;
-    fixture.git_shared_with_index(
-        &shared_root,
-        Some(&sibling_index),
-        &["commit", "-qm", "sibling descendant"],
-    )?;
-    let descendant = oid(fixture.git_shared(&shared_root, &["rev-parse", "HEAD"])?)?;
-    assert_ne!(descendant, next_base);
-
-    let descendant_retry_path = fixture.root.join("budget-descendant-retry");
-    let descendant_retry_scratch = descendant_retry_path.join("tmp/candidate-0");
-    fs::create_dir_all(&descendant_retry_scratch)?;
-    let descendant_retry_attempt = Directory::open_anchor(&descendant_retry_path)?;
-    let descendant_retry = super::prepare_shared_bound(
-        &fixture.git,
-        fixture.worktree.repo(),
-        &descendant_retry_attempt,
-        &descendant_retry_scratch,
-        "refs/heads/lane",
-        descendant,
-        crate::objects::SharedViewLaunch {
-            root: &shared_root,
-            custody_slot: None,
-            current_attempt: None,
-        },
-    )
-    .map_err(|error| -> Box<dyn Error> { error.into() })?;
-    assert_eq!(descendant_retry.base, descendant);
-    assert!(!shared_root.join("pending-index-reset.json").exists());
-    assert_eq!(super::private_tip(&source, "refs/heads/lane")?, descendant);
-    assert_eq!(
-        fixture
-            .git_shared(&shared_root, &["show", ":staged-unique"])?
-            .stdout,
-        b"staged sibling content\n"
-    );
-    assert_eq!(
-        fixture
-            .git_shared(&shared_root, &["show", ":staged-descendant"])?
-            .stdout,
-        b"staged descendant content\n"
-    );
-    assert_eq!(
-        fixture
-            .git_shared(&shared_root, &["show", ":sibling-later"])?
-            .stdout,
-        b"sibling descendant\n"
-    );
-    Ok(())
-}
-
-#[test]
-fn host_git_rejects_planted_commondir() -> TestResult {
-    let fixture = Fixture::new("sha1")?;
-    provenant_confinement::worktrees::acquire_worktree_subject(fixture.worktree.repo())?;
-    let shared_root = fixture.root.join("shared-context-planted-commondir");
-    fs::create_dir_all(&shared_root)?;
-    fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o700))?;
-    for name in ["git-common", "git-objects"] {
-        let path = shared_root.join(name);
-        fs::create_dir(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let attempt_path = fixture.root.join("shared-attempt-1");
-    let scratch = attempt_path.join("tmp/candidate-0");
-    fs::create_dir_all(&scratch)?;
-    let attempt = Directory::open_anchor(&attempt_path)?;
-    super::prepare_shared_bound(
-        &fixture.git,
-        fixture.worktree.repo(),
-        &attempt,
-        &scratch,
-        "refs/heads/lane",
-        fixture.base,
-        crate::objects::SharedViewLaunch {
-            root: &shared_root,
-            custody_slot: None,
-            current_attempt: None,
-        },
-    )?;
-
-    // Plant a commondir file in git-common pointing to a rogue directory
+    let (_, scratch) = fixture.prepare_attempt("attempt-with-planted-commondir", fixture.base)?;
+    let common = scratch.join("git-common");
     let rogue = fixture.root.join("rogue-dir");
     fs::create_dir_all(&rogue)?;
-    let commondir = shared_root.join("git-common/commondir");
-    fs::write(&commondir, format!("{}\n", rogue.display()))?;
+    fs::write(common.join("commondir"), format!("{}\n", rogue.display()))?;
 
-    // Attempting to bind or verify the shared view must fail because commondir is denied
-    let attempt2_path = fixture.root.join("shared-attempt-2");
-    let scratch2 = attempt2_path.join("tmp/candidate-0");
-    fs::create_dir_all(&scratch2)?;
-    let attempt2 = Directory::open_anchor(&attempt2_path)?;
-    assert!(
-        super::prepare_shared_bound(
-            &fixture.git,
-            fixture.worktree.repo(),
-            &attempt2,
-            &scratch2,
-            "refs/heads/lane",
-            fixture.base,
-            crate::objects::SharedViewLaunch {
-                root: &shared_root,
-                custody_slot: None,
-                current_attempt: None
-            },
-        )
-        .is_err()
-    );
-
-    // Also verify execute_bounded sets GIT_COMMON_DIR so host Git does not follow commondir
     let stdout = super::execute_bounded(
         &fixture.git,
-        &shared_root.join("git-common"),
+        &common,
         fixture.worktree.repo().root_path(),
-        &[
-            std::ffi::OsString::from("rev-parse"),
-            std::ffi::OsString::from("--git-common-dir"),
-        ],
+        &super::args(&["rev-parse", "--git-common-dir"]),
         None,
         super::Execution {
-            common_directory: Some(&shared_root.join("git-common")),
+            common_directory: Some(&common),
             ..Default::default()
         },
     )?;
     let common_reported = std::str::from_utf8(&stdout)?.trim();
-    assert_ne!(common_reported, rogue.to_str().unwrap());
+    assert_ne!(
+        common_reported,
+        rogue.to_str().ok_or("rogue path is not UTF-8")?
+    );
     assert_eq!(
         Path::new(common_reported).canonicalize()?,
-        shared_root.join("git-common").canonicalize()?
+        common.canonicalize()?
     );
-
     Ok(())
 }

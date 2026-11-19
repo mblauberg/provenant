@@ -10,7 +10,10 @@ Paths are relative to `tools/front-door/`.
 A settlement driver holds an exclusive lease. Journal locks do not span external
 commands, and terminal effects have separate exclusion. Import precedes
 writer branch publication, the terminal record is committed before custody release, and
-import refusal retains private Git for recovery.
+import refusal retains private Git for recovery. Private staged snapshots survive
+terminal cleanup for recovery.
+Each attempt publishes only its private ref; a sibling-divergent host tip
+refuses publication while retaining both commits for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 Publication accepts a lane tip that descends from the launch base, the origin

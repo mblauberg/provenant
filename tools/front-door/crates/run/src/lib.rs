@@ -540,10 +540,6 @@ pub enum RunError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: attempt reservation retained")]
     AttemptReservationRetained,
-    #[error(
-        "shared worktree Git history diverged while sibling lanes are live; wait for siblings to finish or use an independent worktree"
-    )]
-    SharedViewBaseMismatch,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
     #[error(transparent)]
@@ -969,11 +965,6 @@ impl RunError {
                         "run `{}` to resume import, or `{}` to release custody and recover the preserved private Git manually",
                         fence.reconcile(), fence.abandon()
                     ));
-            }
-            Self::SharedViewBaseMismatch => {
-                diagnostic = kind.diagnostic().detail(
-                    "the shared worktree view has diverged from the launch base while live siblings exist",
-                );
             }
             _ => {}
         }

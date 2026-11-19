@@ -190,217 +190,151 @@ fn terminal_settles_and_publishes_rebased_lane()
 }
 
 #[test]
-fn terminal_publishes_child_commit_from_live_parent_shared_view()
+fn private_attempt_git_views_keep_commits_and_staged_paths_separate()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     let host_base = fixture.prepare()?.head(&fixture.writer)?;
     let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let child_head = std::cell::RefCell::new(None);
-    let shared_base = std::cell::RefCell::new(None);
+    provenant_os::fixture::private_state_dir(&fixture.root.join("home"))?;
+    let runtime = provenant_confinement::UtilityRuntime::new(
+        &executable,
+        fixture.root.join("home"),
+        fixture.root.join("state"),
+    )?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let repo = runtime.open_repo(&executor, &fixture.writer.project, budget, &cancel)?;
+    let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
 
-    let review = fixture.terminal_shared(|| {
-        use provenant_os::fs::LockMode;
-
-        let attempt_path = fixture.root.join("attempt");
-        let attempt = Directory::open_anchor(&attempt_path)?;
+    let prepare = |name: &str,
+                   base: GitOid|
+     -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        let attempt_path = fixture.root.join(name);
         let scratch = attempt_path.join("tmp/candidate-0");
         std::fs::create_dir_all(&scratch)?;
-        let state = fixture.root.join("state");
-        let runtime = provenant_confinement::UtilityRuntime::new(
-            &executable,
-            fixture.root.join("home"),
-            &state,
-        )?;
-        let executor = SystemExecutor::new(1)?;
-        let cancel = provenant_core::CancelToken::new();
-        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
-        let repo = runtime.open_repo(&executor, &fixture.writer.project, budget, &cancel)?;
-        let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
-        provenant_confinement::worktrees::acquire_worktree_subject(worktree.repo())?;
-        let scope = provenant_records::custody::Scope {
-            generation: 1,
-            ..crate::tests::exit().scope
-        };
-
-        let shared_root = fixture.root.join("shared-view");
-        provenant_os::fixture::private_state_dir(&shared_root)?;
-        for name in ["git-common", "git-objects"] {
-            provenant_os::fixture::private_state_dir(&shared_root.join(name))?;
-        }
-        let parent_attempt_path = fixture.root.join("parent-attempt");
-        let parent_scratch = parent_attempt_path.join("tmp/candidate-0");
-        std::fs::create_dir_all(&parent_scratch)?;
-        let parent_attempt = Directory::open_anchor(&parent_attempt_path)?;
-        let parent_preparation = crate::objects::prepare_shared_bound(
+        crate::objects::prepare_bound(
             &executable,
             worktree.repo(),
-            &parent_attempt,
-            &parent_scratch,
-            "refs/heads/lane",
-            host_base,
-            crate::objects::SharedViewLaunch {
-                root: &shared_root,
-                custody_slot: None,
-                current_attempt: None,
-            },
-        )?;
-        assert_eq!(parent_preparation.base, host_base);
-
-        std::fs::write(fixture.writer.worktree.join("parent.txt"), "parent edit\n")?;
-        private_git(&fixture, &shared_root, &executable, &["add", "parent.txt"])?;
-        private_git(
-            &fixture,
-            &shared_root,
-            &executable,
-            &["commit", "-qm", "parent commit"],
-        )?;
-        let parent_tip = GitOid::parse(&private_git(
-            &fixture,
-            &shared_root,
-            &executable,
-            &["rev-parse", "HEAD"],
-        )?)?;
-        let layout =
-            runtime.project_layout_for_common(&executor, repo.common_git_dir(), budget, &cancel)?;
-
-        // A live parent's holder lets the child adopt its shared commit.
-        let slot_path = fixture.root.join("shared-custody-slot");
-        std::fs::create_dir_all(&slot_path)?;
-        let slot = Directory::open_anchor(&slot_path)?;
-        for name in ["parent-holder", "attempt"] {
-            std::fs::create_dir_all(slot_path.join(name))?;
-        }
-        let parent_holder_dir =
-            slot.open_verified_directory(std::ffi::OsStr::new("parent-holder"))?;
-        let parent_holder = parent_holder_dir.try_lock(
-            std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
-            LockMode::Exclusive,
-        )?;
-        let current_holder_dir = slot.open_verified_directory(std::ffi::OsStr::new("attempt"))?;
-        let _current_holder = current_holder_dir.try_lock(
-            std::ffi::OsStr::new(provenant_supervisor::custody::HOLDER_LOCK),
-            LockMode::Exclusive,
-        )?;
-        let current_attempt = "attempt".to_owned();
-
-        let child_preparation = crate::objects::prepare_shared_bound(
-            &executable,
-            worktree.repo(),
-            &attempt,
+            &Directory::open_anchor(&attempt_path)?,
             &scratch,
             "refs/heads/lane",
-            host_base,
-            crate::objects::SharedViewLaunch {
-                root: &shared_root,
-                custody_slot: Some(&slot),
-                current_attempt: Some(&current_attempt),
-            },
+            base,
         )?;
-        assert_eq!(child_preparation.base, parent_tip);
+        Ok(scratch)
+    };
 
-        let writer = crate::writer::WriterLaunch {
-            worktree,
-            branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
-            layout,
-            executor_root: repo.root_path().to_path_buf(),
-            executor_root_identity: repo.root_identity(),
-            base: host_base,
-            custody: Some((
-                slot,
-                provenant_supervisor::custody::WriterBinding::read_only(),
-            )),
-            facts: Default::default(),
-        };
-        writer.snapshot_shared(
-            &state,
-            &attempt,
-            scope,
-            &provenant_records::policy::Policy::default(),
-            Some(child_preparation.base),
-        )?;
+    let sibling = prepare("sibling-attempt", host_base)?;
+    let parent = prepare("parent-attempt", host_base)?;
+    std::fs::write(
+        fixture.writer.worktree.join("sibling.txt"),
+        "sibling staged version\n",
+    )?;
+    private_git(&fixture, &sibling, &executable, &["add", "sibling.txt"])?;
+    let sibling_tree = private_git(&fixture, &sibling, &executable, &["write-tree"])?;
 
-        std::fs::write(fixture.writer.worktree.join("parent.txt"), "child edit\n")?;
-        std::fs::write(fixture.writer.worktree.join("child.txt"), "child edit\n")?;
+    std::fs::write(
+        fixture.writer.worktree.join("parent.txt"),
+        "parent commit\n",
+    )?;
+    private_git(&fixture, &parent, &executable, &["add", "parent.txt"])?;
+    // A plain commit consumes the attempt's full staged snapshot. The sibling's
+    // staged path is absent from this index and cannot enter the commit.
+    private_git(
+        &fixture,
+        &parent,
+        &executable,
+        &["commit", "-qm", "parent commit"],
+    )?;
+    let parent_tip = private_git(&fixture, &parent, &executable, &["rev-parse", "HEAD"])?;
+    assert_eq!(
+        private_git(&fixture, &parent, &executable, &["rev-parse", "HEAD^"])?,
+        host_base.to_string()
+    );
+    assert!(
         private_git(
             &fixture,
-            &shared_root,
+            &parent,
             &executable,
-            &["add", "parent.txt", "child.txt"],
-        )?;
+            &["cat-file", "-e", "HEAD:sibling.txt"]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["write-tree"])?,
+        sibling_tree
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["show", ":sibling.txt"])?,
+        "sibling staged version"
+    );
+
+    // Advance the host branch and launch a third attempt at that tip. The live
+    // sibling's index remains byte-for-byte represented by the same tree.
+    std::fs::write(
+        fixture.writer.worktree.join("host-advance.txt"),
+        "host advance\n",
+    )?;
+    fixture.lane_git(&["add", "host-advance.txt"])?;
+    fixture.commit(&fixture.writer.worktree, "host advance")?;
+    let host_tip = GitOid::parse(&worktree_git(
+        &fixture,
+        &executable,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    assert_ne!(host_tip, host_base);
+    let child = prepare("child-attempt", host_tip)?;
+    assert_eq!(
+        private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?,
+        host_tip.to_string()
+    );
+    assert!(
         private_git(
             &fixture,
-            &shared_root,
+            &child,
             &executable,
-            &["commit", "-qm", "child commit"],
-        )?;
-        let tip = GitOid::parse(&private_git(
-            &fixture,
-            &shared_root,
-            &executable,
-            &["rev-parse", "HEAD"],
-        )?)?;
-        let tip_text = tip.to_string();
-        let parent_tip_text = parent_tip.to_string();
-        let changed_paths = private_git(
-            &fixture,
-            &shared_root,
-            &executable,
-            &["diff", "--name-only", &parent_tip_text, &tip_text],
-        )?;
-        assert_eq!(
-            changed_paths.lines().collect::<Vec<_>>(),
-            ["child.txt", "parent.txt"]
-        );
-
-        let note = writer.unpublish(&attempt);
-        assert!(note.contains("shared worktree left intact"), "{note}");
-        assert_eq!(
-            std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,
-            "child edit\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(fixture.writer.worktree.join("child.txt"))?,
-            "child edit\n"
-        );
-        drop(parent_holder);
-        let note = writer.unpublish(&attempt);
-        assert!(note.contains("worktree restored"), "{note}");
-        assert!(note.contains(&parent_tip.to_string()), "{note}");
-        assert_eq!(
-            std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,
-            "parent edit\n"
-        );
-        assert!(!fixture.writer.worktree.join("child.txt").exists());
-        *child_head.borrow_mut() = Some(tip);
-        *shared_base.borrow_mut() = Some(child_preparation.base);
-        Ok(child_preparation.base)
-    })?;
-
-    assert!(!review);
-    let child_head = child_head.into_inner().ok_or("child tip")?;
-    let shared_base = shared_base.into_inner().ok_or("shared launch base")?;
-    let pins = crate::artifacts::read_sealed(
-        &Directory::open_anchor(&fixture.root.join("attempt"))?,
-        "writer-git-pins.json",
-        crate::RECORD_LIMIT,
-    )?
-    .ok_or("writer Git pins")?;
-    let pins: serde_json::Value = crate::db::decode(&pins)?;
-    let host_base_text = host_base.to_string();
-    let shared_base_text = shared_base.to_string();
-    assert_eq!(pins["base"].as_str(), Some(host_base_text.as_str()));
-    assert_eq!(
-        pins["shared_base"].as_str(),
-        Some(shared_base_text.as_str())
-    );
-    assert_eq!(fixture.prepare()?.head(&fixture.writer)?, child_head);
-    assert_eq!(
-        std::fs::read_to_string(fixture.writer.worktree.join("parent.txt"))?,
-        "child edit\n"
+            &["cat-file", "-e", &parent_tip]
+        )
+        .is_err()
     );
     assert_eq!(
-        std::fs::read_to_string(fixture.writer.worktree.join("child.txt"))?,
-        "child edit\n"
+        private_git(&fixture, &sibling, &executable, &["write-tree"])?,
+        sibling_tree
+    );
+    assert_eq!(
+        private_git(&fixture, &sibling, &executable, &["show", ":sibling.txt"])?,
+        "sibling staged version"
+    );
+
+    std::fs::write(fixture.writer.worktree.join("child.txt"), "child commit\n")?;
+    private_git(&fixture, &child, &executable, &["add", "child.txt"])?;
+    private_git(
+        &fixture,
+        &child,
+        &executable,
+        &["commit", "-qm", "child commit"],
+    )?;
+    let child_tip = private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?;
+    assert_eq!(
+        private_git(&fixture, &child, &executable, &["rev-parse", "HEAD^"])?,
+        host_tip.to_string()
+    );
+    assert!(
+        private_git(
+            &fixture,
+            &child,
+            &executable,
+            &["cat-file", "-e", &parent_tip]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        private_git(&fixture, &parent, &executable, &["rev-parse", "HEAD"])?,
+        parent_tip
+    );
+    assert_eq!(
+        private_git(&fixture, &child, &executable, &["rev-parse", "HEAD"])?,
+        child_tip
     );
     Ok(())
 }

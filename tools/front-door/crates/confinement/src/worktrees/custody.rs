@@ -60,14 +60,14 @@ pub fn acquire_worktree_subject(
     worktree_subject(repo)
 }
 
-/// A writer must pass this check before its terminal result is accepted.
-/// Index and working-tree cleanliness do not prove a Git operation has ended.
+/// Native worktree mutations and removal require completed Git operations.
+/// Index and working-tree cleanliness alone do not prove completion.
 pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
     check_writer_terminal_with_expected_merge(repo, None)
 }
 
-/// Accept only the merge metadata restored from a verified private writer
-/// view. Other Git operations remain terminal refusals.
+/// Accept only the explicitly expected merge marker. Other Git operations
+/// remain unfinished.
 pub fn check_writer_terminal_with_merge(
     repo: &VerifiedRepo,
     merge_head: &[u8],
@@ -80,6 +80,16 @@ fn check_writer_terminal_with_expected_merge(
     expected_merge: Option<&[u8]>,
 ) -> Result<(), WorktreeError> {
     repo.revalidate()?;
+    check_git_operation_terminal(repo.private_dir(), expected_merge)?;
+    repo.revalidate()?;
+    Ok(())
+}
+
+/// Inspect the Git state owned by a writer, including an attempt-private view.
+pub fn check_git_operation_terminal(
+    private: &Directory,
+    expected_merge: Option<&[u8]>,
+) -> Result<(), WorktreeError> {
     for marker in [
         "CHERRY_PICK_HEAD",
         "REVERT_HEAD",
@@ -92,21 +102,18 @@ fn check_writer_terminal_with_expected_merge(
         if marker == "MERGE_HEAD"
             && let Some(expected) = expected_merge
         {
-            let actual = repo
-                .private_dir()
-                .read_stable(OsStr::new(marker), 1024 * 1024)?;
+            let actual = private.read_stable(OsStr::new(marker), 1024 * 1024)?;
             if actual != expected {
                 return Err(WorktreeError::GitOperationInProgress);
             }
             continue;
         }
-        match repo.private_dir().metadata_at(OsStr::new(marker), false) {
+        match private.metadata_at(OsStr::new(marker), false) {
             Ok(_) => return Err(WorktreeError::GitOperationInProgress),
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
     }
-    repo.revalidate()?;
     Ok(())
 }
 

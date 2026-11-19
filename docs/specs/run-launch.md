@@ -27,44 +27,39 @@ checkout. Direct host requests retain authority to select existing checkouts.
 Optional `write_scope` paths are advisory claims: overlaps in one worktree warn
 the owning lane in its admission receipt and checkpoint and refuse nothing.
 By maintainer decision (#3451), path overlap is advisory rather than exclusive;
-a live conflicting writer is not refused. Provenant holds no lock around Git.
-Enforced protections are Git's `index.lock` with brief jittered retry and
-exclusive removal custody requiring zero live holders. Pathspec commits
-(`git commit -m <msg> -- <owned paths>`) are lane guidance (and what Provenant's
-own budget commit does) so lanes avoid committing a sibling's staged paths, rather
-than an enforced guarantee over the shared index. Shared budget commits
-use the immutable minimal shared Git context, letting Git retain its index lock
-through the branch CAS.
-- Why: sharing follows the owner's decision while unrelated lanes stay isolated.
+a live conflicting writer is not refused. Each attempt owns its Git index,
+HEAD, refs, objects, configuration and credentials. `GIT_INDEX_FILE` names the
+index inside its private Git state. A writer index is seeded from the captured
+branch tip, never from a host or sibling staged snapshot. A plain commit can
+therefore include only that attempt's staging; launching another attempt never
+resets or merges a live sibling's index.
+- Why: sharing worktree files must never share staged ownership.
 
-Authorised writers share incarnation- and branch-bound private Git data,
-including HEAD, index, refs and objects. Per-attempt configuration and credentials
-remain separate; private data outlives an individual attempt's scratch.
-Launch and budget recovery use the same shared-tip policy under the shared
-view's existing initialisation gate. An ancestor tip advances by compare-and-swap;
-launch resets its index to the host base, while budget recovery carries staged
-paths with a two-tree merge. Durable index-transition intent distinguishes a
-reset from a staged-index merge after a native host advance. Retries retain the
-old base needed for that merge; a later tip supersedes a pending reset. Both
-modes resolve HEAD while Git holds its index lock. An equal-tip launch without
-pending intent preserves staged edits. A launch behind a live sibling adopts
-the shared tip as its work base, while custody retains the host base for publication's
-compare-and-swap. Scope reporting starts at the adopted base so a child's work
-does not include its parent's commits. With no other live holders, a differing
-tip is retained at `refs/provenant/recovery/<tip>` in the shared Git directory
-before reseeding and warning. Only divergent histories with live siblings
-refuse, with a next step to wait or use an independent worktree. Git failures
-remain failures rather than ancestry answers.
-Liveness comes from each other attempt's retained occupancy holder proof,
-excluding the current attempt. `other_holders_live` is observed before performing
-unscoped budget commits or convergence restore; concurrent sibling registration
-in the narrow residual window between observation and mutation is allowed by
-design. Unscoped budget stops preserve files while siblings live; a lone holder
-can commit all its work and restore files on failed publication.
-Settlement copies object files through held, no-follow descriptors into a byte- and entry-bounded
-host-owned sender before sanitising sidecars. It preserves the live shared
-store and its validated host alternate; inconsistent input fails integrity checks
-before publication. Budget preparation also preserves that alternate.
+Complete attempt-private Git views preserve native semantics for commit, merge,
+cherry-pick, rebase and other commit-producing commands. They avoid a shell
+interceptor that would need to reproduce every Git publication operation.
+Commits become visible on the host branch only after object verification and
+settlement's expected-old-tip compare-and-swap. A sibling's divergent publication
+refuses and retains the losing attempt's private commits and index for recovery;
+it never replaces the winner. There is no automatic rebase or two-tree retry
+of a divergent lane. A continuation that needs a predecessor commit launches
+after that predecessor settles, or explicitly selects an independently available
+source. Scope attribution starts at the attempt's captured launch tip.
+Budget commits build an owned-path tree in a disposable index, obtain the OID
+from `commit-tree`, and publish it by compare-and-swap into the attempt's own
+ref. They never attribute a later observation of shared HEAD to the attempt.
+- Why: every Git operation gets private state, and publication conflicts preserve both histories.
+
+Unscoped budget stops leave files intact while another holder is live. A lone
+holder can commit its work; declared path scopes bound automatic staging.
+
+Settlement copies object files through held, no-follow descriptors into a byte-
+and entry-bounded host-owned sender before sanitising sidecars. Inconsistent
+input fails integrity checks before publication. Unpublished commits and staged
+indexes remain private recovery evidence through terminal cleanup. Settlement
+advances only the native committed index with Git's index-only two-tree merge
+under its index lock, leaving working files intact. Conflicting native staging or
+operations stay intact; private staging and stopped-merge metadata are never copied into the native index.
 Git owns the atomicity of config, index, refs and worktree registration. Provenant
 holds no repository-wide lock around Git commands. Explicit `*.lock` collisions
 receive brief bounded retries with jitter; semantic conflicts and permission

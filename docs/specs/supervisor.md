@@ -323,13 +323,12 @@ inventory; the common Git directory's parent does not establish that owner.
 
 ### Shared Git metadata is read-only
 
-Authorised writers of one worktree incarnation and branch share private Git
-data, with the repository object store as a read-only alternate. Configuration
-and credentials remain private to each attempt. The repository's refs, config,
-hooks and admin metadata stay read-only to lanes; the host imports the result
-and moves the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
-- Why: ordinary Git works in the lane while one host boundary guards shared
-  metadata.
+Each writer owns an attempt-private Git view with separate refs, index,
+objects, configuration and credentials, using the repository object store as a
+read-only alternate. The repository's refs, config, alternates, hooks and admin
+metadata stay read-only to lanes. The host imports verified objects and moves
+the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
+- Why: ordinary Git works in the lane while one host boundary guards shared metadata.
 
 ### Native environment and sandbox tool stores
 
@@ -439,12 +438,10 @@ Git's own inventory is the worktree registry. A worktree's owning lane decides
 who else writes in it. Worktree occupancy is a shared lease: any number of lanes
 may hold one worktree simultaneously. By maintainer decision (#3451), path claims
 are advisory and overlapping claims refuse nothing; a live conflicting writer is
-not excluded by Provenant. Enforced protections are Git's `index.lock` with retry
-and exclusive removal custody requiring zero live holders. Pathspec commits are lane
-guidance (used by Provenant's own budget commits) to avoid staging sibling paths, rather
-than an enforced guarantee over the shared index. Sibling registration in the narrow residual
-window between an `other_holders_live` observation and budget commit or convergence
-restore is allowed by the design. Custody outlives the requesting call. Each attempt
+not excluded by Provenant. Attempts own separate Git refs, indexes and object
+stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
+uses expected-old-tip compare-and-swap after verification, retaining divergent
+private commits for recovery. Custody outlives the requesting call. Each attempt
 also holds its own holder lease; proof that a sibling has settled cannot release
 another attempt's custody. Removal requires exclusive occupancy with zero live holders.
 `worktree remove` refuses the primary, a live writer or observed process, and has

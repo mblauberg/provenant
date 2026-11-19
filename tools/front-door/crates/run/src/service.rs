@@ -572,25 +572,25 @@ impl<'a> Service<'a> {
         if matches!(record.state, AttemptState::Terminal { .. }) {
             record.custody_pending =
                 Some(!self.store.custody_released(&record, call).unwrap_or(false));
-            let restored = self
+            let merge_retained = self
                 .store
                 .attempt_dir(record.attempt_id, false)
                 .ok()
                 .and_then(|attempt| {
                     crate::artifacts::read_sealed_observed(
                         &attempt,
-                        "merge-restored.json",
+                        "private-merge-retained.json",
                         crate::RECORD_LIMIT,
                     )
                     .ok()
                     .flatten()
                 })
-                .and_then(|raw| crate::db::decode::<crate::writer::MergeRestored>(&raw).ok())
+                .and_then(|raw| crate::db::decode::<crate::writer::PrivateMergeRetained>(&raw).ok())
                 .is_some_and(|marker| {
                     marker.schema_version == 1 && marker.scope == crate::RunStore::scope(&record)
                 });
-            if restored && let AttemptState::Terminal { reason, .. } = &mut record.state {
-                let note = "merge index, parents and working files were retained in the worktree";
+            if merge_retained && let AttemptState::Terminal { reason, .. } = &mut record.state {
+                let note = "merge index and parents were retained in attempt-private Git; working files remain in the worktree";
                 *reason = Some(
                     reason
                         .take()
@@ -766,8 +766,6 @@ error_kinds! {
     RetainedWriterImport => "WRITER_IMPORT_RETAINED", "A predecessor writer import remains unresolved.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
     LaneTipUnrooted => "LANE_TIP_UNROOTED", "A lane tip descends from no branch the host knows, so it cannot be published.";
-    SharedViewTipRetained => "SHARED_VIEW_TIP_RETAINED", "A prior shared worktree tip was retained for recovery.";
-    SharedViewBaseMismatch => "SHARED_VIEW_BASE_MISMATCH", "The shared worktree view has diverged from the launch base while live siblings exist.";
 }
 impl ErrorKind {
     /// Safe projection for refusal kinds that do not need additional facts.
@@ -789,10 +787,6 @@ impl ErrorKind {
             Self::DuplicatePacingProfile => {
                 diagnostic.next("remove duplicate pacing profiles for the same account")
             }
-            Self::SharedViewTipRetained => diagnostic.next("inspect the retained recovery ref in the shared worktree Git directory if the prior lane work is still needed"),
-            Self::SharedViewBaseMismatch => diagnostic.next(
-                "wait for live sibling lanes to finish, or run the lane in an independent worktree",
-            ),
             _ => diagnostic,
         }
     }
@@ -800,7 +794,7 @@ impl ErrorKind {
     /// Stable category shared by the output adapters.
     pub const fn category(self) -> &'static str {
         match self {
-            Self::MemoryFloor | Self::StaleReadiness | Self::SharedViewTipRetained => "warning",
+            Self::MemoryFloor | Self::StaleReadiness => "warning",
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound
@@ -832,8 +826,7 @@ impl ErrorKind {
             | Self::QueueFull
             | Self::SecretInput
             | Self::Unsupported
-            | Self::ContinuationUnsupported
-            | Self::SharedViewBaseMismatch => "refused",
+            | Self::ContinuationUnsupported => "refused",
             _ => "error",
         }
     }
@@ -852,7 +845,6 @@ impl ErrorKind {
             | Self::WriterProjectMismatch
             | Self::GuardianIdentity
             | Self::LaneCoordinationRefused => B::Authority,
-            Self::SharedViewBaseMismatch => B::LaneGit,
             _ => B::None,
         }
     }
@@ -929,7 +921,6 @@ impl From<&RunError> for ErrorKind {
                 found, ..
             }) if *found > 1 => Self::UpgradeRequired,
             RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
-            RunError::SharedViewBaseMismatch => Self::SharedViewBaseMismatch,
             _ => Self::Io,
         }
     }
