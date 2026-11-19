@@ -1016,6 +1016,7 @@ pub struct ProviderCommand {
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
     pub secret_input: Option<provenant_os::exec::SecretInput>,
+    pub publication_values: provenant_os::exec::SecretValues,
     /// Opaque, bounded reference for the composed terminal holder. It travels
     /// on the handoff pipe only and is never written to the launch summary.
     pub holder_context: Vec<u8>,

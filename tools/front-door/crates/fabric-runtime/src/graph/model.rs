@@ -777,7 +777,7 @@ pub enum GraphLimitKey {
     ExpansionDepth,
 }
 impl GraphLimitKey {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Nodes => "nodes",
             Self::Edges => "edges",
@@ -841,6 +841,12 @@ pub enum AdmissionError {
     Composite(String),
     #[error("{0}")]
     Plan(String),
+    #[error("{CLOUD_PLACEMENT_REMOVED}")]
+    CloudPlacementRemoved,
+    #[error("node {node}: dependency cycle")]
+    Cycle { node: refusal::GraphIdentifier },
+    #[error("node {node}: writer worktree")]
+    WriterWorktree { node: refusal::GraphIdentifier },
     #[error("{0}")]
     StructuralLimit(GraphStructuralLimit),
     #[error("{0}")]
@@ -907,7 +913,7 @@ impl GraphDocument {
                 .as_ref()
                 .is_some_and(AttemptSpec::names_cloud_placement)
         }) {
-            return Err(AdmissionError::Plan(CLOUD_PLACEMENT_REMOVED.into()));
+            return Err(AdmissionError::CloudPlacementRemoved);
         }
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
@@ -1781,6 +1787,8 @@ pub enum NodeDecisionCause {
         active: bool,
         fallback: bool,
         fragment_error: Option<PlanFailureFact>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structural_limit: Option<GraphStructuralLimit>,
     },
     CompositeFindingsTruncated {
         warning_indices: Vec<usize>,

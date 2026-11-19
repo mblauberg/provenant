@@ -186,6 +186,56 @@ input, write scope or explicit plan parameter emits the advisory
   when planning adds value.
 - Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
 
+### Graph admission and refusal causes
+
+Launch, retry, edit and relay add/edit build the complete candidate in memory.
+Requester binding and PATH, extension syntax (`GraphInput::validate_input`),
+prospective loop expansion, structural host limits, the checkpoint
+envelope and effective input policy must all pass before publishing anything. The
+journal lock covers reading the original state through publication. A refused
+candidate leaves the checkpoint and execution binding unchanged. The pure
+`admit_candidate` gate owns admission; entry points do not maintain separate
+resume validators.
+A structural limit at first admission refuses without publishing. An existing
+running graph that exceeds a structural limit, including during expansion or
+following a host limit reduction, saves a `StructuralLimit` pause and can
+resume after the limit is raised. A cancelled graph, or a settled graph with
+no pending recovery, saves no new structural pause. A verdict correction that
+cannot fit retains the structural pause on its failed lens until retried.
+Resume does not reactivate a previous expansion pause before
+retrying its decision. Malformed fragments remain `InvalidPlanExpansion`;
+only a typed structural overrun receives `StructuralLimit`. Persisted topology
+is checked by the candidate gate before prospective topology so corrupt checkpoints retain their node
+and `bad_checkpoint` diagnosis. Extensions have no separate count or byte cap;
+the complete retained extension list contributes to the checkpoint envelope.
+
+Admission refusals may name node IDs, loop keys and field paths that passed the
+identifier grammar, and host-owned rule identifiers and schema positions. They
+never echo free-form caller text such as prompt or brief bodies. A disclosure
+identifier containing a registered credential is omitted (`null`) in structured
+output and displayed as `[masked]` in text while the refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbitrary
+map keys become `[<key>]`; array positions may use indices. Secret-shaped input
+produces a `SECRET_SHAPED_INPUT` warning naming the field and saying it looks
+like a credential, without echoing the value. The compiled default is Warn;
+`policy.SECRET_SHAPED_INPUT` can suppress the warning; shape-only matches never
+refuse, including when a retained policy requests Refuse. Warnings name their source
+and knob. Operator retry briefs refuse only exact known credential values of at
+least eight bytes, excluding `[REDACTED]`; this check never opens credential
+stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables or >64 KiB total)
+are skipped only by `matches_credential_value_for_retry`, with one warning per process
+that contains no environment names or values, and never refuse retry. Publication
+collection (`ambient_values`) remains strict: an over-bound credential set fails
+validation and withdraws publication, including streaming filters, diagnostic
+projection and per-launch publication context. No raw fallback is allowed.
+The retry refusal precedes any mutation or reservation. Automatic writer restarts reuse accepted input
+without this operator admission check.
+Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
+kind and rule; limit causes name the host limit, never the supplied value.
+CLI stderr, diagnostic JSON and relay wire details project the same cause.
+
+- Why: a refusal must neither publish rejected input nor copy it into diagnostics.
+- Owner: `crates/fabric-runtime/src/graph/candidate.rs`, `crates/fabric-runtime/src/graph/refusal.rs`, `src/fabric/interface.rs`, `src/fabric/graph_execution.rs`, `crates/cli/src/fabric/graph_relay.rs`
+
 ### Composite settlement
 
 A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. An explicit `GraphPatch` skip of a composite remains authoritative until a later replacement or retry supersedes it; reconciliation still recomputes the other active composite boundaries in the same checkpoint. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.

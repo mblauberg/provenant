@@ -403,8 +403,10 @@ impl ValidateInput for GraphInput {
                 document, extend, ..
             } => {
                 path_text(document, "document")?;
-                if extend.len() > 64 || extend.iter().any(|entry| {
-                    entry.len() > 256 || !matches!(entry.split_once('='), Some((key, value)) if !key.is_empty() && !value.is_empty())
+                // The candidate's checkpoint envelope bounds retained extensions.
+                // Transport validation owns syntax, not a separate count/byte cap.
+                if extend.iter().any(|entry| {
+                    !matches!(entry.split_once('='), Some((key, value)) if !key.is_empty() && !value.is_empty())
                 }) {
                     return Err(field("extend"));
                 }

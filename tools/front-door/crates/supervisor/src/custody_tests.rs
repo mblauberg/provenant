@@ -902,6 +902,7 @@ fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
 
 fn never_executed_command(root: &std::path::Path) -> ProviderCommand {
     ProviderCommand {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
         priority: 0,

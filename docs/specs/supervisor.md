@@ -344,10 +344,11 @@ entries do not add filesystem or executable grants.
 Host delivery filters its captured host PATH through the same owner for tool
 lookup. Explicit
 program paths stay explicit. Graph retries capture PATH before changing state,
-then save it with any retry patch under one journal lock. A capture failure
-leaves the previous binding intact; a deliberately empty PATH remains a valid
-captured value. Remote peers record their own PATH at ingress because origin
-directories may not exist there.
+then save it with any retry patch under one journal lock. For a resolved retry,
+PATH capture precedes retry validation, including a settled-graph no-op refusal.
+A capture failure leaves the previous binding and checkpoint intact; a
+deliberately empty PATH remains a valid captured value. Remote peers record their
+own PATH at ingress because origin directories may not exist there.
 
 Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered

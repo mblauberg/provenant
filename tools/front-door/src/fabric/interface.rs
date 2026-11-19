@@ -66,87 +66,6 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
-// Called only after the existing scanner refuses. Field paths are fixed vocabulary;
-// values and user-controlled map keys never enter the diagnostic.
-fn scanner_refusal(input: &Value) -> Option<FacadeError> {
-    fn scan(value: &Value, field: &str) -> Option<FacadeError> {
-        let text = match value {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
-        let rule = provenant_redact::known_shape_rule(text.as_bytes()).ok()??;
-        Some(FacadeError::invalid(InvalidInputDetail::ContentScan {
-            field: field.into(),
-            assignment: rule == "credential assignment",
-        }))
-    }
-    if let Some(brief) = input.get("brief")
-        && let Some(error) = scan(brief, "brief")
-    {
-        return Some(error);
-    }
-    if let Some(nodes) = input.pointer("/document/nodes").and_then(Value::as_array) {
-        for (index, node) in nodes.iter().enumerate() {
-            if let Some(prompt) = node.get("prompt")
-                && let Some(error) = scan(prompt, &format!("document.nodes[{index}].prompt"))
-            {
-                return Some(error);
-            }
-        }
-    }
-    for field in [
-        "set",
-        "document",
-        "name",
-        "template",
-        "route",
-        "model",
-        "account",
-        "host",
-        "worktree",
-        "branch",
-        "base",
-        "write_scope",
-        "over",
-    ] {
-        if let Some(value) = input.get(field)
-            && let Some(error) = scan(value, field)
-        {
-            return Some(error);
-        }
-    }
-    scan(input, "input")
-}
-
-#[cfg(test)]
-#[test]
-// Spec: docs/specs/cli.md#results
-fn scanner_refusal_names_field_and_rule_without_value() -> Result<(), Box<dyn std::error::Error>> {
-    let value = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    let error = scanner_refusal(&json!({"brief": value})).ok_or("expected refusal")?;
-    let diagnostic = error.diagnostic();
-    let wire = serde_json::to_string(&diagnostic)?;
-    assert!(wire.contains("brief"));
-    assert!(wire.contains("credential token"));
-    assert!(!wire.contains(value));
-    let text = "test pass: fix";
-    let assignment =
-        scanner_refusal(&json!({"brief": text})).ok_or("expected assignment refusal")?;
-    let wire = serde_json::to_string(&assignment.diagnostic())?;
-    assert!(wire.contains("credential assignment"));
-    assert!(!wire.contains(text));
-    Ok(())
-}
-
-fn submission_patch_error(error: patch::PatchError, input: &Value) -> FacadeError {
-    if (error.code == "secret" || error.message.contains("secret pattern"))
-        && let Some(refusal) = scanner_refusal(input)
-    {
-        return refusal;
-    }
-    graph_patch_error(error)
-}
-
 // Do not expose serde's message: it can contain supplied values. Preserve only
 // a schema path and a bounded reason, both filtered at the diagnostic boundary.
 fn decode_input<T: serde::de::DeserializeOwned>(
@@ -195,7 +114,11 @@ fn decode_input<T: serde::de::DeserializeOwned>(
 
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
-    if error.parameter.is_some() {
+    if error.parameter.is_some()
+        || error.admission.is_some()
+        || error.candidate.is_some()
+        || error.code != "invalid"
+    {
         return graph_patch_error(error);
     }
     let cause = if error.message.starts_with("unknown node ") {
@@ -204,8 +127,6 @@ fn retry_patch_error(error: patch::PatchError) -> FacadeError {
         GraphRelayCause::RetryUnsettled
     } else if error.message.contains("container retry") {
         GraphRelayCause::RetryContainerBrief
-    } else if error.admission.is_some() {
-        return graph_patch_error(error);
     } else {
         GraphRelayCause::RetryInvalidConfiguration
     };
@@ -227,14 +148,29 @@ fn compile_error(error: provenant_fabric_runtime::graph::template::CompileError)
 /// A compile failure that reached graph admission keeps its typed refusal, so
 /// a template launch reads the same message as the raw document it compiles to.
 /// Failures before admission stay a redacted graph-input reason.
-fn graph_patch_error(error: patch::PatchError) -> FacadeError {
-    match error.admission.clone() {
-        Some(admission) => FacadeError::graph_admission(admission),
-        None => match error.parameter.clone() {
-            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(refusal)),
-            None => graph_input_reason(error),
-        },
+pub(super) fn graph_patch_error(error: patch::PatchError) -> FacadeError {
+    use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    if let Some(candidate) = error.candidate.clone() {
+        return FacadeError::graph_candidate(*candidate);
     }
+    if let Some(admission) = error.admission.clone() {
+        return FacadeError::graph_admission(*admission);
+    }
+    if let Some(refusal) = error.parameter.clone() {
+        return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));
+    }
+    let cause = match error.code {
+        "cycle" => Some(GraphRelayCause::Cycle),
+        "conflict" | "stale_revision" | "idempotency_conflict" => Some(GraphRelayCause::Conflict),
+        "started" => Some(GraphRelayCause::StartedNode),
+        "edit_scope" => Some(GraphRelayCause::TargetOutsideGraph),
+        "journal" => Some(GraphRelayCause::JournalUnavailable),
+        _ => None,
+    };
+    if let Some(cause) = cause {
+        return FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause));
+    }
+    graph_input_reason(error)
 }
 
 pub(super) fn relay_error(error: ServiceError) -> FacadeError {
@@ -931,6 +867,33 @@ fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
 }
 
 impl Factory {
+    #[allow(
+        clippy::print_stderr,
+        reason = "warn operator when policy is unavailable and defaults are used"
+    )]
+    pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
+        let policy = match provenant_cli::config_reads::read_for(
+            &self.context.roots,
+            "run admission",
+        ) {
+            Ok(config) => config.domains.policy.resolve_with_knobs(
+                &self.context.identity.project.to_string(),
+                &config.knobs,
+                &Default::default(),
+            ),
+            Err(error) => {
+                let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                eprintln!(
+                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                );
+                provenant_records::policy::Policy::default()
+            }
+        };
+        Ok(provenant_fabric_runtime::graph::refusal::input_warnings(
+            value, &policy,
+        ))
+    }
+
     fn validate_host_placement(
         &self,
         node: &provenant_fabric_runtime::graph::GraphNode,
@@ -1346,15 +1309,7 @@ impl Factory {
             resolvers: &resolvers,
         }
         .lower(&node)
-        .map_err(|error| {
-            if error.to_string().contains("secret pattern")
-                && let Some(refusal) = scanner_refusal(input)
-            {
-                refusal
-            } else {
-                compile_error(error)
-            }
-        })?;
+        .map_err(compile_error)?;
         if let Some(choice) = input
             .get("route")
             .filter(|value| !value.is_null())
@@ -1570,6 +1525,11 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
+        let warnings = if matches!(operation, "edit" | "retry") {
+            self.graph_input_warnings(&input)?
+        } else {
+            Vec::new()
+        };
         // This shared path must not silently drop the retired field.
         if input.get("operation_id").is_some() {
             return Err(FacadeError::invalid(InvalidInputDetail::OperationIdRetired));
@@ -1631,7 +1591,7 @@ impl Factory {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
         }
-        match operation {
+        let mut receipt = match operation {
             "templates" => {
                 let library = self.template_library(input.get("templates"))?;
                 let names: Vec<_> = match input.get("name").and_then(Value::as_str) {
@@ -1695,7 +1655,11 @@ impl Factory {
             _ => Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "operation".into(),
             ))),
+        }?;
+        if !warnings.is_empty() {
+            receipt["warnings"] = json!(warnings);
         }
+        Ok(receipt)
     }
 
     fn submit_document(
@@ -1709,6 +1673,7 @@ impl Factory {
         let mut input = launch_input(input)?;
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
+        let mut input_warnings = self.graph_input_warnings(&input)?;
         if let Some(document) = raw {
             provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
                 .map_err(|_| {
@@ -1899,7 +1864,7 @@ impl Factory {
                     ..Default::default()
                 };
                 patch::compile_submission(id, &patch, &context, raw["integration_branch"].as_str())
-                    .map_err(|error| submission_patch_error(error, input))?
+                    .map_err(graph_patch_error)?
             } else {
                 let mut document = decode_input::<GraphDocument>(raw.clone(), "document")?;
                 document.graph_id = id.to_owned();
@@ -2022,7 +1987,7 @@ impl Factory {
                 &context,
                 integration_branch.as_ref().and_then(Value::as_str),
             )
-            .map_err(|error| submission_patch_error(error, input))?
+            .map_err(graph_patch_error)?
         };
         if review_launch
             && let Some(base) =
@@ -2108,6 +2073,9 @@ impl Factory {
         }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
+        // Template binding can assemble a credential from individually safe
+        // inputs. Check the bound launch before submission normalises its text.
+        input_warnings.extend(self.graph_input_warnings(&bound)?);
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(warning) = review_subject
@@ -2126,11 +2094,16 @@ impl Factory {
             &self.context.config.graph.limits,
             self.context.port_table.worktree_layout.clone(),
         )
-        .map_err(|error| submission_patch_error(error, input))?;
-        // Graph-wide metadata is retained losslessly. Content inspection is advisory.
-        let bound_document =
-            serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        patch::warn_for_secrets("graph.bound_document", &bound_document);
+        .map_err(graph_patch_error)?;
+        provenant_fabric_runtime::graph::admit_candidate(
+            &document,
+            None,
+            &[],
+            &self.context.config.graph.limits,
+            &self.context.config.graph.budget,
+            Some(&self.requester_lane_path()?),
+        )
+        .map_err(FacadeError::graph_candidate)?;
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {
@@ -2138,14 +2111,17 @@ impl Factory {
                 disk: None,
                 reason: error.to_string(),
             })?;
-        let mut warnings = implementation_warnings(
+        input_warnings.extend(implementation_warnings(
             &expanded_for_warnings.nodes,
             input,
             self.context.config.implement.warn_unbounded_junior,
-        );
+        ));
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
-            warnings.push(warning);
+            input_warnings.push(warning);
         }
+        input_warnings.sort();
+        input_warnings.dedup();
+        let warnings = input_warnings;
         if input["explain"] == true {
             let skipped = provenant_fabric_runtime::graph::when::skipped_rows(
                 &document,
@@ -2236,9 +2212,6 @@ impl Factory {
                     }
                 },
             }));
-        }
-        for warning in &warnings {
-            warn_operator(warning);
         }
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
             // A concurrent launch bound this name to other input between the
@@ -2398,6 +2371,7 @@ impl Factory {
                 .map(|_| budget),
             announce,
             Some(&mut replayed),
+            None,
         )?;
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
@@ -2503,7 +2477,7 @@ impl Factory {
                 worktree_layout: self.context.port_table.worktree_layout.clone(),
             },
         )
-        .map_err(graph_input_reason)?;
+        .map_err(graph_patch_error)?;
         for expansion in &mut checkpoint.expansions {
             for node in &mut expansion.nodes {
                 let mut value = encode(&*node)?;
@@ -2513,6 +2487,15 @@ impl Factory {
                 bind_read_roots(node, &value)?;
             }
         }
+        provenant_fabric_runtime::graph::admit_candidate(
+            &execution.document,
+            Some(&checkpoint),
+            &[],
+            &self.context.config.graph.limits,
+            &self.context.config.graph.budget,
+            execution.requester_path.as_deref(),
+        )
+        .map_err(FacadeError::graph_candidate)?;
         // save writes patch events before publishing the checkpoint, under this lock.
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         Ok(
@@ -2556,30 +2539,51 @@ impl Factory {
             )));
         }
         let id = target.graph.clone();
-        let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
-        // Fail before opening the retry transaction. A capture error leaves
-        // the last valid requester PATH binding untouched.
-        let requester_path = self.requester_lane_path()?;
-        let mut journal = FileJournal::open(
-            &self.context.roots.state,
-            self.context.identity.project,
-            &id,
+        let run = self.graph_retry(
+            GraphInput::Resume {
+                extra: Default::default(),
+                document: id.into(),
+                extend,
+            },
             budget,
             cancel,
-            &self.clock,
-        )
-        .map_err(graph_journal_error)?;
-        let execution = FileJournal::execution(
-            &self.context.roots.state,
-            self.context.identity.project,
-            &id,
-        )
-        .map_err(graph_journal_error)?
-        .ok_or(FacadeError::NotFound)?;
-        let mut checkpoint = journal
-            .load(&id)
-            .map_err(graph_journal_error)?
-            .ok_or(FacadeError::NotFound)?;
+            &mut target,
+            input,
+        )?;
+        target.attempt = None;
+        self.control_receipt(run, &target, input, budget, cancel, false)
+    }
+
+    pub(super) fn prepare_retry(
+        &self,
+        target: &mut super::unified::GraphTarget,
+        input: &Value,
+        document: &GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<(), FacadeError> {
+        if let Some(brief) = input.get("brief").and_then(Value::as_str) {
+            match provenant_redact::matches_credential_value_for_retry(brief.as_bytes()) {
+                Err(_) => {
+                    return Err(FacadeError::io_caused(
+                        "check retry brief credentials",
+                        Some("retry brief credential check failed"),
+                    ));
+                }
+                Ok(true) => {
+                    return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue,
+                    )));
+                }
+                Ok(false) => {}
+            }
+        }
+        let id = target.graph.clone();
+        let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
+        // Keep the no-op guard under the retry journal lock, alongside the
+        // staged retry mutation.
+        let extensions_empty = input
+            .get("extend")
+            .is_none_or(|extensions| extensions.as_array().is_some_and(Vec::is_empty));
         // The cancel flag alone restores nothing: only nodes cancelled out of a
         // live state (Skipped with the cancel reason) are resumable.
         let has_resumable_work = checkpoint.pause.is_some()
@@ -2596,7 +2600,7 @@ impl Factory {
             });
         if target.node.is_none()
             && !brief_given
-            && extend.is_empty()
+            && extensions_empty
             && !has_resumable_work
             && checkpoint.nodes.iter().all(|node| node.state.settled())
         {
@@ -2660,11 +2664,11 @@ impl Factory {
                 }
             } else {
                 let library = self.template_library(None)?;
-                let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
                 patch::retry_node_and_dependants(
                     &mut LiveGraph {
-                        document: &execution.document,
-                        checkpoint: &mut checkpoint,
+                        document,
+                        checkpoint,
                     },
                     &node,
                     input.get("brief").and_then(Value::as_str),
@@ -2681,25 +2685,7 @@ impl Factory {
             }
             target.node = Some(node);
         }
-        // Publish the requester's PATH with any retry patch under the same
-        // journal lock, including graph-wide retries with no node patch. A
-        // concurrent tick cannot launch pending work with stale PATH.
-        journal
-            .set_requester_path(requester_path)
-            .map_err(graph_journal_error)?;
-        journal.save(&checkpoint).map_err(graph_journal_error)?;
-        drop(journal);
-        let run = self.graph(
-            GraphInput::Resume {
-                extra: Default::default(),
-                document: id.into(),
-                extend,
-            },
-            budget,
-            cancel,
-        )?;
-        target.attempt = None;
-        self.control_receipt(run, &target, input, budget, cancel, false)
+        Ok(())
     }
 
     fn control_receipt(
@@ -3613,8 +3599,21 @@ mod tests {
         }
     }
 
+    fn bind_fixture_project(roots: &provenant_core::Roots, path: &Path) -> Result {
+        let project = std::fs::canonicalize(path)?;
+        let common_dir = std::fs::canonicalize(project.join(".git"))?;
+        let location = provenant_config::ProjectLocation::from_verified_primary_checkout(
+            common_dir, &project,
+        )?;
+        provenant_config::bind_project(roots, location)?;
+        Ok(())
+    }
+
     fn factory(rig: &TestRig) -> Result<Factory> {
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        // Library unit tests inherit the lane environment, where Context::open
+        // requires a project binding instead of creating one as a CLI would.
+        bind_fixture_project(&roots, &rig.project)?;
         Ok(Factory {
             context: Context::open(roots, &rig.home, &rig.project)?,
             project_attribution: false,
@@ -3632,6 +3631,11 @@ mod tests {
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
     #[test]
     fn graph_advance_uses_requester_path_after_submission_and_retry() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::graph_advance_uses_requester_path_after_submission_and_retry",
+        )? {
+            return Ok(());
+        }
         use std::os::unix::ffi::OsStrExt;
         let rig = TestRig::new()?;
         let mut factory = factory(&rig)?;
@@ -3728,27 +3732,46 @@ mod tests {
             &document.graph_id,
         )?
         .ok_or("bound graph execution")?;
-        let mut unavailable_git = requester.clone();
-        unavailable_git.git = rig.root.join("missing-git");
-        factory.host_launch = Some(unavailable_git);
-        let error = factory
-            .graph_document(
-                json!({"op":"retry", "id":document.graph_id}),
-                budget,
-                &cancel,
-            )
-            .expect_err("PATH capture failure must refuse retry");
-        assert!(matches!(
-            error,
-            FacadeError::Io { ref operation, .. } if operation == "capture requester PATH"
-        ));
-        let after = FileJournal::execution(
+        let before_checkpoint = FileJournal::read_checkpoint(
             &factory.context.roots.state,
             factory.context.identity.project,
             &document.graph_id,
-        )?
-        .ok_or("bound graph execution after refused retry")?;
-        assert_eq!(after, before);
+        )?;
+        let mut unavailable_git = requester.clone();
+        unavailable_git.git = rig.root.join("missing-git");
+        factory.host_launch = Some(unavailable_git);
+        for request in [
+            json!({"op":"retry", "id":document.graph_id}),
+            json!({"op":"retry", "id":document.graph_id, "node":"review"}),
+            json!({"op":"retry", "id":document.graph_id, "node":"review", "brief":"repair review"}),
+            json!({"op":"retry", "id":document.graph_id, "extend":["budget.per_graph.tokens=30"]}),
+        ] {
+            let error = factory
+                .graph_document(request.clone(), budget, &cancel)
+                .expect_err("PATH capture failure must refuse retry");
+            assert!(
+                matches!(
+                    error,
+                    FacadeError::Io { ref operation, .. } if operation == "capture requester PATH"
+                ),
+                "unexpected retry error for {request}: {error:?}"
+            );
+            let after = FileJournal::execution(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+            )?
+            .ok_or("bound graph execution after refused retry")?;
+            assert_eq!(after, before);
+            assert_eq!(
+                FileJournal::read_checkpoint(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    &document.graph_id,
+                )?,
+                before_checkpoint
+            );
+        }
 
         requester.lane_path = Some(Vec::new());
         factory.host_launch = Some(requester);
@@ -3757,7 +3780,12 @@ mod tests {
     }
 
     #[test]
-    fn refused_retry_leaves_the_persisted_graph_readable_and_unchanged() -> Result {
+    fn admission_refusals_disclose_no_caller_text_and_preserve_publication() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::admission_refusals_disclose_no_caller_text_and_preserve_publication",
+        )? {
+            return Ok(());
+        }
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
         let project = factory.context.identity.project;
@@ -3768,8 +3796,10 @@ mod tests {
         ))?;
         let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(fixture["checkpoint"].clone())?;
-        let execution: GraphDocument =
-            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let mut execution_value = fixture["execution"]["document"].clone();
+        execution_value["schema_version"] =
+            json!(crate::worktree_tests::support::GRAPH_DOCUMENT_SCHEMA_VERSION);
+        let execution: GraphDocument = serde_json::from_value(execution_value)?;
         let directory: PathBuf = factory
             .context
             .roots
@@ -3800,6 +3830,93 @@ mod tests {
         let path = directory.join("graph-g-test.json");
         let before = std::fs::read(&path)?;
 
+        let marker = "REFUSAL_MARKER_3391";
+        let secret = format!("sk-abcdefghijklmnopqrstuvwx {marker}");
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()])?;
+        let mut keyed = json!({"id":"reader", "prompt":"safe", "route":{"alias":"senior"}});
+        keyed[marker] = json!(secret);
+        // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+        for (path_name, request) in [
+            (
+                "launch",
+                json!({"op":"run", "document":{
+                    "schema_version":99, "graph_id":"refused-launch",
+                    "context":{marker:secret},
+                    "nodes":[{"id":"inspect", "prompt":"safe", "access":"read_only", "route":{"alias":"senior"}}]
+                }}),
+            ),
+            (
+                "retry",
+                json!({"op":"retry", "id":"g-test/reader", "brief":secret}),
+            ),
+            (
+                "edit",
+                json!({"op":"edit", "id":"g-test", "patch":{"schema_version":99, "replace":[keyed]}}),
+            ),
+            (
+                "extension",
+                json!({"op":"retry", "id":"g-test", "extend":[format!("per_graph.tokens={secret}")]}),
+            ),
+            (
+                "limit",
+                json!({"op":"retry", "id":"g-test", "extend":[format!("limits.nodes={secret}")]}),
+            ),
+            (
+                "input_count",
+                json!({"op":"retry", "id":"g-test", "extend":vec!["loop.none.rounds=2";65]}),
+            ),
+            (
+                "input_bytes",
+                json!({"op":"retry", "id":"g-test", "extend":[format!("loop.{}.rounds=2", "x".repeat(257))]}),
+            ),
+        ] {
+            let error = factory
+                .graph_document(request, budget, &cancel)
+                .expect_err(path_name);
+            for projection in [
+                error.to_string(),
+                serde_json::to_string(&error)?,
+                serde_json::to_string(&error.diagnostic())?,
+            ] {
+                assert!(!projection.contains(marker), "{path_name}: {projection}");
+                assert!(
+                    !projection.contains("sk-abcdefghijklmnopqrstuvwx"),
+                    "{path_name}: {projection}"
+                );
+            }
+            if path_name == "retry" {
+                assert!(
+                    matches!(
+                        error,
+                        FacadeError::InvalidInput {
+                            detail: Some(InvalidInputDetail::GraphRelayCause(
+                                provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue
+                            ))
+                        }
+                    ),
+                    "unexpected retry refusal cause: {error:?}"
+                );
+            }
+            if path_name == "extension" {
+                assert!(
+                    error.to_string().contains("per_graph.tokens"),
+                    "unexpected extension refusal cause: {error}"
+                );
+            }
+            if path_name == "limit" {
+                assert!(error.to_string().contains("limits.nodes"));
+            }
+            // Check the complete envelope, including the requester's PATH, byte for byte.
+            assert_eq!(std::fs::read(&path)?, before, "{path_name}");
+            assert!(
+                FileJournal::read_checkpoint(
+                    &factory.context.roots.state,
+                    project,
+                    "refused-launch"
+                )?
+                .is_none()
+            );
+        }
         let error = factory
             .graph_document(
                 json!({"op":"retry","id":"g-test/reader","node":"other","brief":"Replacement"}),
@@ -3813,6 +3930,89 @@ mod tests {
             FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?,
             Some(checkpoint)
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn tightened_retry_limit_preserves_the_checkpoint_envelope() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::tightened_retry_limit_preserves_the_checkpoint_envelope",
+        )? {
+            return Ok(());
+        }
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let mut document_value = fixture["execution"]["document"].clone();
+        document_value["schema_version"] =
+            json!(crate::worktree_tests::support::GRAPH_DOCUMENT_SCHEMA_VERSION);
+        let document: GraphDocument = serde_json::from_value(document_value)?;
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: factory.cwd.clone(),
+            document: document.clone(),
+        })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let path = factory
+            .context
+            .roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string())
+            .join("graph-g-test.json");
+        let before = std::fs::read(&path)?;
+        // A candidate that passed under the old policy must be checked again
+        // after the host tightens its limit, before publishing the retry.
+        let request = json!({"op":"retry", "id":"g-test/reader", "brief":"new work"});
+        let mut staged = checkpoint.clone();
+        let mut target = factory
+            .graph_target("g-test/reader")?
+            .ok_or("retry target")?;
+        factory.prepare_retry(&mut target, &request, &document, &mut staged)?;
+        provenant_fabric_runtime::graph::admit_candidate(
+            &document,
+            Some(&staged),
+            &[],
+            &factory.context.config.graph.limits,
+            &factory.context.config.graph.budget,
+            None,
+        )?;
+        factory.context.config.graph.limits.node_prompt_bytes = 1;
+        let error = factory
+            .graph_document(
+                json!({"op":"retry", "id":"g-test/reader", "brief":"new work"}),
+                budget,
+                &cancel,
+            )
+            .expect_err("tightened limit must refuse");
+        assert!(
+            error.to_string().contains("node_prompt_bytes"),
+            "unexpected tightened-limit refusal cause: {error}"
+        );
+        assert_eq!(std::fs::read(path)?, before);
         Ok(())
     }
 
@@ -5801,6 +6001,7 @@ mod tests {
                 .output()?;
             assert!(result.status.success());
             source = String::from_utf8(result.stdout)?.trim().to_owned();
+            bind_fixture_project(&factory.context.roots, &selected)?;
             let selected_context =
                 Context::open(factory.context.roots.clone(), &rig.home, &selected)?;
             provenant_cli::fabric::graph_relay::provision_child(

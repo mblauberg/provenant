@@ -13,8 +13,7 @@ use std::{
 
 const LIMIT: usize = 16 * 1024 * 1024;
 const MASK: &str = "[REDACTED]";
-// Short values are too ambiguous for document-wide substring replacement.
-const MIN_EXACT_BYTES: usize = 8;
+pub use provenant_redact::MIN_EXACT_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

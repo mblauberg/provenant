@@ -204,22 +204,24 @@ pub struct PatchError {
     /// `GraphDocument::admit`. Keeping the typed value lets the front door
     /// project it exactly as it projects a raw document, so one compile
     /// failure reads the same through every entry path.
-    pub admission: Option<AdmissionError>,
+    pub admission: Option<Box<AdmissionError>>,
+    pub candidate: Option<Box<CandidateError>>,
     /// The supplied parameter a template refused, when compilation failed on one.
     pub parameter: Option<Box<ParameterRefusal>>,
 }
 
 impl PatchError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
             cause: None,
             admission: None,
+            candidate: None,
             parameter: None,
         }
     }
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new("invalid", message)
     }
 }
@@ -255,6 +257,12 @@ pub struct PatchContext<'a> {
     pub limits: &'a crate::config::GraphLimits,
     /// The project's declared worktree layout used for generated child paths.
     pub worktree_layout: provenant_config::WorktreeLayoutPort,
+}
+
+/// Detect a credential shape for advisory warnings only.
+pub fn scan_for_secrets(text: &str) -> Result<(), String> {
+    provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
+        .map_err(|_| "input looks like a credential".to_owned())
 }
 
 /// Advisory content inspection. Field and rule are host-owned labels; matched
@@ -1008,7 +1016,6 @@ pub fn submission(
         limits,
         worktree_layout,
     };
-    scan(&patch, &context)?;
     let compiled = compile_submission(
         &document.graph_id,
         &patch,
@@ -1137,7 +1144,20 @@ fn admit_submission(
 ) -> Result<(), PatchError> {
     document.admit(context.limits).map_err(|error| {
         let mut refusal = classify(error.to_string());
-        refusal.admission = Some(error);
+        refusal.admission = Some(Box::new(error));
+        refusal
+    })?;
+    admit_candidate(
+        document,
+        None,
+        &[],
+        context.limits,
+        &Default::default(),
+        None,
+    )
+    .map_err(|error| {
+        let mut refusal = PatchError::invalid(error.to_string());
+        refusal.candidate = Some(Box::new(error));
         refusal
     })?;
     Ok(())
@@ -1196,6 +1216,7 @@ pub(super) fn prepare(
     // the steer boundary. Captured fragments were normalised before storage.
     // Only a live patch still carries unprocessed ingress text.
     let normalised = if matches!(mode, Preparation::Live { retry: None }) {
+        scan(patch, context)?;
         Some(
             prompt_text::normalise(patch, prompt_text::Context::Patch)
                 .map_err(PatchError::invalid)?,
@@ -1254,9 +1275,6 @@ pub(super) fn prepare(
         return Err(PatchError::invalid(
             "patch adds, skips and replaces nothing",
         ));
-    }
-    if matches!(mode, Preparation::Live { retry: None }) {
-        scan(patch, context)?;
     }
 
     // A planner's catalogue is host-authored and trusted; inline templates
@@ -1537,32 +1555,32 @@ pub(super) fn prepare(
             ));
         }
     }
-    validate_schema(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
-    let (plan, _) = validate_flat_plan(&preview, &plans::generous())
-        .map_err(|reason| classify(reason.to_string()))?;
-    validate_output_kinds(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
-    if let Some(limit) = structural_limit(&preview, &plan, context.limits) {
-        return Err(PatchError {
-            code: "invalid",
-            message: limit.to_string(),
-            cause: Some(PlanFailureFact::Structural(limit)),
-            admission: None,
-            parameter: None,
-        });
-    }
-    let mut expansions = checkpoint.expansions.clone();
-    expansions.push(expansion.clone());
-    let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
-    if bound > MAX_CHECKPOINT_BYTES as usize {
-        let limit = GraphEnvelopeLimit { bound };
-        return Err(PatchError {
-            code: "invalid",
-            message: limit.to_string(),
-            cause: Some(PlanFailureFact::Envelope(limit)),
-            admission: None,
-            parameter: None,
-        });
-    }
+    let mut candidate = checkpoint.clone();
+    candidate.expansions.push(expansion.clone());
+    // Retry preparation may temporarily remove asks before it refreshes wake.
+    asks::refresh_wake(&mut candidate);
+    let admitted = admit_candidate(
+        source,
+        Some(&candidate),
+        &[],
+        context.limits,
+        &Default::default(),
+        None,
+    )
+    .map_err(|error| {
+        let mut refusal = PatchError::invalid(error.to_string());
+        refusal.cause = match &error {
+            CandidateError::Structural(limit) | CandidateError::NodeStructural { limit, .. } => {
+                Some(PlanFailureFact::Structural(*limit))
+            }
+            CandidateError::Envelope(limit) => Some(PlanFailureFact::Envelope(*limit)),
+            _ => None,
+        };
+        refusal.candidate = Some(Box::new(error));
+        refusal
+    })?;
+    let preview = admitted.expanded;
+    let plan = admitted.plan;
     Ok(Prepared::Ready(Box::new(Admission {
         expansion,
         preview,

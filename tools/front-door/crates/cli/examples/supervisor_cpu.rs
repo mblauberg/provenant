@@ -159,6 +159,7 @@ fn capture(root: &Path, churn: bool) -> Result {
         &clock,
     )?;
     let command = ProviderCommand {
+        publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
         priority: 0,

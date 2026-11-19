@@ -35,6 +35,7 @@ impl super::Factory {
 }
 
 use super::*;
+use serde_json::Value;
 
 /// Called once, as soon as a submitted graph's first checkpoint is saved.
 pub(crate) type Announce<'a> = &'a dyn Fn(
@@ -500,6 +501,27 @@ impl Factory {
             admission_timeout,
             announce,
             None,
+            None,
+        )
+    }
+
+    pub(crate) fn graph_retry(
+        &self,
+        input: GraphInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        target: &mut super::unified::GraphTarget,
+        request: &Value,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        self.graph_launch_result(
+            input,
+            budget,
+            cancel,
+            None,
+            None,
+            None,
+            None,
+            Some((target, request)),
         )
     }
 
@@ -516,6 +538,7 @@ impl Factory {
         admission_timeout: Option<WaitBudget>,
         announce: Option<Announce<'_>>,
         replayed: Option<&mut bool>,
+        retry: Option<(&mut super::unified::GraphTarget, &Value)>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
@@ -572,7 +595,7 @@ impl Factory {
                     }
                     document
                 };
-                if !resume && document.submission_patch.is_none() {
+                if !resume && retry.is_none() && document.submission_patch.is_none() {
                     let submission_key = document
                         .provenance
                         .as_ref()
@@ -589,7 +612,7 @@ impl Factory {
                         &self.context.config.graph.limits,
                         self.context.port_table.worktree_layout.clone(),
                     )
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                    .map_err(super::interface::graph_patch_error)?;
                 }
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
@@ -597,106 +620,126 @@ impl Factory {
                     )
                     .map_err(run_error)?;
                 }
-                let checkpoint = FileJournal::read_checkpoint(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    &document.graph_id,
-                )
-                .map_err(graph_journal_error)?;
-                let admitted = checkpoint.is_some();
-                if !admitted
-                    && let Err(reason) = provenant_cli::route::validate_graph_exclusions(
-                        &document.exclude,
-                        &self.context.roots,
-                    )
-                {
-                    return Err(FacadeError::DispatchRefused {
-                        reason,
-                        disk: None,
-                        fact: None,
-                    });
-                }
-                document
-                    .admit(&self.context.config.graph.limits)
-                    .map_err(FacadeError::graph_admission)?;
-                let expanded = document
-                    .expanded(&self.context.config.graph.limits)
-                    .map_err(|reason| FacadeError::DispatchRefused {
-                        reason,
-                        disk: None,
-                        fact: None,
-                    })?;
-                // A new writer does not exist until the kernel has journalled
-                // its provisioning intent. Check its declared branch here;
-                // provisioning still verifies the actual checkout at launch.
-                let writer_branch = |node: &provenant_fabric_runtime::graph::GraphNode,
-                                     path: &str|
-                 -> Result<String, FacadeError> {
-                    if let Some(new) = node
-                        .attempt
-                        .as_ref()
-                        .and_then(|spec| spec.new_worktree.as_ref())
-                    {
-                        return Ok(new.branch.clone());
-                    }
-                    let writer = provenant_run::resolve_writer(
-                        self.context.roots.state.as_path(),
-                        &self.cwd,
-                        Path::new(path),
-                    )
-                    .map_err(run_error)?;
-                    let writer = provenant_run::prepare_writer_with_facts(
-                        &writer,
-                        self.context.roots.state.as_path(),
+                if retry.is_none() {
+                    let checkpoint = FileJournal::read_checkpoint(
+                        &self.context.roots.state,
                         self.context.identity.project,
-                        &facts,
+                        &document.graph_id,
                     )
-                    .map_err(run_error)?;
-                    Ok(writer
-                        .branch
-                        .as_str()
-                        .trim_start_matches("refs/heads/")
-                        .to_owned())
-                };
-                for node in &expanded.nodes {
-                    if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
-                        &node.delivery
-                    {
-                        provenant_run::HostDeliveryContext::validate_integration_target(
-                            &self.cwd, target,
-                        )
-                        .map_err(run_error)?;
-                    }
+                    .map_err(graph_journal_error)?;
+                    let admitted = checkpoint.is_some();
                     if !admitted
-                        && node.delivery == Some(provenant_records::run::DeliveryMode::Push)
-                    {
-                        let path = node
-                            .worktree
-                            .as_deref()
-                            .ok_or(FacadeError::InvalidInput { detail: None })?;
-                        provenant_run::HostDeliveryContext::check_delivery_branch(
-                            &self.cwd,
-                            &writer_branch(node, path)?,
+                        && let Err(reason) = provenant_cli::route::validate_graph_exclusions(
+                            &document.exclude,
+                            &self.context.roots,
                         )
-                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
-                    }
-                    // A local target checked out in the writer's own worktree
-                    // cannot be advanced by compare-and-swap, so refuse the
-                    // graph before any attempt rather than at delivery.
-                    if !admitted
-                        && let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
-                            &node.delivery
-                        && !target.starts_with("origin/")
-                        && let Some(path) = node.worktree.as_deref()
-                        && writer_branch(node, path)? == *target
                     {
                         return Err(FacadeError::DispatchRefused {
-                            fact: None,
+                            reason,
                             disk: None,
-                            reason: format!(
-                                "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
-                            ),
+                            fact: None,
                         });
+                    }
+                    // Preflight checks topology only. Capture and admit the requester
+                    // PATH after the journal-locked submission replay decision below.
+                    let extensions = match &input {
+                        GraphInput::Resume { extend, .. } => extend.as_slice(),
+                        _ => &[],
+                    };
+                    let candidate = match checkpoint.as_ref() {
+                        Some(checkpoint) => {
+                            provenant_fabric_runtime::graph::admit_running_candidate(
+                                &document,
+                                checkpoint,
+                                extensions,
+                                &self.context.config.graph.limits,
+                                &self.context.config.graph.budget,
+                                None,
+                            )
+                        }
+                        None => provenant_fabric_runtime::graph::admit_candidate(
+                            &document,
+                            None,
+                            extensions,
+                            &self.context.config.graph.limits,
+                            &self.context.config.graph.budget,
+                            None,
+                        ),
+                    }
+                    .map_err(FacadeError::graph_candidate)?;
+                    let expanded = candidate.expanded();
+                    // A new writer does not exist until the kernel has journalled
+                    // its provisioning intent. Check its declared branch here;
+                    // provisioning still verifies the actual checkout at launch.
+                    let writer_branch = |node: &provenant_fabric_runtime::graph::GraphNode,
+                                         path: &str|
+                     -> Result<String, FacadeError> {
+                        if let Some(new) = node
+                            .attempt
+                            .as_ref()
+                            .and_then(|spec| spec.new_worktree.as_ref())
+                        {
+                            return Ok(new.branch.clone());
+                        }
+                        let writer = provenant_run::resolve_writer(
+                            self.context.roots.state.as_path(),
+                            &self.cwd,
+                            Path::new(path),
+                        )
+                        .map_err(run_error)?;
+                        let writer = provenant_run::prepare_writer_with_facts(
+                            &writer,
+                            self.context.roots.state.as_path(),
+                            self.context.identity.project,
+                            &facts,
+                        )
+                        .map_err(run_error)?;
+                        Ok(writer
+                            .branch
+                            .as_str()
+                            .trim_start_matches("refs/heads/")
+                            .to_owned())
+                    };
+                    for node in &expanded.nodes {
+                        if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
+                            &node.delivery
+                        {
+                            provenant_run::HostDeliveryContext::validate_integration_target(
+                                &self.cwd, target,
+                            )
+                            .map_err(run_error)?;
+                        }
+                        if !admitted
+                            && node.delivery == Some(provenant_records::run::DeliveryMode::Push)
+                        {
+                            let path = node
+                                .worktree
+                                .as_deref()
+                                .ok_or(FacadeError::InvalidInput { detail: None })?;
+                            provenant_run::HostDeliveryContext::check_delivery_branch(
+                                &self.cwd,
+                                &writer_branch(node, path)?,
+                            )
+                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                        }
+                        // A local target checked out in the writer's own worktree
+                        // cannot be advanced by compare-and-swap, so refuse the
+                        // graph before any attempt rather than at delivery.
+                        if !admitted
+                            && let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
+                                &node.delivery
+                            && !target.starts_with("origin/")
+                            && let Some(path) = node.worktree.as_deref()
+                            && writer_branch(node, path)? == *target
+                        {
+                            return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
+                                reason: format!(
+                                    "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
+                                ),
+                            });
+                        }
                     }
                 }
                 Some(document)
@@ -942,7 +985,7 @@ impl Factory {
             if let Some((directory, name, bytes)) = &scratch_source {
                 restore_scratch_source(directory, name, bytes)?;
             }
-            let checkpoint = journal.load(id).map_err(graph_journal_error)?;
+            let mut checkpoint = journal.load(id).map_err(graph_journal_error)?;
             let existing = checkpoint.is_some();
             let bound_execution = if existing {
                 Some(
@@ -956,6 +999,20 @@ impl Factory {
                 )
             } else {
                 None
+            };
+            // Retry the bound execution, with the reset staged under this lock.
+            let is_retry = retry.is_some();
+            let document = if is_retry {
+                bound_execution
+                    .as_ref()
+                    .map(|bound| &bound.document)
+                    .ok_or(FacadeError::NotFound)?
+            } else {
+                document
+            };
+            let extensions = match &input {
+                GraphInput::Resume { extend, .. } => extend.as_slice(),
+                _ => &[],
             };
             // A graph name holds one launch input. A new launch that finds the
             // name bound to another digest lost a race for it; never resume or
@@ -980,6 +1037,40 @@ impl Factory {
                     return Ok(run);
                 }
             }
+            // Capture before retry validation or staged resets, including no-op
+            // retries of settled graphs. Failure must preserve the bound execution.
+            let requester_path = self.requester_lane_path()?;
+            let mut retry_changed = false;
+            if let Some((target, request)) = retry {
+                let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
+                let node_given = target.node.is_some();
+                retry_changed = brief_given || node_given || !extensions.is_empty();
+                self.prepare_retry(
+                    target,
+                    request,
+                    document,
+                    checkpoint.as_mut().ok_or(FacadeError::NotFound)?,
+                )?;
+            }
+            let candidate = match checkpoint.as_ref().filter(|_| !retry_changed) {
+                Some(checkpoint) => provenant_fabric_runtime::graph::admit_running_candidate(
+                    document,
+                    checkpoint,
+                    extensions,
+                    &self.context.config.graph.limits,
+                    &self.context.config.graph.budget,
+                    Some(&requester_path),
+                ),
+                None => provenant_fabric_runtime::graph::admit_candidate(
+                    document,
+                    checkpoint.as_ref(),
+                    extensions,
+                    &self.context.config.graph.limits,
+                    &self.context.config.graph.budget,
+                    Some(&requester_path),
+                ),
+            }
+            .map_err(FacadeError::graph_candidate)?;
             let mut ledger_warning = None;
             let integration_base = if existing {
                 checkpoint
@@ -1051,7 +1142,7 @@ impl Factory {
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
                     peer_origin_context: None,
                     peer_submission_digest: None,
-                    requester_path: Some(self.requester_lane_path()?),
+                    requester_path: Some(requester_path.clone()),
                     extra: Default::default(),
                     bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
@@ -1070,6 +1161,14 @@ impl Factory {
             } else {
                 None
             };
+            if is_retry {
+                journal
+                    .set_requester_path(requester_path.clone())
+                    .map_err(graph_journal_error)?;
+                journal
+                    .save(checkpoint.as_ref().ok_or(FacadeError::NotFound)?)
+                    .map_err(graph_journal_error)?;
+            }
             let mut owner = BoundGraphOwner {
                 writer_launch_budget: None,
                 admission_timeout,
@@ -1097,14 +1196,26 @@ impl Factory {
                     GraphInput::Resume { extend, .. } => extend.as_slice(),
                     _ => &[],
                 };
-                provenant_fabric_runtime::graph::resume_with_budget(
-                    document,
-                    &mut owner,
-                    &mut journal,
-                    &graph_config.limits,
-                    &graph_config.budget,
-                    extensions,
-                )
+                if is_retry {
+                    provenant_fabric_runtime::graph::resume_admitted(
+                        document,
+                        &mut owner,
+                        &mut journal,
+                        &graph_config.limits,
+                        &graph_config.budget,
+                        extensions,
+                        candidate,
+                    )
+                } else {
+                    provenant_fabric_runtime::graph::resume_with_budget(
+                        document,
+                        &mut owner,
+                        &mut journal,
+                        &graph_config.limits,
+                        &graph_config.budget,
+                        extensions,
+                    )
+                }
             } else {
                 provenant_fabric_runtime::graph::advance_with_budget(
                     document,
@@ -1125,8 +1236,8 @@ impl Factory {
                     }
                     _ => FacadeError::InvalidInput { detail: None },
                 },
-                provenant_fabric_runtime::graph::GraphError::Extension(reason)
-                | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
+                provenant_fabric_runtime::graph::GraphError::Candidate(error) => FacadeError::graph_candidate(error),
+                provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
                     FacadeError::DispatchRefused {
                         reason,
                         disk: None,

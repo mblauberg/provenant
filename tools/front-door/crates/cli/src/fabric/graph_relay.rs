@@ -40,7 +40,19 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         "invalid_config" => Some(Cause::InvalidConfig),
         "invalid_review" => Some(Cause::InvalidReview),
         "cycle" => Some(Cause::Cycle),
-        "conflict" => Some(Cause::Conflict),
+        "conflict" | "stale_revision" | "idempotency_conflict" => {
+            return ServiceError::Cli {
+                code: code.into(),
+                message: FacadeError::GraphRelayRefused {
+                    refusal_code: code.into(),
+                    detail: Some(InvalidInputDetail::GraphRelayCause(Cause::Conflict)),
+                }
+                .diagnostic()
+                .detail
+                .unwrap_or_default(),
+                data: Value::Null,
+            };
+        }
         "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),
         "invalid"
             if message == "writer composite children require explicit per-node work bindings" =>
@@ -64,8 +76,11 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
 }
 
 fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> ServiceError {
+    if let Some(candidate) = error.candidate {
+        return ServiceError::Facade(FacadeError::graph_candidate(*candidate));
+    }
     match error.admission {
-        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(admission)),
+        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(*admission)),
         None => refused(error.code, error.message),
     }
 }
@@ -92,6 +107,10 @@ pub fn serve(
 }
 
 /// Serve reads with the binary's existing graph service after attempt-bound authorisation.
+#[allow(
+    clippy::print_stderr,
+    reason = "warn operator when policy is unavailable and defaults are used"
+)]
 pub fn serve_with_read(
     context: &Context,
     attempt: &str,
@@ -101,6 +120,30 @@ pub fn serve_with_read(
     clock: &dyn Clock,
     read: &impl Fn(Value) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
+    let mutating_input = matches!(arguments["op"].as_str(), Some("add" | "edit" | "run"));
+    let policy = if mutating_input {
+        match crate::config_reads::read_for(&context.roots, "run admission") {
+            Ok(config) => config.domains.policy.resolve_with_knobs(
+                &context.identity.project.to_string(),
+                &config.knobs,
+                &Default::default(),
+            ),
+            Err(error) => {
+                let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                eprintln!(
+                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                );
+                Default::default()
+            }
+        }
+    } else {
+        Default::default()
+    };
+    let mut warnings = if mutating_input {
+        provenant_fabric_runtime::graph::refusal::input_warnings(&arguments, &policy)
+    } else {
+        Vec::new()
+    };
     let mut op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
     // The lane has already started the launch allowance. This confirmed
@@ -144,7 +187,11 @@ pub fn serve_with_read(
         let parent =
             relay::historical_parent_of_attempt(&checkpoint, &reference).ok_or_else(not_a_node)?;
         if let Some(receipt) = replay_run_request(&checkpoint, parent, &request)? {
-            return Ok(serde_json::to_value(receipt)?);
+            let mut value = serde_json::to_value(receipt)?;
+            if !warnings.is_empty() {
+                value["warnings"] = json!(warnings);
+            }
+            return Ok(value);
         }
         if relay::parent_of_attempt(&checkpoint, &reference).is_none() {
             return Err(not_a_node());
@@ -210,7 +257,11 @@ pub fn serve_with_read(
         // Preparation runs without the lock; another caller may have admitted
         // this raw request in the meantime, with different resolved pins.
         if let Some(receipt) = replay_run_request(&checkpoint, parent, request)? {
-            return Ok(serde_json::to_value(receipt)?);
+            let mut value = serde_json::to_value(receipt)?;
+            if !warnings.is_empty() {
+                value["warnings"] = json!(warnings);
+            }
+            return Ok(value);
         }
     }
     let document = FileJournal::execution(state, project, &graph_id)
@@ -235,14 +286,18 @@ pub fn serve_with_read(
                         retain_run_request(&mut checkpoint, &receipt, request)?;
                         journal.save(&checkpoint).map_err(journal_error)?;
                     }
-                    Ok(serde_json::to_value(receipt)?)
+                    let mut value = serde_json::to_value(receipt)?;
+                    if !warnings.is_empty() {
+                        value["warnings"] = json!(warnings);
+                    }
+                    Ok(value)
                 }
                 None => Err(not_a_node()),
             };
         }
         (None, _) => return Err(not_a_node()),
     };
-    let value = match op {
+    let mut value = match op {
         RelayOp::Read { .. } | RelayOp::Run { .. } => {
             unreachable!("host requests are resolved before journal locking")
         }
@@ -254,7 +309,11 @@ pub fn serve_with_read(
                     retain_run_request(&mut checkpoint, &receipt, request)?;
                     journal.save(&checkpoint).map_err(journal_error)?;
                 }
-                return Ok(serde_json::to_value(receipt)?);
+                let mut value = serde_json::to_value(receipt)?;
+                if !warnings.is_empty() {
+                    value["warnings"] = json!(warnings);
+                }
+                return Ok(value);
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
@@ -371,6 +430,12 @@ pub fn serve_with_read(
                     .map(|(branch, commit)| (branch.as_str(), commit.as_str())),
             )
             .map_err(patch_refused)?;
+            if let Some(expansion) = checkpoint.expansions.last() {
+                warnings.extend(provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &serde_json::to_value(expansion)?,
+                    &policy,
+                ));
+            }
             if let Some(request) = &run_request {
                 retain_run_request(&mut checkpoint, &receipt, request)?;
             }
@@ -379,7 +444,11 @@ pub fn serve_with_read(
                     journal.save(&checkpoint).map_err(journal_error)?;
                 }
                 // Nothing changed; the earlier admission is already journalled.
-                return Ok(serde_json::to_value(receipt)?);
+                let mut value = serde_json::to_value(receipt)?;
+                if !warnings.is_empty() {
+                    value["warnings"] = json!(warnings);
+                }
+                return Ok(value);
             }
             if request.needs_worktree_provisioning()
                 && let Some(path) = receipt.worktree.as_deref()
@@ -471,6 +540,12 @@ pub fn serve_with_read(
                 },
             )
             .map_err(patch_refused)?;
+            if let Some(expansion) = checkpoint.expansions.last() {
+                warnings.extend(provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &serde_json::to_value(expansion)?,
+                    &policy,
+                ));
+            }
             // Leave time to persist a refusal and deliver it to the caller.
             // The relay's transport reserve alone does not cover journal I/O.
             let now = clock.mono_now();
@@ -535,6 +610,11 @@ pub fn serve_with_read(
         }
     };
     journal.save(&checkpoint).map_err(journal_error)?;
+    if !warnings.is_empty() {
+        warnings.sort();
+        warnings.dedup();
+        value["warnings"] = json!(warnings);
+    }
     Ok(value)
 }
 
@@ -2661,7 +2741,7 @@ mod provisioning_tests {
                 journal.save(&checkpoint)?;
             }
             let request = json!({
-                "op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply",
+                "op":"add","id":"child","use":"task","prompt":"password=example-lost-reply-3391", "idempotency_key":"lost-reply",
                 "launch":{"node":{"use":"task","prompt":format!("Review {base}...{subject}"),
                     "source":{"type":"commit","commit":subject}}}
             });
@@ -2827,6 +2907,21 @@ mod provisioning_tests {
             let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             assert_eq!(replay["node"], receipt["node"]);
             assert_eq!(replay["revision"], receipt["revision"]);
+            {
+                let warnings = replay["warnings"]
+                    .as_array()
+                    .ok_or("visible replay warnings")?;
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|w| w.to_string().contains("prompt looks like a credential"))
+                );
+                assert!(
+                    warnings
+                        .iter()
+                        .all(|w| !w.to_string().contains("example-lost-reply-3391"))
+                );
+            }
             assert_eq!(replay["replayed"], true);
             let unavailable = |_| panic!("settled run must not prepare or fetch");
             let prepared_replay = serve_with_read(
@@ -2838,7 +2933,8 @@ mod provisioning_tests {
                 &clock,
                 &unavailable,
             )?;
-            assert_eq!(prepared_replay, replay);
+            assert_eq!(prepared_replay["node"], replay["node"]);
+            assert_eq!(prepared_replay["revision"], replay["revision"]);
             let mut changed_run = run.clone();
             changed_run["input"]["pr"] = json!(8);
             assert!(
@@ -2957,7 +3053,7 @@ mod provisioning_tests {
         Ok(())
     }
 
-    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn crash_after_the_fence_is_recovered_by_the_next_serve()
     -> Result<(), Box<dyn std::error::Error>> {
