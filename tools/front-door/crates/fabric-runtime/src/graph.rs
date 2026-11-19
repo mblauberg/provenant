@@ -1429,345 +1429,46 @@ pub fn settle_cancelled_nodes<R: AttemptOwner, J: GraphJournal>(
     }
 }
 
-/// Effect driver: load the checkpoint, collect host facts, apply the pure
-/// transition and save before the next effect. Node and attempt decisions live
-/// in `transitions` and `next_attempt`; host failures leave the previous saved
-/// checkpoint (including its launch and custody fences) authoritative.
+/// Control flow for the extracted scheduling pass (#3542).
+enum ScheduleExit {
+    /// The pass produced a final run for the caller to return.
+    Done(Box<GraphRun>),
+    /// Re-enter `advance_inner` for a decision extension or a cleared pause.
+    Recurse {
+        resume: bool,
+        extensions: Vec<String>,
+        observed_ci: std::collections::BTreeSet<String>,
+    },
+}
+
+/// Effect driver for one scheduling pass. Kept separate from admission and
+/// final settlement so a debug build does not pool this loop's temporaries into
+/// a single large frame on the graph launch path (#3542).
 #[allow(
     clippy::too_many_arguments,
-    reason = "one observation set follows internal rescheduling for this advance"
+    reason = "one admitted execution state follows internal rescheduling"
 )]
-fn advance_inner<R: AttemptOwner, J: GraphJournal>(
+fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
     journal: &mut J,
     limits: &crate::config::GraphLimits,
-    budget: &crate::config::GraphBudget,
-    mut resume: bool,
-    extensions: &[String],
-    observed_ci: &mut std::collections::BTreeSet<String>,
-    submission_refusals: &[(String, String)],
-    admitted_candidate: Option<AdmittedCandidate>,
-) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    let worktree_layout = owner.worktree_layout();
-    // Resolve once for this graph operation, before replay and expansion.
-    let admission_policy = owner.graph_admission_policy();
-    let unbounded = crate::config::GraphLimits {
-        nodes: usize::MAX,
-        edges: usize::MAX,
-        routes_per_node: u16::MAX as usize,
-        node_prompt_bytes: usize::MAX,
-        graph_prompt_bytes: usize::MAX,
-        fan_out_width: usize::MAX,
-        expansion_depth: usize::MAX,
-        ..limits.clone()
-    };
-    let stored = journal
-        .load(&document.graph_id)
-        .map_err(GraphError::Journal)?;
-    let (base, _) = if stored.is_some() {
-        validate_replay_plan(document, &unbounded)
-            .map_err(|error| GraphError::Invalid(error.to_string()))?
-    } else {
-        validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
-    };
-    let admitted = match admitted_candidate {
-        Some(candidate) => {
-            if candidate.source != *document
-                || candidate.checkpoint != stored
-                || candidate.extensions != extensions
-            {
-                return Err(GraphError::Invalid(
-                    "admitted candidate does not match the execution state".into(),
-                ));
-            }
-            candidate
-        }
-        None => match stored.as_ref() {
-            Some(checkpoint) => {
-                admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
-            }
-            None => admit_candidate(document, None, extensions, limits, budget, None),
-        }
-        .map_err(|error| match error {
-            CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
-                node: node.to_string(),
-                invariant,
-            },
-            other => GraphError::Candidate(other),
-        })?,
-    };
-    let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
-    let mut expanded = plans::expand(
-        document,
-        stored_extensions,
-        stored.as_ref().map_or(&[], |c| c.expansions.as_slice()),
-        &unbounded,
-    )
-    .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-    let (mut plan, mut positions) = validate_flat_plan(&expanded, &unbounded)
-        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-    let plan_digest = plan_digest(&base)
-        .map_err(GraphError::Canonical)?
-        .to_string();
-
-    let mut checkpoint = match stored {
-        Some(checkpoint) => {
-            let mut validation = checkpoint.clone();
-            restore_cancelled_nodes(&mut validation)
-                .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-            // Cancellation retains attempt custody evidence. Validate the
-            // original state without reopening the actual admission fence.
-            for node in &mut validation.nodes {
-                if node
-                    .skip_reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.starts_with("parent "))
-                    && let Some(state) = node.cancelled_from.take()
-                {
-                    node.state = state;
-                    node.skip_reason = None;
-                }
-            }
-            asks::refresh_wake(&mut validation);
-            validate_checkpoint(document, &validation, &plan, &plan_digest)?;
-            checkpoint
-        }
-        None => {
-            if let Some(reason) = graph_envelope_reason(document, &[], &[], &plan) {
-                return Err(GraphError::Invalid(reason));
-            }
-            let asks = may_ask(&plan);
-            let (review, integration) = owner.bound_graph_bases();
-            let bases = GraphBaseBinding::new(review, integration);
-            let instance_id = if asks {
-                Some(provenant_core::hex(
-                    &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
-                ))
-            } else {
-                None
-            };
-            let ask_actor = asks.then(|| owner.actor());
-            let mut checkpoint = transitions::initial_checkpoint(
-                document,
-                &plan,
-                plan_digest,
-                bases,
-                instance_id,
-                ask_actor,
-            );
-            if let Some(submission) = document.submission_patch.as_ref() {
-                let library = template::TemplateLibrary::bundled();
-                let resolvers = Default::default();
-                patch::admit_patch(
-                    &mut patch::LiveGraph {
-                        document,
-                        checkpoint: &mut checkpoint,
-                    },
-                    None,
-                    submission,
-                    &patch::PatchContext {
-                        library: &library,
-                        resolvers: &resolvers,
-                        journal: None,
-                        limits,
-                        worktree_layout: worktree_layout.clone(),
-                    },
-                )
-                .map_err(|error| GraphError::Invalid(error.to_string()))?;
-            }
-            // Publish the generation before the first eager bind. A stop can
-            // then write an instance-bound request while a host owns the graph
-            // lock and is resolving or creating a worktree.
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            if !submission_refusals.is_empty() {
-                for progress in &mut checkpoint.nodes {
-                    if progress.state == NodeState::Pending {
-                        let reason = submission_refusals
-                            .iter()
-                            .find(|(id, _)| id == &progress.id)
-                            .map_or("graph submission refused before launch", |(_, reason)| {
-                                reason.as_str()
-                            });
-                        transitions::fail_with(
-                            progress,
-                            "writer_preflight_refused",
-                            reason.to_owned(),
-                        );
-                    }
-                }
-                journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                return Ok(transitions::graph_run(checkpoint));
-            }
-            for index in 0..plan.nodes.len() {
-                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
-                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                    return Ok(transitions::graph_run(checkpoint));
-                }
-                let node = &plan.nodes[index];
-                // A loop round's worktree is advanced by earlier rounds; its
-                // starting head becomes known only at that round.
-                if plans::writer(node)
-                    && !node.provision_worktree
-                    && node.round.is_none()
-                    && node
-                        .attempt
-                        .as_ref()
-                        .and_then(|spec| spec.new_worktree.as_ref())
-                        .is_none()
-                {
-                    let worktree = node
-                        .worktree
-                        .as_deref()
-                        .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    match owner.bind_writer_worktree(worktree) {
-                        Ok(binding) => {
-                            transitions::apply_writer_binding(
-                                node,
-                                &mut checkpoint.nodes[index],
-                                binding,
-                                document.schema_version >= 2,
-                            )
-                            .map_err(GraphError::Refused)?;
-                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                        }
-                        // Contention waits in the launch loop, which owns the
-                        // persisted deadline; only a refusal fails the node here.
-                        Err(error) if next_attempt::launch_contention(&error) => {}
-                        Err(error) => {
-                            transitions::writer_binding_failed(
-                                &mut checkpoint.nodes[index],
-                                &node.id,
-                                &next_attempt::writer_binding_reason(&node.id, &error),
-                            );
-                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                        }
-                    }
-                    // Save a successful binding before acknowledging the stop;
-                    // otherwise the physical bind could outlive its checkpoint.
-                    if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)?
-                    {
-                        settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                        return Ok(transitions::graph_run(checkpoint));
-                    }
-                }
-            }
-            // Pin named review bases while the admitted source locations are
-            // still the ones selected for this execution.
-            for index in 0..plan.nodes.len() {
-                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
-                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                    return Ok(transitions::graph_run(checkpoint));
-                }
-                if !checkpoint.nodes[index].review_base_pending {
-                    continue;
-                }
-                let node = &plan.nodes[index];
-                let location = source_worktree(node, &plan, &checkpoint, &positions);
-                if matches!(
-                    node.source,
-                    Some(SourceBinding::Node { .. } | SourceBinding::Head { .. })
-                ) && location.is_none()
-                {
-                    continue;
-                }
-                let reference = node
-                    .review_base
-                    .as_deref()
-                    .ok_or_else(|| GraphError::Invalid("node review base missing".into()))?;
-                let base = owner.resolve_review_base(reference, location).map_err(GraphError::Run)?
-                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
-                    .ok_or_else(|| GraphError::Refused(format!("node {}: review base could not be bound; correct the reference and rerun", node.id)))?;
-                transitions::apply_review_base(&mut checkpoint.nodes[index], base);
-                journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
-                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                    return Ok(transitions::graph_run(checkpoint));
-                }
-            }
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            checkpoint
-        }
-    };
-
-    if let Some(limit) = admitted.growth_limit {
-        // A refused resume cannot reopen or re-pause a cancelled graph.
-        if checkpoint.cancelled {
-            return Ok(GraphRun {
-                status: GraphStatus::Cancelled,
-                outcome: None,
-                checkpoint,
-                advance_error: None,
-            });
-        }
-        checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-        return Ok(transitions::graph_run(checkpoint));
-    }
-
-    if recover_minima(&mut checkpoint, &plan) {
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-
-    if may_ask(&plan) && (checkpoint.instance_id.is_none() || checkpoint.ask_actor.is_none()) {
-        asks::identity::<R, J::Error>(&mut checkpoint, owner)?;
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-    let effective_budget = admitted.effective_budget;
-    if transitions::refresh_limit_notes(&mut checkpoint, document) {
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-    if resume && apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
-        settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-        return Ok(transitions::graph_run(checkpoint));
-    }
-    if resume {
-        let mut resume_view = checkpoint.clone();
-        restore_cancelled_nodes(&mut resume_view)
-            .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-        // Keep the cancellation fence and its displayed states durable until
-        // every extension is accepted. Reopen in the same save as those states.
-        if checkpoint.cancelled {
-            close_resolved_asks(&mut checkpoint, owner, journal)?;
-        }
-        if journal
-            .apply_cancellation(document, &mut checkpoint)
-            .map_err(GraphError::Journal)?
-        {
-            settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-            return Ok(transitions::graph_run(checkpoint));
-        }
-        transitions::apply_resume(&mut checkpoint, extensions)
-            .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-        if extensions.iter().any(|e| e.starts_with("loop.")) {
-            let expanded = plans::expand(
-                document,
-                &checkpoint.extensions,
-                &checkpoint.expansions,
-                &unbounded,
-            )
-            .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-            let (extended, _) = validate_flat_plan(&expanded, &unbounded)
-                .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-            transitions::apply_loop_extensions(&mut checkpoint, extensions, &extended)
-                .map_err(|error| GraphError::Invalid(error.into()))?;
-            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            return advance_inner(
-                document,
-                owner,
-                journal,
-                limits,
-                budget,
-                false,
-                &[],
-                observed_ci,
-                &[],
-                None,
-            );
-        }
-        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-    }
-
+    worktree_layout: provenant_config::WorktreeLayoutPort,
+    admission_policy: provenant_records::policy::Policy,
+    effective_budget: crate::config::GraphBudget,
+    resume_in: bool,
+    checkpoint_in: GraphCheckpoint,
+    expanded_in: GraphDocument,
+    plan_in: PlannedGraph,
+    positions_in: std::collections::BTreeMap<String, usize>,
+    observed_ci_in: std::collections::BTreeSet<String>,
+) -> Result<ScheduleExit, GraphError<R::Error, J::Error>> {
+    let mut resume = resume_in;
+    let mut checkpoint = checkpoint_in;
+    let mut expanded = expanded_in;
+    let mut plan = plan_in;
+    let mut positions = positions_in;
+    let mut observed_ci = observed_ci_in;
     let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
         if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
@@ -1782,7 +1483,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             // A resume against tighter limits must return the durable pause
             // before observing attempts can settle the graph and clear it.
             if resume {
-                return Ok(transitions::graph_run(checkpoint));
+                return Ok(ScheduleExit::Done(Box::new(transitions::graph_run(
+                    checkpoint,
+                ))));
             }
         }
         if structural_pause.is_none() {
@@ -1900,12 +1603,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .iter()
                     .any(|node| !node.state.settled() && node.detached_from_graph_cancel);
                 if !detached_live {
-                    return Ok(GraphRun {
+                    return Ok(ScheduleExit::Done(Box::new(GraphRun {
                         status: GraphStatus::Cancelled,
                         outcome: None,
                         checkpoint,
                         advance_error: None,
-                    });
+                    })));
                 }
             } else {
                 transitions::clear_cancellation(&mut checkpoint);
@@ -2008,18 +1711,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 }
                             }
                         } else {
-                            return advance_inner(
-                                document,
-                                owner,
-                                journal,
-                                limits,
-                                budget,
-                                true,
-                                &[extension],
+                            return Ok(ScheduleExit::Recurse {
+                                resume: true,
+                                extensions: vec![extension],
                                 observed_ci,
-                                &[],
-                                None,
-                            );
+                            });
                         }
                     }
                     continue;
@@ -3431,18 +3127,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     )
                     .map_err(GraphError::Refused)?;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    return advance_inner(
-                        document,
-                        owner,
-                        journal,
-                        limits,
-                        budget,
-                        false,
-                        &[],
+                    return Ok(ScheduleExit::Recurse {
+                        resume: false,
+                        extensions: Vec::new(),
                         observed_ci,
-                        &[],
-                        None,
-                    );
+                    });
                 }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
                     plans::settle(
@@ -3558,18 +3247,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             journal,
             &effective_budget,
         )? {
-            return advance_inner(
-                document,
-                owner,
-                journal,
-                limits,
-                budget,
-                false,
-                &[],
+            return Ok(ScheduleExit::Recurse {
+                resume: false,
+                extensions: Vec::new(),
                 observed_ci,
-                &[],
-                None,
-            );
+            });
         }
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
             && !checkpoint.delivered
@@ -3587,7 +3269,383 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             transitions::record_delivery(&mut checkpoint, url).map_err(GraphError::Refused)?;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
+        return Ok(ScheduleExit::Done(Box::new(transitions::graph_run(
+            checkpoint,
+        ))));
+    }
+}
+
+/// Effect driver: load the checkpoint, collect host facts, apply the pure
+/// transition and save before the next effect. Node and attempt decisions live
+/// in `transitions` and `next_attempt`; host failures leave the previous saved
+/// checkpoint (including its launch and custody fences) authoritative.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one observation set follows internal rescheduling for this advance"
+)]
+fn advance_inner<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    mut resume: bool,
+    extensions: &[String],
+    observed_ci: &mut std::collections::BTreeSet<String>,
+    submission_refusals: &[(String, String)],
+    admitted_candidate: Option<AdmittedCandidate>,
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    let worktree_layout = owner.worktree_layout();
+    // Resolve once for this graph operation, before replay and expansion.
+    let admission_policy = owner.graph_admission_policy();
+    let unbounded = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..limits.clone()
+    };
+    let stored = journal
+        .load(&document.graph_id)
+        .map_err(GraphError::Journal)?;
+    let (base, _) = if stored.is_some() {
+        validate_replay_plan(document, &unbounded)
+            .map_err(|error| GraphError::Invalid(error.to_string()))?
+    } else {
+        validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
+    };
+    let admitted = match admitted_candidate {
+        Some(candidate) => {
+            if candidate.source != *document
+                || candidate.checkpoint != stored
+                || candidate.extensions != extensions
+            {
+                return Err(GraphError::Invalid(
+                    "admitted candidate does not match the execution state".into(),
+                ));
+            }
+            candidate
+        }
+        None => match stored.as_ref() {
+            Some(checkpoint) => {
+                admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
+            }
+            None => admit_candidate(document, None, extensions, limits, budget, None),
+        }
+        .map_err(|error| match error {
+            CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
+                node: node.to_string(),
+                invariant,
+            },
+            other => GraphError::Candidate(other),
+        })?,
+    };
+    let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
+    let expanded = plans::expand(
+        document,
+        stored_extensions,
+        stored.as_ref().map_or(&[], |c| c.expansions.as_slice()),
+        &unbounded,
+    )
+    .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+    let (plan, positions) = validate_flat_plan(&expanded, &unbounded)
+        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+    let plan_digest = plan_digest(&base)
+        .map_err(GraphError::Canonical)?
+        .to_string();
+
+    let mut checkpoint = match stored {
+        Some(checkpoint) => {
+            let mut validation = checkpoint.clone();
+            restore_cancelled_nodes(&mut validation)
+                .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+            // Cancellation retains attempt custody evidence. Validate the
+            // original state without reopening the actual admission fence.
+            for node in &mut validation.nodes {
+                if node
+                    .skip_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("parent "))
+                    && let Some(state) = node.cancelled_from.take()
+                {
+                    node.state = state;
+                    node.skip_reason = None;
+                }
+            }
+            asks::refresh_wake(&mut validation);
+            validate_checkpoint(document, &validation, &plan, &plan_digest)?;
+            checkpoint
+        }
+        None => {
+            if let Some(reason) = graph_envelope_reason(document, &[], &[], &plan) {
+                return Err(GraphError::Invalid(reason));
+            }
+            let asks = may_ask(&plan);
+            let (review, integration) = owner.bound_graph_bases();
+            let bases = GraphBaseBinding::new(review, integration);
+            let instance_id = if asks {
+                Some(provenant_core::hex(
+                    &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
+                ))
+            } else {
+                None
+            };
+            let ask_actor = asks.then(|| owner.actor());
+            let mut checkpoint = transitions::initial_checkpoint(
+                document,
+                &plan,
+                plan_digest,
+                bases,
+                instance_id,
+                ask_actor,
+            );
+            if let Some(submission) = document.submission_patch.as_ref() {
+                let library = template::TemplateLibrary::bundled();
+                let resolvers = Default::default();
+                patch::admit_patch(
+                    &mut patch::LiveGraph {
+                        document,
+                        checkpoint: &mut checkpoint,
+                    },
+                    None,
+                    submission,
+                    &patch::PatchContext {
+                        library: &library,
+                        resolvers: &resolvers,
+                        journal: None,
+                        limits,
+                        worktree_layout: worktree_layout.clone(),
+                    },
+                )
+                .map_err(|error| GraphError::Invalid(error.to_string()))?;
+            }
+            // Publish the generation before the first eager bind. A stop can
+            // then write an instance-bound request while a host owns the graph
+            // lock and is resolving or creating a worktree.
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            if !submission_refusals.is_empty() {
+                for progress in &mut checkpoint.nodes {
+                    if progress.state == NodeState::Pending {
+                        let reason = submission_refusals
+                            .iter()
+                            .find(|(id, _)| id == &progress.id)
+                            .map_or("graph submission refused before launch", |(_, reason)| {
+                                reason.as_str()
+                            });
+                        transitions::fail_with(
+                            progress,
+                            "writer_preflight_refused",
+                            reason.to_owned(),
+                        );
+                    }
+                }
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                return Ok(transitions::graph_run(checkpoint));
+            }
+            for index in 0..plan.nodes.len() {
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(transitions::graph_run(checkpoint));
+                }
+                let node = &plan.nodes[index];
+                // A loop round's worktree is advanced by earlier rounds; its
+                // starting head becomes known only at that round.
+                if plans::writer(node)
+                    && !node.provision_worktree
+                    && node.round.is_none()
+                    && node
+                        .attempt
+                        .as_ref()
+                        .and_then(|spec| spec.new_worktree.as_ref())
+                        .is_none()
+                {
+                    let worktree = node
+                        .worktree
+                        .as_deref()
+                        .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                    match owner.bind_writer_worktree(worktree) {
+                        Ok(binding) => {
+                            transitions::apply_writer_binding(
+                                node,
+                                &mut checkpoint.nodes[index],
+                                binding,
+                                document.schema_version >= 2,
+                            )
+                            .map_err(GraphError::Refused)?;
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
+                        // Contention waits in the launch loop, which owns the
+                        // persisted deadline; only a refusal fails the node here.
+                        Err(error) if next_attempt::launch_contention(&error) => {}
+                        Err(error) => {
+                            transitions::writer_binding_failed(
+                                &mut checkpoint.nodes[index],
+                                &node.id,
+                                &next_attempt::writer_binding_reason(&node.id, &error),
+                            );
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
+                    }
+                    // Save a successful binding before acknowledging the stop;
+                    // otherwise the physical bind could outlive its checkpoint.
+                    if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)?
+                    {
+                        settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                        return Ok(transitions::graph_run(checkpoint));
+                    }
+                }
+            }
+            // Pin named review bases while the admitted source locations are
+            // still the ones selected for this execution.
+            for index in 0..plan.nodes.len() {
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(transitions::graph_run(checkpoint));
+                }
+                if !checkpoint.nodes[index].review_base_pending {
+                    continue;
+                }
+                let node = &plan.nodes[index];
+                let location = source_worktree(node, &plan, &checkpoint, &positions);
+                if matches!(
+                    node.source,
+                    Some(SourceBinding::Node { .. } | SourceBinding::Head { .. })
+                ) && location.is_none()
+                {
+                    continue;
+                }
+                let reference = node
+                    .review_base
+                    .as_deref()
+                    .ok_or_else(|| GraphError::Invalid("node review base missing".into()))?;
+                let base = owner.resolve_review_base(reference, location).map_err(GraphError::Run)?
+                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                    .ok_or_else(|| GraphError::Refused(format!("node {}: review base could not be bound; correct the reference and rerun", node.id)))?;
+                transitions::apply_review_base(&mut checkpoint.nodes[index], base);
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(transitions::graph_run(checkpoint));
+                }
+            }
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            checkpoint
+        }
+    };
+
+    if let Some(limit) = admitted.growth_limit {
+        // A refused resume cannot reopen or re-pause a cancelled graph.
+        if checkpoint.cancelled {
+            return Ok(GraphRun {
+                status: GraphStatus::Cancelled,
+                outcome: None,
+                checkpoint,
+                advance_error: None,
+            });
+        }
+        checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
         return Ok(transitions::graph_run(checkpoint));
+    }
+
+    if recover_minima(&mut checkpoint, &plan) {
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+
+    if may_ask(&plan) && (checkpoint.instance_id.is_none() || checkpoint.ask_actor.is_none()) {
+        asks::identity::<R, J::Error>(&mut checkpoint, owner)?;
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+    let effective_budget = admitted.effective_budget;
+    if transitions::refresh_limit_notes(&mut checkpoint, document) {
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+    if resume && apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+        settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+        return Ok(transitions::graph_run(checkpoint));
+    }
+    if resume {
+        let mut resume_view = checkpoint.clone();
+        restore_cancelled_nodes(&mut resume_view)
+            .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+        // Keep the cancellation fence and its displayed states durable until
+        // every extension is accepted. Reopen in the same save as those states.
+        if checkpoint.cancelled {
+            close_resolved_asks(&mut checkpoint, owner, journal)?;
+        }
+        if journal
+            .apply_cancellation(document, &mut checkpoint)
+            .map_err(GraphError::Journal)?
+        {
+            settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+            return Ok(transitions::graph_run(checkpoint));
+        }
+        transitions::apply_resume(&mut checkpoint, extensions)
+            .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+        if extensions.iter().any(|e| e.starts_with("loop.")) {
+            let expanded = plans::expand(
+                document,
+                &checkpoint.extensions,
+                &checkpoint.expansions,
+                &unbounded,
+            )
+            .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+            let (extended, _) = validate_flat_plan(&expanded, &unbounded)
+                .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+            transitions::apply_loop_extensions(&mut checkpoint, extensions, &extended)
+                .map_err(|error| GraphError::Invalid(error.into()))?;
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            return advance_inner(
+                document,
+                owner,
+                journal,
+                limits,
+                budget,
+                false,
+                &[],
+                observed_ci,
+                &[],
+                None,
+            );
+        }
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+
+    match advance_schedule(
+        document,
+        owner,
+        journal,
+        limits,
+        worktree_layout,
+        admission_policy,
+        effective_budget,
+        resume,
+        checkpoint,
+        expanded,
+        plan,
+        positions,
+        std::mem::take(observed_ci),
+    )? {
+        ScheduleExit::Done(run) => Ok(*run),
+        ScheduleExit::Recurse {
+            resume,
+            extensions,
+            mut observed_ci,
+        } => advance_inner(
+            document,
+            owner,
+            journal,
+            limits,
+            budget,
+            resume,
+            &extensions,
+            &mut observed_ci,
+            &[],
+            None,
+        ),
     }
 }
 

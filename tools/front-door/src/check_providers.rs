@@ -563,11 +563,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             std::thread::scope(|scope| {
                 for _ in 0..settings.concurrency.value {
                     let queue = &queue;
-                    // A route runs the full graph path, which the main thread
-                    // runs on its 8 MiB stack; in a debug build its executor
-                    // frames overflow a default worker stack (#3542).
-                    let worker = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
-                    worker.spawn_scoped(scope, move || loop {
+                    // A route runs the full graph path. Its executor frames now
+                    // fit a default worker stack in a debug build (#3542), so
+                    // workers need no enlarged stack.
+                    scope.spawn(move || loop {
                         let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
                         let Some(row) = row else { break; };
                         if let Err(error) = live(row, settings, cadence, globals, workers) {
@@ -575,7 +574,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                             row.cause = Cause::Check(CheckCause::LaunchRefused);
                             row.error_code.get_or_insert_with(|| error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>().map_or("provider_check_error", |error| error.code()).to_owned());
                         }
-                    })?;
+                    });
                 }
                 Ok::<(), std::io::Error>(())
             })?;

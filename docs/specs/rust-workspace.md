@@ -58,6 +58,18 @@ Tests isolate user state and use controlled time and synchronisation.
 - Owner: `crates/test-support/src/lib.rs` (`root_inputs`, `wait_for`, `process_is_gone`, `assert_process_gone`),
   `crates/core/src/time.rs::Clock`
 
+## Bounded debug stack frames
+
+A graph launch fits the default 2 MiB stack of a spawned debug-build thread.
+Large executor locals and futures on the launch path are boxed and the largest
+phases are split into separate functions; a raised `RUST_MIN_STACK` or an
+enlarged worker stack is not the fix.
+- Why: a launch that needs an enlarged thread stack overflows debug tests and
+  workers that run on the default, and raising the limit hides the cause.
+- Owner: `tools/front-door/crates/fabric-runtime/src/graph.rs`,
+  `tools/front-door/src/fabric/run_owner.rs`,
+  `tools/front-door/src/check_providers.rs`, `tools/front-door/.cargo/config.toml`
+
 ## One owner per mechanism
 
 Each mechanism has one implementation; callers supply the policy that varies.
