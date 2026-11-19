@@ -50,6 +50,7 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("stale_graph_age", "string"),
     FieldMetadata::int("graph_checkpoint_days", 1, 3650),
     FieldMetadata::new("discard_archive_retention", "string"),
+    FieldMetadata::new("cargo_target_idle", "string"),
     FieldMetadata::new("free_floor", "string"),
     FieldMetadata::new("critical_free", "string"),
     FieldMetadata::new("alert_below", "string"),

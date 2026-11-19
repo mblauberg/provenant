@@ -32,10 +32,12 @@ ageing provider state or collecting checkpoints. Tick enters the same path.
 Provider state, scratch and payload-cap policies run as separate scheduled
 adapters. The declaration
 also owns settings and subsystem ownership; adding a class requires collection
-and measurement implementations. Preview bounds cache measurement and may omit
-idle candidates whose recent writes could not be checked within the budget.
-Its byte estimates can be partial; a timed-out process census keeps custody unknown.
-Cargo cache previews are bounded and mark incomplete measurements in JSON.
+and measurement implementations. Preview and apply measure caches under the
+sweep budget alone, never a fixed entry count, so one large cache cannot end the
+pass before later classes run. A measurement the budget stops is marked partial
+in JSON and text and resumes on the next pass; a timed-out process census keeps
+custody unknown. A class the pass never reached reports `not run in this pass`
+and an unavailable byte row, never a measured zero.
 The preview uses local ref evidence without forge reads. Apply refreshes custody
 before removal. Measurements do not follow links; APFS clones may share physical
 blocks, so the change in volume free space can differ. Apply removes eligible attempt scratch without a separate
@@ -76,13 +78,23 @@ It accepts bytes or a percentage of the cache volume, defaults to 10% of that
 volume and shows its effective source in diagnostics. For example, set
 `"lanes.cargo_cache_max" = "50G"` or `"10%"` in the host configuration
 `[knobs]` table; profile and launch overrides use the same knob. Launch evicts eligible targets in
-least-recently-used order when the cache exceeds the budget. `gc --dry-run`
-shows measured cache size against that budget; incomplete previews say so.
+least-recently-used order when the cache exceeds the budget. Full GC also
+removes a managed target nothing wrote for `gc.cargo_target_idle` (default
+`30d`, same duration syntax) whatever the budget allows, including targets of
+chair-made and hand-made worktrees, and any tombstone an interrupted removal
+left. `gc --dry-run` shows measured allocated bytes against the budget with the
+budget and idle settings and their sources, and names each target it would
+remove with its worktree and reason (`idle`, `over budget`, `tombstone`);
+incomplete previews say so. Allocated bytes include blocks shared with APFS
+clones, so the volume may gain less.
 Targets of the removed `lanes.cargo_target = "shared"` mode under
 `~/Library/Caches/provenant-shared-cargo/` count toward both the budget and the
-free-space sweep until full GC retires them: a preview lists them, and `--apply`
-removes each whose Cargo locks are free and that was not written within the
-build-directory grace. Live attempt custody and held Cargo build
+free-space sweep until full GC retires them. A preview probes and measures each
+project directory as apply would; `--apply` renames each whose Cargo locks are
+free and that was not written within the build-directory grace to a tombstone,
+then deletes it under `gc.sweep_budget`, resuming tombstones first on the next
+pass. Each kept directory is listed with its cause: a held lock, a recent write
+or a probe failure. Live attempt custody and held Cargo build
 locks always protect a target. Full GC also protects recent writes and the
 newest Cargo seed generation for each project. Private lane caches older than `gc.idle` are
 eligible when their owner has settled or disappeared. Unknown custody keeps a cache.

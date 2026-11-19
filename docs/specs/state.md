@@ -192,7 +192,9 @@ results, handoffs, logs and process records, and never removes files from busy
 or unreleased attempts. After merge, cleanup targets only the merged branch's
 worktree and attempt scratch. At lane launch, space below `gc.free_floor`
 triggers a best-effort single-flight full sweep; full sweeps preserve busy or
-recently used shared caches and the newest seed generation.
+recently used shared caches and the newest seed generation. Managed Cargo
+targets unused for `gc.cargo_target_idle` (default 30 days) are collected
+whatever the cache budget allows.
 The [disk spec](disk.md#bounded-sweeps) owns sweep budgets and resumption;
 [cache custody](disk.md#scratch-and-cache-custody) covers private and shared
 Cargo targets under `lanes.cargo_cache_max`.

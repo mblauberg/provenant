@@ -59,10 +59,21 @@ and not locked are trimmed; held or unprobeable locks report as busy and are spa
 `lanes.cargo_cache_max` covers both private lane and shared Cargo targets. It
 accepts bytes or a percentage of the volume and defaults to 10% of the cache volume.
 Its effective value and source are observable. Launch and disk-floor collection
-reclaim eligible targets least recently used first; bounded previews report
-partial measurements explicitly. Cargo build locks and live attempt custody
-protect targets independently of size pressure. The newest seed generation and
-recent writes retain their existing protection.
+reclaim eligible targets least recently used first. Full GC also removes any
+managed target unused for `gc.cargo_target_idle` (default 30 days), whatever
+the budget allows and whoever made its worktree, and every GC removal names its
+target, owning worktree and reason. Measurement stops only at the sweep
+deadline, preview included; a stopped census reports partial measurements
+explicitly and resumes. Cargo build locks and live attempt custody protect
+targets independently of size and age, and a failed lock probe keeps the target
+with its cause reported. The newest seed generation and recent writes retain
+their existing protection. Retired shared targets are renamed to a tombstone
+under their held locks before deletion, so an interrupted pass never leaves a
+partial target where Cargo builds.
+- Why: worktrees removed without a lane settlement, and chair or hand-made
+  worktrees, otherwise keep their targets forever while the cache stays under
+  budget; a fixed measurement cap starved every class after the first large
+  cache.
 
 An EPERM process with complete descriptor evidence and no observed cwd or
 descriptor beneath a candidate produces a warning once rather than making every
