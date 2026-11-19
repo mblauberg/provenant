@@ -1754,53 +1754,56 @@ pub fn launch_values(
     publication_secrets(values)
 }
 
-/// Return non-empty values of at least `MIN_EXACT_BYTES` bytes from ambient variables
-/// whose names end in one of the credential assignment keys understood by the streaming redactor,
-/// excluding placeholder values like `[REDACTED]`.
-/// Out-of-bounds variables (>16 KiB, >128 variables or >64 KiB total) are skipped with a visible
-/// warning instead of invalidating the secret set.
-/// This deliberately reads process environment only; it never opens stores.
+/// Collect held ambient credentials for publication. Bounds failures must withdraw
+/// publication rather than silently omitting a value the process holds.
 pub fn ambient_values() -> Result<Vec<Vec<u8>>, RedactorError> {
     ambient_values_from(std::env::vars_os())
 }
 
-#[allow(
-    clippy::print_stderr,
-    reason = "warn operator of skipped out-of-bounds ambient credentials"
-)]
+fn ambient_credentials(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> impl Iterator<Item = Vec<u8>> {
+    vars.into_iter().filter_map(|(name, value)| {
+        if !credential_variable_name(name.as_encoded_bytes()) {
+            return None;
+        }
+        let value = value.into_encoded_bytes();
+        (value.len() >= MIN_EXACT_BYTES && value.as_slice() != REDACTED).then_some(value)
+    })
+}
+
 fn ambient_values_from(
     vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> Result<Vec<Vec<u8>>, RedactorError> {
-    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = vars.into_iter().collect();
+    validate_secrets(ambient_credentials(vars))
+}
+
+#[allow(
+    clippy::print_stderr,
+    reason = "warn once about bounded retry admission"
+)]
+fn warn_skipped_retry_credentials() {
+    static WARNING: std::sync::Once = std::sync::Once::new();
+    WARNING.call_once(|| {
+        // Do not interpolate environment names or values into diagnostics.
+        eprintln!("warning: retry admission skipped out-of-bounds ambient credentials (16 KiB per value, 128 values, 64 KiB total); publication remains fail-closed");
+    });
+}
+
+/// Only retry admission may skip credentials outside the bounded exact matcher.
+fn ambient_values_for_retry_from(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut vars: Vec<_> = vars.into_iter().collect();
     vars.sort_by(|a, b| a.0.cmp(&b.0));
     let mut values = Vec::new();
     let mut total_bytes = 0usize;
-    for (name, value) in vars {
-        if !credential_variable_name(name.as_encoded_bytes()) {
-            continue;
-        }
-        let encoded = value.into_encoded_bytes();
-        if encoded.len() < MIN_EXACT_BYTES || encoded.as_slice() == REDACTED {
-            continue;
-        }
-        let name_str = name.to_string_lossy();
-        if encoded.len() > MAX_SECRET_LENGTH {
-            eprintln!(
-                "warning: skipping ambient credential variable {name_str}: length {} exceeds limit of {MAX_SECRET_LENGTH}",
-                encoded.len()
-            );
-            continue;
-        }
-        if values.len() >= MAX_SECRETS {
-            eprintln!(
-                "warning: skipping ambient credential variable {name_str}: credential count exceeds limit of {MAX_SECRETS}"
-            );
-            continue;
-        }
-        if total_bytes.saturating_add(encoded.len()) > MAX_SECRET_BYTES {
-            eprintln!(
-                "warning: skipping ambient credential variable {name_str}: total credential bytes would exceed limit of {MAX_SECRET_BYTES}"
-            );
+    for encoded in ambient_credentials(vars) {
+        if encoded.len() > MAX_SECRET_LENGTH
+            || values.len() >= MAX_SECRETS
+            || total_bytes.saturating_add(encoded.len()) > MAX_SECRET_BYTES
+        {
+            warn_skipped_retry_credentials();
             continue;
         }
         total_bytes += encoded.len();
@@ -1811,9 +1814,10 @@ fn ambient_values_from(
 
 /// Validate whether text contains an exact known credential value (ambient or scoped)
 /// of at least `MIN_EXACT_BYTES` bytes, excluding placeholder values like `[REDACTED]`.
+/// Only this admission path skips over-bound ambient values, with a warning.
 /// Returns `Ok(false)` if safe, or `Ok(true)` if text matches a credential value.
-pub fn matches_credential_value(bytes: &[u8]) -> Result<bool, RedactorError> {
-    let mut secrets = ambient_values()?;
+pub fn matches_credential_value_for_retry(bytes: &[u8]) -> Result<bool, RedactorError> {
+    let mut secrets = ambient_values_for_retry_from(std::env::vars_os())?;
     secrets.extend(scoped_values());
     secrets.retain(|s| s.len() >= MIN_EXACT_BYTES && s.as_slice() != REDACTED);
     if secrets.is_empty() {
@@ -2033,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_credential_value_ignores_short_or_placeholder_values() {
+    fn matches_credential_value_for_retry_ignores_short_or_placeholder_values() {
         // Short values (< 8 bytes) and placeholder '[REDACTED]' are ignored.
         let _scope = publication_scope([
             b"ollama".to_vec(),
@@ -2045,11 +2049,17 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(!matches_credential_value(b"plain retry brief with ollama and EMPTY").unwrap());
-        assert!(!matches_credential_value(b"brief with [REDACTED] placeholder").unwrap());
-        assert!(!matches_credential_value(b"brief with 1234567 embedded").unwrap());
-        assert!(matches_credential_value(b"brief with 12345678 embedded").unwrap());
-        assert!(matches_credential_value(b"brief with exact-credential-3391 embedded").unwrap());
+        assert!(
+            !matches_credential_value_for_retry(b"plain retry brief with ollama and EMPTY")
+                .unwrap()
+        );
+        assert!(!matches_credential_value_for_retry(b"brief with [REDACTED] placeholder").unwrap());
+        assert!(!matches_credential_value_for_retry(b"brief with 1234567 embedded").unwrap());
+        assert!(matches_credential_value_for_retry(b"brief with 12345678 embedded").unwrap());
+        assert!(
+            matches_credential_value_for_retry(b"brief with exact-credential-3391 embedded")
+                .unwrap()
+        );
         let prose = b"ollama EMPTY [REDACTED] 1234567";
         assert_eq!(publication_text(prose, []).unwrap(), prose);
         assert_eq!(publication_text(b"12345678", []).unwrap(), REDACTED);
@@ -2082,22 +2092,79 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/retry-owner.md#credential-admission-and-publication
     #[test]
-    fn ambient_values_skips_oversize_credential_variables() {
+    fn ambient_bounds_are_lenient_only_for_retry() {
         use std::ffi::OsString;
-        let vars = vec![
+        for (count, length, retained, expected) in [
+            (1, MAX_SECRET_LENGTH + 1, 0, RedactorError::SecretTooLong),
             (
-                OsString::from("FIXTURE_TEST_API_KEY"),
-                OsString::from("x".repeat(MAX_SECRET_LENGTH + 1)),
+                MAX_SECRETS + 1,
+                MIN_EXACT_BYTES,
+                MAX_SECRETS,
+                RedactorError::TooManySecrets,
             ),
-            (
-                OsString::from("VALID_TEST_API_KEY"),
-                OsString::from("valid-exact-3391"),
-            ),
-        ];
-        let values = ambient_values_from(vars)
-            .expect("oversize ambient credential variable must not fail the set");
-        assert_eq!(values, vec![b"valid-exact-3391".to_vec()]);
+            (5, MAX_SECRET_LENGTH, 4, RedactorError::SecretSetTooLarge),
+        ] {
+            let vars = (0..count)
+                .map(|index| {
+                    (
+                        OsString::from(format!("BOUND_{index:03}_API_KEY")),
+                        OsString::from(format!("{index:08}{}", "x".repeat(length - 8))),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ambient_values_from(vars.clone()), Err(expected));
+            let values = ambient_values_for_retry_from(vars).unwrap();
+            assert_eq!(values.len(), retained);
+            assert!(validate_secrets(values).is_ok());
+        }
+    }
+
+    // Spec: docs/specs/retry-owner.md#credential-admission-and-publication
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "fixture subprocess isolates ambient credentials and captures process-wide stderr"
+    )]
+    fn oversized_ambient_credential_withdraws_publication_but_admits_retry() {
+        const CHILD: &str = "PROVENANT_REDACT_BOUND_TEST";
+        const NAME: &str = "UNTRUSTED\n\u{1b}[31m_API_KEY";
+        let oversized = "oversized-held-credential-".repeat(800);
+        if std::env::var_os(CHILD).is_some() {
+            for _ in 0..2 {
+                assert!(!matches_credential_value_for_retry(b"ordinary retry brief").unwrap());
+            }
+            assert_eq!(ambient_values(), Err(RedactorError::SecretTooLong));
+            assert_eq!(
+                publication_text(oversized.as_bytes(), []),
+                Err(RedactorError::SecretTooLong)
+            );
+            assert!(Redactor::for_publication([]).is_err());
+            assert!(known_shapes(oversized.as_bytes()).is_err());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::oversized_ambient_credential_withdraws_publication_but_admits_retry",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .env(NAME, &oversized)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.matches("warning: retry admission").count(), 1);
+        assert!(!stderr.contains(&oversized));
+        assert!(!stderr.contains(NAME));
+        assert!(!stderr.contains('\u{1b}'));
     }
 
     #[test]

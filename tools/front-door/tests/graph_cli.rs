@@ -2296,10 +2296,12 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
         "exact-value refusal is atomic"
     );
 
-    // An out-of-bounds ambient credential variable (>16 KiB) is skipped with a visible warning and does not refuse retry.
+    // An out-of-bounds ambient credential variable (>16 KiB) is skipped only
+    // for retry admission, with a generic warning and no disclosed name/value.
+    let oversized = "x".repeat(16 * 1024 + 1);
     let output = rig
         .command()
-        .env("FIXTURE_API_KEY", "x".repeat(16 * 1024 + 1))
+        .env("FIXTURE_API_KEY", &oversized)
         .args(["retry", &id, "--brief", "ordinary retry brief"])
         .output()?;
     let reply: Value = serde_json::from_slice(&output.stdout)?;
@@ -2309,8 +2311,23 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("warning") && stderr.contains("FIXTURE_API_KEY"),
-        "expected visible warning in stderr: {stderr}"
+        stderr.contains("retry admission skipped out-of-bounds ambient credentials"),
+        "expected the retry admission warning in stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr
+            .matches("retry admission skipped out-of-bounds ambient credentials")
+            .count(),
+        1,
+        "warning should be emitted once per process: {stderr}"
+    );
+    assert!(
+        !stderr.contains("FIXTURE_API_KEY"),
+        "warning must omit variable names: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&oversized),
+        "warning must omit credential values: {stderr}"
     );
     Ok(())
 }
@@ -2536,16 +2553,6 @@ fn retry_after_lowered_host_limit_preserves_structural_pause() -> Result {
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
 
-    let id2 = "lowered-limit-changed";
-    let path2 = rig.document(
-        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id2,"nodes":[
-            {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
-            {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
-        ]}),
-    )?;
-    let output2 = rig.command().args(["run", "--file"]).arg(path2).output()?;
-    assert!(output2.status.success(), "{output2:?}");
-
     use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
 
@@ -2603,28 +2610,56 @@ fn retry_after_lowered_host_limit_preserves_structural_pause() -> Result {
     );
 
     // Verify the checkpoint in journal has the StructuralLimit pause.
-    let checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
     assert_eq!(
         checkpoint.pause_cause(),
         Some(provenant_records::pause::PauseCause::StructuralLimit),
         "checkpoint must record StructuralLimit pause"
     );
 
-    // 2. Changed retry (e.g. with --node and --brief) against lowered limit must refuse.
-    let (output, refused) = rig.run(&[
-        "retry",
-        &format!("{id2}/first"),
-        "--brief",
-        "new instruction",
-    ])?;
+    // Graph-wide retry reset its nodes to pending. Recreate the explicit
+    // settled cancellation fixture so the node-scoped retry reaches candidate
+    // structural admission instead of refusing on node state.
+    checkpoint.cancelled = true;
+    for node in &mut checkpoint.nodes {
+        node.state = NodeState::Skipped;
+        node.skip_reason = Some("graph cancelled".into());
+        node.cancelled_from = Some(NodeState::Pending);
+        node.gate = None;
+        node.outputs = None;
+    }
+    assert!(
+        checkpoint
+            .nodes
+            .iter()
+            .all(|node| { node.state == NodeState::Skipped && node.cancelled_from.is_some() }),
+        "changed-retry fixture must be settled before invocation"
+    );
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    // 2. A node-scoped retry builds a replacement candidate even without a
+    // brief. Do not put a brief on a gate: that would be an invalid candidate
+    // for an unrelated reason before structural admission.
+    let (output, refused) = rig.run(&["retry", &format!("{id}/first")])?;
     assert!(
         !output.status.success(),
         "changed candidate retry against lowered limit must be refused: {refused}"
     );
-    assert_eq!(refused["status"], "error");
     assert!(
-        refused["error"]["message"].is_string(),
-        "refusal must carry an error message: {refused}"
+        refused["error"]["code"] == "graph_target"
+            && refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("limits.nodes=1 reached (2)")),
+        "changed candidate must be refused by the lowered structural node limit: {refused}"
     );
 
     Ok(())

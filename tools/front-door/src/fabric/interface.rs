@@ -2562,7 +2562,7 @@ impl Factory {
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), FacadeError> {
         if let Some(brief) = input.get("brief").and_then(Value::as_str) {
-            match provenant_redact::matches_credential_value(brief.as_bytes()) {
+            match provenant_redact::matches_credential_value_for_retry(brief.as_bytes()) {
                 Err(_) => {
                     return Err(FacadeError::io_caused(
                         "check retry brief credentials",

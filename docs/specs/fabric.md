@@ -212,8 +212,8 @@ the complete retained extension list contributes to the checkpoint envelope.
 Admission refusals may name node IDs, loop keys and field paths that passed the
 identifier grammar, and host-owned rule identifiers and schema positions. They
 never echo free-form caller text such as prompt or brief bodies. A disclosure
-identifier containing a registered credential is omitted (`null`) while the
-refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbitrary
+identifier containing a registered credential is omitted (`null`) in structured
+output and displayed as `[masked]` in text while the refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbitrary
 map keys become `[<key>]`; array positions may use indices. Secret-shaped input
 produces a `SECRET_SHAPED_INPUT` warning naming the field and saying it looks
 like a credential, without echoing the value. The compiled default is Warn;
@@ -222,8 +222,12 @@ refuse, including when a retained policy requests Refuse. Warnings name their so
 and knob. Operator retry briefs refuse only exact known credential values of at
 least eight bytes, excluding `[REDACTED]`; this check never opens credential
 stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables or >64 KiB total)
-are skipped with a visible warning and never refuse retry. The refusal precedes
-any mutation or reservation. Automatic writer restarts reuse accepted input
+are skipped only by `matches_credential_value_for_retry`, with one warning per process
+that contains no environment names or values, and never refuse retry. Publication
+collection (`ambient_values`) remains strict: an over-bound credential set fails
+validation and withdraws publication, including streaming filters, diagnostic
+projection and per-launch publication context. No raw fallback is allowed.
+The retry refusal precedes any mutation or reservation. Automatic writer restarts reuse accepted input
 without this operator admission check.
 Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
 kind and rule; limit causes name the host limit, never the supplied value.

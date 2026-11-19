@@ -47,7 +47,7 @@ impl std::ops::Deref for GraphIdentifier {
 }
 impl fmt::Display for GraphIdentifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.as_deref().unwrap_or_default())
+        f.write_str(self.0.as_deref().unwrap_or("[masked]"))
     }
 }
 
@@ -470,11 +470,20 @@ mod tests {
         for value in [example, "redacted"] {
             let _scope = provenant_redact::publication_scope([value.as_bytes().to_vec()]).unwrap();
             let masked = GraphIdentifier::try_from(value.to_owned()).unwrap();
-            assert!(masked.to_string().is_empty());
+            assert_eq!(masked.to_string(), "[masked]");
+            assert_eq!(
+                format!("node {masked}: structural limit"),
+                "node [masked]: structural limit"
+            );
+            let extension = ExtensionCause::loop_rule(
+                &format!("loop.{value}.rounds=3"),
+                ExtensionRule::NonIncreasing,
+            );
+            assert!(extension.to_string().contains(" for loop [masked]"));
             assert!(serde_json::to_value(&masked).unwrap().is_null());
             let restored: GraphIdentifier =
                 serde_json::from_value(serde_json::to_value(masked).unwrap()).unwrap();
-            assert!(restored.to_string().is_empty());
+            assert_eq!(restored.to_string(), "[masked]");
         }
     }
 
