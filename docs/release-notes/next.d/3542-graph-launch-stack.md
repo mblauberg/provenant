@@ -2,4 +2,4 @@
 
 ### Fabric and graphs
 
-- A graph launch now fits the default 2 MiB stack of a spawned thread in a debug build. The large scheduling pass in `advance_inner` runs in its own frame, and large values on the submit path are boxed. The `RUST_MIN_STACK` override and the 8 MiB `check providers --live` worker stack are removed. (#3542)
+- Graph execution uses smaller stack frames in a debug build. The scheduling pass, gate evaluation, attempt admission and observation recording, the host launch preparation and the submit path are split into separate functions, and large values on the submit path are boxed. Threads that run graph execution now take one named size, `GRAPH_STACK_BYTES`, in place of the scattered `RUST_MIN_STACK` and 8 MiB worker overrides. (#3542)
