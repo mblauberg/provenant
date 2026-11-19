@@ -4041,6 +4041,21 @@ impl WriterLaunch {
             if tip == bases.work || held != bases.host {
                 return Ok(String::new());
             }
+            // Hold the admission gate from the sibling check through the
+            // converge, so no sibling is admitted into files being restored.
+            // An observer holding the gate leaves the worktree intact.
+            let _admission = match &self.custody {
+                Some((slot, _)) => {
+                    match provenant_supervisor::custody::writer_admission_guard(slot) {
+                        Ok(gate) => Some(gate),
+                        Err(provenant_supervisor::custody::CustodyError::Busy) => {
+                            return Ok(format!("worktree left intact; {location}"));
+                        }
+                        Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
+                    }
+                }
+                None => None,
+            };
             if self.other_holders_live(Some(attempt))? {
                 return Ok(format!("shared worktree left intact; {location}"));
             }
