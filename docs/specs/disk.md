@@ -83,7 +83,10 @@ single-flight guard is released on every exit. A dead or over-budget holder is
 detected and takeover emits a warning. Recursive surveys persist bounded
 traversal progress and accumulated measurements so a large tree makes progress
 across passes. A survey snapshot never grants removal authority: takeover and
-resumption require fresh candidate custody checks.
+resumption require fresh candidate custody checks. Each trigger and scope keeps
+its own bounded restart record, so unfinished scopes remain independently
+resumable without growing the single-flight lease record. An ambiguous legacy
+inline cursor restarts its scope from the beginning rather than skipping work.
 - Why: a large or abandoned sweep must not prevent later collection.
 
 Collection belongs to [worktrees](supervisor.md#worktrees) and

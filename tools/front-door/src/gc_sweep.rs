@@ -20,6 +20,9 @@ const PROGRESS_LIMIT: u64 = 16 * 1024;
 // One-time bound for converting progress files written before cursors moved
 // into per-scope sidecars. New lease records remain limited to PROGRESS_LIMIT.
 const LEGACY_PROGRESS_LIMIT: u64 = 64 * 1024 * 1024;
+// Rewriting an accepted legacy record can add lease metadata. Pending
+// migration records have bounded headroom; ordinary legacy input does not.
+const MIGRATION_PROGRESS_LIMIT: u64 = LEGACY_PROGRESS_LIMIT + PROGRESS_LIMIT;
 const EPOCH_LIMIT: u64 = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +100,11 @@ struct Progress {
     scope: Option<String>,
     #[serde(default)]
     cursor: Option<Cursor>,
+    // Old records have no marker. Once migrated, sidecars are authoritative.
+    #[serde(default)]
+    scope_cursors_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    migration_pending: bool,
     // Read for migration from the original inline format, then omitted from
     // every new write so the lease file stays bounded regardless of scopes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -167,15 +175,15 @@ fn clear_scope_cursor(directory: &Directory, key: &str) -> Result<(), io::Error>
 }
 
 fn migrate_legacy_cursors(directory: &Directory, progress: &mut Progress) -> Result<(), io::Error> {
-    for (key, cursor) in std::mem::take(&mut progress.cursors) {
-        write_scope_cursor(directory, &key, &cursor)?;
+    for (key, cursor) in &progress.cursors {
+        if read_scope_cursor(directory, key)?.is_none() {
+            write_scope_cursor(directory, key, cursor)?;
+        }
     }
-    if let (Some(trigger), Some(scope), Some(cursor)) =
-        (&progress.trigger, &progress.scope, &progress.cursor)
-    {
-        let key = scope_key(trigger, scope);
-        write_scope_cursor(directory, &key, cursor)?;
-    }
+    // An empty map with an inline cursor is ambiguous: a sidecar-era
+    // completion may have removed the cursor just before a crash. Restarting
+    // that scope from the beginning is safe; resurrecting it could skip work.
+    progress.cursors.clear();
     Ok(())
 }
 
@@ -284,10 +292,11 @@ impl Lease {
             }
             return Ok(());
         }
+        let key = scope_key(trigger, scope);
+        let cursor = read_scope_cursor(&self.directory, &key)?;
         self.progress.trigger = Some(trigger.into());
         self.progress.scope = Some(scope.into());
-        let key = scope_key(trigger, scope);
-        self.progress.cursor = read_scope_cursor(&self.directory, &key)?;
+        self.progress.cursor = cursor;
         self.progress.released = false;
         self.write_progress_locked()
     }
@@ -465,9 +474,6 @@ pub(crate) fn acquire(
     {
         return Ok(Acquire::Busy(None));
     }
-    if let Some(progress) = &mut old {
-        migrate_legacy_cursors(&directory, progress)?;
-    }
     let warning = old.as_ref().and_then(|progress| {
         if progress.released {
             return None;
@@ -487,6 +493,28 @@ pub(crate) fn acquire(
         }
     });
     let epoch = next_epoch(&directory, old.as_ref().map(|progress| progress.epoch))?;
+    if let Some(progress) = &mut old
+        && !progress.scope_cursors_v2
+    {
+        // Fence the previous holder before the potentially long migration.
+        // Keep the legacy payload intact until every sidecar has been written,
+        // so a crash or write failure can retry it under the new epoch.
+        progress.pid = std::process::id() as i64;
+        progress.epoch = epoch;
+        progress.started_unix_seconds = clock.unix_seconds();
+        progress.started_host_monotonic_micros = clock.host_monotonic_micros().ok();
+        progress.boot_identity = clock.boot_identity().ok();
+        progress.budget_seconds = budget.as_secs().max(1);
+        progress.released = false;
+        progress.migration_pending = true;
+        write_legacy_progress(&directory, progress)?;
+        if let Err(error) = migrate_legacy_cursors(&directory, progress) {
+            progress.released = true;
+            let _ = write_legacy_progress(&directory, progress);
+            return Err(error.into());
+        }
+        progress.scope_cursors_v2 = true;
+    }
     if budget.is_zero() {
         let _ = writeln!(
             io::stderr().lock(),
@@ -496,7 +524,6 @@ pub(crate) fn acquire(
     let cursor = if let Some(progress) = &old {
         if let (Some(trigger), Some(scope)) = (&progress.trigger, &progress.scope) {
             read_scope_cursor(&directory, &scope_key(trigger, scope))?
-                .or_else(|| progress.cursor.clone())
         } else {
             progress.cursor.clone()
         }
@@ -514,6 +541,8 @@ pub(crate) fn acquire(
         trigger: old.as_ref().and_then(|progress| progress.trigger.clone()),
         scope: old.as_ref().and_then(|progress| progress.scope.clone()),
         cursor,
+        scope_cursors_v2: true,
+        migration_pending: false,
         cursors: BTreeMap::new(),
     };
     let lease = Lease {
@@ -559,14 +588,43 @@ fn metadata_lock_for_release(
     )
 }
 
+fn write_legacy_progress(directory: &Directory, progress: &Progress) -> Result<(), io::Error> {
+    let bytes = serde_json::to_vec(progress).map_err(io::Error::other)?;
+    if bytes.len() as u64 > MIGRATION_PROGRESS_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy GC progress exceeds its size limit",
+        ));
+    }
+    directory
+        .atomic_write(
+            OsStr::new(PROGRESS_FILE),
+            ".gc-progress-",
+            &bytes,
+            PublishMode::Replace,
+        )
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
 fn read_progress(directory: &Directory) -> Result<Option<Progress>, Box<dyn std::error::Error>> {
-    let bytes = match directory.read_stable(OsStr::new(PROGRESS_FILE), LEGACY_PROGRESS_LIMIT) {
+    let bytes = match directory.read_stable(OsStr::new(PROGRESS_FILE), MIGRATION_PROGRESS_LIMIT) {
         Ok(bytes) => bytes,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(Box::new(error)),
     };
     match serde_json::from_slice::<Progress>(&bytes) {
-        Ok(progress) => Ok(Some(progress)),
+        Ok(progress) => {
+            let progress: Progress = progress;
+            if bytes.len() as u64 > LEGACY_PROGRESS_LIMIT && !progress.migration_pending {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "legacy GC progress exceeds its size limit",
+                )
+                .into());
+            }
+            Ok(Some(progress))
+        }
         Err(error) => {
             let _ = writeln!(
                 io::stderr().lock(),
@@ -737,6 +795,8 @@ mod tests {
             trigger: None,
             scope: None,
             cursor: None,
+            scope_cursors_v2: false,
+            migration_pending: false,
             cursors: BTreeMap::new(),
         };
         assert!(!holder_over_budget(&progress, &clock));
@@ -752,9 +812,10 @@ mod tests {
     #[test]
     fn live_over_budget_lease_is_fenced_and_resumes_its_saved_cursor() {
         let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
         let mut clock = test_clock();
         let budget = Duration::from_secs(30);
-        let mut old = match acquire(temp.path(), budget, &clock).unwrap() {
+        let mut old = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("new lock should be available"),
         };
@@ -769,14 +830,14 @@ mod tests {
         let cancel = CancelToken::new();
         old.watch_fence(cancel.clone()).unwrap();
         assert!(matches!(
-            acquire(temp.path(), budget, &clock).unwrap(),
+            acquire(&root, budget, &clock).unwrap(),
             Acquire::Busy(_)
         ));
 
         clock
             .advance(DurationMicros::from_micros(31_000_000))
             .unwrap();
-        let current = match acquire(temp.path(), budget, &clock).unwrap() {
+        let current = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("expired lease should be fenced and taken over"),
         };
@@ -800,7 +861,7 @@ mod tests {
         drop(current);
         // An early exit releases its lease but keeps the cursor for resumption.
         assert!(matches!(
-            acquire(temp.path(), budget, &clock).unwrap(),
+            acquire(&root, budget, &clock).unwrap(),
             Acquire::Held(_)
         ));
     }
@@ -809,9 +870,9 @@ mod tests {
     #[test]
     fn dead_owner_is_taken_over_with_a_warning() {
         let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
         let clock = test_clock();
-        let directory =
-            provenant_config::private_directory(&temp.path().join("tick"), true).unwrap();
+        let directory = provenant_config::private_directory(&root.join("tick"), true).unwrap();
         let progress = Progress {
             pid: 2_000_000_000,
             epoch: 3,
@@ -828,11 +889,13 @@ mod tests {
                 candidate: None,
                 detail: None,
             }),
+            scope_cursors_v2: false,
+            migration_pending: false,
             cursors: BTreeMap::new(),
         };
         next_epoch(&directory, Some(progress.epoch)).unwrap();
         write_progress(&directory, &progress).unwrap();
-        let lease = match acquire(temp.path(), Duration::from_secs(30), &clock).unwrap() {
+        let lease = match acquire(&root, Duration::from_secs(30), &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("dead owner should be taken over"),
         };
@@ -849,9 +912,10 @@ mod tests {
     #[test]
     fn early_exit_releases_lease_and_keeps_the_resume_cursor() {
         let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
         let clock = test_clock();
         let budget = Duration::from_secs(30);
-        let mut lease = match acquire(temp.path(), budget, &clock).unwrap() {
+        let mut lease = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("new sweep should acquire its lease"),
         };
@@ -864,7 +928,7 @@ mod tests {
         lease.checkpoint(cursor.clone()).unwrap();
         drop(lease);
 
-        let resumed = match acquire(temp.path(), budget, &clock).unwrap() {
+        let resumed = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("early exit must release its lease immediately"),
         };
@@ -913,6 +977,165 @@ mod tests {
     }
 
     #[test]
+    fn legacy_migration_does_not_overwrite_an_existing_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let directory = provenant_config::private_directory(&root.join("tick"), true).unwrap();
+        let old = Cursor {
+            class: "old".into(),
+            ..Cursor::default()
+        };
+        let newer = Cursor {
+            class: "newer".into(),
+            ..Cursor::default()
+        };
+        let key = scope_key("full_gc", "first");
+        let legacy = Progress {
+            pid: 2_000_000_000,
+            epoch: 3,
+            started_unix_seconds: clock.unix_seconds(),
+            started_host_monotonic_micros: clock.host_monotonic_micros().ok(),
+            boot_identity: clock.boot_identity().ok(),
+            budget_seconds: 30,
+            released: false,
+            trigger: Some("full_gc".into()),
+            scope: Some("first".into()),
+            cursor: Some(old),
+            scope_cursors_v2: false,
+            migration_pending: false,
+            cursors: BTreeMap::new(),
+        };
+        next_epoch(&directory, Some(legacy.epoch)).unwrap();
+        write_progress(&directory, &legacy).unwrap();
+        write_scope_cursor(&directory, &key, &newer).unwrap();
+        let Acquire::Held(mut resumed) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("dead sweep is busy")
+        };
+        resumed.set_identity("full_gc", "first").unwrap();
+        assert_eq!(resumed.cursor(), Some(&newer));
+    }
+
+    #[test]
+    fn markerless_completed_scope_does_not_resurrect_inline_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let directory = provenant_config::private_directory(&root.join("tick"), true).unwrap();
+        let legacy = Progress {
+            pid: 2_000_000_000,
+            epoch: 3,
+            started_unix_seconds: clock.unix_seconds(),
+            started_host_monotonic_micros: clock.host_monotonic_micros().ok(),
+            boot_identity: clock.boot_identity().ok(),
+            budget_seconds: 30,
+            released: false,
+            trigger: Some("full_gc".into()),
+            scope: Some("first".into()),
+            cursor: Some(Cursor {
+                class: "old".into(),
+                ..Cursor::default()
+            }),
+            scope_cursors_v2: false,
+            migration_pending: false,
+            cursors: BTreeMap::new(),
+        };
+        next_epoch(&directory, Some(legacy.epoch)).unwrap();
+        write_progress(&directory, &legacy).unwrap();
+        let Acquire::Held(mut resumed) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("dead sweep is busy")
+        };
+        resumed.set_identity("full_gc", "first").unwrap();
+        assert_eq!(resumed.cursor(), None);
+    }
+
+    #[test]
+    fn failed_legacy_migration_preserves_cursor_for_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let directory = provenant_config::private_directory(&root.join("tick"), true).unwrap();
+        let cursor = Cursor {
+            class: "kept".into(),
+            ..Cursor::default()
+        };
+        let key = scope_key("full_gc", "first");
+        let legacy = Progress {
+            pid: 2_000_000_000,
+            epoch: 3,
+            started_unix_seconds: clock.unix_seconds(),
+            started_host_monotonic_micros: clock.host_monotonic_micros().ok(),
+            boot_identity: clock.boot_identity().ok(),
+            budget_seconds: 30,
+            released: false,
+            trigger: Some("full_gc".into()),
+            scope: Some("first".into()),
+            cursor: Some(cursor.clone()),
+            scope_cursors_v2: false,
+            migration_pending: false,
+            cursors: [(key.clone(), cursor.clone())].into(),
+        };
+        next_epoch(&directory, Some(legacy.epoch)).unwrap();
+        write_progress(&directory, &legacy).unwrap();
+        let blocked = root.join("tick").join(scope_cursor_name(&key));
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(acquire(&root, budget, &clock).is_err());
+        let preserved = read_progress(&directory).unwrap().unwrap();
+        assert!(preserved.released);
+        assert!(preserved.epoch > legacy.epoch);
+        assert_eq!(preserved.cursors.get(&key), Some(&cursor));
+        std::fs::remove_dir(blocked).unwrap();
+        let Acquire::Held(mut resumed) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("released sweep is busy")
+        };
+        resumed.set_identity("full_gc", "first").unwrap();
+        assert_eq!(resumed.cursor(), Some(&cursor));
+    }
+
+    #[test]
+    fn sidecar_checkpoint_survives_stale_lease_and_failed_scope_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let Acquire::Held(mut lease) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("new sweep is busy")
+        };
+        lease.set_identity("full_gc", "first").unwrap();
+        let old = Cursor {
+            class: "old".into(),
+            ..Cursor::default()
+        };
+        let newer = Cursor {
+            class: "newer".into(),
+            ..Cursor::default()
+        };
+        lease.checkpoint(old.clone()).unwrap();
+        // Simulate a crash between publishing the sidecar and the lease record.
+        write_scope_cursor(&lease.directory, &scope_key("full_gc", "first"), &newer).unwrap();
+        lease
+            .directory
+            .atomic_write(
+                &scope_cursor_name(&scope_key("full_gc", "second")),
+                ".test-",
+                b"invalid",
+                PublishMode::Replace,
+            )
+            .unwrap();
+        assert!(lease.set_identity("full_gc", "second").is_err());
+        assert_eq!(lease.scope(), Some("first"));
+        drop(lease);
+        let Acquire::Held(mut resumed) = acquire(&root, budget, &clock).unwrap() else {
+            panic!("released sweep is busy")
+        };
+        resumed.set_identity("full_gc", "first").unwrap();
+        assert_eq!(resumed.cursor(), Some(&newer));
+    }
+
+    #[test]
     fn many_scope_cursors_migrate_out_of_the_bounded_lease_record() {
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
@@ -943,6 +1166,8 @@ mod tests {
             trigger: Some("full_gc".into()),
             scope: Some(scope_names[0].clone()),
             cursor: Some(cursor_for(0)),
+            scope_cursors_v2: false,
+            migration_pending: false,
             cursors,
         };
         let directory = provenant_config::private_directory(&root.join("tick"), true).unwrap();
@@ -1018,7 +1243,8 @@ mod tests {
     #[test]
     fn bounded_fixture_sweep_releases_and_resumes_at_its_last_candidate() {
         let temp = tempfile::tempdir().unwrap();
-        let fixture = temp.path().join("candidates");
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let fixture = root.join("candidates");
         std::fs::create_dir(&fixture).unwrap();
         for index in 0..256 {
             std::fs::create_dir(fixture.join(format!("candidate-{index:03}"))).unwrap();
@@ -1026,7 +1252,7 @@ mod tests {
 
         let mut clock = test_clock();
         let budget = Duration::from_secs(1);
-        let mut lease = match acquire(temp.path(), budget, &clock).unwrap() {
+        let mut lease = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("new fixture sweep should acquire its lease"),
         };
@@ -1065,7 +1291,7 @@ mod tests {
         );
         drop(lease);
 
-        let resumed = match acquire(temp.path(), budget, &clock).unwrap() {
+        let resumed = match acquire(&root, budget, &clock).unwrap() {
             Acquire::Held(lease) => lease,
             Acquire::Busy(_) => panic!("released fixture sweep should resume"),
         };
