@@ -1809,6 +1809,64 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
     wait_for_identity_absence(&escapee)?;
     Ok(())
 }
+/// Half the five-second full-census backstop: a retained guardian that
+/// misses the last blocker's exit wakes only on that backstop.
+#[cfg(target_os = "macos")]
+const RELEASE_AFTER_LAST_BLOCKER: Duration = Duration::from_millis(2_500);
+/// Retained custody releases the writer soon after the last process blocking
+/// settlement exits. Its exit must wake the guardian whether it lands in a
+/// stop's exit wait, between a census and its watch, or in the idle wait.
+#[cfg(target_os = "macos")]
+fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
+    root: &Path,
+) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
+    // Live graph children forbid the escapee stop: only its own exit settles.
+    std::fs::write(home.join("live-graph-children"), b"pending")?;
+    let ready_path = root.join("release.sock");
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let (writer, handle) = start(
+        root,
+        "release",
+        "s2-detach-provider",
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    drop(writer);
+    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let escapee = process_identity(read_pid_line(&mut stream)?)?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    // Its socket closing ends the escapee, at once and with no signal.
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    let last_blocker_gone = Instant::now();
+    let clock = SystemClock::new();
+    let _released = Directory::open_anchor(&root.join("release-writer"))?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = last_blocker_gone.elapsed();
+    assert!(
+        waited < RELEASE_AFTER_LAST_BLOCKER,
+        "writer released {waited:?} after the last blocker exited"
+    );
+    Ok(())
+}
 #[cfg(target_os = "macos")]
 fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result<()> {
     std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
@@ -3069,6 +3127,11 @@ const CASES: &[Case] = &[
     (
         "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
         escapee_is_ended_only_when_the_host_reports_no_nested_runs,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "retained_custody_releases_the_writer_soon_after_the_last_blocker_exits",
+        retained_custody_releases_the_writer_soon_after_the_last_blocker_exits,
     ),
     #[cfg(target_os = "macos")]
     (

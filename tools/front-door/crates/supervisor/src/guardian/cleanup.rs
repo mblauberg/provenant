@@ -799,7 +799,8 @@ impl Driver<'_> {
     #[allow(clippy::disallowed_methods)]
     fn await_exits(&mut self, identities: &[ProcessIdentity], grace: Duration) {
         let pids = identities.iter().map(|identity| identity.pid).collect();
-        let mut watched = matches!(self.reactor.watch_processes(&pids), Ok((_, 0)));
+        let mut watched =
+            matches!(self.reactor.watch_processes(&pids), Ok(watches) if watches.failures == 0);
         let deadline = Instant::now() + grace;
         loop {
             if !identities.iter().any(|identity| self.still_alive(identity)) {
@@ -949,9 +950,10 @@ impl Driver<'_> {
     }
 
     /// Exit and fork filters for every identity that can still block
-    /// settlement. Returns whether all of them are watched; dead identities
-    /// need no filter.
-    pub(super) fn watch_retained_processes(&mut self) -> bool {
+    /// settlement. Returns whether all of them are watched (dead identities
+    /// need no filter) and whether one was found gone at registration, an
+    /// exit no event will report.
+    pub(super) fn watch_retained_processes(&mut self) -> (bool, bool) {
         let pids: std::collections::BTreeSet<i64> = self
             .tracked
             .iter()
@@ -960,7 +962,10 @@ impl Driver<'_> {
             .chain(self.spared.spared_identities())
             .map(|identity| identity.pid)
             .collect();
-        matches!(self.reactor.watch_processes(&pids), Ok((_, 0)))
+        match self.reactor.watch_processes(&pids) {
+            Ok(watches) => (watches.failures == 0, watches.gone),
+            Err(_) => (false, false),
+        }
     }
 }
 

@@ -23,6 +23,13 @@ pub(crate) fn ensure_supported() -> io::Result<()> {
 
 pub(crate) struct Watch<'a>(PhantomData<BorrowedFd<'a>>);
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProcessWatches {
+    pub(crate) added: bool,
+    pub(crate) gone: bool,
+    pub(crate) failures: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
@@ -42,7 +49,7 @@ impl GuardianReactor {
         Err(unsupported())
     }
 
-    pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
+    pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<ProcessWatches> {
         Err(unsupported())
     }
     pub(crate) fn install() -> io::Result<Self> {

@@ -1668,11 +1668,12 @@ impl Driver<'_> {
                             .chain(self.spared.spared_identities()),
                     );
                     match self.reactor.watch_processes(&pids) {
-                        Ok((added, failures)) => {
-                            process_watch_unavailable = failures != 0;
-                            // Close the gap between observing a new process
-                            // and registering its fork filter.
-                            census_event_pending |= added;
+                        Ok(watches) => {
+                            process_watch_unavailable = watches.failures != 0;
+                            // Close the gap between observing a process and
+                            // registering its filter: a fork or exit there
+                            // sends no event.
+                            census_event_pending |= watches.added || watches.gone;
                         }
                         Err(_) => process_watch_unavailable = true,
                     }
@@ -2088,7 +2089,11 @@ impl Driver<'_> {
                 schedule.process_event |=
                     std::mem::take(&mut self.deferred_process_event) && !schedule.escalate_only;
                 if step != RetainedStep::Wait {
-                    schedule.watched = self.watch_retained_processes();
+                    let (watched, gone) = self.watch_retained_processes();
+                    schedule.watched = watched;
+                    // A blocker that exited after the look's census but
+                    // before its filter sends no event: look at once.
+                    schedule.process_event |= gone && !schedule.escalate_only;
                 }
                 // The old lock inode can be proven idle even after its name is
                 // removed. Leave the durable unresolved fence untouched.

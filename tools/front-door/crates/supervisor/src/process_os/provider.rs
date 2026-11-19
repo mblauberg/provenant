@@ -53,6 +53,18 @@ impl<'a> Watch<'a> {
     }
 }
 
+/// What one round of process-watch registration found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProcessWatches {
+    /// A filter was added; a fork before it was registered sent no event.
+    pub(crate) added: bool,
+    /// A PID was already gone at registration, or right after it: its exit
+    /// sent no event, so the caller treats this as one. Reported once per PID.
+    pub(crate) gone: bool,
+    /// Filters that could not be registered for live processes.
+    pub(crate) failures: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
@@ -70,6 +82,8 @@ pub(crate) struct GuardianReactor {
     queue: std::fs::File,
     _mask: SignalMask,
     processes: BTreeSet<i64>,
+    /// Requested PIDs already reported gone at registration.
+    exited: BTreeSet<i64>,
     pollfds: Vec<libc::pollfd>,
     cancellation_directory: Option<std::fs::File>,
     #[cfg(feature = "fixture")]
@@ -115,6 +129,7 @@ impl GuardianReactor {
             queue,
             _mask: mask,
             processes: BTreeSet::new(),
+            exited: BTreeSet::new(),
             pollfds: Vec::with_capacity(4),
             cancellation_directory: None,
             #[cfg(feature = "fixture")]
@@ -158,11 +173,14 @@ impl GuardianReactor {
     }
 
     /// Watch known processes for fork and exit. A failure requires a full
-    /// scan; kqueue does not expose the new PID in a fork event.
-    pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
+    /// scan; kqueue does not expose the new PID in a fork event. A process
+    /// that exits before its filter is registered sends no exit event, so
+    /// it is reported as `gone` instead.
+    pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<ProcessWatches> {
         let queue = self.queue.as_raw_fd();
-        let (added, failures) = register_process_watches(
+        let mut watches = register_process_watches(
             &mut self.processes,
+            &mut self.exited,
             pids,
             |pid| {
                 let ident = usize::try_from(pid).map_err(|_| io::ErrorKind::InvalidInput)?;
@@ -196,18 +214,16 @@ impl GuardianReactor {
             },
         )?;
         #[cfg(feature = "fixture")]
-        let mut failures = failures;
-        #[cfg(feature = "fixture")]
         if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
             && state.join("s2-fail-process-watch").exists()
         {
-            failures += 1;
+            watches.failures += 1;
             self.injected_watch_failures += 1;
             if self.injected_watch_failures >= 2 {
                 let _ = std::fs::write(state.join("s2-process-watch-failed"), b"failed");
             }
         }
-        Ok((added, failures))
+        Ok(watches)
     }
 
     /// Waits for at most the requested duration, capped to one second per
@@ -359,16 +375,17 @@ fn poll_timeout_ms(remaining: Duration) -> i32 {
 
 fn register_process_watches(
     processes: &mut BTreeSet<i64>,
+    exited: &mut BTreeSet<i64>,
     pids: &BTreeSet<i64>,
     mut register: impl FnMut(i64) -> io::Result<()>,
     mut gone: impl FnMut(i64) -> bool,
-) -> io::Result<(bool, usize)> {
+) -> io::Result<ProcessWatches> {
     if pids.len() > MAX_CENSUS_ENTRIES {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     processes.retain(|pid| pids.contains(pid));
-    let mut added = false;
-    let mut failures = 0;
+    exited.retain(|pid| pids.contains(pid));
+    let mut watches = ProcessWatches::default();
     for &pid in pids {
         if processes.contains(&pid) {
             continue;
@@ -376,13 +393,24 @@ fn register_process_watches(
         match register(pid) {
             Ok(()) => {
                 processes.insert(pid);
-                added = true;
+                watches.added = true;
+                // Recheck after registering: an exit just before the filter
+                // took hold may never be delivered.
+                if gone(pid) {
+                    watches.gone |= exited.insert(pid);
+                } else {
+                    exited.remove(&pid);
+                }
             }
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) || gone(pid) => {}
-            Err(_) => failures += 1,
+            // A PID still requested stays in `exited`, so a dead identity
+            // the caller has not yet pruned is reported once, not each round.
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) || gone(pid) => {
+                watches.gone |= exited.insert(pid);
+            }
+            Err(_) => watches.failures += 1,
         }
     }
-    Ok((added, failures))
+    Ok(watches)
 }
 
 fn guardian_signals() -> [i32; 4] {
@@ -1466,10 +1494,12 @@ mod tests {
     #[test]
     fn process_watch_failures_do_not_hide_later_pids() {
         let mut watched = BTreeSet::new();
+        let mut exited = BTreeSet::new();
         let pids = BTreeSet::from([1, 2, 3, 4, 5]);
         let mut attempted = Vec::new();
         let result = register_process_watches(
             &mut watched,
+            &mut exited,
             &pids,
             |pid| {
                 attempted.push(pid);
@@ -1484,8 +1514,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attempted, vec![1, 2, 3, 4, 5]);
-        assert_eq!(result, (true, 2));
+        assert_eq!(
+            result,
+            ProcessWatches {
+                added: true,
+                gone: true,
+                failures: 2,
+            }
+        );
         assert!(watched.contains(&4));
+    }
+
+    /// An exit before (or racing) registration sends no kqueue event, so it
+    /// is reported as one, once per PID while the caller still requests it.
+    #[test]
+    fn a_pid_gone_at_registration_is_reported_once() {
+        let mut watched = BTreeSet::new();
+        let mut exited = BTreeSet::new();
+        let pids = BTreeSet::from([7, 8]);
+        let esrch = |pid| {
+            if pid == 7 {
+                Err(io::Error::from_raw_os_error(libc::ESRCH))
+            } else {
+                Ok(())
+            }
+        };
+        // 8 registers, then is found gone: its exit may predate the filter.
+        let first =
+            register_process_watches(&mut watched, &mut exited, &pids, esrch, |pid| pid == 8)
+                .unwrap();
+        assert_eq!(
+            first,
+            ProcessWatches {
+                added: true,
+                gone: true,
+                failures: 0,
+            }
+        );
+        let again =
+            register_process_watches(&mut watched, &mut exited, &pids, esrch, |_| true).unwrap();
+        assert_eq!(again, ProcessWatches::default());
+        // Dropped by the caller, then requested again (a reused PID): new.
+        register_process_watches(&mut watched, &mut exited, &BTreeSet::new(), esrch, |_| true)
+            .unwrap();
+        let reused =
+            register_process_watches(&mut watched, &mut exited, &pids, esrch, |_| false).unwrap();
+        assert!(reused.gone && reused.added, "{reused:?}");
     }
 
     #[test]
