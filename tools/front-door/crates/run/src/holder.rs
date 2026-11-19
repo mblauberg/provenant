@@ -5477,11 +5477,12 @@ mod writer_recovery_tests {
         Ok(())
     }
 
-    /// A writer that exits without a handoff keeps its uncommitted paths in
-    /// the terminal reason: the empty-final-message cause must not overwrite
-    /// them (#3341). The branch head and the dirty file are preserved for the
-    /// chair, so the graph stays continuable in both the empty and the
-    /// non-empty final-message cases.
+    /// A writer that exits without a handoff and without a commit keeps its
+    /// uncommitted paths in the terminal reason: the empty-final-message cause
+    /// must not overwrite them (#3341). The branch head and the dirty file are
+    /// preserved for the chair, so the graph stays continuable in both the
+    /// empty and the non-empty final-message cases. A commit would move the
+    /// head and end the census, so this case needs a writer that never committed.
     #[test]
     fn no_handoff_writer_exit_keeps_dirty_paths_head_and_continuation()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -5546,45 +5547,8 @@ mod writer_recovery_tests {
             drop(provenant_supervisor::fixture::bind_writer_attempt(
                 lease, &attempt,
             )?);
-            let committed_head = {
-                let objects = candidate.join("git-objects");
-                let shared_objects = launch.worktree.repo().common_git_dir().join("objects");
-                let private_git = |args: &[std::ffi::OsString]| {
-                    crate::objects::execute_bounded(
-                        &git,
-                        &candidate.join("git-common"),
-                        &fixture.writer.worktree,
-                        args,
-                        None,
-                        crate::objects::Execution {
-                            object_directory: Some(&objects),
-                            alternate_directory: Some(&shared_objects),
-                            ..Default::default()
-                        },
-                    )
-                };
-                let head = private_git(&[
-                    "-c".into(),
-                    "user.name=Fixture".into(),
-                    "-c".into(),
-                    "user.email=fixture@example.invalid".into(),
-                    "commit-tree".into(),
-                    format!("{}^{{tree}}", launch.base).into(),
-                    "-p".into(),
-                    launch.base.to_string().into(),
-                    "-m".into(),
-                    "Partial work".into(),
-                ])?;
-                let head = std::str::from_utf8(&head)?.trim();
-                private_git(&[
-                    "update-ref".into(),
-                    launch.branch.as_str().into(),
-                    head.into(),
-                ])?;
-                head.to_owned()
-            };
-            // The writer exited mid-build: a commit on its branch and an edit
-            // it never committed. Both must survive for the chair.
+            // The writer exited mid-build with an edit it never committed and
+            // no commit: the branch head stays at its base for the chair.
             std::fs::write(fixture.writer.worktree.join(DIRTY), "uncommitted edit\n")?;
 
             let mut observed = crate::tests::exit();
@@ -5604,7 +5568,9 @@ mod writer_recovery_tests {
             else {
                 return Err("not terminal".into());
             };
-            assert_eq!(*outcome, Outcome::ReviewRequired, "{reason:?}");
+            // Uncommitted work is never delivered or reported as a success; the
+            // missing handoff or empty message does not hide that outcome.
+            assert_eq!(*outcome, Outcome::Uncommitted, "{reason:?}");
             let reason = reason.as_deref().ok_or("terminal reason")?;
             assert!(
                 reason.contains(DIRTY),
@@ -5614,12 +5580,18 @@ mod writer_recovery_tests {
                 reason.contains("uncommitted"),
                 "uncommitted cause lost from reason: {reason}"
             );
-            let head = provenant_core::GitOid::parse(&committed_head)?;
             let terminal: crate::writer::WriterTerminal = crate::db::decode(
                 &read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
                     .ok_or("writer terminal not sealed")?,
             )?;
-            assert_eq!(terminal.head, head, "recorded head");
+            assert_eq!(terminal.head, launch.base, "recorded head");
+            assert_eq!(
+                finished.partial_signals,
+                [
+                    PartialSignal::HandoffMissing,
+                    PartialSignal::UncommittedWork
+                ]
+            );
             let stop = stop.as_ref().ok_or("typed stop")?;
             let next = stop.next_step(
                 &Default::default(),
@@ -5644,13 +5616,6 @@ mod writer_recovery_tests {
                 assert_eq!(
                     finished.settlement_reason,
                     Some(SettlementReason::HandoffMissing)
-                );
-                assert_eq!(
-                    finished.partial_signals,
-                    [
-                        PartialSignal::HandoffMissing,
-                        PartialSignal::UncommittedWork
-                    ]
                 );
                 assert_eq!(stop.cause(), provenant_records::StopCause::HandoffMissing);
                 assert_eq!(next, provenant_records::NextStep::Chair, "{reason}");
