@@ -4237,8 +4237,7 @@ pub(super) fn prepare_candidates_inner(
             .map_err(|error| error.to_string())?;
         let common_git_dir = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir().to_path_buf()),
-            // Read-only views never own build output: their target stays in scratch.
-            AccessMode::ReadOnly => None,
+            AccessMode::ReadOnly => common_git_path.clone(),
         };
         let private_cache = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
@@ -4660,7 +4659,7 @@ pub(super) fn prepare_candidates_inner(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
-        if writer.is_none() {
+        if writer.is_none() && !cargo_target.value.is_shared() {
             super::command::scratch_cargo_output(&mut spec.env, scratch);
         }
         spec.complete_tool_requirements(&plan, &cwd)?;
@@ -4720,11 +4719,7 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = &cargo_cache_budget_warning {
             push_launch_warning(&mut route, warning.clone());
         }
-        // A read-only lane builds in its own scratch by design; only a writer
-        // that should share the project target is warned.
-        if writer.is_some()
-            && let Some((_, target_val)) = spec.env.iter().find(|(k, _)| k == "CARGO_TARGET_DIR")
-        {
+        if let Some((_, target_val)) = spec.env.iter().find(|(k, _)| k == "CARGO_TARGET_DIR") {
             let target_path = Path::new(target_val);
             if target_path.starts_with(scratch) || target_path.starts_with(&paths.temporary) {
                 push_launch_warning(

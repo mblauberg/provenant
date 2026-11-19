@@ -1562,7 +1562,7 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
 }
 
 #[test]
-fn read_only_lane_setup_never_creates_a_target_outside_its_scratch() -> Result<(), ProviderError> {
+fn read_only_lane_setup_leaves_an_external_target_to_the_host() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture".into());
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
@@ -1571,12 +1571,17 @@ fn read_only_lane_setup_never_creates_a_target_outside_its_scratch() -> Result<(
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.host_var = &external;
     let launch = crate::codex::Codex.prepare(input)?;
-    // Setup only anchors directories under run-owned state; the host creates an
-    // external target before launch, so a setup step for it would be refused.
-    assert!(!launch.setup.iter().any(|step| matches!(
-        step,
-        crate::launch::SetupStep::CreateDir(path) if path.starts_with("/fixture/shared")
-    )));
+    // Setup only anchors directories under run-owned state; the host creates the
+    // shared or configured target before launch, so a setup step for it would be
+    // refused.
+    assert!(
+        launch.setup.iter().all(|step| !matches!(
+            step,
+            crate::launch::SetupStep::CreateDir(path) if path.starts_with("/fixture/shared")
+        )),
+        "{:?}",
+        launch.setup
+    );
     let scratch = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let launch = crate::codex::Codex.prepare(fixture_input(
         &route,

@@ -956,7 +956,7 @@ fn verify_lane_profile(
         let argv = [
             "/bin/sh",
             "-c",
-            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$CARGO_TARGET_DIR\" = \"$tmp/target\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
+            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test -d \"$CARGO_TARGET_DIR\" && test -w \"$CARGO_TARGET_DIR\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
         ]
         .map(OsString::from);
         let command = compiled.command(
