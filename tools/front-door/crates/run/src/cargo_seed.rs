@@ -267,9 +267,13 @@ impl Outcome {
             extra: Default::default(),
         }
     }
+    pub(crate) fn is_seeded(&self) -> bool {
+        self.status == "seeded"
+    }
 }
 
-pub(crate) fn seed_target(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn seed_target_with_reservation(
     state: &Path,
     cache: &Path,
     worktree: &Path,
@@ -277,6 +281,7 @@ pub(crate) fn seed_target(
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
+    before_clone: impl FnOnce(Option<u64>),
 ) -> Outcome {
     #[cfg(unix)]
     {
@@ -306,6 +311,7 @@ pub(crate) fn seed_target(
                 project_key,
             },
             Some(cancel),
+            before_clone,
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
         )
     }
@@ -319,6 +325,7 @@ pub(crate) fn seed_target(
             home,
             environment,
             cancel,
+            before_clone,
         );
         Outcome::skipped("unsupported_platform")
     }
@@ -345,6 +352,7 @@ fn seed_target_with(
             project_key: "",
         },
         None,
+        |_| {},
         |source, dest, _| clone(source, dest),
     )
 }
@@ -363,6 +371,7 @@ fn seed_target_cancellable(
     cache: &Path,
     compatibility: SeedCompatibility<'_>,
     cancel: Option<&provenant_core::CancelToken>,
+    before_clone: impl FnOnce(Option<u64>),
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
     let budget = SeedBudget::new();
@@ -498,6 +507,13 @@ fn seed_target_cancellable(
         });
     };
     let source = selected.target;
+    before_clone(allocated_tree_bytes(&source, deadline, cancel));
+    if deadline.expired() {
+        return Outcome::fallback(fallback_reasons::SEED_BUDGET_EXHAUSTED);
+    }
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return Outcome::fallback(fallback_reasons::CANCELLED);
+    }
     let Ok(random) = temporary_name() else {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     };
@@ -561,6 +577,38 @@ fn seed_target_cancellable(
             Outcome::fallback(reason)
         }
     }
+}
+
+#[cfg(unix)]
+fn allocated_tree_bytes(
+    path: &Path,
+    deadline: &SeedBudget,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Option<u64> {
+    use std::{fs, os::unix::fs::MetadataExt};
+    fn walk(
+        path: &Path,
+        depth: usize,
+        deadline: &SeedBudget,
+        cancel: Option<&provenant_core::CancelToken>,
+    ) -> Option<u64> {
+        if depth > 64 || deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(path).ok()?;
+        let mut bytes = metadata.blocks().saturating_mul(512);
+        if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path).ok()? {
+                if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
+                    return None;
+                }
+                bytes =
+                    bytes.saturating_add(walk(&entry.ok()?.path(), depth + 1, deadline, cancel)?);
+            }
+        }
+        Some(bytes)
+    }
+    walk(path, 0, deadline, cancel)
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -935,6 +983,7 @@ mod tests {
                 project_key: "project-a",
             },
             None,
+            |_| {},
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
                 Ok(())
@@ -983,6 +1032,7 @@ mod tests {
                 project_key: "project-a",
             },
             None,
+            |_| {},
             |_, _, _| panic!("profile-incompatible artifacts are never cloned"),
         );
         assert_eq!(
@@ -1012,6 +1062,7 @@ mod tests {
                 project_key: "project-a",
             },
             None,
+            |_| {},
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
                 Ok(())
@@ -1132,7 +1183,7 @@ mod tests {
         provenant_confinement::cargo::CargoHome::resolve(&home, |_| None)
             .unwrap()
             .lane_cargo_environment(&home, &cache, &mut env);
-        let outcome = seed_target(
+        let outcome = seed_target_with_reservation(
             &state,
             &cache,
             &worktree,
@@ -1140,6 +1191,7 @@ mod tests {
             &home,
             &env,
             &provenant_core::CancelToken::new(),
+            |_| {},
         );
         assert_eq!(
             (outcome.status.as_str(), outcome.reason.as_str()),
@@ -1148,7 +1200,7 @@ mod tests {
         assert!(cache.join("target").is_dir());
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
-        let outcome = seed_target(
+        let outcome = seed_target_with_reservation(
             &state,
             &cache,
             &worktree,
@@ -1156,6 +1208,7 @@ mod tests {
             &home,
             &refused,
             &provenant_core::CancelToken::new(),
+            |_| {},
         );
         assert_eq!(
             outcome,

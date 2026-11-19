@@ -194,6 +194,142 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn gc_collects_output_from_created_and_primary_worktrees() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+    fixture.run(&["add", ".gitignore"])?;
+    fixture.run(&["commit", "-m", "ignore output"])?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "created-output".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let primary = canonicalize(&fixture.root)?;
+    for path in [&created.path, &primary] {
+        fs::create_dir(path.join("target"))?;
+        fs::write(path.join("target/artifact"), "output")?;
+    }
+    let lanes = list_for_gc(&context, &cancel())?;
+    let regenerable = ["target".into()];
+    let policy = WorktreeGcPolicy {
+        include_foreign: false,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Outputs,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
+        upstream: None,
+        terminal: &|_| false,
+        no_live_lanes: &|_| true,
+        regenerable: &regenerable,
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+    };
+    let report = collect(&context, &lanes, &policy, &cancel())?;
+    for path in [&created.path, &primary] {
+        assert!(
+            !path.join("target").exists(),
+            "{path:?}: {:?}",
+            report.candidates
+        );
+        assert!(path.is_dir());
+    }
+    fs::create_dir(primary.join("target"))?;
+    fs::write(primary.join("target/artifact"), "held")?;
+    let _writer = cache_writer_guard(context.project_state, &primary)
+        .map_err(|state| format!("writer guard: {state:?}"))?;
+    let primary_lane = lanes.iter().find(|lane| lane.primary).ok_or("primary")?;
+    collect(
+        &context,
+        std::slice::from_ref(primary_lane),
+        &policy,
+        &cancel(),
+    )?;
+    assert!(primary.join("target/artifact").exists());
+    Ok(())
+}
+
+#[test]
+fn gc_stops_output_deletion_and_resumes_remaining_files() -> Result<(), Box<dyn Error>> {
+    fn scenario(primary: bool) -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let lane = if primary {
+            list_for_gc(&context, &cancel())?
+                .into_iter()
+                .find(|lane| lane.primary)
+                .ok_or("primary")?
+        } else {
+            gc_owned_lane(&test, &context, "interrupted-output")?
+        };
+        let target = lane.path.join("target");
+        fs::create_dir(&target)?;
+        for name in ["one", "two"] {
+            fs::write(target.join(name), "regenerable")?;
+        }
+        let policy = WorktreeGcPolicy {
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Outputs,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".into()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+        };
+        let mut stopped = false;
+        let mut should_stop = || {
+            if !target.exists() {
+                stopped |= fs::read_dir(&lane.path).is_ok_and(|entries| {
+                    entries.flatten().any(|entry| {
+                        let output = entry.path().join("output");
+                        output.is_dir()
+                            && (!output.join("one").exists() || !output.join("two").exists())
+                    })
+                });
+            }
+            stopped
+        };
+        let cancelled = cancel();
+        let report = collect_from(
+            &context,
+            std::slice::from_ref(&lane),
+            &policy,
+            &cancelled,
+            0,
+            &mut should_stop,
+        )?;
+        assert_eq!(report.interrupted_at, Some(0));
+        assert!(target.is_dir());
+        assert_ne!(target.join("one").exists(), target.join("two").exists());
+        collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+        assert!(!target.exists());
+        Ok(())
+    }
+    scenario(false)?;
+    scenario(true)
+}
+
+#[test]
 fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn Error>> {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
@@ -1213,6 +1349,30 @@ fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error
         .find(|lane| lane.path == canonical)
         .ok_or("missing unmanaged fixture worktree")?;
     lane.dirty = WorktreeCondition::Ignored;
+    let disabled = collect(
+        &context,
+        std::slice::from_ref(&lane),
+        &WorktreeGcPolicy {
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Outputs,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+            upstream: Some(fixture.head()?),
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".to_owned()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+        },
+        &cancel(),
+    )?;
+    assert!(target.join("artifact").exists());
+    assert!(disabled.idle_output.is_empty());
     let report = collect(
         &context,
         &[lane],

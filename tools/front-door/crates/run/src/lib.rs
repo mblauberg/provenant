@@ -91,8 +91,8 @@ pub use plan::{
 };
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
-    ProviderStateIssue, ScratchOwner, ScratchOwnerResolver, ScratchPolicy, TOMBSTONE,
-    payload_totals,
+    ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver, ScratchPolicy,
+    TOMBSTONE, payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,

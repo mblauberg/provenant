@@ -234,6 +234,18 @@ fn validate_entry(entry: &crate::DomainSection, table: &Table) -> Vec<SectionErr
             code: "retired.writer_launch_seconds",
         }];
     }
+    if entry.name == "fabric"
+        && table
+            .get("lanes")
+            .and_then(Item::as_table_like)
+            .is_some_and(|lanes| lanes.contains_key("build_dir_max_bytes"))
+    {
+        return vec![SectionError {
+            detail: None,
+            field: "lanes.build_dir_max_bytes".into(),
+            code: "retired.build_dir_max_bytes",
+        }];
+    }
     (entry.validate)(table)
 }
 
@@ -628,12 +640,12 @@ fn inspect<T: DeserializeOwned + Serialize>(
     for key in [
         "gc.schedule",
         "gc.idle",
+        "gc.sweep_budget",
         "gc.stale_graph_age",
         "gc.graph_checkpoint_days",
-        "gc.discard_archive_days",
+        "gc.discard_archive_retention",
         "gc.free_floor",
         "gc.critical_free",
-        "gc.lane_cargo_cache_max",
         "gc.alert_below",
         "gc.projects",
     ] {
@@ -1151,7 +1163,15 @@ fn recover_settings<T: DeserializeOwned + Default>(
                         .map(|(key, _)| key.to_owned())
                         .unwrap_or_default();
                 }
-                let rule = if unknown { "unknown_key" } else { "type" };
+                let rule = if unknown {
+                    if prefix == "gc" && key == "lane_cargo_cache_max" {
+                        "retired.lane_cargo_cache_max"
+                    } else {
+                        "unknown_key"
+                    }
+                } else {
+                    "type"
+                };
                 issues.push(Issue {
                     location: site(sites, &join(prefix, &key), origin, unknown),
                     rule,
@@ -1377,6 +1397,24 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             line: issue.location.line,
             message: format!(
                 "{key}: invalid configuration in an unused domain; run `provenant check config --json` to inspect it"
+            ),
+        });
+    }
+    if key == "gc.lane_cargo_cache_max"
+        || key == "domains.fabric.lanes.build_dir_max_bytes"
+        || issue.rule == "retired.lane_cargo_cache_max"
+        || issue.rule == "retired.build_dir_max_bytes"
+        || issue.source.as_ref().is_some_and(|source| {
+            source.code == "retired.lane_cargo_cache_max"
+                || source.code == "retired.build_dir_max_bytes"
+        })
+    {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!(
+                "{key}: removed configuration key; use lanes.cargo_cache_max under [knobs] instead"
             ),
         });
     }
@@ -1690,7 +1728,7 @@ impl Overrides<'_> {
             rule,
             source: (graph_policy || retired_key).then(|| SectionError {
                 detail: None,
-                field: if retired_key {
+                field: if retired_key && path.len() > 2 {
                     path[2..].join(".")
                 } else {
                     path.join(".")
@@ -1735,6 +1773,10 @@ impl Overrides<'_> {
                 "retired.bundle_bytes"
             } else if key == ["domains", "fabric", "graph", "writer_launch_seconds"] {
                 "retired.writer_launch_seconds"
+            } else if key == ["domains", "fabric", "lanes", "build_dir_max_bytes"] {
+                "retired.build_dir_max_bytes"
+            } else if key == ["gc", "lane_cargo_cache_max"] {
+                "retired.lane_cargo_cache_max"
             } else {
                 "unknown_key"
             };
@@ -2559,6 +2601,7 @@ fn normalise_tables(table: &mut Table) {
 #[cfg(test)]
 mod warning_tests {
     use super::*;
+    use crate::{DomainConfig, DomainSection};
 
     #[test]
     fn warning_stamp_is_per_revision_and_finding() -> Result<(), Box<dyn std::error::Error>> {
@@ -2628,5 +2671,62 @@ mod warning_tests {
             ["--json", "hook", "claude", "pre-tool-use"].map(Into::into)
         ));
         assert!(!is_pre_tool_hook(["config", "show"].map(Into::into)));
+    }
+
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    struct FabricStub {
+        #[serde(default)]
+        lanes: LanesStub,
+    }
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LanesStub {}
+    impl DomainConfig for FabricStub {}
+
+    fn fabric_defaults(_: Profile) -> &'static str {
+        "[lanes]\n"
+    }
+
+    const FABRIC_SECTION: DomainSection =
+        DomainSection::new::<FabricStub>("fabric", fabric_defaults);
+    const FABRIC_DOMAINS: DomainSections<FabricStub> = DomainSections::new(&[FABRIC_SECTION]);
+
+    #[test]
+    fn retired_cargo_cache_settings_produce_actionable_diagnostic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let inputs = provenant_test_support::test_roots(temp.path())?;
+        let roots = inputs.resolve(&provenant_test_support::IdentityPathResolver)?;
+        let text = b"schema_version=1\n[gc]\nlane_cargo_cache_max='50G'\n[domains.fabric.lanes]\nbuild_dir_max_bytes=1000\n";
+        let config = load_with_domains(&roots, Some(&text[..]), &FABRIC_DOMAINS)?;
+        let gc_warning = config
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("gc.lane_cargo_cache_max"))
+            .ok_or("missing gc.lane_cargo_cache_max diagnostic")?;
+        assert!(
+            gc_warning
+                .message
+                .contains("use lanes.cargo_cache_max under [knobs] instead"),
+            "unexpected message: {}",
+            gc_warning.message
+        );
+        let fabric_warning = config
+            .warnings
+            .iter()
+            .find(|warning| {
+                warning
+                    .message
+                    .contains("domains.fabric.lanes.build_dir_max_bytes")
+            })
+            .ok_or("missing domains.fabric.lanes.build_dir_max_bytes diagnostic")?;
+        assert!(
+            fabric_warning
+                .message
+                .contains("use lanes.cargo_cache_max under [knobs] instead"),
+            "unexpected message: {}",
+            fabric_warning.message
+        );
+        Ok(())
     }
 }

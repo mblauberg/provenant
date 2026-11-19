@@ -1849,7 +1849,10 @@ fn rust_toolchain(
     for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
         add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
     }
-    if access == Access::ReadOnly {
+    // A shared or configured target lies outside run-owned state, which setup
+    // may not create in. The host creates it before launch (preparation), so
+    // setup only anchors a target inside the lane cache.
+    if access == Access::ReadOnly && target.starts_with(cache) {
         setup.push(SetupStep::CreateDir(target));
     }
 }

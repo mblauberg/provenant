@@ -47,6 +47,13 @@ characterisation tests. Record the baseline so another agent can repeat it.
 Use the same oracle across the change. Investigate unexplained failures or
 behaviour changes, and report the ownership and dependency delta.
 
+## Repairing a red pull request
+
+Read what failed with `provenant ci failures pr N` (several numbers at once
+for several PRs) and the PR's state with `provenant pr status N`, and give that output
+to the repair writer as its input. Raw job-log reads spend the forge quota and
+miss the failure summary.
+
 ## Judging review findings
 
 When the chair runs review and repair by hand, judge each finding against the

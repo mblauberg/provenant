@@ -224,6 +224,40 @@ pub fn current_chair(context: &Context) -> Result<provenant_records::custody::Ch
     })
 }
 
+/// A host chair session with its source explanation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostChairSession {
+    pub session: String,
+    pub source: String,
+}
+
+impl Context {
+    /// The host chair session when known, and the source it came from.
+    pub fn host_chair_session(&self) -> Option<HostChairSession> {
+        if let Some(session) = current_session() {
+            return Some(HostChairSession {
+                session,
+                source: format!(
+                    "environment variable {}",
+                    provenant_core::consumer_env::SESSION_ID
+                ),
+            });
+        }
+        let actor = self.identity.inbox.actor;
+        if let Some(session) = provenant_workflow::session::chair_session_for(
+            &self.roots.state,
+            self.identity.project,
+            actor,
+        ) {
+            return Some(HostChairSession {
+                session: session.as_str().to_owned(),
+                source: format!("saved chair session for actor {actor}"),
+            });
+        }
+        None
+    }
+}
+
 /// Record a lifecycle acquisition without turning advisory custody into admission.
 pub fn acquire_custody(
     context: &Context,
@@ -1610,6 +1644,158 @@ node_prompt_bytes = 262144
             super::facade_outcome(&failure.error).1.code(),
             "PEER_VERSION"
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Isolated child processes test chair session resolution across environment variables."
+    )]
+    fn host_chair_session_discovery() -> Result<(), Box<dyn std::error::Error>> {
+        use std::path::PathBuf;
+
+        const FIXTURE: &str = "PROVENANT_TEST_HOST_CHAIR_SESSION";
+        if let Some(mode) = std::env::var_os(FIXTURE) {
+            use provenant_core::{Clock, RootInputs};
+            use std::fs;
+
+            let root = PathBuf::from(std::env::var("PROVENANT_TEST_ROOT")?);
+            let home = root.join("home");
+            let project = root.join("project");
+            let state = root.join("state");
+            let mut inputs = RootInputs::new(home.clone(), project.clone());
+            inputs.state_dir = Some(state.clone());
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let location = provenant_config::ProjectLocation::new(fs::canonicalize(&project)?)?;
+            let binding = provenant_config::bind_project(&roots, location)?;
+            provenant_config::bind_host(&roots)?;
+
+            let context = super::Context::open_for_project(roots, &home, &binding)?;
+
+            if mode == "none_and_stored" {
+                // 1. None fallback: without PROVENANT_SESSION_ID and without stored session.
+                assert_eq!(context.host_chair_session(), None);
+
+                // Now store a chair session for this actor/project.
+                let session_id =
+                    provenant_workflow::session::HostSessionId::parse("saved-chair-456")?;
+                let clock = provenant_os::clock::SystemClock::new();
+                let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
+                provenant_workflow::session::SessionStore::new(
+                    context.roots.state.clone(),
+                    context.identity.project,
+                    session_id,
+                )
+                .with_chair(context.identity.host, context.identity.inbox.actor)
+                .with_workspace(context.project_root.clone())
+                .save(
+                    b"checkpoint",
+                    budget,
+                    &provenant_core::CancelToken::new(),
+                    &clock,
+                )?;
+
+                // 2. Stored chair session fallback:
+                let hs = context
+                    .host_chair_session()
+                    .expect("expected stored chair session");
+                assert_eq!(hs.session, "saved-chair-456");
+                assert_eq!(
+                    hs.source,
+                    format!(
+                        "saved chair session for actor {}",
+                        context.identity.inbox.actor
+                    )
+                );
+            } else if mode == "env_override" {
+                // 3. PROVENANT_SESSION_ID override takes precedence over stored session.
+                let hs = context
+                    .host_chair_session()
+                    .expect("expected session from env");
+                assert_eq!(hs.session, "env-override-789");
+                assert_eq!(
+                    hs.source,
+                    format!(
+                        "environment variable {}",
+                        provenant_core::consumer_env::SESSION_ID
+                    )
+                );
+            }
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let project = root.join("project");
+        let state = root.join("state");
+        let config = root.join("config");
+        for directory in [&home, &project, &state, &config] {
+            std::fs::create_dir_all(directory)?;
+        }
+        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
+        )?;
+
+        // Phase 1: verify None fallback, then save session and verify stored fallback.
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "fabric::context::tests::host_chair_session_discovery",
+                "--nocapture",
+            ])
+            .env(FIXTURE, "none_and_stored")
+            .env("PROVENANT_TEST_ROOT", &root)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("PROVENANT_ROOT", &project)
+            .env("PROVENANT_STATE_DIR", &state)
+            .env_remove("PROVENANT_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_SESSION_ID");
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Phase 2: verify PROVENANT_SESSION_ID override over the stored session.
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "fabric::context::tests::host_chair_session_discovery",
+                "--nocapture",
+            ])
+            .env(FIXTURE, "env_override")
+            .env("PROVENANT_TEST_ROOT", &root)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("PROVENANT_ROOT", &project)
+            .env("PROVENANT_STATE_DIR", &state)
+            .env("PROVENANT_SESSION_ID", "env-override-789")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_SESSION_ID");
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        Ok(())
     }
 
     #[test]

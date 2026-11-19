@@ -6,14 +6,6 @@
 # Project Status carries progress and labels carry only signal. Do not add
 # status labels here.
 
-- name: bug
-  color: "d73a4a"
-  description: Something isn't working
-
-- name: enhancement
-  color: "a2eeef"
-  description: New feature or request
-
 - name: documentation
   color: "0075ca"
   description: Improvements or additions to documentation

@@ -1906,7 +1906,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
         fence["attempt_inode"] = metadata.inode.into();
         fs::write(&reservation, serde_json::to_vec(&fence)?)?;
         assert!(
-            crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?
+            crate::gc_support::lane_states(&roots, context.project_id, &cancel)?
                 .get(&landing.worktree)
                 == Some(&true)
         );

@@ -27,6 +27,7 @@ mod checkpoint_retention;
 mod event_delivery;
 mod events;
 mod gc_support;
+mod gc_sweep;
 mod handoff;
 mod hook_state;
 mod hook_worktree;
@@ -45,6 +46,7 @@ mod provider_retention;
 mod release_smoke;
 mod retention_owner;
 mod roots;
+mod scratch_dir;
 mod scratch_owner;
 mod settlement;
 mod staging_gc;
@@ -138,7 +140,7 @@ fn emit<T: Serialize>(
     emit_summarised(result, globals, human, read_only, None)
 }
 /// `emit` for an owner that supplies its own compact view.
-fn emit_summarised<T: Serialize>(
+pub(crate) fn emit_summarised<T: Serialize>(
     result: &CommandResult<T>,
     globals: &provenant_cli::Globals,
     human: &str,
@@ -198,6 +200,7 @@ fn land_explanation(
         ("gate.commands", "commands"),
         ("approval_sources", "approval"),
         ("approval_tier", "approval tier"),
+        ("approval_carry", "approval carry"),
         ("local_gate.mode", "local gate"),
         ("integration", "integration"),
         ("publish", "publication"),

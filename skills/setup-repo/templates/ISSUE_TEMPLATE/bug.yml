@@ -1,6 +1,6 @@
 name: Bug report
 description: The project behaves differently from its documented contract.
-labels: ["bug"]
+type: Bug
 body:
   - type: markdown
     attributes:

@@ -63,7 +63,7 @@ fn commit_unlanded_lane(rig: &TestRig, path: &Path) -> Result<provenant_core::Gi
     Ok(git(rig, &["-C", worktree, "rev-parse", "HEAD"])?.parse()?)
 }
 
-pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
+pub(super) fn gc_refuses_unbound_bare_projects() -> Result {
     for name in ["bare.git", ".git"] {
         let mut rig = repository()?;
         let container = rig.root.join("bare-container");
@@ -150,7 +150,12 @@ pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> R
         );
         rig.project = bare.clone();
         let from_bare = command(&rig, &["gc", "--apply", "--json"])?;
-        assert_ne!(code(&from_bare), 0);
+        assert_ne!(
+            code(&from_bare),
+            0,
+            "{name}: {}",
+            String::from_utf8_lossy(&from_bare.stdout.bytes)
+        );
         assert!(bare.join("HEAD").is_file() && linked.join(".git").is_file());
         assert_eq!(
             git(&rig, &["worktree", "list", "--porcelain"])?,
@@ -181,6 +186,113 @@ pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> R
         ],
     )?;
     ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
+    Ok(())
+}
+
+pub(super) fn gc_collects_bound_bare_worktrees() -> Result {
+    for mode in ["linked", "bare", "scheduled"] {
+        let mut rig = repository()?;
+        let bare = rig.root.join("owner.git");
+        git(
+            &rig,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                rig.project.to_str().ok_or("path")?,
+                bare.to_str().ok_or("path")?,
+            ],
+        )
+        .map_err(|error| format!("clone bare: {error}"))?;
+        let linked = rig.root.join("bare-linked");
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "worktree",
+                "add",
+                "-qb",
+                "bare-linked",
+                linked.to_str().ok_or("path")?,
+            ],
+        )
+        .map_err(|error| format!("add bare checkout: {error}"))?;
+        rig.project = linked;
+        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .map_err(|error| format!("resolve roots: {error}"))?;
+        let location = provenant_config::ProjectLocation::new(&bare)
+            .map_err(|error| format!("bare location: {error}"))?;
+        let binding = provenant_config::bind_project(&roots, location)
+            .map_err(|error| format!("bind bare: {error}"))?;
+        let created = ok(&rig, &["worktree", "create", "gc-bare", "--json"])
+            .map_err(|error| format!("create bare worktree: {error}"))?;
+        let path = bare.join(".worktrees/gc-bare");
+        assert!(path.join(".git").is_file(), "{created}");
+        let head = created["data"]["head"]
+            .as_str()
+            .ok_or("head")?
+            .parse()
+            .map_err(|error| format!("parse created head: {error}; {created}"))?;
+        mark_created_lane_as_managed(&rig, &roots, &path, "gc-bare", head, head)
+            .map_err(|error| format!("mark bare lane managed: {error}"))?;
+        fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n[gc.projects.'{}']\nforeign_worktrees='keep'\n",
+                binding.project_id()
+            ),
+        )?;
+        if mode == "scheduled" {
+            rig.project = rig.home.clone();
+        } else if mode == "bare" {
+            rig.project = bare;
+        }
+        let registration = roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(binding.project_id().to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(&path));
+        let state = provenant_os::fs::Directory::open_anchor(&registration)?;
+        let held = state.try_lock_existing(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let args: &[&str] = if mode == "scheduled" {
+            &["gc", "--scheduled", "--apply", "--idle", "0", "--json"]
+        } else {
+            &["gc", "--apply", "--idle", "0", "--json"]
+        };
+        ok(&rig, args)?;
+        assert!(path.exists(), "held bare worktree removed ({mode})");
+        drop(held);
+        ok(&rig, args)?;
+        assert!(!path.exists(), "bound bare worktree retained ({mode})");
+    }
+    Ok(())
+}
+
+pub(super) fn gc_sweep_budget_stops_then_resumes() -> Result {
+    let rig = repository()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nsweep_budget='0'\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let stopped = command(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert_ne!(code(&stopped), 0);
+    let stopped: Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+    assert_eq!(stopped["data"]["sweep_stopped"], true, "{stopped}");
+    assert!(stopped["data"]["sweep_cursor"].is_object());
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nsweep_budget='5m'\nfree_floor='18446744073709551615B'\n",
+    )?;
+    let resumed = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert_eq!(resumed["data"]["sweep_stopped"], false);
     Ok(())
 }
 
@@ -338,45 +450,55 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
-    let worktree = rig.project.join(".worktrees/idle");
-    let head = commit_unlanded_lane(&rig, &worktree)?;
-    let (roots, _) = writer_context(&rig)?;
-    mark_created_lane_as_managed(
-        &rig,
-        &roots,
-        &worktree,
-        "idle",
-        created["data"]["head"].as_str().ok_or("head")?.parse()?,
-        head,
-    )?;
-    let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
-    let profile = |name: &str, age: u64| -> Result<PathBuf> {
-        let dir = cache.join("target").join(name);
-        fs::create_dir_all(dir.join("deps"))?;
+    let target = |branch: &str, profile: &str, age: u64| -> Result<PathBuf> {
+        let created = ok(&rig, &["worktree", "create", branch, "--json"])?;
+        let worktree = rig.project.join(".worktrees").join(branch);
+        let head = commit_unlanded_lane(&rig, &worktree)?;
+        let (roots, _) = writer_context(&rig)?;
+        mark_created_lane_as_managed(
+            &rig,
+            &roots,
+            &worktree,
+            branch,
+            created["data"]["head"].as_str().ok_or("head")?.parse()?,
+            head,
+        )?;
+        let cache = prepare_lane_cache(&rig, &worktree, branch)?;
+        let target = cache.join("target");
+        let dir = target.join(profile);
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir.join("deps"))?;
         for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
             fs::write(dir.join(lock), b"")?;
         }
         fs::write(dir.join("deps/payload"), vec![1; 65_536])?;
         let when = std::time::SystemTime::now() - Duration::from_secs(age);
-        // Recency is the newest write anywhere below the directory, locks included.
+        // Targets, including their roots and every profile, are the eviction unit.
         for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
             fs::File::open(dir.join(lock))?.set_modified(when)?;
         }
-        for path in [dir.join("deps/payload"), dir.join("deps"), dir.clone()] {
+        for path in [
+            dir.join("deps/payload"),
+            dir.join("deps"),
+            dir,
+            target.clone(),
+        ] {
             fs::File::open(path)?.set_modified(when)?;
         }
-        Ok(dir)
+        Ok(target)
     };
-    let stale = profile("debug", 3_000)?;
-    let building = profile("release", 2_000)?;
-    let fresh = profile("fast", 1_000)?;
+    let stale = target("oldest", "debug", 3_000)?;
+    let building = target("building", "release", 2_000)?;
+    let fresh = target("newer", "fast", 1_000)?;
     fs::write(
         rig.state.join("config.toml"),
-        b"schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes=100000\n",
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.cargo_cache_max'='100000'\n",
     )?;
     // A running Cargo holds its profile's lock: the directory is never taken.
-    let held = Directory::open_anchor(&building)?;
+    let held = Directory::open_anchor(&building.join("release"))?;
     let ForeignLock::Acquired(_cargo) =
         held.try_flock_foreign(std::ffi::OsStr::new(".cargo-lock"), LockMode::Exclusive)?
     else {
@@ -388,7 +510,7 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
             .map(|paths| {
                 paths
                     .iter()
-                    .filter_map(|path| path.as_str()?.rsplit('/').next().map(str::to_owned))
+                    .filter_map(|path| path.as_str().map(str::to_owned))
                     .collect()
             })
             .unwrap_or_default()
@@ -397,14 +519,29 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     // is skipped, and the next oldest goes until the cap is met.
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
     let dirs = &preview["data"]["build_dirs"];
-    // Preview skips the expensive census and leaves every profile untouched.
-    assert_eq!(dirs["measurement_skipped"], true, "{dirs}");
-    assert!(names(&dirs["removed"]).is_empty(), "{dirs}");
-    assert!(stale.join("deps/payload").is_file() && fresh.is_dir());
+    // A bounded preview may measure this small fixture but never mutates it.
+    assert!(
+        dirs["errors"].as_array().ok_or("errors")?.is_empty(),
+        "{dirs}"
+    );
+    assert_eq!(
+        names(&dirs["removed"]),
+        [stale.to_string_lossy(), fresh.to_string_lossy()],
+        "{dirs}"
+    );
+    assert_eq!(names(&dirs["busy"]), [building.to_string_lossy()], "{dirs}");
+    assert!(stale.join("debug/deps/payload").is_file());
+    assert!(building.join("release/deps/payload").is_file());
+    assert!(fresh.join("fast/deps/payload").is_file());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     let dirs = &applied["data"]["build_dirs"];
-    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
-    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
+    assert_eq!(
+        names(&dirs["removed"]),
+        [stale.to_string_lossy(), fresh.to_string_lossy()],
+        "{dirs}"
+    );
+    assert_eq!(names(&dirs["busy"]), [building.to_string_lossy()], "{dirs}");
+    assert!(building.join("release/deps/payload").is_file());
     assert!(dirs["bytes"].as_u64().ok_or("bytes")? >= 2 * 65_536);
     let remaining = dirs["cache_bytes"].as_u64().ok_or("cache_bytes")?;
     assert!((65_536..=100_000).contains(&remaining), "{dirs}");
@@ -412,7 +549,17 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     let text = command(&rig, &["gc", "--apply"])?;
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(text.contains("collected:"), "{text}");
-    assert!(text.contains("cache/scratch bytes"), "{text}");
+    // The compact summary reports one lower-bound byte figure over every
+    // measured class (cache, scratch, archives, Cargo targets and worktrees).
+    let known = text
+        .split(" known bytes")
+        .next()
+        .and_then(|head| head.rsplit(' ').next())
+        .and_then(|figure| figure.parse::<u64>().ok());
+    assert!(
+        text.contains(" known bytes") && known.is_some(),
+        "summary must report a numeric known-bytes figure: {text}"
+    );
     Ok(())
 }
 
@@ -880,6 +1027,19 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         &["worktree", "add", "-qb", "broken", ".worktrees/broken"],
     )?;
     fs::remove_dir_all(rig.project.join(".worktrees/broken"))?;
+    // A checkout made by Git remains foreign even when Provenant-created
+    // worktrees have not yet been assigned to a lane.
+    let foreign = rig.root.join("foreign-gc");
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "foreign-gc",
+            foreign.to_str().ok_or("path")?,
+        ],
+    )?;
     let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
     assert_eq!(dry["data"]["dry_run"], true);
     assert!(merged.is_dir());
@@ -1025,12 +1185,10 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     store.cancel(attempt, "fixture ended", &call)?;
-    let before_child =
-        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
+    let before_child = crate::gc_support::lane_states(&roots, context.project_id, &cancel)?;
     assert!(before_child.is_current());
     assert_eq!(
-        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?
-            .get(&path),
+        crate::gc_support::lane_states(&roots, context.project_id, &cancel)?.get(&path),
         Some(&true)
     );
     // A queued child in the host graph also blocks output pruning.
@@ -1039,14 +1197,13 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     child_store.create(&child_run, &call)?;
     assert!(!before_child.is_current());
     assert!(
-        !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
+        !crate::gc_support::lane_states(&roots, context.project_id, &cancel)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
     child_store.cancel(child_run.attempt_id, "child ended", &call)?;
-    let snapshot =
-        crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
+    let snapshot = crate::gc_support::lane_states(&roots, context.project_id, &cancel)?;
     assert!(snapshot.is_current());
     let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
     let later = writer_run(writer, "gc-later", 112, "queued after snapshot")?;
@@ -1082,7 +1239,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let sealed = fs::read(&request)?;
     fs::write(&request, b"broken")?;
     assert!(
-        !crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)
+        !crate::gc_support::lane_states(&roots, context.project_id, &cancel)
             .is_ok_and(|states| states.get(&path) == Some(&true))
     );
     let corrupt = command(&rig, &["gc", "--apply", "--json"])?;
