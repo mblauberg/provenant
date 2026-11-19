@@ -21,6 +21,8 @@ const GC_SELECTION_SNAPSHOT_LIMIT: u64 = 1024 * 1024;
 const MAX_GC_SELECTION_SNAPSHOTS: usize = 64;
 /// Reads of one name that may each meet a concurrent atomic replacement.
 const REPLACEMENT_READS: usize = 16;
+/// Serialises record replacement in a binding directory.
+const BINDING_LOCK: &str = "project-binding.lock";
 
 /// A canonical Git common directory, or the canonical directory for a
 /// non-Git workspace. Discovery and canonicalisation belong to confinement.
@@ -752,8 +754,7 @@ fn bindings(
         // A concurrent first binding may have made the directory but not yet
         // atomically published its record. Its deterministic owner can finish
         // publication; readers leave it alone.
-        let Some(bytes) = read_record(&directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
-        else {
+        let Some(bytes) = read_binding_record(&directory)? else {
             continue;
         };
         let record = decode_binding_record(&bytes)?;
@@ -793,7 +794,7 @@ fn update_primary_checkout_hint(
     let budget =
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| ConfigError::InvalidProjectBinding)?;
     let _lock = directory.lock(
-        OsStr::new("project-binding.lock"),
+        OsStr::new(BINDING_LOCK),
         LockMode::Exclusive,
         budget,
         &provenant_core::CancelToken::new(),
@@ -928,7 +929,33 @@ fn verify_directory(directory: &Directory, path: &Path) -> Result<(), ConfigErro
     Ok(())
 }
 
-/// A binding record that must already be published in this directory.
+/// A lockless binding read. A burst of hint updates can replace the record
+/// during every optimistic read; that is contention, not invalid state, so
+/// read once more under the writers' lock in shared mode. Replacement takes
+/// that lock, so it already exists then and a lookup creates no state.
+fn read_binding_record(directory: &Directory) -> Result<Option<Vec<u8>>, ConfigError> {
+    match read_record_attempts(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)? {
+        RecordRead::Absent => Ok(None),
+        RecordRead::Read(bytes, _) => Ok(Some(bytes)),
+        RecordRead::KeptChanging => {
+            let clock = provenant_os::clock::SystemClock::new();
+            let budget = WaitBudget::cli(clock.mono_now(), 5)
+                .map_err(|_| ConfigError::InvalidProjectBinding)?;
+            let _shared = directory.lock_existing(
+                OsStr::new(BINDING_LOCK),
+                LockMode::Shared,
+                budget,
+                &provenant_core::CancelToken::new(),
+                &clock,
+            )?;
+            read_record(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)
+        }
+    }
+}
+
+/// A binding record that must already be published in this directory. Its
+/// callers either hold the binding lock or publish the record only once, so
+/// they never need the shared-lock read.
 fn published_record(directory: &Directory) -> Result<Vec<u8>, ConfigError> {
     read_record(directory, OsStr::new(RECORD), RECORD_LIMIT, |_| true)?
         .ok_or(ConfigError::InvalidProjectBinding)
@@ -954,10 +981,30 @@ fn read_record_with_metadata(
     limit: u64,
     accept: impl Fn(&Metadata) -> bool,
 ) -> Result<Option<(Vec<u8>, Metadata)>, ConfigError> {
+    match read_record_attempts(directory, name, limit, accept)? {
+        RecordRead::Absent => Ok(None),
+        RecordRead::Read(bytes, metadata) => Ok(Some((bytes, metadata))),
+        RecordRead::KeptChanging => Err(ConfigError::InvalidProjectBinding),
+    }
+}
+
+enum RecordRead {
+    Absent,
+    Read(Vec<u8>, Metadata),
+    /// Every optimistic read met a replacement.
+    KeptChanging,
+}
+
+fn read_record_attempts(
+    directory: &Directory,
+    name: &OsStr,
+    limit: u64,
+    accept: impl Fn(&Metadata) -> bool,
+) -> Result<RecordRead, ConfigError> {
     for _ in 0..REPLACEMENT_READS {
         let entry = match directory.metadata_at(name, false) {
             Ok(entry) => entry,
-            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) if error.is_not_found() => return Ok(RecordRead::Absent),
             Err(error) => return Err(error.into()),
         };
         // A stat that resolves the name while a rename replaces it can report
@@ -984,13 +1031,13 @@ fn read_record_with_metadata(
             Err(other) => return Err(other.into()),
         };
         match directory.metadata_at(name, false) {
-            Ok(after) if entry.unchanged(&after) => return Ok(Some((bytes, after))),
+            Ok(after) if entry.unchanged(&after) => return Ok(RecordRead::Read(bytes, after)),
             Ok(_) => continue,
             Err(error) if error.is_not_found() => continue,
             Err(error) => return Err(error.into()),
         }
     }
-    Err(ConfigError::InvalidProjectBinding)
+    Ok(RecordRead::KeptChanging)
 }
 
 fn validate_location(path: &Path) -> Result<(), ConfigError> {
