@@ -135,6 +135,19 @@ fn preflight_writer_worktrees(
             continue;
         }
         canonical_paths.insert(canonical, path.to_owned());
+        // Another lane's edits in a shared worktree are that lane's work, not
+        // leftovers: refusing or committing them would act on someone else's
+        // files. Skip the dirty check for this path and say why.
+        let attached = writer.attached_lanes().map_err(run_error)?;
+        if !attached.is_empty() {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: worktree {path} is in use by {}; skipping the dirty-worktree preflight for it",
+                attached.join(", ")
+            );
+            outcomes.insert(path.to_owned(), (None, None));
+            continue;
+        }
         let paths =
             writer
                 .uncommitted_paths(&git)

@@ -374,6 +374,32 @@ pub struct WriterLaunch {
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    /// Lanes that hold or retain this worktree's occupancy: every recorded
+    /// reservation, plus an unnamed entry when a live holder has none. Empty
+    /// means no other lane is attached. Observation only; it never locks.
+    pub fn attached_lanes(&self) -> Result<Vec<String>> {
+        let Some((slot, _)) = &self.custody else {
+            return Ok(Vec::new());
+        };
+        let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(slot)
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let mut lanes: Vec<String> = listing
+            .reservations
+            .iter()
+            .map(|reservation| {
+                format!(
+                    "{} (attempt {})",
+                    reservation.branch.as_deref().unwrap_or("unknown branch"),
+                    reservation.scope.attempt
+                )
+            })
+            .collect();
+        if lanes.is_empty() && self.other_holders_live(None)? {
+            lanes.push("a live lane".to_owned());
+        }
+        Ok(lanes)
+    }
+
     pub(crate) fn other_holders_live(&self, attempt: Option<&Directory>) -> Result<bool> {
         let Some((slot, _)) = &self.custody else {
             return Ok(false);
