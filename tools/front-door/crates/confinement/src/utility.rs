@@ -356,6 +356,29 @@ pub enum GitRead {
     },
 }
 
+/// Longest command label a refusal quotes; path lists are cut, not omitted.
+const COMMAND_LABEL_LIMIT: usize = 160;
+
+impl GitRead {
+    /// The Git subcommand and arguments this read runs, without the repository
+    /// and hardening options every read shares, for naming a failed read.
+    pub fn command_label(&self) -> String {
+        let label = git_read_tail(self.clone()).map_or_else(
+            |_| format!("{self:?}"),
+            |tail| {
+                tail.iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+        );
+        match label.char_indices().nth(COMMAND_LABEL_LIMIT) {
+            Some((end, _)) => format!("{}...", &label[..end]),
+            None => label,
+        }
+    }
+}
+
 /// A closed mutation set. It is crate-private: callers receive only the
 /// narrower policy services that own each operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1687,7 +1710,14 @@ fn git_args(
     let mut args = repository_args(repo);
     args.extend(GIT_COMMON.iter().map(OsString::from));
     args.push(format!("--attr-source={attribute_source}").into());
-    let tail = match operation {
+    args.extend(git_read_tail(operation)?);
+    Ok(args)
+}
+
+/// The subcommand and arguments of a read, after the repository and hardening
+/// options every read shares.
+fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
+    Ok(match operation {
         GitRead::DirtyPatch => vec![
             "diff".into(),
             "--binary".into(),
@@ -2009,9 +2039,7 @@ fn git_args(
             path.append_to(&mut object);
             vec!["cat-file".into(), "blob".into(), object]
         }
-    };
-    args.extend(tail);
-    Ok(args)
+    })
 }
 
 fn append_paths(args: &mut Vec<OsString>, paths: &[RepoPath]) {

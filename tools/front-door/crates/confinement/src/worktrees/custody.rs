@@ -301,11 +301,14 @@ fn inspect_submodules(
         let head = parse_oid(trim_ascii(&head.stdout.bytes))?;
         let mut references = BTreeMap::new();
         for read in [GitRead::BranchTips, GitRead::RemoteBranchTips] {
+            let command = read.command_label();
             let refs = run_git(context, child, read, cancel)?;
             if exit_code(&refs)? != 0 {
                 return Err(unknown("submodule retained refs are unavailable"));
             }
-            references.extend(parse_branch_tips(&refs.stdout.bytes)?);
+            references.extend(parse_branch_tips(&refs.stdout.bytes).map_err(|detail| {
+                git_read_failure(&command, &refs, format!("output: {detail}"))
+            })?);
         }
         let references: Vec<_> = references
             .into_iter()
