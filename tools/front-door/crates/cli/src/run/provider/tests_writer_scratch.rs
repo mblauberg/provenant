@@ -1656,15 +1656,26 @@ printf 'agy 1.0.0\n'
         options.env = Some(&publishing.environment);
         executor.execute(options)
     };
-    let denied = run_shim("ci")?;
-    assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
-    assert_eq!(denied.stderr.bytes, b"github.deny_labels\n");
+    // Project github.json denials are advisory: the shim forwards the call and
+    // warns with its source, it does not refuse the invocation (the same
+    // contract providers::lane::github_policy_warns_and_preserves_invocations
+    // pins for the generated wrapper).
+    let warned = run_shim("ci")?;
+    assert_eq!(
+        warned.termination,
+        provenant_os::exec::Termination::Exit(0)
+    );
+    assert_eq!(
+        warned.stderr.bytes,
+        b"warning: github.deny_labels (advisory)\n"
+    );
     let allowed = run_shim("docs")?;
     assert_eq!(
         allowed.termination,
         provenant_os::exec::Termination::Exit(0)
     );
     assert_eq!(allowed.stdout.bytes, b"forwarded\n");
+    assert!(warned.stdout.bytes.starts_with(b"forwarded\n"));
     // A named pool redraws after an adapter disappears during local preparation.
     // The first two lookups establish availability; the third refuses the first
     // selected member, and the next lookup admits the remaining member.
