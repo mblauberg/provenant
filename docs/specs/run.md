@@ -135,6 +135,9 @@ Writers use private Git state; the host does not execute with lane-mutable Git
 configuration. For sandboxed lanes, confinement protects shared Git state.
 Import uses Git's quarantined receive and verification; publication compares
 against the pinned base. The base remains pinned until publication.
+Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
+(such as `hint:` lines) is filtered from stderr before warning so advice lines
+never surface as Provenant warnings.
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.

@@ -2153,6 +2153,20 @@ fn successful_git_import_with_graft_hint_keeps_result_and_other_stderr_refuses()
 }
 
 #[test]
+fn git_advice_is_stripped_from_stderr() {
+    let stderr = b"hint: Support for <GIT_DIR>/info/grafts is deprecated\nhint: and will be removed in a future Git version.\n";
+    assert!(super::only_git_advice(stderr));
+    assert!(super::strip_git_advice(stderr).is_empty());
+
+    let mixed = b"hint: advice line\nwarning: non-advice warning\nhint: another hint\n";
+    assert!(!super::only_git_advice(mixed));
+    assert_eq!(
+        super::strip_git_advice(mixed),
+        b"warning: non-advice warning"
+    );
+}
+
+#[test]
 fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let lane_base = child_of(&fixture, fixture.base, "lane start")?;

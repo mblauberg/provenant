@@ -1105,7 +1105,8 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: None,
+                terminal_cause: (outcome == Outcome::Rejected)
+                    .then_some(TerminalCause::AccessPolicyRefused),
                 terminal_note: None,
             },
             call,
@@ -1147,6 +1148,9 @@ impl RunStore {
             terminal_cause,
             terminal_note,
         } = withdrawal;
+        let terminal_cause = terminal_cause.or_else(|| {
+            (outcome == Outcome::Rejected).then_some(TerminalCause::AccessPolicyRefused)
+        });
         if failure.is_some()
             && !matches!(
                 expected,

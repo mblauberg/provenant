@@ -1387,10 +1387,10 @@ impl TerminalCause {
                 crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
             }
             Self::SourceViewRefused => {
-                "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
+                "the pinned source view of the lane could not be built; the step and cause follow. Run `provenant retry` or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
             }
             Self::ProjectBindingDirectoryUnsafe => {
-                "the project binding state directory is unsafe; ask the host owner to check its ownership and private permissions before retrying"
+                "the project binding state directory is unsafe; ask the host owner to check its ownership and private permissions, then run `provenant retry`"
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
@@ -1402,28 +1402,28 @@ impl TerminalCause {
                 "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
             }
             Self::AccessPolicyRefused => {
-                "launch access policy refused the lane; correct the request and declared access grants before retrying"
+                "launch access policy refused the lane; correct the request and declared access grants with `provenant retry` before retrying"
             }
             Self::StoredPromptUnreadable => {
-                "launch preparation could not read the stored prompt; inspect the run's local files and resubmit the request"
+                "launch preparation could not read the stored prompt; inspect local files and run `provenant retry`"
             }
             Self::CloudPlacementRemoved => {
                 "this attempt was stored with cloud placement, which was removed, so it never runs locally; relaunch the brief with `provenant cloud launch --file BRIEF`"
             }
             Self::WriteGrantsRefused => {
-                "launch preparation refused the write grants; check grant paths and domains.run.write_grant_limit_bytes before retrying"
+                "launch preparation refused the write grants; check grant paths and run `provenant retry` before retrying"
             }
             Self::WorktreeBusy => {
-                "the worktree is busy; wait for its writer to finish or select another worktree"
+                "the worktree is busy; wait for its writer to finish or run `provenant reconcile`"
             }
             Self::HandoffRefused => {
-                "the host refused the launch handoff; inspect local launch evidence and host configuration before retrying"
+                "the host refused the launch handoff; run `provenant reconcile` before retrying"
             }
             Self::RetainedWriterImport => {
-                "a retained writer import blocks launch; reconcile the earlier writer's import before retrying"
+                "a retained writer import blocks launch; run `provenant reconcile` before retrying"
             }
             Self::UnsupportedPlatform => {
-                "sandbox backend is unavailable: UnsupportedPlatform; select a host with a supported sandbox backend before retrying"
+                "sandbox backend is unavailable: UnsupportedPlatform; select a host with a supported sandbox backend, then run `provenant retry`"
             }
             Self::UnknownPacingAccount => {
                 "pacing configuration references an unregistered account; correct the pacing profile"
