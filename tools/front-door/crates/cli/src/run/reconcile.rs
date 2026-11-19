@@ -17,6 +17,14 @@ pub(super) fn reconcile_summary(state: &run::Reconciled) -> String {
         run::Reconciled::Settling { .. } | run::Reconciled::Abandoned { .. } => {
             plain_text(&state.to_string(), usize::MAX)
         }
+        run::Reconciled::WriterLeaseReleased { locks } => format!(
+            "writer leases released: {}",
+            locks
+                .iter()
+                .map(|lock| plain_text(&lock.to_string_lossy(), usize::MAX))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         run::Reconciled::Uncertain { reason } => {
             format!("uncertain: {}", plain_text(&reason.to_string(), usize::MAX))
         }

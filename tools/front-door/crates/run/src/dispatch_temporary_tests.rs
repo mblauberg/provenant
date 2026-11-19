@@ -421,7 +421,15 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             &provenant_supervisor::census::SystemProcessObserver,
         )?;
         if prepared {
-            assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [(attempt, Reconciled::WriterLeaseReleased { locks })]
+                        if *attempt == id
+                            && locks.iter().any(|lock| lock.ends_with("lane/writer.lock"))
+                ),
+                "{found:?}"
+            );
             assert!(store.writer_fences()?.is_empty());
             finish_reactions(&store)?;
             assert_eq!(
@@ -508,7 +516,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     drop(held);
     assert!(matches!(
         store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &provenant_supervisor::census::SystemProcessObserver)?.as_slice(),
-        [(attempt, Reconciled::Withdrawn)] if *attempt == id
+        [(attempt, Reconciled::WriterLeaseReleased { locks })] if *attempt == id && locks.contains(&custody.join("writer.lock"))
     ));
     assert!(store.writer_fences()?.is_empty());
     assert!(candidate.join("x.lock").exists());

@@ -329,6 +329,39 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub publish_granted: bool,
 }
 
+/// The result of comparing a retry's worktree head with its pinned commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepinOutcome {
+    /// The head already equals the pin.
+    Unchanged { head: GitOid },
+    /// The head descends from the pin; adopt it and warn with both ids.
+    Repinned { pinned: GitOid, head: GitOid },
+    /// The head does not descend from the pin; refuse with both ids.
+    NotDescendant { pinned: GitOid, head: GitOid },
+}
+
+impl RepinOutcome {
+    /// Warning naming both commits, for a descendant head.
+    pub fn warning(self) -> Option<String> {
+        match self {
+            Self::Repinned { pinned, head } => Some(format!(
+                "warning: re-pinned writer head from pinned commit {pinned} to current head {head}: the writer's own commits are the only difference"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Refusal naming both commits, for a non-descendant head.
+    pub fn refusal(self) -> Option<String> {
+        match self {
+            Self::NotDescendant { pinned, head } => Some(format!(
+                "writer head {head} does not descend from pinned commit {pinned}; restore the pinned lineage or choose a new branch before retrying"
+            )),
+            _ => None,
+        }
+    }
+}
+
 pub struct WriterLaunch {
     pub worktree: VerifiedWorktree,
     pub branch: GitRefName,
@@ -430,6 +463,110 @@ impl WriterLaunch {
             ));
         }
         Ok(())
+    }
+
+    /// Commit the worktree's retained edits locally as WIP before a plan node
+    /// launches. Returns the new head. Hooks and mutable Git configuration are
+    /// excluded by the bounded Git command path.
+    pub fn commit_wip(
+        &self,
+        git: &Path,
+        message: &str,
+        expected_paths: &[String],
+    ) -> Result<GitOid> {
+        use provenant_os::clock::SystemClock;
+        let (directory, _) = self
+            .custody
+            .as_ref()
+            .ok_or(RunError::Validation("writer custody unavailable"))?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let _guard = provenant_supervisor::custody::acquire_unreserved_writer(
+            directory,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+        .map_err(|error| match error {
+            provenant_supervisor::custody::CustodyError::Filesystem(
+                provenant_os::fs::FsError::LockTimeout { .. },
+            ) => RunError::Writer(worktrees::WorktreeError::LockBusy),
+            provenant_supervisor::custody::CustodyError::Fenced => {
+                RunError::Validation("writer custody has an unsettled reservation")
+            }
+            other => RunError::Io(std::io::Error::other(other.to_string())),
+        })?;
+        let repo = self.worktree.repo();
+        let git_dir = repo.private_git_dir();
+        let root = repo.root_path();
+        let run = |args: &[&str]| -> Result<Vec<u8>> {
+            let mut argv = vec![OsString::from("--work-tree"), root.into()];
+            argv.extend(args.iter().map(OsString::from));
+            crate::objects::command(git, git_dir, root, &argv, None)
+        };
+        repo.revalidate()
+            .map_err(provenant_confinement::worktrees::WorktreeError::from)?;
+        let branch = run(&["symbolic-ref", "-q", "HEAD"])?;
+        if std::str::from_utf8(&branch).ok().map(str::trim) != Some(self.branch.as_str()) {
+            return Err(RunError::Validation(
+                "writer branch changed during WIP preflight; retry submission",
+            ));
+        }
+        let current = run(&["rev-parse", "HEAD"])?;
+        let current = std::str::from_utf8(&current)
+            .map_err(|_| RunError::Validation("writer head is not UTF-8"))?;
+        if current.trim() != self.base.to_string() || self.uncommitted_paths(git)? != expected_paths
+        {
+            return Err(RunError::Validation(
+                "writer changed during WIP preflight; retry submission",
+            ));
+        }
+        run(&["add", "-A"])?;
+        run(&[
+            "-c",
+            "user.name=provenant",
+            "-c",
+            "user.email=provenant@invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            message,
+        ])?;
+        let bytes = run(&["rev-parse", "HEAD"])?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| RunError::Validation("WIP commit head is not UTF-8"))?;
+        GitOid::parse(text.trim()).map_err(|_| RunError::Validation("WIP commit head is invalid"))
+    }
+
+    /// Reconcile a retry's worktree head with the commit pinned for its
+    /// predecessor attempt. A head descended from the pin means the writer's
+    /// own commits are the only difference and the retry may re-pin; any
+    /// other head is a hard refusal naming both ids.
+    pub fn repin_head(&self, git: &Path, pinned: GitOid) -> Result<RepinOutcome> {
+        let head = self.base;
+        if head == pinned {
+            return Ok(RepinOutcome::Unchanged { head });
+        }
+        let repo = self.worktree.repo();
+        let descends = crate::objects::command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                pinned.to_string().into(),
+                head.to_string().into(),
+            ],
+            None,
+        )
+        .is_ok();
+        Ok(if descends {
+            RepinOutcome::Repinned { pinned, head }
+        } else {
+            RepinOutcome::NotDescendant { pinned, head }
+        })
     }
 
     /// List paths with uncommitted predecessor edits in the writer worktree.
@@ -1839,7 +1976,7 @@ pub fn trusted_lane_toolchain_diagnostic(
         .flat_map(|grant| {
             [
                 grant.path.join("bin"),
-                grant.path.join(provenant_os::build_slots::SHIM_DIRECTORY),
+                grant.path.join(provenant_os::admission::SHIM_DIRECTORY),
             ]
         })
         .collect();
@@ -2335,6 +2472,91 @@ mod cargo_setup_tests {
     }
 
     #[test]
+    fn retry_repins_a_descendant_head_and_refuses_an_unrelated_one() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            retry_repins_a_descendant_head_and_refuses_an_unrelated_one
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/repin", "lane")?;
+        let mut writer = fixture.prepare(&lane)?;
+        let source = GitOid::parse(&fixture.source)?;
+        let utility = runtime(&fixture.state)?;
+        let git = utility.git_program_path();
+
+        assert_eq!(
+            writer.repin_head(git, source)?,
+            RepinOutcome::Unchanged { head: source }
+        );
+
+        // A commit authored in the worktree descends from the pin.
+        let tree = fixture.run_git(&["rev-parse", "HEAD^{tree}"])?;
+        let child = GitOid::parse(&fixture.run_git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &fixture.source,
+            "-m",
+            "writer own commit",
+        ])?)?;
+        writer.base = child;
+        let outcome = writer.repin_head(git, source)?;
+        assert_eq!(
+            outcome,
+            RepinOutcome::Repinned {
+                pinned: source,
+                head: child
+            }
+        );
+        let warning = outcome.warning().expect("warning");
+        assert!(warning.contains(&source.to_string()), "{warning}");
+        assert!(warning.contains(&child.to_string()), "{warning}");
+
+        // An unrelated head must be refused, naming both ids.
+        let unrelated =
+            GitOid::parse(&fixture.run_git(&["commit-tree", &tree, "-m", "unrelated"])?)?;
+        writer.base = unrelated;
+        let outcome = writer.repin_head(git, source)?;
+        assert_eq!(
+            outcome,
+            RepinOutcome::NotDescendant {
+                pinned: source,
+                head: unrelated
+            }
+        );
+        let refusal = outcome.refusal().expect("refusal");
+        assert!(refusal.contains(&source.to_string()), "{refusal}");
+        assert!(refusal.contains(&unrelated.to_string()), "{refusal}");
+        Ok(())
+    }
+
+    #[test]
+    fn wip_refuses_branch_changed_at_the_same_head() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(wip_refuses_branch_changed_at_the_same_head))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/original", "lane")?;
+        let writer = fixture.prepare(&lane)?;
+        std::fs::write(lane.join("retained.txt"), "draft")?;
+        let paths = writer.uncommitted_paths(&fixture.git)?;
+        fixture.lane_git(&lane, &["checkout", "-qb", "chore/other"])?;
+        let error = writer
+            .commit_wip(&fixture.git, "WIP: test", &paths)
+            .expect_err("branch change must refuse");
+        assert!(error.to_string().contains("branch changed"), "{error}");
+        assert_eq!(std::fs::read_to_string(lane.join("retained.txt"))?, "draft");
+        let head = provenant_os::fixture::git_command_at(&fixture.git)
+            .current_dir(&lane)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(head.status.success());
+        assert_eq!(String::from_utf8(head.stdout)?.trim(), fixture.source);
+        Ok(())
+    }
+
+    #[test]
     fn writer_reports_uncommitted_paths_independent_of_git_output_order() -> FixtureResult<()> {
         if clean_environment_child(stringify!(
             writer_reports_uncommitted_paths_independent_of_git_output_order
@@ -2557,7 +2779,7 @@ mod cargo_setup_tests {
         std::fs::create_dir_all(home.join(".rustup")).unwrap();
         std::fs::create_dir(&worktree).unwrap();
         std::fs::create_dir_all(scratch.join("bin")).unwrap();
-        std::fs::create_dir_all(scratch.join(provenant_os::build_slots::SHIM_DIRECTORY)).unwrap();
+        std::fs::create_dir_all(scratch.join(provenant_os::admission::SHIM_DIRECTORY)).unwrap();
         std::fs::create_dir(scratch.join("other")).unwrap();
         std::fs::write(bin.join("rustup"), b"fixture").unwrap();
         std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
@@ -2582,7 +2804,7 @@ mod cargo_setup_tests {
             (
                 "scratch cargo shim",
                 vec![
-                    scratch.join(provenant_os::build_slots::SHIM_DIRECTORY),
+                    scratch.join(provenant_os::admission::SHIM_DIRECTORY),
                     bin.clone(),
                 ],
                 &grants[..],

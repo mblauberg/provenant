@@ -254,6 +254,35 @@ pub(super) fn append_changes(
                 &serde_json::json!(warning),
             )?);
         }
+        // WIP and retained-edit warnings live on the submitted document; they
+        // are emitted once with the node's first checkpoint.
+        if old.is_none()
+            && let Some(spec) = expanded.as_ref().and_then(|document| {
+                document
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == node.id)
+            })
+        {
+            if let Some(commit) = &spec.wip_commit {
+                let mut effect = event(
+                    GraphEventKind::Effect,
+                    &node.id,
+                    "wip_commit",
+                    &commit.as_str(),
+                )?;
+                effect.details = effect_identifier("commit", Some(commit));
+                events.push(effect);
+            }
+            if let Some(warning) = &spec.writer_dirty_warning {
+                events.push(event(
+                    GraphEventKind::Warning,
+                    &node.id,
+                    "writer_dirty",
+                    &warning.chars().take(512).collect::<String>(),
+                )?);
+            }
+        }
         if super::relay::yields_slot(node) != old.is_some_and(super::relay::yields_slot) {
             events.push(event(
                 GraphEventKind::Wait,

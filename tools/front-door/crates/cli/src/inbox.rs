@@ -113,9 +113,57 @@ pub fn resolve_control(
     }
 }
 
+/// Compose the one-line notice that states what a steer will do before it
+/// interrupts the live attempt. It names the configured fallback and the layer
+/// that set it, so the action is announced rather than discovered afterwards.
+fn compose_steer_restart_notice(
+    fallback: provenant_fabric_runtime::config::SteerFallback,
+    source: &str,
+) -> String {
+    use provenant_fabric_runtime::config::SteerFallback as F;
+    let (name, behaviour) = match fallback {
+        F::FreshWithHandoff => (
+            "fresh_with_handoff",
+            "if the provider session is unavailable, a fresh attempt continues with the accepted brief, prior handoff and steering instructions",
+        ),
+        F::Refuse => (
+            "refuse",
+            "if the provider session is unavailable, the steering text is retained without a successor",
+        ),
+    };
+    format!(
+        "warning: steer will interrupt this attempt and launch a successor; fallback={name} (source: {source}); {behaviour}"
+    )
+}
+
+/// Read the effective steer fallback and its source for the pre-cancel notice.
+/// A config read failure never blocks steering; the action simply goes unannounced.
+pub fn steer_restart_notice(roots: &provenant_core::Roots) -> Option<String> {
+    let config = crate::config_reads::read_for(roots, "fabric context").ok()?;
+    let source =
+        crate::config_reads::setting_source(&config.origins, "domains.fabric.steer.fallback");
+    Some(compose_steer_restart_notice(
+        config.domains.fabric.steer.fallback,
+        &source,
+    ))
+}
+
+/// Emit a notice, then take the action it describes. Isolated so ordering is
+/// testable: the notice must reach the user before the live attempt is cancelled.
+pub(crate) fn announce_before<E, S, R>(notice: Option<&str>, emit: E, act: S) -> R
+where
+    E: FnOnce(&str),
+    S: FnOnce() -> R,
+{
+    if let Some(notice) = notice {
+        emit(notice);
+    }
+    act()
+}
+
 /// Persist a steer with Run's owner. Its live adapter decoder requests an
 /// interrupt after validating the session identity. The message identifier is
-/// stable across replays.
+/// stable across replays. The fallback notice is printed before that interrupt.
 pub fn deliver_steer(
     edge: &crate::run::Edge<'_>,
     identity: &provenant_fabric_runtime::identity::Identity,
@@ -136,7 +184,16 @@ pub fn deliver_steer(
     };
     let store = provenant_run::RunStore::open(&context, &run_call)
         .map_err(|error| InboxError::Steer(error.to_string()))?;
-    match store.steer(attempt, operation_id.clone(), text, &run_call) {
+    let notice = steer_restart_notice(edge.roots);
+    let outcome = announce_before(
+        notice.as_deref(),
+        |line| {
+            use std::io::Write as _;
+            let _ = writeln!(io::stderr().lock(), "{line}");
+        },
+        || store.steer(attempt, operation_id.clone(), text, &run_call),
+    );
+    match outcome {
         Ok(provenant_run::SteerReceipt::Queued { message_id })
         | Ok(provenant_run::SteerReceipt::AlreadyQueued { message_id }) => Ok(message_id),
         Ok(provenant_run::SteerReceipt::AlreadyTerminal { message_id }) => Ok(message_id),
@@ -1433,6 +1490,44 @@ mod tests {
                 matches!(error, Error::Remote { operation_id: Some(id), .. } if id == operation)
             );
         }
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_notice_is_one_line_naming_the_fallback_and_its_source() {
+        use provenant_fabric_runtime::config::SteerFallback as F;
+        let source = "config.toml (domains.fabric.steer.fallback)";
+        for (fallback, name) in [
+            (F::FreshWithHandoff, "fresh_with_handoff"),
+            (F::Refuse, "refuse"),
+        ] {
+            let notice = compose_steer_restart_notice(fallback, source);
+            assert!(!notice.contains('\n'), "notice must be a single line");
+            assert!(notice.starts_with("warning: steer will interrupt"));
+            assert!(notice.contains(&format!("fallback={name}")), "{notice}");
+            assert!(notice.contains(source), "{notice}");
+        }
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn fallback_line_is_emitted_before_the_cancel() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        let notice = Some("warning: steer will interrupt this attempt");
+        let result = announce_before(
+            notice,
+            |line| events.borrow_mut().push(format!("notice:{line}")),
+            || {
+                events.borrow_mut().push("cancel:steered".into());
+                "receipt"
+            },
+        );
+        assert_eq!(result, "receipt");
+        let events = events.into_inner();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].starts_with("notice:"), "{events:?}");
+        assert_eq!(events[1], "cancel:steered", "{events:?}");
     }
 }
 

@@ -448,7 +448,7 @@ fn memory_pressure_refusal_keeps_source_and_resource_action() {
         },
     ));
     let projection = error.diagnostic();
-    assert_eq!(projection.code, "confinement_refused");
+    assert_eq!(projection.code, "MEMORY_PRESSURE");
     assert!(projection.detail.unwrap().contains("host configuration"));
     assert!(projection.next.unwrap().contains("memory"));
 

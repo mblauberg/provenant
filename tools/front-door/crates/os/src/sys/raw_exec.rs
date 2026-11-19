@@ -21,10 +21,12 @@ enum ProcessCensusState {
 #[cfg(target_os = "macos")]
 fn classify_process(pid: i32) -> ProcessCensusState {
     // Public Darwin SDK: sys/sysctl.h kinfo_proc begins with kp_proc;
-    // sys/proc.h extern_proc offsetof(p_stat) is 36, offsetof(p_pid) is 40.
+    // sys/proc.h extern_proc offsetof(p_flag) is 32, offsetof(p_stat) is 36,
+    // offsetof(p_pid) is 40.
     #[repr(C)]
     struct KinfoProcStat {
-        _prefix: [u8; 36],
+        _prefix: [u8; 32],
+        p_flag: libc::c_int,
         p_stat: libc::c_char,
         _pad: [u8; 3],
         p_pid: libc::pid_t,
@@ -64,7 +66,10 @@ fn classify_process(pid: i32) -> ProcessCensusState {
     if record.p_pid != pid {
         return ProcessCensusState::Unclassified;
     }
-    if record.p_stat == libc::SZOMB as libc::c_char {
+    // sys/proc.h P_WEXIT: the process is exiting and XNU already excludes it
+    // from group delivery, though p_stat has not reached SZOMB yet.
+    const P_WEXIT: libc::c_int = 0x0000_2000;
+    if record.p_stat == libc::SZOMB as libc::c_char || record.p_flag & P_WEXIT != 0 {
         ProcessCensusState::Zombie
     } else {
         ProcessCensusState::Live
@@ -113,10 +118,11 @@ fn zombie_is_only_group_member(pid: u32) -> bool {
                 break;
             }
             match classify_process(member) {
-                ProcessCensusState::Zombie => {}
-                ProcessCensusState::Vanished
-                | ProcessCensusState::Live
-                | ProcessCensusState::Unclassified => {
+                // A member reaped between the group kill and this census is no
+                // longer signalable either: only a live or unreadable member
+                // keeps the EPERM a real delivery failure (#3380).
+                ProcessCensusState::Zombie | ProcessCensusState::Vanished => {}
+                ProcessCensusState::Live | ProcessCensusState::Unclassified => {
                     all_zombies = false;
                     break;
                 }

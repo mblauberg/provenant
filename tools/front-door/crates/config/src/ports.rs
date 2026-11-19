@@ -429,7 +429,8 @@ impl PortEntry for VerifyPort {
     fn valid(&self) -> bool {
         self.backend.valid()
             && relative(&self.workspace, true)
-            && !self.base.is_empty()
+            // An empty base means "infer from the remote HEAD"; the consumer
+            // that needs a commit resolves it before reading that ref.
             && !self.remote.is_empty()
             && self.load_per_cpu.is_finite()
             && self.load_per_cpu > 0.0
@@ -546,6 +547,66 @@ declare_ports! {
     build_admission: Port,
 }
 
+/// An error in one port-table layer always names its file and the key that
+/// caused it, so an operator can fix that declaration without guessing which
+/// Git setting failed.
+fn layer_error(path: &Path, key: &str, message: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{}: {key}: {message}", path.display()),
+    )
+}
+
+/// Deep-merge an overlay's object fields over the lower layer. Objects merge
+/// recursively, every other JSON shape replaces the lower value, and unknown
+/// keys are retained so the decoder can warn about them.
+fn merge_layer(target: &mut serde_json::Value, overlay: &serde_json::Value) {
+    match (target, overlay) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(changes)) => {
+            for (key, value) in changes {
+                match base.get_mut(key) {
+                    Some(existing) => merge_layer(existing, value),
+                    None => {
+                        base.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (slot, value) => *slot = value.clone(),
+    }
+}
+
+/// Find the first dotted key whose JSON shape differs from the compiled
+/// template. Used only to name the key in a decode error; the decoder still
+/// owns acceptance of the merged value.
+fn first_type_mismatch(
+    template: &serde_json::Value,
+    value: &serde_json::Value,
+    prefix: &str,
+) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    match (template, value) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(over)) => {
+            for (key, child) in over {
+                if let Some(expected) = base.get(key)
+                    && let Some(found) =
+                        first_type_mismatch(expected, child, &format!("{prefix}{key}"))
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        (serde_json::Value::Array(_), serde_json::Value::Array(_))
+        | (serde_json::Value::String(_), serde_json::Value::String(_))
+        | (serde_json::Value::Number(_), serde_json::Value::Number(_))
+        | (serde_json::Value::Bool(_), serde_json::Value::Bool(_)) => None,
+        _ => Some(prefix.trim_end_matches('.').to_owned()),
+    }
+}
+
 fn apply_layer(
     table: &mut serde_json::Value,
     path: &Path,
@@ -555,60 +616,121 @@ fn apply_layer(
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(layer_error(path, "file", error)),
     };
     let mut bytes = Vec::new();
-    file.take(MAX_PORTS_BYTES + 1).read_to_end(&mut bytes)?;
+    file.take(MAX_PORTS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| layer_error(path, "file", error))?;
     if bytes.len() as u64 > MAX_PORTS_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "port table exceeds size limit",
-        ));
+        return Err(layer_error(path, "file", "port table exceeds size limit"));
     }
     let mut overlay: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-    let object = overlay.as_object_mut().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "port table must be an object")
-    })?;
-    if object
+        serde_json::from_slice(&bytes).map_err(|error| layer_error(path, "json", error))?;
+    let object = overlay
+        .as_object_mut()
+        .ok_or_else(|| layer_error(path, "<root>", "port table must be an object"))?;
+    // schema_version is optional in an overlay: it defaults to the current
+    // version. A mismatch warns but does not refuse a compatible shape.
+    match object
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
-        != Some(u64::from(PORTS_SCHEMA_VERSION))
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid port table schema",
-        ));
+        None => {
+            object.insert(
+                "schema_version".into(),
+                serde_json::json!(PORTS_SCHEMA_VERSION),
+            );
+        }
+        Some(version) if version != u64::from(PORTS_SCHEMA_VERSION) => {
+            use std::io::Write;
+            let _ = writeln!(
+                io::stderr().lock(),
+                "warning: {}: schema_version: expected {}, found {version}; using the current schema",
+                path.display(),
+                PORTS_SCHEMA_VERSION
+            );
+            object.insert(
+                "schema_version".into(),
+                serde_json::json!(PORTS_SCHEMA_VERSION),
+            );
+        }
+        Some(_) => {}
     }
-    let target = table.as_object_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "compiled port table must be an object",
-        )
-    })?;
+    let template = table.clone();
+    let target = table
+        .as_object_mut()
+        .ok_or_else(|| layer_error(path, "<root>", "compiled port table must be an object"))?;
     for (name, value) in object.iter_mut() {
-        if name != "schema_version" && PortTable::PORT_NAMES.contains(&name.as_str()) {
-            let entry = value.as_object_mut().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "port entry must be an object")
-            })?;
+        if name == "schema_version" {
+            continue;
+        }
+        if PortTable::PORT_NAMES.contains(&name.as_str()) {
+            if !value.is_object() {
+                return Err(layer_error(path, name, "port entry must be an object"));
+            }
+            let existing = target
+                .get_mut(name)
+                .ok_or_else(|| layer_error(path, name, "unknown port"))?;
+            merge_layer(existing, value);
+            let entry = existing
+                .as_object_mut()
+                .ok_or_else(|| layer_error(path, name, "merged port entry is not an object"))?;
             entry.insert(
                 "source".into(),
-                serde_json::to_value(source).map_err(io::Error::other)?,
+                serde_json::to_value(source).map_err(|error| layer_error(path, name, error))?,
             );
-            target.insert(name.clone(), value.clone());
-        } else if name != "schema_version" {
+        } else {
             target.insert(name.clone(), value.clone());
         }
     }
-    let source = path.display().to_string();
+    let source_name = path.display().to_string();
     let merged = serde_json::to_vec(table).map_err(io::Error::other)?;
-    let (decoded, warnings) =
-        provenant_records::decode_input::<PortTable>(&source, &merged).map_err(io::Error::other)?;
+    let (decoded, warnings) = provenant_records::decode_input::<PortTable>(&source_name, &merged)
+        .map_err(|error| {
+        let key =
+            first_type_mismatch(&template, table, "").unwrap_or_else(|| "port table".to_owned());
+        layer_error(path, &key, error)
+    })?;
     for warning in &warnings {
         on_unknown(&bytes, warning);
     }
     *table = serde_json::to_value(decoded).map_err(io::Error::other)?;
     Ok(())
+}
+
+/// Name the layer a port declaration came from.
+pub fn port_source_layer(source: PortSource) -> &'static str {
+    match source {
+        PortSource::Builtin => "builtin",
+        PortSource::Host => "host",
+        PortSource::Project => "project",
+    }
+}
+
+/// Infer an unset `verify.base` from the symbolic target of
+/// `refs/remotes/<remote>/HEAD`. Returns the `<remote>/<branch>` base and a
+/// source string naming the ref it came from.
+pub fn infer_verify_base(remote: &str, remote_head_target: &str) -> Option<(String, String)> {
+    if remote.is_empty() || remote_head_target.is_empty() {
+        return None;
+    }
+    let base = remote_head_target.strip_prefix("refs/remotes/")?.to_owned();
+    let (head_remote, branch) = base.split_once('/')?;
+    if head_remote.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some((base, format!("refs/remotes/{remote}/HEAD")))
+}
+
+/// The refusal when no layer declares `verify.base` and no remote HEAD resolves.
+pub fn verify_base_unset_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "verify.base is unset and could not be inferred from the remote HEAD; set verify.base in {PORTS_CONFIG} or host ports.json, for example {{\"verify\":{{\"base\":\"origin/main\"}}}}"
+        ),
+    )
 }
 
 impl PortTable {
@@ -664,14 +786,26 @@ impl PortTable {
     /// Resolve only the project declaration over compiled defaults when no
     /// validated host state root is available to supply host-level ports.
     pub fn read_project_only(project: &Path) -> io::Result<Self> {
-        let table = Self::read_layers(Some(project), None, |_, warning| {
-            let message = format!(
-                "{}: {}: unknown configuration key; ignored",
-                warning.source, warning.key
-            );
-            use std::io::Write;
-            let _ = writeln!(io::stderr().lock(), "warning: {message}");
-        })?;
+        let table = Self::read_layers(
+            Some(project),
+            None,
+            |_, warning| {
+                let message = format!(
+                    "{}: {}: unknown configuration key; ignored",
+                    warning.source, warning.key
+                );
+                use std::io::Write;
+                let _ = writeln!(io::stderr().lock(), "warning: {message}");
+            },
+            |path, error| {
+                use std::io::Write;
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "warning: {}: malformed port layer ignored: {error}",
+                    path.display()
+                );
+            },
+        )?;
         table.validate()?;
         Ok(table)
     }
@@ -688,13 +822,21 @@ impl PortTable {
         host_state: &Path,
         mut on_unknown: impl FnMut(&[u8], &provenant_records::InputWarning),
     ) -> io::Result<Self> {
-        Self::read_layers(project, Some(host_state), &mut on_unknown)
+        Self::read_layers(project, Some(host_state), &mut on_unknown, |path, error| {
+            use std::io::Write;
+            let _ = writeln!(
+                io::stderr().lock(),
+                "warning: {}: malformed port layer ignored: {error}",
+                path.display()
+            );
+        })
     }
 
     fn read_layers(
         project: Option<&Path>,
         host_state: Option<&Path>,
         mut on_unknown: impl FnMut(&[u8], &provenant_records::InputWarning),
+        mut on_malformed: impl FnMut(&Path, &io::Error),
     ) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
         if let Some(host_state) = host_state {
@@ -706,12 +848,27 @@ impl PortTable {
             )?;
         }
         if let Some(project) = project {
-            apply_layer(
-                &mut document,
-                &project.join(PORTS_CONFIG),
+            let path = project.join(PORTS_CONFIG);
+            let mut candidate = document.clone();
+            let mut warnings = Vec::new();
+            let applied = apply_layer(
+                &mut candidate,
+                &path,
                 PortSource::Project,
-                &mut on_unknown,
-            )?;
+                &mut |bytes, warning| warnings.push((bytes.to_vec(), warning.clone())),
+            );
+            match applied {
+                Ok(()) => {
+                    document = candidate;
+                    for (bytes, warning) in warnings {
+                        on_unknown(&bytes, &warning);
+                    }
+                }
+                // Project overlays are optional. A malformed one must not stop
+                // a command that does not need verify; the warning names its
+                // file and key.
+                Err(error) => on_malformed(&path, &error),
+            }
         }
         serde_json::from_value(document).map_err(io::Error::other)
     }
@@ -1010,7 +1167,112 @@ mod tests {
             serde_json::to_vec(&malformed).unwrap(),
         )
         .unwrap();
-        assert!(PortTable::read_for_inspection(Some(&project), &host).is_err());
+        // A malformed project overlay is optional: it is skipped with a
+        // warning that names the file and the offending key.
+        let mut malformed_warnings = Vec::new();
+        let table = PortTable::read_layers(
+            Some(&project),
+            Some(&host),
+            |_, _| {},
+            |path, error| malformed_warnings.push((path.to_path_buf(), error.to_string())),
+        )
+        .unwrap();
+        assert_eq!(table.verify.backend, PortBackend::None);
+        assert_eq!(malformed_warnings.len(), 1);
+        assert!(malformed_warnings[0].0.ends_with(PORTS_CONFIG));
+        assert!(
+            malformed_warnings[0].1.contains("verify"),
+            "{malformed_warnings:?}"
+        );
+
+        // A malformed host layer is a real boundary: it still refuses, but
+        // names its file and key instead of masquerading as a Git error.
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&malformed).unwrap(),
+        )
+        .unwrap();
+        let message = PortTable::read_for_inspection(Some(&project), &host)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("ports.json"), "{message}");
+        assert!(message.contains("verify"), "{message}");
+        assert!(!message.contains("Git configuration"), "{message}");
+    }
+
+    #[test]
+    fn partial_overlay_deep_merges_fields_and_keeps_lower_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+
+        // schema_version is optional in a layer; the host sets a non-default
+        // field and a tier override, the project sets only verify.base.
+        let host_overlay = serde_json::json!({
+            "verify": {
+                "test_threads": 4,
+                "tiers": {"2": {"warn_for_host_load": false}},
+            },
+        });
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&host_overlay).unwrap(),
+        )
+        .unwrap();
+        let project_overlay = serde_json::json!({"verify": {"base": "upstream/master"}});
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&project_overlay).unwrap(),
+        )
+        .unwrap();
+
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(table.verify.base, "upstream/master");
+        assert_eq!(table.verify.source, PortSource::Project);
+        assert_eq!(table.verify.test_threads, Some(4));
+        assert!(!table.verify.tiers["2"].warn_for_host_load);
+        assert_eq!(table.verify.remote, "origin");
+        assert_eq!(table.verify.default_tier, "0");
+        assert_eq!(table.land.source, PortSource::Builtin);
+
+        // The same field-level merge applies to a host overlay over builtins.
+        std::fs::remove_file(project.join(PORTS_CONFIG)).unwrap();
+        let table = PortTable::read_for(None, &host).unwrap();
+        assert_eq!(table.verify.source, PortSource::Host);
+        assert_eq!(table.verify.test_threads, Some(4));
+        assert_eq!(table.verify.base, "");
+    }
+
+    #[test]
+    fn builtin_verify_tiers_are_neutral_and_base_is_inferred() {
+        let builtin = PortTable::builtin();
+        assert!(builtin.verify.base.is_empty());
+        for tier in builtin.verify.tiers.values() {
+            for command in &tier.commands {
+                assert!(!command.contains("scripts/"), "{command}");
+                assert!(command.starts_with("cargo "), "{command}");
+            }
+        }
+    }
+
+    #[test]
+    fn verify_base_inference_uses_the_remote_head_symref_target() {
+        let inferred = infer_verify_base("origin", "refs/remotes/origin/master").unwrap();
+        assert_eq!(inferred.0, "origin/master");
+        assert_eq!(inferred.1, "refs/remotes/origin/HEAD");
+        let inferred = infer_verify_base("upstream", "refs/remotes/upstream/main").unwrap();
+        assert_eq!(inferred.0, "upstream/main");
+        assert_eq!(inferred.1, "refs/remotes/upstream/HEAD");
+        assert!(infer_verify_base("origin", "").is_none());
+        assert!(infer_verify_base("origin", "refs/heads/main").is_none());
+        assert!(infer_verify_base("", "refs/remotes/origin/main").is_none());
+        assert!(
+            verify_base_unset_error()
+                .to_string()
+                .contains(".provenant/ports.json")
+        );
     }
 
     #[test]

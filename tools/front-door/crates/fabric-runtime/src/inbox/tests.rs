@@ -1789,3 +1789,20 @@ fn listing_metadata_round_trips_and_rejects_malformed_values() {
     malformed_peer["peers"][0]["state"] = serde_json::json!("pending");
     assert!(serde_json::from_value::<InboxResult>(malformed_peer).is_err());
 }
+
+#[test]
+fn saved_receipt_keeps_unknown_fields_without_a_flatten_chain() {
+    let id = "1".repeat(32);
+    let wire = serde_json::json!({
+        "result": "saved",
+        "operation_id": "op-1",
+        "request_id": id,
+        "revision": 1,
+        "state": "open",
+        "answer_id": null,
+        "delivery": null,
+        "from_a_newer_writer": {"kept": true},
+    });
+    let result: InboxResult = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+}

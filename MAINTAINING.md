@@ -88,6 +88,13 @@ must be explicit. Changes to ambient rules apply to new sessions.
 
 ## Verify and release
 
+When cutting a version, start with `scripts/prepare-release vX.Y.Z`. It bumps
+each workspace member's own `[package] version` under `tools/front-door`,
+refreshes `Cargo.lock` offline, updates the bug template placeholder from
+`rust-toolchain.toml`, warns about merged changes that have no next.d fragment,
+and collates the notes. Review and commit its changes, then run the gates
+below; the script prints the remaining steps (pull request and tag).
+
 Use the [CI runbook](docs/runbooks/ci.md), [test tiers](docs/runbooks/test-tiers.md)
 and [release skill](skills/release/SKILL.md) for the relevant checks. Run the
 checkout gates or require exact-head CI evidence:

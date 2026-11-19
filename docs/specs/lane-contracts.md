@@ -58,11 +58,13 @@ check names; bounded metadata carries explicit truncation flags.
 
 `event_delivery::Journal` captures a cursor before reconciliation, then wakes
 waiters from replayed records. Named PR interests survive waiter expiry; the
-host continues indexing their outcomes. `pr watch` pins its head, reconciles
-checks initially and after a quiet-period gap, and revalidates the PR head at
-the end. A watch timeout reports its last check buckets as a timeout, not a CI
-failure. `status_wait`, provider lens waits and owner-side lane waits subscribe
-before their initial read. Graph markers index committed checkpoint digests
+host continues indexing their outcomes. `wait --pr` subscribes before its first
+check read and reconciles after a quiet-period gap. A PR wait timeout retains
+the last known state and reports the readable check summary and next step as a
+diagnostic line, with a timeout outcome rather than a CI failure. The wait's
+budget comes from `--timeout` or `domains.wait`, with its source shown; there is
+no second, hard-coded PR watch budget. `status_wait`, provider lens waits and
+owner-side lane waits subscribe before their initial read. Graph markers index committed checkpoint digests
 (`GraphCheckpoint`), and retained run-event ingestion indexes queued, running and terminal
 `LaneLifecycle` transitions. Its source cursor and observations commit together;
 terminal reactions also retain their independently retryable settlement notice.

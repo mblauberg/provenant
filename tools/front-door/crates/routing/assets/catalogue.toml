@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261115-owner-overrides"
+revision = "route-pools-20261119-neutral"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -41,9 +41,6 @@ model = "cursor/gpt-5.3-codex-low"
 efforts = []
 evidence_ref = "tests/fixtures/model-listings/cursor-models.txt@82daaf40aaae5c17a9ccb74815e64f4d76c2dbcc; captured 2026-10-23"
 trains_on_prompts = false
-
-# Go plan limits: https://opencode.ai/v2/docs/console/go/ accessed 2026-10-28.
-
 
 [[models]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
@@ -225,63 +222,54 @@ opencode_paid = "pace"
 opencode_free = "max"
 codex = "spend"
 
+# Bundled pool weights are neutral: every member uses the catalogue's default
+# weight, so ranking is tiered by [capability_preferences] alone and no provider,
+# account or plan is favoured. Account- and plan-specific weights and the
+# observations behind them belong in local configuration, not in this asset.
 [pools]
 utility = [
-    # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
-    { selector = "cursor/composer-*", weight = 1, efforts = [] },
-    { selector = "claude/claude-haiku-*", weight = 4, effort = "low", efforts = ["low"] },
-    { selector = "codex/gpt-*-luna", weight = 2, effort = "low", efforts = ["low"] },
+    { selector = "cursor/composer-*", efforts = [] },
+    { selector = "claude/claude-haiku-*", effort = "low", efforts = ["low"] },
+    { selector = "codex/gpt-*-luna", effort = "low", efforts = ["low"] },
 ]
 junior = [
-    # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
-    { selector = "cursor/composer-*", weight = 1, efforts = [] },
-    # Prefer free capacity while it is eligible and available.
-    { selector = "opencode/opencode/deepseek-v*-flash-free", weight = 50, free = true, efforts = [] },
-    { selector = "opencode/opencode/glm-*-flash-free", weight = 50, free = true, efforts = [] },
-    # Provisional pending local trial evidence.
-    { selector = "opencode/opencode-go/deepseek-v*-flash", weight = 2, efforts = [] },
-    { selector = "opencode/opencode-go/glm-*-flash", weight = 1, efforts = [] },
-    { selector = "codex/gpt-*-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
-    { selector = "codex/gpt-*-luna", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
-    { selector = "claude/claude-haiku-*", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
-    { selector = "agy/gemini-*-flash", weight = 2, effort = "medium", efforts = ["low", "medium", "high"] },
-    { selector = "agy/claude-sonnet-*", weight = 1, efforts = [] },
+    { selector = "cursor/composer-*", efforts = [] },
+    { selector = "opencode/opencode/deepseek-v*-flash-free", free = true, efforts = [] },
+    { selector = "opencode/opencode/glm-*-flash-free", free = true, efforts = [] },
+    { selector = "opencode/opencode-go/deepseek-v*-flash", efforts = [] },
+    { selector = "opencode/opencode-go/glm-*-flash", efforts = [] },
+    { selector = "codex/gpt-*-terra", effort = "low", efforts = ["low", "medium"] },
+    { selector = "codex/gpt-*-luna", effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-haiku-*", effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-flash", effort = "medium", efforts = ["low", "medium", "high"] },
+    { selector = "agy/claude-sonnet-*", efforts = [] },
 ]
 senior = [
-    # Provisional pending local trial evidence.
-    { selector = "opencode/opencode-go/deepseek-v*-flash", weight = 1, efforts = [] },
-    { selector = "opencode/opencode-go/glm-*-flash", weight = 1, efforts = [] },
-    # Writer work stopped early more often and cost more per success on terra at
-    # high effort than on the other routes, while terra at low or medium effort and
-    # on read-only work did well. A hash-assigned pool makes that a fair comparison.
-    # Terra stays here at low or medium effort; its weight moved to codex sol, which
-    # the codex provider paces to spend, since Claude quota is the scarcer one.
-    # Exact routes and user-configured pools can still select terra at high effort.
-    { selector = "codex/gpt-*-sol", weight = 6, effort = "medium", efforts = ["low", "medium", "high"] },
-    { selector = "codex/gpt-*-terra", weight = 2, effort = "medium", efforts = ["low", "medium"] },
-    { selector = "claude/claude-sonnet-*", weight = 4, efforts = ["medium", "high", "xhigh"] },
-    { selector = "agy/gemini-*-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
-    { selector = "agy/claude-opus-*-thinking", weight = 1, efforts = [] },
-    # Lowest weight for the same reason as Composer above.
-    { selector = "cursor/grok-*", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "opencode/opencode-go/deepseek-v*-flash", efforts = [] },
+    { selector = "opencode/opencode-go/glm-*-flash", efforts = [] },
+    { selector = "codex/gpt-*-sol", effort = "medium", efforts = ["low", "medium", "high"] },
+    { selector = "codex/gpt-*-terra", effort = "medium", efforts = ["low", "medium"] },
+    { selector = "claude/claude-sonnet-*", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-flash", effort = "high", efforts = ["low", "medium", "high"] },
+    { selector = "agy/claude-opus-*-thinking", efforts = [] },
+    { selector = "cursor/grok-*", efforts = ["low", "medium", "high", "xhigh"] },
 ]
 principal = [
-    { selector = "claude/claude-opus-*", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
-    { selector = "codex/gpt-*-sol", weight = 1, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-opus-*", efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "codex/gpt-*-sol", effort = "high", efforts = ["medium", "high", "xhigh"] },
 ]
 writing = [
-    # Lowest weight: Cursor's allowance is small and resets monthly, so it must last the month.
-    { selector = "cursor/composer-*", weight = 1, efforts = [] },
-    { selector = "agy/gemini-*-flash", weight = 4, efforts = ["low", "medium", "high"] },
-    { selector = "claude/claude-haiku-*", weight = 4, efforts = ["low", "medium", "high", "xhigh"] },
-    { selector = "agy/claude-sonnet-*", weight = 2, efforts = [] },
-    { selector = "claude/claude-sonnet-*", weight = 1, efforts = ["medium", "high", "xhigh"] },
-    { selector = "codex/gpt-*-luna", weight = 1, effort = "high", efforts = ["high", "xhigh"] },
+    { selector = "cursor/composer-*", efforts = [] },
+    { selector = "agy/gemini-*-flash", efforts = ["low", "medium", "high"] },
+    { selector = "claude/claude-haiku-*", efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "agy/claude-sonnet-*", efforts = [] },
+    { selector = "claude/claude-sonnet-*", efforts = ["medium", "high", "xhigh"] },
+    { selector = "codex/gpt-*-luna", effort = "high", efforts = ["high", "xhigh"] },
 ]
 design = [
-    { selector = "claude/claude-sonnet-*", weight = 4, efforts = ["medium", "high", "xhigh"] },
-    { selector = "agy/gemini-*-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
-    { selector = "claude/claude-opus-*", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "claude/claude-sonnet-*", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-flash", effort = "high", efforts = ["low", "medium", "high"] },
+    { selector = "claude/claude-opus-*", efforts = ["low", "medium", "high", "xhigh"] },
 ]
 
 # Capability preferences affect ranking without excluding pool members.

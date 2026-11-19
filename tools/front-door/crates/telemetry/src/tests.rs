@@ -1612,7 +1612,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         |number, outcome, pool: Option<&str>, role: Option<&str>, partial, known: bool| {
             let mut fact = fact(number, None);
             fact.terminal_state = outcome;
-            fact.tier = Some("senior".into());
+            fact.tier = None;
             fact.context = Some(provenant_records::run::WorkContext {
                 role: role.map(str::to_owned),
                 ..Default::default()
@@ -1724,11 +1724,22 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         ),
     ])
     .unwrap();
-    let review = rows.iter().find(|prior| prior.role == "review").unwrap();
+    let review = rows
+        .iter()
+        .find(|prior| prior.pool == "senior" && prior.role == "review")
+        .unwrap();
     assert_eq!((review.successes, review.failures), (3, 2));
     assert!(!review.source.is_empty());
-    let task = rows.iter().find(|prior| prior.role == "task").unwrap();
+    let task = rows
+        .iter()
+        .find(|prior| prior.pool == "senior" && prior.role == "task")
+        .unwrap();
     assert_eq!((task.successes, task.failures), (1, 0));
+    let junior = rows
+        .iter()
+        .find(|prior| prior.pool == "junior" && prior.role == "review")
+        .unwrap();
+    assert_eq!((junior.successes, junior.failures), (1, 0));
 }
 
 #[test]
@@ -1751,7 +1762,7 @@ fn prior_key_table_is_shared_by_outcome_producer_and_route_consumer() {
             workload,
             writes,
         });
-        fact.tier = Some("senior".into());
+        fact.tier = None;
         fact.context = explicit_role.map(|role| provenant_records::run::WorkContext {
             role: Some(role.into()),
             ..Default::default()
