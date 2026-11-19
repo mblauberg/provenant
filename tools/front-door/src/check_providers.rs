@@ -563,10 +563,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             std::thread::scope(|scope| {
                 for _ in 0..settings.concurrency.value {
                     let queue = &queue;
-                    // A route runs the full graph path, which the main thread
-                    // runs on its 8 MiB stack; in a debug build its executor
-                    // frames overflow a default worker stack (#3542).
-                    let worker = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+                    // A route runs the full graph path, so a worker gets the
+                    // graph stack size (#3542).
+                    let worker = std::thread::Builder::new()
+                        .stack_size(provenant_fabric_runtime::graph::GRAPH_STACK_BYTES);
                     worker.spawn_scoped(scope, move || loop {
                         let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
                         let Some(row) = row else { break; };

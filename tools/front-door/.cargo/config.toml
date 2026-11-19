@@ -12,10 +12,12 @@
 # https://blog.rust-lang.org/2025/09/18/Rust-1.90.0/
 # macOS uses the current Xcode system linker. No host-specific override here.
 
-# Debug builds give the graph executor's largest functions (advance, observe or
-# start, attempt launch) frames of 0.1-0.4 MiB each, so one graph launch needs
-# more than the 2 MiB default of a spawned test thread. Stored records no longer
-# need it (#3292); #3542 shrinks those frames and removes this override. A larger
-# stack set by the caller is not overridden.
+# Graph execution needs a larger stack than the 2 MiB default of a spawned
+# thread in a debug build: one launch nests several large executor frames, which
+# #3542 shrinks but cannot remove. Production workers size their own stack from
+# `provenant_fabric_runtime::graph::GRAPH_STACK_BYTES`; test harness threads can
+# only be sized through this variable, so it repeats that constant (8 MiB) and a
+# fabric-runtime test pins the two together. A larger stack set by the caller is
+# not overridden.
 [env]
 RUST_MIN_STACK = "8388608"
