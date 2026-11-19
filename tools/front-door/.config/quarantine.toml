@@ -2,6 +2,13 @@
 # Expiry is limited to 30 days from the day the CI check runs.
 
 [[test]]
+package = "provenant-cli"
+name = "run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory"
+issue = "#3300"
+owner = "chair"
+expires = 2026-12-14
+
+[[test]]
 package = "provenant"
 name = "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks"
 issue = "#3295"
