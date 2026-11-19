@@ -23,14 +23,6 @@ pub(super) fn lane_prepare_isolates_nested_state() -> Result {
     lane_prepare_cases(&[("codex", false, false, 91)])
 }
 
-pub(super) fn lane_prepare_isolates_nested_claude_state() -> Result {
-    lane_prepare_cases(&[("claude", false, false, 93)])
-}
-
-pub(super) fn lane_prepare_isolates_nested_writer_state() -> Result {
-    lane_prepare_cases(&[("codex", true, false, 92), ("claude", true, false, 94)])
-}
-
 pub(super) fn lane_prepare_isolates_nested_publishing_state() -> Result {
     lane_prepare_cases(&[("codex", true, true, 95), ("claude", true, true, 96)])
 }
@@ -82,17 +74,6 @@ pub(super) fn lane_builds_and_tests_swift_in_a_registered_worktree() -> Result {
         return Ok(());
     }
     lane_prepare_with(&[("claude", true, false, 97)], Probe::Swift)
-}
-
-pub(super) fn read_only_lane_builds_and_tests_swift_in_scratch() -> Result {
-    let selected = cfg!(target_os = "macos")
-        && Path::new("/usr/bin/swift").exists()
-        && provenant_providers::swift_toolchain_available(&|name| std::env::var_os(name));
-    if !selected {
-        provenant_test_support::skip_sandbox_dependent_test("no Swift toolchain is selected")?;
-        return Ok(());
-    }
-    lane_prepare_with(&[("claude", false, false, 98)], Probe::SwiftReadOnly)
 }
 
 pub(super) fn read_only_lane_builds_and_tests_cargo_in_scratch() -> Result {

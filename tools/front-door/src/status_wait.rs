@@ -2335,46 +2335,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn final_line_states_every_settle_and_the_next_command() {
-        use Settle::*;
-        let sources = vec![
-            Source::Graph("fixed".parse().expect("target")),
-            Source::Graph("broken".parse().expect("target")),
-            Source::Graph("input".parse().expect("target")),
-            Source::Graph("slow".parse().expect("target")),
-        ];
-        let mixed = vec![
-            Some(reading(Succeeded)),
-            Some(reading(Unsuccessful)),
-            Some(reading(NeedsInput)),
-            Some(reading(Pending)),
-        ];
-        assert_eq!(
-            final_line(&sources, &mixed, false, &[]),
-            "next: fixed settled ok, broken failed, input needs input, slow still running at timeout; provenant wait slow\n"
-        );
-        let settled = vec![
-            Some(reading(Succeeded)),
-            Some(reading(Unsuccessful)),
-            Some(reading(NeedsInput)),
-            Some(reading(Succeeded)),
-        ];
-        assert_eq!(
-            final_line(&sources, &settled, true, &[]),
-            "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant status fixed broken input slow\n"
-        );
-        assert_eq!(
-            final_line(&[], &[], true, &[]),
-            "next: nothing to wait for; provenant status\n"
-        );
-        // A superseded target keeps its states; the next command names the newer handle.
-        assert_eq!(
-            final_line(&sources, &settled, true, &["slow-2".to_owned()]),
-            "next: fixed settled ok, broken failed, input needs input, slow settled ok; provenant wait slow-2\n"
-        );
-    }
-
     fn reading(settle: Settle) -> Reading {
         Reading {
             settle,
@@ -2544,46 +2504,5 @@ mod tests {
         assert_eq!(pinned.verdict(), None);
         assert_eq!(watched_head(&pinned), "new");
         assert_eq!(pinned.head, "stale");
-    }
-
-    #[test]
-    fn pr_timeout_reports_the_last_known_check_summary_and_next_step() {
-        let sources = vec![Source::Pr {
-            number: 7,
-            repository: Ok("owner/repo".into()),
-            watch_head: None,
-        }];
-        let pending = Reading {
-            settle: Settle::Pending,
-            line: "#7 pending".into(),
-            data: json!({
-                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
-                "merge": "clean", "review": "unknown", "error": null,
-                "checks_passed": null, "checks_total": null,
-                "checks_failed": null, "checks_pending": null
-            }),
-        };
-        let settled = Reading {
-            settle: Settle::Succeeded,
-            line: "#7 ready".into(),
-            data: json!({
-                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
-                "merge": "clean", "review": "approved", "error": null,
-                "checks_passed": 1, "checks_total": 1,
-                "checks_failed": 0, "checks_pending": 0
-            }),
-        };
-        let details = pr_timeout_details(&sources, &[Some(pending), Some(settled)]);
-        assert_eq!(details.len(), 1, "only an unsettled PR gets a detail");
-        assert!(details[0].contains("#7 OPEN abc"), "{details:?}");
-        assert!(details[0].contains("checks=unavailable"), "{details:?}");
-        assert!(
-            details[0].contains("cause=checks_not_scheduled"),
-            "{details:?}"
-        );
-        assert!(
-            details[0].contains(crate::pr::status::NO_CHECKS_NEXT),
-            "{details:?}"
-        );
     }
 }

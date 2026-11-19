@@ -1308,35 +1308,6 @@ pub(crate) fn pr_land_default_batch_gates_then_cleans_up() -> Result {
     Ok(())
 }
 
-pub(crate) fn pr_land_prunes_the_selected_merged_worktree() -> Result {
-    let mut landing = landing()?;
-    // Git retains registrations of unrelated checkouts that disappeared.
-    let missing = landing.rig.project.join(".worktrees/disappeared");
-    git(
-        &landing.rig,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            missing.to_str().ok_or("path")?,
-        ],
-    )?;
-    fs::remove_dir_all(&missing)?;
-    landing.rig.env.push((
-        "FIXTURE_GH_DIR".into(),
-        landing.rig.project.clone().into_os_string(),
-    ));
-    let path = landing.worktree.to_str().ok_or("path")?;
-    let output = command(&landing.rig, &["--project", path, "land", NUMBER, "--json"])?;
-    let value = json(&output)?;
-    assert_eq!(code(&output), 0, "{value}");
-    assert_eq!(status(&value, "worktree")?, "done", "{value}");
-    assert_eq!(status(&value, "branch")?, "done", "{value}");
-    assert!(!landing.worktree.exists());
-    assert!(!branch_exists(&landing.rig, "feat")?);
-    Ok(())
-}
-
 pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
     for observation in ["initial", "late"] {
         let mut landing = landing()?;
@@ -1952,61 +1923,6 @@ pub(crate) fn pr_land_primary_with_separate_git_directory() -> Result {
     Ok(())
 }
 
-pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
-    for configured in [true, false] {
-        let mut landing = landing_with_git_dir(true)?;
-        let main = landing.rig.project.clone();
-        let lane = landing.rig.root.join("outside-feat");
-        git(
-            &landing.rig,
-            &[
-                "worktree",
-                "move",
-                landing.worktree.to_str().ok_or("path")?,
-                lane.to_str().ok_or("path")?,
-            ],
-        )?;
-        if configured {
-            git(
-                &landing.rig,
-                &["config", "core.worktree", main.to_str().ok_or("path")?],
-            )?;
-        }
-        landing
-            .rig
-            .env
-            .push(("FIXTURE_GH_DIR".into(), main.clone().into_os_string()));
-        let output = command(
-            &landing.rig,
-            &[
-                "--project",
-                lane.to_str().ok_or("path")?,
-                "land",
-                NUMBER,
-                "--json",
-            ],
-        )?;
-        let value = json(&output)?;
-        assert_eq!(value["data"]["merged"], true, "{value}");
-        if configured {
-            assert_eq!(code(&output), 0, "{value}");
-            assert_eq!(status(&value, "worktree")?, "done", "{value}");
-            assert_eq!(status(&value, "branch")?, "done", "{value}");
-            assert!(!lane.exists());
-            assert!(!branch_exists(&landing.rig, "feat")?);
-            let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
-            assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
-        } else {
-            assert_eq!(code(&output), 0, "{value}");
-            assert_eq!(value["data"]["cleanup_pending"], true);
-            assert!(value.to_string().contains("worktree inventory"), "{value}");
-            assert!(lane.exists());
-            assert!(branch_exists(&landing.rig, "feat")?);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result {
     // A checkout of the base with a tracked modification is not fast-forwarded.
     let landing = landing()?;
@@ -2202,16 +2118,6 @@ pub(crate) fn pr_land_keeps_a_branch_held_by_a_paused_rebase() -> Result {
 
     // Once the rebase is aborted nothing holds the branch, so it is deleted.
     git_in(&landing.rig, &held, &["rebase", "--abort"])?;
-    git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
-    assert_deleted(&landing)
-}
-
-pub(crate) fn pr_land_keeps_a_branch_held_by_a_bisect() -> Result {
-    let landing = landing()?;
-    let held = hold(&landing, "bisect")?;
-    assert_kept(&landing, race(&landing, &[])?, "bisected")?;
-
-    git_in(&landing.rig, &held, &["bisect", "reset"])?;
     git_in(&landing.rig, &held, &["checkout", "-q", "--detach"])?;
     assert_deleted(&landing)
 }

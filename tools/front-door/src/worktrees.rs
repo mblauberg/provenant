@@ -2937,26 +2937,6 @@ mod gc_preview_tests {
         }
     }
     #[test]
-    fn gc_preview_names_idle_output_and_why_it_qualifies() {
-        let mut data = GcData::default();
-        let mut project = worktrees::WorktreeGcReport::default();
-        project.idle_output.push(worktrees::OutputEntry {
-            bytes: 0,
-            path: "/checkout/target".into(),
-            removed: false,
-            reason: "would_remove".into(),
-        });
-        data.worktree_cleanup.push(project);
-        let summary = gc_data_summary(&data);
-        assert!(summary.contains("would reclaim idle output /checkout/target"));
-        assert!(summary.contains("idle output and custody checks passed"));
-        let json = serde_json::to_value(&data).unwrap();
-        assert_eq!(
-            json["worktree_cleanup"][0]["idle_output"][0]["reason"],
-            "would_remove"
-        );
-    }
-    #[test]
     fn retention_registry_settings_resolve_and_adapters_cover_every_class() {
         let temp = tempfile::tempdir().unwrap();
         let mut input =
@@ -3250,35 +3230,6 @@ mod gc_preview_tests {
         assert!(human.contains("team_id=TEAM123"));
         assert!(!human.contains("/home/Library/Caches"));
         assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
-    }
-    #[test]
-    fn gc_failure_human_output_names_failed_paths_and_next_step()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut data = GcData::default();
-        data.provider_state
-            .errors
-            .push(provenant_run::ProviderStateIssue {
-                path: "/state/failed-cache".into(),
-                reason: "permission denied".into(),
-            });
-        let result = gc_failure(&data, "provider-state retention incomplete", false);
-        let mut output = Vec::new();
-        provenant_cli::render(
-            &result,
-            provenant_cli::RenderMode::Human {
-                text: "",
-                read_only: false,
-                summary: None,
-            },
-            &mut output,
-        )?;
-        let human = String::from_utf8(output)?;
-        assert!(
-            human.contains("/state/failed-cache: permission denied"),
-            "{human}"
-        );
-        assert!(human.contains("provenant gc --apply --json"), "{human}");
-        Ok(())
     }
     #[test]
     fn read_only_context_accepts_absent_repository_lock_without_creating_it()

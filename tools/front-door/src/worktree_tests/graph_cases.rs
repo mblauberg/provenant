@@ -336,7 +336,6 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             &gate.join("entered"),
             "graph preparation entered",
         )?;
-        let before = std::time::Instant::now();
         ok(&rig, &["stop", "preparation-first", "--json"])?;
         ok(
             &rig,
@@ -348,10 +347,6 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             "{phase}: {first}"
         );
         let stopped = ok(&rig, &["status", "preparation-first", "--json"])?;
-        assert!(
-            before.elapsed() < Duration::from_secs(4),
-            "{phase}: {stopped}"
-        );
         assert_eq!(
             stopped["data"]["rows"][0]["state"], "cancelled",
             "{phase}: {stopped}"

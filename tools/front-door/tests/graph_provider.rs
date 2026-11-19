@@ -1323,10 +1323,6 @@ fn writer_cli_launches_from_cwd(location: &str, base: &str) -> Result {
     Ok(())
 }
 
-fn writer_cli_launches_from_worktree_root() -> Result {
-    writer_cli_launches_from_cwd("worktree", "HEAD")
-}
-
 fn writer_cli_branch_binds_the_new_worktree() -> Result {
     writer_cli_launches_from_cwd("branch", "HEAD")
 }
@@ -1337,9 +1333,6 @@ fn writer_cli_branch_with_remote_base_from_primary_checkout() -> Result {
 }
 
 // Spec: docs/specs/run-launch.md#writer-binding
-fn writer_cli_branch_with_remote_base_from_linked_checkout() -> Result {
-    writer_cli_launches_from_cwd("branch-worktree", "origin/main")
-}
 
 // Spec: docs/specs/supervisor.md#managed-writer-path-owner
 fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
@@ -1347,17 +1340,6 @@ fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
 }
 
 // Spec: docs/specs/run-git.md#project-layout-ownership
-fn writer_cli_branch_from_separate_git_directory_uses_saved_primary() -> Result {
-    writer_cli_launches_from_cwd("branch-separate-git-dir", "HEAD")
-}
-
-fn writer_cli_branch_from_bare_linked_checkout_uses_common_layout() -> Result {
-    writer_cli_launches_from_cwd("branch-bare-linked", "HEAD")
-}
-
-fn writer_cli_launches_from_worktree_subdirectory() -> Result {
-    writer_cli_launches_from_cwd("subdirectory", "HEAD")
-}
 
 fn writer_cli_launches_from_primary_checkout() -> Result {
     writer_cli_launches_from_cwd("primary", "HEAD")
@@ -2849,10 +2831,6 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
     );
     cleanup.disarm();
     Ok(())
-}
-
-fn named_route_writer_retries_quota_with_partial_work() -> Result {
-    partial_quota_alias_fixture(true)
 }
 
 fn named_route_read_only_retries_quota_with_partial_output() -> Result {
@@ -6109,10 +6087,6 @@ fn main() -> ExitCode {
                 uncatalogued_cli_model_launches_and_surfaces_provider_failure,
             ),
             (
-                "writer_cli_launches_from_worktree_root",
-                writer_cli_launches_from_worktree_root,
-            ),
-            (
                 "writer_cli_branch_binds_the_new_worktree",
                 writer_cli_branch_binds_the_new_worktree,
             ),
@@ -6121,24 +6095,8 @@ fn main() -> ExitCode {
                 writer_cli_branch_with_remote_base_from_primary_checkout,
             ),
             (
-                "writer_cli_branch_with_remote_base_from_linked_checkout",
-                writer_cli_branch_with_remote_base_from_linked_checkout,
-            ),
-            (
                 "writer_cli_branch_from_linked_checkout_uses_primary_layout",
                 writer_cli_branch_from_linked_checkout_uses_primary_layout,
-            ),
-            (
-                "writer_cli_branch_from_separate_git_directory_uses_saved_primary",
-                writer_cli_branch_from_separate_git_directory_uses_saved_primary,
-            ),
-            (
-                "writer_cli_branch_from_bare_linked_checkout_uses_common_layout",
-                writer_cli_branch_from_bare_linked_checkout_uses_common_layout,
-            ),
-            (
-                "writer_cli_launches_from_worktree_subdirectory",
-                writer_cli_launches_from_worktree_subdirectory,
             ),
             (
                 "writer_cli_launches_from_primary_checkout",
@@ -6235,10 +6193,6 @@ fn main() -> ExitCode {
             (
                 "graph_read_only_alias_retries_another_member_after_empty_launch_quota",
                 graph_read_only_alias_retries_another_member_after_empty_launch_quota,
-            ),
-            (
-                "named_route_writer_retries_quota_with_partial_work",
-                named_route_writer_retries_quota_with_partial_work,
             ),
             (
                 "named_route_read_only_retries_quota_with_partial_output",

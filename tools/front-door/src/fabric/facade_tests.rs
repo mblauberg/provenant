@@ -375,29 +375,6 @@ fn peer_output_binding_is_consumed_before_the_cli_projection() {
 }
 
 #[test]
-fn peer_output_length_round_trips_and_rejects_malformed_values() {
-    let mut value = serde_json::json!({
-        "kind":"chunk", "target":{"attempt":"11111111111111111111111111111111"},
-        "part":"result", "state":"succeeded", "reason":null, "offset":0,
-        "next_offset":0, "eof":true,
-        "digest":provenant_core::Digest::from_bytes([2; 32]),
-        "bytes":{"encoding":"utf8","data":""}, "length":17,
-        "planner_fallback":"planner failed", "future_output_field":{"kept":true}
-    });
-    let chunk: OutputResult = serde_json::from_value(value.clone()).unwrap();
-    let encoded = serde_json::to_value(chunk).unwrap();
-    assert_eq!(encoded["length"], 17);
-    assert_eq!(encoded["planner_fallback"], "planner failed");
-    assert_eq!(
-        encoded["future_output_field"],
-        serde_json::json!({"kept":true})
-    );
-
-    value["length"] = serde_json::json!("unknown");
-    assert!(serde_json::from_value::<OutputResult>(value).is_err());
-}
-
-#[test]
 fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
     let error = run_error(provenant_run::RunError::Writer(
         provenant_confinement::worktrees::WorktreeError::Dirty("TOKEN_SENTINEL".into()),

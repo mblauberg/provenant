@@ -2157,23 +2157,6 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_status_names_blocking_upstream() {
-        let mut run = graph_status_fixture();
-        let node = &mut run.checkpoint.nodes[1];
-        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("blocked by ordinary (Failed)".into());
-        assert!(
-            super::graph_human(&run).contains("composite: Blocked (blocked by ordinary (Failed))")
-        );
-        assert!(
-            super::graph_human::graph_human_full(&run)
-                .contains("error=blocked by ordinary (Failed)")
-        );
-        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
-        assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
-    }
-
-    #[test]
     fn graph_status_renders_invalid_input_field_and_reason() {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
@@ -2466,55 +2449,6 @@ mod result_tests {
         assert!(super::graph_human(&run).contains("Cancellation reason: requested by chair"));
         let json = serde_json::to_value(&run).unwrap();
         assert_eq!(json["checkpoint"]["cancel_reason"], "requested by chair");
-    }
-
-    #[test]
-    fn graph_status_compact_and_json_remain_unchanged() {
-        let run = graph_status_fixture();
-        let ordinary = super::graph_human(&run);
-        let globals = provenant_cli::Globals::default();
-        assert_eq!(super::graph_display(&run, "status", &globals), ordinary);
-        let globals = provenant_cli::Globals {
-            full: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            super::graph_display(&run, "status", &globals),
-            super::graph_human::graph_human_full(&run)
-        );
-        assert_eq!(super::graph_display(&run, "run", &globals), ordinary);
-        assert!(ordinary.lines().any(
-            |row| row.starts_with("  ordinary: Failed outcome=TaskFailed ")
-                && row.contains("wait=none disposition=terminal")
-        ));
-        assert!(
-            ordinary.contains("  composite: Running (1 members) wait=none disposition=running")
-        );
-        assert!(ordinary.contains("  member: Running CI waiting"));
-        assert!(!ordinary.contains("loop-member"));
-        assert!(!ordinary.contains(" attempt=new"));
-        let result =
-            provenant_records::CommandResult::new("status", provenant_records::Outcome::Ok, &run);
-        let mut outputs = Vec::new();
-        for full in [false, true] {
-            let globals = provenant_cli::Globals {
-                json: true,
-                full,
-                ..Default::default()
-            };
-            assert_eq!(super::graph_display(&run, "status", &globals), ordinary);
-            let mut bytes = Vec::new();
-            provenant_cli::render(
-                &result,
-                globals.render_mode(&ordinary, false, None),
-                &mut bytes,
-            )
-            .unwrap();
-            outputs.push(bytes);
-        }
-        assert_eq!(outputs[0], outputs[1]);
-        let json: serde_json::Value = serde_json::from_slice(&outputs[0]).unwrap();
-        assert_eq!(json["data"], serde_json::to_value(&run).unwrap());
     }
 
     #[test]

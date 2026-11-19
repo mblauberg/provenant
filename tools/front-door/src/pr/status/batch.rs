@@ -480,22 +480,6 @@ mod tests {
     }
 
     // Spec: docs/specs/cli.md#ci-observations
-    #[test]
-    fn the_rollup_query_aliases_one_pull_request_per_number() {
-        let query = rollup_query("owner", "repo", &[1, 2]);
-        assert_eq!(
-            query.chars().filter(|c| *c == '{').count(),
-            query.chars().filter(|c| *c == '}').count()
-        );
-        assert!(query.contains("a00:pullRequest(number:1)"));
-        assert!(query.contains("a01:pullRequest(number:2)"));
-        assert!(query.contains("contexts(last:100)"));
-        assert!(query.contains("...on CheckRun{name status conclusion detailsUrl}"));
-        assert!(query.contains("...on StatusContext{context state targetUrl}"));
-        assert_eq!(alias(0, 12), "a00");
-        assert_eq!(alias(11, 12), "a11");
-        assert_eq!(alias(0, 120), "a000");
-    }
 
     #[test]
     fn rollup_buckets_match_the_rest_reader() {

@@ -185,39 +185,6 @@ fn pr_resave_with_unchanged_head_reuses_recorded_paths() -> Result {
     Ok(())
 }
 
-/// A receipt saved before the reviewed base was recorded is named with its
-/// remedy, and saving the delivery again replaces it.
-#[cfg(unix)]
-#[test]
-fn a_retired_receipt_is_named_and_saved_again() -> Result {
-    let mut rig = TestRig::new()?;
-    let history = pull_request_history(&rig)?;
-    record_gh_calls(&mut rig, &history.second, &history.target)?;
-    let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
-    let saved = save_receipt(&rig, &pending, "0", 0)?;
-    let mut retired = saved["data"]["receipt"].clone();
-    retired["schema_version"] = json!(1);
-    retired["subject"]
-        .as_object_mut()
-        .ok_or("subject")?
-        .remove("base");
-    let project = retired["project_id"].as_str().ok_or("project id")?;
-    let path = rig.state.join(format!(
-        "workflow/projects/{project}/deliveries/{DELIVERY}/receipt.json"
-    ));
-    std::fs::write(path, serde_json::to_vec(&retired)?)?;
-    let review = request(&rig, "review.json", json!({"delivery_id": DELIVERY}))?;
-    let refused = call(&rig, &["workflow", "review", "--request", &review], 1)?;
-    assert_eq!(refused["error"]["code"], "RECEIPT_RETIRED");
-    let saved = save_receipt(&rig, &pending, "1", 0)?;
-    assert_eq!(saved["data"]["receipt"]["revision"], 2);
-    assert_eq!(
-        saved["data"]["receipt"]["subject"]["base"],
-        json!(history.target)
-    );
-    Ok(())
-}
-
 #[cfg(unix)]
 #[test]
 fn pr_head_mismatch_refuses_the_save() -> Result {

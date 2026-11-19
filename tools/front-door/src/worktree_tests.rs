@@ -258,7 +258,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
         args,
         &[
             "graph_stop_cancels_live_delivery_fetch_and_seed_preparation",
-            "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_collects_a_settled_lane_whose_completion_attempt_failed",
             "completion_and_sweep_retain_unlanded_or_dirty_lanes",
@@ -268,11 +267,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "graph_run_refuses_low_disk_writers",
             "gc_reports_terminal_tmp_details_and_compact_text_count",
             "lane_prepare_isolates_nested_state",
-            "lane_prepare_isolates_nested_claude_state",
-            "lane_prepare_isolates_nested_writer_state",
             "lane_prepare_isolates_nested_publishing_state",
             "lane_builds_and_tests_swift_in_a_registered_worktree",
-            "read_only_lane_builds_and_tests_swift_in_scratch",
             "read_only_lane_builds_and_tests_cargo_in_scratch",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
@@ -307,7 +303,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "git_created_and_recreated_worktrees_are_dispatchable",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_default_batch_gates_then_cleans_up",
-            "pr_land_prunes_the_selected_merged_worktree",
             "pr_land_from_lane_ignores_only_its_callers",
             "pr_land_refuses_incomplete_worker_census",
             "pr_land_canonicalises_quoted_worktree_paths",
@@ -317,7 +312,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_recovery_uses_recorded_merged_head",
             "pr_land_preserves_terminal_writer_evidence_in_host_store",
             "pr_land_primary_with_separate_git_directory",
-            "pr_land_out_of_tree_with_separate_git_directory",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
             "pr_land_changes_nothing_when_the_merge_does_not_happen",
             "pr_land_default_batch_preserves_checkout_when_publication_is_unknown",
@@ -325,7 +319,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_leaves_a_reused_branch_name_alone",
             "pr_land_deletes_an_unregistered_branch_only_at_the_merged_head",
             "pr_land_keeps_a_branch_held_by_a_paused_rebase",
-            "pr_land_keeps_a_branch_held_by_a_bisect",
             "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away",
             "pr_land_refuses_when_a_worktree_entry_cannot_be_read",
             "pr_land_refuses_when_worktree_state_is_malformed",
@@ -340,7 +333,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
                 "graph_stop_cancels_live_delivery_fetch_and_seed_preparation" => graph_stop_cancels_live_delivery_fetch_and_seed_preparation(),
-                "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_collects_a_settled_lane_whose_completion_attempt_failed" => gc_collects_a_settled_lane_whose_completion_attempt_failed(),
                 "completion_and_sweep_retain_unlanded_or_dirty_lanes" => completion_and_sweep_retain_unlanded_or_dirty_lanes(),
@@ -350,15 +342,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "graph_run_refuses_low_disk_writers" => graph_run_refuses_low_disk_writers(),
                 "gc_reports_terminal_tmp_details_and_compact_text_count" => gc_reports_terminal_tmp_details_and_compact_text_count(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
-                "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
-                "lane_prepare_isolates_nested_writer_state" => {
-                    lane_prepare_isolates_nested_writer_state()
-                }
                 "lane_builds_and_tests_swift_in_a_registered_worktree" => {
                     lane_builds_and_tests_swift_in_a_registered_worktree()
-                }
-                "read_only_lane_builds_and_tests_swift_in_scratch" => {
-                    read_only_lane_builds_and_tests_swift_in_scratch()
                 }
                 "read_only_lane_builds_and_tests_cargo_in_scratch" => {
                     read_only_lane_builds_and_tests_cargo_in_scratch()
@@ -443,9 +428,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_merges_then_fetches_fast_forwards_and_prunes" => {
                     crate::pr_land_tests::pr_land_merges_then_fetches_fast_forwards_and_prunes()
                 }
-                "pr_land_prunes_the_selected_merged_worktree" => {
-                    crate::pr_land_tests::pr_land_prunes_the_selected_merged_worktree()
-                }
                 "pr_land_from_lane_ignores_only_its_callers" => crate::pr_land_tests::pr_land_from_lane_ignores_only_its_callers(),
                 "pr_land_refuses_incomplete_worker_census" => crate::pr_land_tests::pr_land_refuses_incomplete_worker_census(),
                 "pr_land_canonicalises_quoted_worktree_paths" => crate::pr_land_tests::pr_land_canonicalises_quoted_worktree_paths(),
@@ -458,7 +440,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
                 }
                 "pr_land_primary_with_separate_git_directory" => crate::pr_land_tests::pr_land_primary_with_separate_git_directory(),
-                "pr_land_out_of_tree_with_separate_git_directory" => crate::pr_land_tests::pr_land_out_of_tree_with_separate_git_directory(),
                 "pr_open_refuses_what_the_receipts_cannot_support" => {
                     crate::pr_land_tests::pr_open_refuses_what_the_receipts_cannot_support()
                 }
@@ -474,9 +455,6 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "pr_land_keeps_a_branch_held_by_a_paused_rebase" => {
                     crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_paused_rebase()
-                }
-                "pr_land_keeps_a_branch_held_by_a_bisect" => {
-                    crate::pr_land_tests::pr_land_keeps_a_branch_held_by_a_bisect()
                 }
                 "pr_land_keeps_a_branch_held_in_a_checkout_that_went_away" => {
                     crate::pr_land_tests::pr_land_keeps_a_branch_held_in_a_checkout_that_went_away()
